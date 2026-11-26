@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -24,26 +25,14 @@ FORBIDDEN_RO_TREES = ("/run", "/var/run", "/proc", "/dev", "/sys", "/root")
 _SECTIONS: dict[str, dict[str, type]] = {
     "repo": {"name": str, "base": str},
     "checks": {
-        "commands": list,
-        "runner": list,
-        "inputs": dict,
-        "required_ci": list,
-        "network": bool,
-        "env_allowlist": list,
-        "ro_paths": list,
-        "writable": list,
-        "scratch": list,
-        "env": dict,
-        "limits": dict,
+        "commands": list, "runner": list, "inputs": dict, "required_ci": list, "network": bool,
+        "env_allowlist": list, "ro_paths": list, "writable": list, "scratch": list,
+        "env": dict, "limits": dict,
     },
     "delivery": {
-        "merge": str,
-        "mergify_queue": str,
-        "reviewers": list,
-        "review_publishers": list,
-        "reviewer_ro_paths": list,
-        "review_chunk_bytes": int,
-        "review": dict,
+        "merge": str, "mergify_queue": str,
+        "reviewers": list, "review_publishers": list, "reviewer_ro_paths": list,
+        "review_chunk_bytes": int, "review": dict,
     },
 }
 
@@ -75,12 +64,13 @@ def load(path: Path | str) -> Config:
         raise ConfigError(f"{path}: {exc}") from None
 
 
+def run_git(worktree: Path, *args: str, timeout: float = 60) -> _proc.Completed:
+    return _proc.run(["git", *args], cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=timeout)
+
+
 def base_revision(worktree: Path, base_branch: str) -> str:
     """Resolve the remote base, or the task's recorded base when the ref is absent."""
-    done = _proc.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base_branch}"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
-    )
+    done = run_git(worktree, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base_branch}")
     if done.exit_code == 0:
         return done.stdout.strip()
     if done.exit_code == 1:
@@ -100,51 +90,56 @@ def _has_replacement_refs(common_dir: Path) -> bool:
             return True
         return True
     try:
-        packed = (common_dir / "packed-refs").read_bytes()
+        return b" refs/replace/" in (common_dir / "packed-refs").read_bytes()
     except FileNotFoundError:
         return False
     except OSError:
         return True
-    return b" refs/replace/" in packed
 
 
-def _remote_workflow(worktree: Path, branch: str, previous: Config | None) -> tuple[Config, str]:
+def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
+                     refresh: bool, read_timeout: Callable[[float], float]) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
+    ref = f"refs/remotes/origin/{branch}"
+    if refresh:
+        fetched = run_git(worktree, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+                          "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:{ref}", timeout=read_timeout(60))
+        if fetched.exit_code != 0:
+            raise ConfigError(f"could not refresh origin/{branch}. {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
-    resolved = _proc.run(
-        ["git", "rev-parse", *directory_args, "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+    resolved = _proc.run_git_paths(
+        ["git", "rev-parse", *directory_args, "--verify", f"{ref}^{{commit}}"],
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60),
     )
     if resolved.exit_code != 0:
         raise ConfigError(f"{source} has no remote-tracking base commit. {hint}")
-    common_dir, _, revision = resolved.stdout.rstrip("\n").rpartition("\n")
+    common_dir, _, revision = resolved.stdout.rpartition("\n")
     if (previous is not None and previous.base_branch == branch and previous.trusted_base_revision == revision
             and common_dir and not _has_replacement_refs(Path(common_dir))):
         return previous, revision
     shown = _proc.run(
         ["git", "show", f"{revision}:workflow.toml"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), preserve_newlines=True, encoding="utf-8",
     )
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
     try:
-        data = tomllib.loads(shown.stdout)
+        text = shown.stdout.encode("utf-8", errors="surrogateescape").decode("utf-8")
+        return _build(tomllib.loads(text)), revision
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{source}: {exc}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{source}: invalid TOML: {exc}. {hint}") from None
-    try:
-        return _build(data), revision
     except ConfigError as exc:
         raise ConfigError(f"{source}: {exc}. {hint}") from None
 
 
-def load_trusted(worktree: Path, *, previous: Config | None = None) -> Config:
+def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: bool = False,
+                 read_timeout: Callable[[float], float] = float) -> Config:
     """Select delivery policy using Git's origin default and its trusted workflow."""
     prefix = "refs/remotes/origin/"
-    default = _proc.run(
-        ["git", "symbolic-ref", "--quiet", f"{prefix}HEAD"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
-    )
+    default = run_git(worktree, "symbolic-ref", "--quiet", f"{prefix}HEAD", timeout=read_timeout(60))
     ref = default.stdout.strip()
     if default.exit_code != 0 or not ref.startswith(prefix):
         raise ConfigError(
@@ -152,13 +147,13 @@ def load_trusted(worktree: Path, *, previous: Config | None = None) -> Config:
             "or supply --config for bootstrap or an override."
         )
     branch = ref.removeprefix(prefix)
-    policy, revision = _remote_workflow(worktree, branch, previous)
-    if policy.base_branch == branch:
-        return replace(policy, trusted_base_revision=revision)
-    base, revision = _remote_workflow(worktree, policy.base_branch, previous)
-    if base.base_branch != policy.base_branch:
-        raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
-    return replace(base, trusted_base_revision=revision)
+    policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh, read_timeout=read_timeout)
+    if policy.base_branch != branch:
+        branch = policy.base_branch
+        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh, read_timeout=read_timeout)
+        if policy.base_branch != branch:
+            raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
+    return replace(policy, trusted_base_revision=revision)
 
 
 def _build(data: dict[str, Any]) -> Config:
@@ -203,20 +198,20 @@ def _build(data: dict[str, Any]) -> Config:
             raise ConfigError(f"unknown review family delivery.review.{family}")
         if not isinstance(table, dict):
             raise ConfigError(f"[delivery.review.{family}] must be a table")
-        _reject_unknown(
-            f"[delivery.review.{family}]", table, ("model", "effort", "allowed_efforts")
-        )
+        label = f"delivery.review.{family}"
+        _reject_unknown(f"[{label}]", table, ("model", "effort", "allowed_efforts"))
         for key in ("model", "effort"):
             if key in table and (not isinstance(table[key], str) or not table[key]):
-                raise ConfigError(f"delivery.review.{family}.{key} must be a non-empty str")
-        if "allowed_efforts" in table and not isinstance(table["allowed_efforts"], list):
-            raise ConfigError(f"delivery.review.{family}.allowed_efforts must be a list")
-        allowed = _strings(
-            f"delivery.review.{family}.allowed_efforts", table.get("allowed_efforts", [])
-        )
-        review[family] = ReviewConfig(table.get("model"), table.get("effort"), allowed)
+                raise ConfigError(f"{label}.{key} must be a non-empty str")
+        allowed = table.get("allowed_efforts", [])
+        if not isinstance(allowed, list):
+            raise ConfigError(f"{label}.allowed_efforts must be a list")
+        review[family] = ReviewConfig(table.get("model"), table.get("effort"),
+                                      _strings(f"{label}.allowed_efforts", allowed))
 
-    commands = _commands(checks.get("commands", []))
+    commands = _strings("checks.commands", checks.get("commands", []))
+    if any(not command.strip() for command in commands):
+        raise ConfigError("checks.commands entries must each be a nonblank command")
     kwargs: dict[str, Any] = {}
     if "runner" in checks:
         runner = _strings("checks.runner", checks["runner"])
@@ -225,22 +220,18 @@ def _build(data: dict[str, Any]) -> Config:
         if "/" in runner[0] and not Path(runner[0]).is_absolute():
             raise ConfigError("checks.runner executable paths must be absolute")
         kwargs["check_runner"] = runner
-    if "inputs" in checks:
-        inputs = {}
-        for key, value in checks["inputs"].items():
-            label = f'checks.inputs."{key}"'
-            if key != "*" and key not in commands:
-                raise ConfigError(f"{label} must exactly match a checks.commands entry")
-            inputs[key] = _strings(label, value)
-        kwargs["inputs"] = inputs
-    if "env_allowlist" in checks:
-        kwargs["env_allowlist"] = _strings("checks.env_allowlist", checks["env_allowlist"])
-    if "ro_paths" in checks:
-        kwargs["sandbox_ro"] = _host_paths("checks.ro_paths", checks["ro_paths"])
-    if "writable" in checks:
-        kwargs["writable"] = _host_paths("checks.writable", checks["writable"])
-    if "env" in checks:
-        kwargs["env"] = _env_table(checks["env"])
+    inputs = {}
+    for key, value in checks.get("inputs", {}).items():
+        label = f'checks.inputs."{key}"'
+        if key != "*" and key not in commands:
+            raise ConfigError(f"{label} must exactly match a checks.commands entry")
+        inputs[key] = _strings(label, value)
+    for key, field, read in (("env_allowlist", "env_allowlist", _strings),
+                             ("ro_paths", "sandbox_ro", _host_paths),
+                             ("writable", "writable", _host_paths)):
+        if key in checks:
+            kwargs[field] = read(f"checks.{key}", checks[key])
+    env = _env_table(checks.get("env", {}))
     if "scratch" in checks:
         kwargs["scratch"] = _strings("checks.scratch", checks["scratch"])
         for entry in kwargs["scratch"]:
@@ -269,7 +260,7 @@ def _build(data: dict[str, Any]) -> Config:
         reviewer_ro_paths=reviewer_ro_paths,
         review_chunk_bytes=review_chunk_bytes,
         network=checks.get("network", False),
-        **kwargs,
+        inputs=inputs, env=env, **kwargs,
     )
 
 
@@ -293,13 +284,6 @@ def _reject_unknown(where: str, table: dict[str, Any], allowed: Any) -> None:
     unknown = sorted(set(table) - set(allowed))
     if unknown:
         raise ConfigError(f"unknown key(s) in {where}: {', '.join(unknown)}")
-
-
-def _commands(value: list[Any]) -> tuple[str, ...]:
-    commands = _strings("checks.commands", value)
-    if any(not command.strip() for command in commands):
-        raise ConfigError("checks.commands entries must each be a nonblank command")
-    return commands
 
 
 def _strings(label: str, value: list[Any]) -> tuple[str, ...]:
@@ -329,13 +313,12 @@ def _env_table(table: dict[str, Any]) -> tuple[tuple[str, str], ...]:
             raise ConfigError(f"checks.env must not override {name}")
         if not isinstance(value, str):
             raise ConfigError(f"checks.env.{name} must be a str")
-    return tuple(table.items())
+    return tuple(sorted(table.items()))
 
 
 def _limits(table: dict[str, Any]) -> ResourceLimits:
     defaults = ResourceLimits()
-    allowed = tuple(defaults.__dict__)
-    _reject_unknown("checks.limits", table, allowed)
+    _reject_unknown("checks.limits", table, defaults.__dict__)
     values = defaults.__dict__ | table
     for name, value in values.items():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:

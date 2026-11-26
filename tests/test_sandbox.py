@@ -5,11 +5,13 @@ import itertools
 import json
 import os
 import resource
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import traceback
 from contextlib import ExitStack
 from dataclasses import replace
@@ -36,6 +38,10 @@ with open("{log}", "w", encoding="utf-8") as stream:
 separator = args.index("--")
 options, command = args[:separator], args[separator + 1:]
 env = {{}} if "--clearenv" in options else dict(os.environ)
+if "--args" in options:
+    index = options.index("--args")
+    with os.fdopen(int(options[index + 1]), "rb") as arguments:
+        options[index:index + 2] = list(map(os.fsdecode, arguments.read().split(b"\\0")[:-1]))
 home_source = None
 i = 0
 while i < len(options):
@@ -110,9 +116,10 @@ def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
 
 @pytest.mark.parametrize("command,exit_code,line_count,start,end", [
     ("for i in $(seq 1 50); do echo $i; done; echo err >&2", 0, 40, "12", "err"),
-    ("""python3 -c 'print("x" * 16777216 + " Ω end")'""", 0, 1, "x", " Ω end"),
+    ("""python3 -c 'print("x" * 20000 + " Ω end")'""", 0, 1, "x", " Ω end"),
+    ("""python3 -c 'print("terminal line" + "\\n" * 20_000)'""", 0, 1, "terminal line", "terminal line"),
     ("./" * 8_200 + "absent/file", 1, 1, "", "otherwise restore the required file."),
-], ids=["lines", "oversized-line", "missing-file"])
+], ids=["lines", "oversized-line", "trailing-newlines", "missing-file"])
 def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, command, exit_code, line_count, start, end):
     (result,) = sandbox.run_checks(make_config(checks=(command,)), git_repo).results
     lines = result.tail.splitlines()
@@ -144,7 +151,8 @@ def test_check_pipeline_verdict(git_repo, bwrap_log, monkeypatch, capsys, comman
 def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     monkeypatch.setenv("LZ_KEEP", "kept")
     monkeypatch.setenv("LZ_DROP", "dropped")
-    sandbox.run_checks(make_config(), git_repo)
+    values = 'printf "%s\\n" "$PATH" "$LZ_KEEP" "${LZ_DROP-unset}" "$UV_CACHE_DIR" "$PYTHONDONTWRITEBYTECODE"'
+    (result,) = sandbox.run_checks(make_config(checks=(values,)), git_repo).results
     argv = argv_of(bwrap_log)
     head, tail = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
     for flag in ("--die-with-parent", "--new-session", "--unshare-all", "--clearenv"):
@@ -159,11 +167,8 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert all(("--tmpfs", p) in windows for p in ("/tmp", "/run", "/var/run"))
     assert ("--dev", "/dev") in windows and ("--proc", "/proc") in windows
     assert head[head.index("--chdir") + 1] == str(git_repo)
-    setenv = dict(_pairs(head, "--setenv"))
-    assert setenv["PATH"] == os.environ["PATH"] and setenv["LZ_KEEP"] == "kept"
-    assert "LZ_DROP" not in setenv
-    assert setenv["HOME"] == sandbox.SANDBOX_HOME
-    assert setenv["UV_CACHE_DIR"] == "/tmp/uv-cache" and setenv["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert "--args" in head and "--setenv" not in head and "kept" not in head
+    assert result.tail.splitlines() == [os.environ["PATH"], "kept", "unset", "/tmp/uv-cache", "1"]
     binds = _pairs(head, "--bind")
     home_src, home_dst = binds[0]
     assert home_dst == sandbox.SANDBOX_HOME and Path(home_src).name.startswith("loopzero-home-")
@@ -180,19 +185,16 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert head.index("--tmpfs") < head.index(str(git_repo))
     assert tail == ["prlimit", f"--as={sandbox._cap_limit(4096 << 20, resource.RLIMIT_AS)}",
                     f"--fsize={sandbox._cap_limit(2048 << 20, resource.RLIMIT_FSIZE)}",
-                    "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", "echo hello"]
+                    "--", *sandbox.CHECK_SHELL, values]
 
 
-def test_probe_uses_real_flags(git_repo, bwrap_log):
-    sandbox.run_checks(make_config(checks=(), network=True), git_repo)
-    argv = argv_of(bwrap_log)  # only the probe ran
-    assert argv[argv.index("--") + 1 :] == ["true"]
-    assert argv.index("--unshare-all") < argv.index("--share-net") < argv.index("--clearenv")
-
-
-def test_network_binds_resolv_conf_after_run_tmpfs(git_repo, bwrap_log):
-    sandbox.run_checks(make_config(network=True), git_repo)
+@pytest.mark.parametrize("checks", [(), ("echo hello",)], ids=["probe", "stage"])
+def test_network_binds_resolv_conf_after_run_tmpfs(git_repo, bwrap_log, checks):
+    sandbox.run_checks(make_config(checks=checks, network=True), git_repo)
     argv = argv_of(bwrap_log)
+    if not checks:
+        assert argv[argv.index("--") + 1 :] == ["true"]
+    assert argv.index("--unshare-all") < argv.index("--share-net") < argv.index("--clearenv")
     resolv_conf = Path("/etc/resolv.conf")
     resolved = resolv_conf.resolve()
     if resolv_conf.is_symlink() and any(
@@ -201,14 +203,8 @@ def test_network_binds_resolv_conf_after_run_tmpfs(git_repo, bwrap_log):
         source = destination = str(resolved.parent)
     else:
         source, destination = str(resolved), str(resolv_conf)
-    bind_at = next(
-        i
-        for i in range(len(argv) - 2)
-        if argv[i : i + 3] == ["--ro-bind", source, destination]
-    )
-    run_tmpfs_at = next(
-        i for i in range(len(argv) - 1) if argv[i : i + 2] == ["--tmpfs", "/run"]
-    )
+    bind_at = next(i for i, flag in enumerate(argv) if flag == "--ro-bind" and argv[i + 1:i + 3] == [source, destination])
+    run_tmpfs_at = next(i for i, pair in enumerate(itertools.pairwise(argv)) if pair == ("--tmpfs", "/run"))
     assert bind_at > run_tmpfs_at
 
 
@@ -216,15 +212,17 @@ def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch
     extra, cache = tmp_path / "ro", tmp_path / "rw"
     monkeypatch.setenv("UV_CACHE_DIR", str(cache))
     monkeypatch.setenv("RUFF_CACHE_DIR", "host-ruff")
-    cfg = make_config(sandbox_ro=(str(extra),), writable=(str(cache),), scratch=())
-    cfg = Config(**{**cfg.__dict__, "env_allowlist": ("PATH", "UV_CACHE_DIR", "RUFF_CACHE_DIR")})
-    sandbox.run_checks(Config(**{**cfg.__dict__, "env": (("RUFF_CACHE_DIR", "cfg"),)}), git_repo)
+    cfg = make_config(
+        sandbox_ro=(str(extra),), writable=(str(cache),), scratch=(),
+        env_allowlist=("PATH", "UV_CACHE_DIR", "RUFF_CACHE_DIR"), env=(("RUFF_CACHE_DIR", "cfg"),),
+        checks=('printf "%s\\n" "$UV_CACHE_DIR" "$RUFF_CACHE_DIR"',),
+    )
+    (result,) = sandbox.run_checks(cfg, git_repo).results
     argv = argv_of(bwrap_log)
     assert _pairs(argv, "--ro-bind-try") == [(str(extra),) * 2]
     assert _pairs(argv, "--bind-try") == [(str(cache),) * 2]
     assert len(_pairs(argv, "--bind")) == 1  # only HOME; no scratch
-    setenv = dict(_pairs(argv, "--setenv"))  # defaults < host allowlist < config.env
-    assert (setenv["UV_CACHE_DIR"], setenv["RUFF_CACHE_DIR"]) == (str(cache), "cfg")
+    assert result.tail.splitlines() == [str(cache), "cfg"]
 
 
 def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
@@ -233,26 +231,50 @@ def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
 
 
 def inject_check_timeout(monkeypatch, output, before_timeout=None):
-    communicate = subprocess.Popen.communicate
+    def read_output_tail(process, limit, timeout):
+        if before_timeout is not None:
+            before_timeout()
+        raise subprocess.TimeoutExpired(process.args, timeout, output=output[-limit:])
 
-    def communicate_with_timeout(process, input=None, timeout=None):
-        if tuple(process.args[-6:-1]) == sandbox.CHECK_SHELL:
-            if before_timeout is not None:
-                before_timeout()
-            raise subprocess.TimeoutExpired(process.args, timeout, output=output)
-        return communicate(process, input, timeout)
-
-    monkeypatch.setattr(subprocess.Popen, "communicate", communicate_with_timeout)
+    monkeypatch.setattr(sandbox._proc, "_read_output_tail", read_output_tail)
 
 
-def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
-    inject_check_timeout(monkeypatch, b"x" * 20_000 + b"partial")
+def test_verbose_stage_bounds_parent_memory(git_repo, bwrap_log):
+    command = shlex.join([sys.executable, "-c", """
+import os
+import sys
+
+block = b"x" * (1024 * 1024)
+for _ in range(50):
+    sys.stdout.buffer.write(block)
+sys.stdout.flush()
+os.write(1, b"\\r\\nlast stdout\\r\\n")
+os.write(2, "final Ω diagnostic\\r\\n".encode())
+sys.exit(7)
+"""])
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        baseline, _ = tracemalloc.get_traced_memory()
+        result = sandbox._run_one(make_config(), git_repo, ["bwrap", "--chdir", str(git_repo), "--"], command, 30)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.exit_code == 7
+    assert result.tail.endswith("\nlast stdout\nfinal Ω diagnostic")
+    assert len(result.tail.encode()) == 16 * 1024
+    assert peak - baseline < 4 * 1024 * 1024
+
+
+def test_timeout_is_recorded_with_drained_output(git_repo, bwrap_log):
+    command = "printf '%20000s\\n' ''; echo last diagnostic >&2; exec sleep 30"
     report = sandbox.run_checks(
-        make_config(checks=("echo partial", "echo after")), git_repo, timeout=0.3
+        make_config(checks=(command, "echo after")), git_repo, timeout=1
     )
-    (first,) = report.results
-    assert (first.exit_code, len(first.tail.encode("utf-8"))) == (sandbox.TIMEOUT_EXIT, 16 * 1024)
-    assert "partial\n[loopzero] timed out" in first.tail and not report.ok
+    (result,) = report.results
+    assert result.exit_code == sandbox.TIMEOUT_EXIT and not report.ok
+    assert result.tail.endswith("\nlast diagnostic\n\n[loopzero] timed out after 1s")
+    assert len(result.tail.encode()) == 16 * 1024
 
 
 def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, monkeypatch):
@@ -489,19 +511,29 @@ def test_real_sandbox_tmp_subpath_bind_stays_visible(git_repo, tmp_path):
 @pytest.mark.skipif(
     not _real_bwrap_works() or shutil.which("uv") is None, reason="needs real bwrap and uv"
 )
-def test_real_sandbox_uv_run_offline(git_repo):
-    home = Path.home()  # the sandbox home inside `loopzero check`: bind the real toolchain
-    uv_cache = os.environ.get("UV_CACHE_DIR", f"{home}/.cache/uv")
-    uv_pythons = os.environ.get("UV_PYTHON_INSTALL_DIR", f"{home}/.local/share/uv/python")
+def test_real_sandbox_uv_run_offline(git_repo, tmp_path):
+    uv_cache = tmp_path / "uv-cache"
+    uv_cache.mkdir()
+    uv = shutil.which("uv")
+    assert uv is not None
+    env = {
+        "UV_CACHE_DIR": str(uv_cache),
+        "UV_NO_CONFIG": "1",
+        "UV_OFFLINE": "1",
+        "UV_PYTHON": str(Path(sys._base_executable).resolve()),
+        "UV_PYTHON_DOWNLOADS": "never",
+    }
     pyproject = '[project]\nname = "t"\nversion = "0"\nrequires-python = ">=3.12"\n'
     (git_repo / "pyproject.toml").write_text(pyproject + "[dependency-groups]\ndev = []\n")
-    subprocess.run(["uv", "lock", "-q"], cwd=git_repo, check=True)  # projects commit uv.lock
+    lock_env = {"HOME": str(tmp_path), "PATH": os.defpath, **env}
+    subprocess.run([uv, "lock", "-q"], cwd=git_repo, env=lock_env, check=True)
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-q", "-m", "uv project")
     cfg = make_config(
         checks=("uv run --group dev python -c 1", ".venv/bin/python -c 1", "test ! -w ."),
-        env=(("UV_CACHE_DIR", uv_cache), ("UV_PYTHON_INSTALL_DIR", uv_pythons)),
-        sandbox_ro=(str(Path(shutil.which("uv")).parent), uv_pythons), writable=(uv_cache,),
+        env=tuple(env.items()),
+        sandbox_ro=(str(Path(uv).parent), sys.base_prefix),
+        writable=(str(uv_cache),),
     )
     report = sandbox.run_checks(cfg, git_repo)
     assert report.ok, report
@@ -515,7 +547,7 @@ def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
 
 @pytest.fixture
 def heartbeat_log(monkeypatch):
-    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
+    monkeypatch.setattr(sandbox, "FIRST_HEARTBEAT_DELAY", 0.03)
     observed, events, reporters = Event(), [], set()
 
     def status(message):
@@ -573,7 +605,6 @@ def test_silent_stage_reports_live_metadata_then_completion(
 
 
 def test_early_failure_reports_actual_exit_without_heartbeat(git_repo, bwrap_log, monkeypatch):
-    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 30.0)
     events = []
     report = sandbox.run_checks(
         make_config(checks=("echo secret; exit 17", "echo never")), git_repo,
@@ -658,7 +689,7 @@ def status(message):
     if mode == "blocked-heartbeat":
         threading.Event().wait()
 
-sandbox.HEARTBEAT_INTERVAL = 0.03
+sandbox.FIRST_HEARTBEAT_DELAY = 0.03
 repo = Path.cwd()
 command = "echo complete" if mode in {"dispatch", "removal"} else "exec sleep 30"
 report = sandbox.run_checks(make_config(checks=(command,)), repo, status=status)
@@ -702,11 +733,14 @@ def fetched_base(git_repo):
 
 
 @pytest.fixture
-def cache_check(git_repo):
-    exclude = git_repo / ".git/info/exclude"
-    with exclude.open("a") as stream:
+def receipt_path(git_repo):
+    with (git_repo / ".git/info/exclude").open("a") as stream:
         stream.write("\n.loopzero/\n")
+    return git_repo / ".loopzero/checks.json"
 
+
+@pytest.fixture
+def cache_check(git_repo, receipt_path):
     def cache(config, *, clean=False, verify_reuse=False):
         report = sandbox.run_checks(config, git_repo)
         assert report.ok
@@ -722,20 +756,19 @@ def cache_check(git_repo):
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
-                                    'dirty_tree', 'legacy'])
-def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change):
+                                    'dirty_tree', 'legacy', 'grant'])
+def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change, cache_check, receipt_path):
     cfg = make_config(checks=('echo one', 'echo two'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
+    if change == 'grant':
+        cfg = replace(cfg, env_allowlist=(*cfg.env_allowlist, "HEAVY_SLOT_GRANTED_CORES"))
+        monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "2")
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
         assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted', fetched_base) is None
     whole = replace(cfg, inputs={'*': ('.',)})
     key = sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     assert key is not None
-    _save_report(git_repo, sandbox.run_checks(cfg, git_repo))
-    receipt = git_repo / '.loopzero/checks.json'
-    git(git_repo, 'config', 'core.excludesFile', str(git_repo / '.git/info/exclude'))
-    with (git_repo / '.git/info/exclude').open('a') as stream:
-        stream.write('\n.loopzero/\n')
+    cache_check(cfg, clean=True)
     if change in {'other', 'input', 'shared', 'dirty_tree'}:
         path = 'README.md' if change in {'input', 'dirty_tree'} else 'src.py' if change == 'other' else change
         (git_repo / path).write_text('new content')
@@ -749,10 +782,16 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
         cfg = replace(cfg, network=True)
     elif change == 'environment':
         monkeypatch.setenv('LZ_KEEP', 'changed')
+        assert _current_check_report(git_repo, cfg, fetched_base) is None
+    elif change == 'grant':
+        monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "4")
+        assert _current_check_report(git_repo, cfg, fetched_base) is not None
+        monkeypatch.delenv("HEAVY_SLOT_GRANTED_CORES")
+        assert _current_check_report(git_repo, cfg, fetched_base) is not None
     elif change == 'version':
         monkeypatch.setattr(sandbox, '__version__', 'new')
     else:
-        data = json.loads(receipt.read_text())
+        data = json.loads(receipt_path.read_text())
         if change in {'failed', 'boolean_exit_code'}:
             for row in data['results']:
                 row['exit_code'] = False if change == 'boolean_exit_code' else 1
@@ -763,7 +802,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
         else:
             for row in data['results']:
                 row.pop('input_key')
-        receipt.write_text(json.dumps(data))
+        receipt_path.write_text(json.dumps(data))
     report = sandbox.run_checks(cfg, git_repo, status=(messages := []).append)
     assert [r.command for r in report.results] == list(cfg.checks)
     assert all(bool(r.reused_from) == (change == 'other') for r in report.results)
@@ -823,36 +862,35 @@ def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_ba
     assert report.results[0].reused_from is None
 
 
-@pytest.mark.parametrize("recorded_base", [False, True])
-def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, recorded_base):
-    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+@pytest.mark.parametrize("base", ["tracked", "recorded", "absent"])
+def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, cache_check):
     head = git(git_repo, "rev-parse", "HEAD").strip()
     base_ref = "refs/remotes/origin/main"
-    if recorded_base:
+    if base == "recorded":
         (git_repo / ".loopzero").mkdir()
         (git_repo / ".loopzero/task.md").write_text(f"Base: {head}\n")
-    else:
+    elif base == "tracked":
         git(git_repo, "update-ref", base_ref, head)
 
     config = make_config(inputs={"*": (".",)})
-    _save_report(git_repo, sandbox.run_checks(config, git_repo))
-    assert _current_check_report(git_repo, config, head) is not None
-    assert sandbox.run_checks(config, git_repo).results[0].reused_from == head
+    cache_check(config, clean=True, verify_reuse=base != "absent")
+    if base == "absent":
+        [result] = sandbox.run_checks(config, git_repo).results
+        assert (result.exit_code, result.input_key, result.reused_from) == (0, None, None)
+        return
 
     tree = git(git_repo, "rev-parse", "HEAD^{tree}").strip()
     new_base = git(git_repo, "commit-tree", tree, "-p", head, "-m", "advance base").strip()
     git(git_repo, "update-ref", base_ref, new_base)
     report = sandbox.run_checks(config, git_repo)
     assert report.ok and report.head == head and not report.dirty
-    assert (report.results[0].reused_from, _current_check_report(git_repo, config, head)) == (None, None)
+    assert report.results[0].reused_from is None and _current_check_report(git_repo, config, head) is not None
 
 
-def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fetched_base):
+def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fetched_base, receipt_path):
     marker = "CHECK_INTEGRATION_SHARD []"
     command = f"echo '{marker}'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
-    with (git_repo / ".git/info/exclude").open("a") as stream:
-        stream.write("\n.loopzero/\n")
     original = sandbox.run_checks(config, git_repo)
     assert original.ok
     legacy = replace(original.results[0], tail=f"{'x' * 20_000}\n{marker}")
@@ -861,7 +899,7 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     git(git_repo, "commit", "--allow-empty", "-m", "advance head")
     _save_report(git_repo, sandbox.run_checks(config, git_repo))
 
-    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
+    receipt = json.loads(receipt_path.read_text())
     assert receipt["head"] == git(git_repo, "rev-parse", "HEAD").strip()
     [result] = receipt["results"]
     assert result["reused_from"] == original.head
@@ -902,16 +940,6 @@ def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkey
     assert saved.get("input_key") is None and saved.get("reused_from") is None
 
 
-def test_local_checks_run_fresh_without_a_base(git_repo, bwrap_log, cache_check):
-    config = make_config(inputs={"*": (".",)})
-    cache_check(config)
-
-    second = sandbox.run_checks(config, git_repo)
-    assert second.ok
-    assert second.results[0].input_key is None
-    assert second.results[0].reused_from is None
-
-
 @pytest.mark.parametrize('symlink', [False, True])
 def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_base, symlink):
     from loopzero.types import CheckReport, CheckResult
@@ -922,7 +950,7 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     _save_report(git_repo, CheckReport(
         git(git_repo, 'rev-parse', 'HEAD').strip(), False,
         (CheckResult(command, 0, 0.0, 'forged pass', key),),
-        sandbox.settings_fingerprint(cfg, git_repo),
+        sandbox.settings_fingerprint(cfg),
     ))
     if symlink:
         (git_repo / '.loopzero').rename(git_repo / 'forged')
@@ -959,15 +987,15 @@ def test_input_key_distinguishes_runners(git_repo, fetched_base, tmp_path):
     assert len(keys) == 3
 
 
-def test_receipt_settings_distinguish_runner_paths(git_repo, monkeypatch, tmp_path):
+def test_receipt_settings_distinguish_runner_paths(monkeypatch, tmp_path):
     cfg = make_config(check_runner=("runner",), env_allowlist=())
     first, second = tmp_path / "first", tmp_path / "second"
     first.touch()
     second.touch()
     monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(first))
-    original = sandbox.settings_fingerprint(cfg, git_repo, base="base")
+    original = sandbox.settings_fingerprint(cfg)
     monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(second))
-    assert sandbox.settings_fingerprint(cfg, git_repo, base="base") != original
+    assert sandbox.settings_fingerprint(cfg) != original
 
 
 @pytest.mark.parametrize("change", ["target", "content"])

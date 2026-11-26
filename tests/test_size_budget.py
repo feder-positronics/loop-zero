@@ -71,39 +71,37 @@ def stage_tree(repo):
     return git(repo, "write-tree").strip()
 
 
-@pytest.mark.parametrize("case,expected_rc", [
-    ("new_over_cap", 1),
-    ("existing_hold", 0),
-    ("existing_shrink", 0),
-    ("existing_grow", 1),
+@pytest.fixture
+def module_path(git_repo):
+    path = git_repo / "src/loopzero/mod.py"
+    path.parent.mkdir(parents=True)
+    return path
+
+
+_SIMPLE_FUNCTION = "def ok():\n    return 1\n"
+_HOT_FUNCTION = _branchy("hot", 11)
+
+
+@pytest.mark.parametrize("before,after,expected_rc", [
+    pytest.param(_SIMPLE_FUNCTION, _branchy("new_hot", 10), 1, id="new_over_cap"),
+    pytest.param(_HOT_FUNCTION, _HOT_FUNCTION, 0, id="existing_hold"),
+    pytest.param(_HOT_FUNCTION, _branchy("hot", 10), 0, id="existing_shrink"),
+    pytest.param(_HOT_FUNCTION, _branchy("hot", 12), 1, id="existing_grow"),
 ])
-def test_complexity_ratchet(git_repo, case, expected_rc):
-    src = git_repo / "src/loopzero/mod.py"
-    src.parent.mkdir(parents=True)
-    if case == "new_over_cap":
-        src.write_text("def ok():\n    return 1\n")
-    else:
-        src.write_text(_branchy("hot", 11))  # CC = 12 > 10
+def test_complexity_ratchet(git_repo, module_path, before, after, expected_rc):
+    module_path.write_text(before)
     base = stage_tree(git_repo)
-
-    if case == "new_over_cap":
-        src.write_text(_branchy("new_hot", 10))  # CC = 11 > 10
-    elif case == "existing_shrink":
-        src.write_text(_branchy("hot", 10))  # CC = 11 <= 12
-    elif case == "existing_grow":
-        src.write_text(_branchy("hot", 12))  # CC = 13 > 12
-
+    if after != before:
+        module_path.write_text(after)
     done = run_budget(git_repo, base)
     assert done.returncode == expected_rc, done.stdout + done.stderr
     assert ("complexity=FAIL" if expected_rc else "complexity=PASS") in done.stdout
 
 
-def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo):
-    src = git_repo / "src/loopzero/mod.py"
-    src.parent.mkdir(parents=True)
+def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo, module_path):
     with_blocks = "".join(f"    with contextlib.suppress(ValueError):\n        y = {i}\n"
                           for i in range(11))
-    src.write_text(
+    module_path.write_text(
         "import contextlib\n"
         "def pep758(x):\n"
         f"{with_blocks}"
@@ -118,10 +116,8 @@ def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo):
     assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
 
 
-def test_complexity_rejects_old_python(git_repo, tmp_path):
-    src = git_repo / "src/loopzero/mod.py"
-    src.parent.mkdir(parents=True)
-    src.write_text("def ok():\n    return 1\n")
+def test_complexity_rejects_old_python(git_repo, module_path, tmp_path):
+    module_path.write_text(_SIMPLE_FUNCTION)
     base = stage_tree(git_repo)
     fake_py = tmp_path / "old-python"
     fake_py.write_text(

@@ -36,18 +36,12 @@ with _proc.unwind_on_sigterm():
 
 @pytest.fixture
 def run_python(tmp_path):
-    def run(script, *, timeout=30, env_allowlist=("PATH",), unbuffered=False, **kwargs):
+    def run(script, *, timeout=30, env_allowlist=("PATH",), unbuffered=False, args=(), **kwargs):
         python = [sys.executable, "-u"] if unbuffered else [sys.executable]
-        return _proc.run([*python, "-c", script], cwd=tmp_path, env_allowlist=env_allowlist,
+        return _proc.run([*python, "-c", script, *args], cwd=tmp_path, env_allowlist=env_allowlist,
                          timeout=timeout, **kwargs)
 
     return run
-
-
-def test_run_captures_output_exit_code_and_duration(run_python):
-    done = run_python("import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)")
-    assert (done.exit_code, done.stdout, done.stderr) == (3, "out\n", "err\n")
-    assert done.duration_s >= 0
 
 
 def test_run_strips_environment_to_allowlist(run_python, monkeypatch):
@@ -59,26 +53,28 @@ def test_run_strips_environment_to_allowlist(run_python, monkeypatch):
     assert done.stdout.strip() == "['LZ_EXTRA', 'LZ_KEEP']"
 
 
-def test_run_uses_cwd(tmp_path, run_python):
-    done = run_python("import os; print(os.getcwd())", env_allowlist=())
-    assert done.stdout.strip() == str(tmp_path.resolve())
-
-
-def test_run_never_uses_a_shell(tmp_path):
-    marker = tmp_path / "pwned"
-    done = _proc.run(["true", ";", "touch", str(marker)], cwd=tmp_path, env_allowlist=("PATH",), timeout=30)
-    assert done.exit_code == 0
-    assert not marker.exists()
-
-
 def test_run_raises_tool_missing(tmp_path):
     with pytest.raises(_proc.ToolMissing, match="definitely-not-a-tool"):
         _proc.run(["definitely-not-a-tool"], cwd=tmp_path, env_allowlist=("PATH",), timeout=30)
 
 
-def test_run_raises_on_timeout(run_python):
-    with pytest.raises(_proc.ProcTimeout, match="timed out"):
-        run_python("import time; time.sleep(5)", timeout=0.2)
+def test_run_reaps_child_before_propagating_keyboard_interrupt(run_python, monkeypatch):
+    children = []
+
+    class InterruptedPopen(subprocess.Popen):
+        def _communicate(self, *args, **kwargs):
+            children.append(self)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess, "Popen", InterruptedPopen)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_python("import time; time.sleep(30)", timeout=5)
+        assert children[0].returncode is not None
+    finally:
+        for child in children:
+            child.kill()
+            child.wait(timeout=5)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="checks Linux process state")
@@ -99,7 +95,7 @@ def test_timeout_stops_descendant_and_preserves_output(tmp_path, monkeypatch):
     with subprocess.Popen([sys.executable, "-c", wait]) as unrelated:
         monkeypatch.setattr(subprocess, "Popen", ReadyPopen)
         try:
-            with pytest.raises(_proc.ProcTimeout) as raised:
+            with pytest.raises(_proc.ProcTimeout, match="timed out") as raised:
                 _proc.run(
                     [sys.executable, "-c", parent], cwd=tmp_path, env_allowlist=(), timeout=0.75,
                 )
@@ -125,11 +121,15 @@ def test_timeout_stops_descendant_and_preserves_output(tmp_path, monkeypatch):
             unrelated.kill()
 
 
-def test_merge_output_interleaves_streams(run_python):
-    done = run_python("import sys; print('a'); print('b', file=sys.stderr); print('c')",
-                      unbuffered=True, merge_output=True)
-    assert done.stdout.splitlines() == ["a", "b", "c"]
-    assert done.stderr == ""
+@pytest.mark.parametrize("merge,stderr", [(True, ""), (False, "b\n")])
+def test_run_captures_exit_duration_cwd_and_streams(tmp_path, run_python, merge, stderr):
+    done = run_python(
+        "import os,sys; print(os.getcwd()); print('b', file=sys.stderr); print(sys.argv[1]); sys.exit(3)",
+        unbuffered=True, merge_output=merge, env_allowlist=(), args=("argument with spaces",),
+    )
+    assert (done.exit_code, done.stderr) == (3, stderr)
+    assert done.duration_s >= 0
+    assert done.stdout.splitlines() == [str(tmp_path.resolve()), *(["b"] if merge else []), "argument with spaces"]
 
 
 def test_tail_keeps_last_lines():

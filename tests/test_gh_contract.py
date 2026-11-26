@@ -2,29 +2,51 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
+import resource
 import shutil
+import signal
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from loopzero import github
 from loopzero.types import Finding, ReviewResult
+from tests.conftest import isolate_github_auth
 from tests.test_github import (
     HEAD,
-    PR_FILES,
     REPO,
     FakeGh,
+    gh as gh,
     merge_json,
     pr_json,
     rest_pr_json,
-    threads_json,
+    arm_review,
+    arm_workflow_check,
 )
 
 REAL_GH = shutil.which("gh")
+
+
+def test_api_removes_payload_when_staging_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(github, "_gh_json", lambda *args, **kwargs: pytest.fail("unexpected dispatch"))
+    original_limit = resource.getrlimit(resource.RLIMIT_FSIZE)
+    handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    try:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (0, original_limit[1]))
+        with pytest.raises(OSError) as failure:
+            github._api("repos/example/project/issues", {"body": "synthetic"})
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, original_limit)
+        signal.signal(signal.SIGXFSZ, handler)
+    assert failure.value.errno == errno.EFBIG
+    assert not list(tmp_path.glob("*.loopzero"))
 
 
 @pytest.fixture(scope="module")
@@ -34,24 +56,19 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
     fake = FakeGh(tmp_path, tmp_path)
     merged = merge_json(state='MERGED', head=HEAD, sha='c' * 40)
     fake.respond_pr_list([pr_json()], branch="lz/x")
-    fake.respond_pr_view(pr_json(), pr_json(), branch="lz/x")
     fake.respond_pr_create(pr_json(), branch="lz/x")
+    arm_review(fake, branch="lz/x")
+    fake.respond_pr_view(pr_json(), branch="lz/x")
+    arm_workflow_check(fake)
     fake.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     fake.append(f"api repos/{REPO}/pulls/7", merged)
-    fake.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
-    fake.respond(f"api repos/{REPO}/pulls/7/files", PR_FILES)
-    fake.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
-    fake.respond("api graphql", threads_json())
-    fake.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
-    fake.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     fake.respond("pr ready", "")
     fake.respond("pr merge", "")
     fake.fail(f"api repos/{REPO}/git/ref/heads/lz/x", "gh: Not Found (HTTP 404)")
 
     with pytest.MonkeyPatch.context() as env:
         env.setenv("PATH", str(tmp_path), prepend=os.pathsep)
-        env.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token")
-        env.setattr(github, "_app_token_cache", ("", 0.0))
+        isolate_github_auth(tmp_path, env)
         github.pr_for_branch(REPO, "lz/x")
         github.pr_view(REPO, 7)
         github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body\n")
@@ -113,65 +130,45 @@ def test_contract_capture_covers_operations_with_rest_metadata(captured_argv: li
     assert any("?state=open&head=acme%3Alz%2Fx" in argv[1] for argv in calls)
 
 
-def test_captured_api_methods_match_the_wire(
-    captured_argv: list[dict], tmp_path: Path
-) -> None:
-    api_calls = [call for call in captured_argv if call["argv"][0] == "api"]
-    for index, call in enumerate(api_calls):
+def test_captured_methods_match_the_wire(captured_argv: list[dict], tmp_path: Path) -> None:
+    for index, call in enumerate(captured_argv):
         argv = call["argv"]
-        if any(flag in argv for flag in ("-F", "-f")) and argv[1] != "graphql":
-            assert argv[argv.index("--method") + 1] == "GET", argv
-
-        if argv[1] == "graphql":
-            expected = "POST"  # GitHub's GraphQL read transport is intentionally POST.
-        elif argv[1] == "-X":
-            expected = argv[2]
-        elif "--method" in argv:
-            expected = argv[argv.index("--method") + 1]
-        elif "--input" in argv:
+        if argv[0] == "pr":
+            assert argv[1] in {"ready", "merge"}
+            expected = "POST"
+        elif argv[1] == "graphql":
             expected = "POST"
         else:
-            expected = "GET"
+            if any(flag in argv for flag in ("-F", "-f")):
+                assert argv[argv.index("--method") + 1] == "GET", argv
+            if argv[1] == "-X":
+                expected = argv[2]
+            elif "--method" in argv:
+                expected = argv[argv.index("--method") + 1]
+            else:
+                expected = "POST" if "--input" in argv else "GET"
         output = offline_run(argv, tmp_path / str(index), call)
         methods = re.findall(r"^> (GET|POST|PATCH|PUT|DELETE) ", output, re.MULTILINE)
         assert methods and methods[0] == expected, (argv, expected, output)
 
 
-@pytest.mark.parametrize("command", ["ready", "merge"])
-def test_captured_pr_mutations_use_graphql_post(
-    captured_argv: list[dict], tmp_path: Path, command: str
-) -> None:
-    call = next(item for item in captured_argv if item["argv"][:2] == ["pr", command])
-    output = offline_run(call["argv"], tmp_path, call)
-    assert re.search(r"^> POST ", output, re.MULTILINE), output
-
-
-def test_strict_fake_rejects_exhausted_calls(
-    fake_bin: Path, tmp_path: Path
-) -> None:
-    fake = FakeGh(fake_bin, tmp_path)
-    fake.expect(
-        ["api", f"repos/{REPO}/pulls/7", "--include"], rest_pr_json(pr_json()),
-    )
-    assert github.pr_view(REPO, 7).number == 7
-    fake.assert_complete()
-    with pytest.raises(github.GhError, match="exhausted"):
-        github.pr_view(REPO, 7)
-
-
-def test_strict_fake_rejects_unexpected_argv(fake_bin: Path, tmp_path: Path) -> None:
-    fake = FakeGh(fake_bin, tmp_path)
-    fake.expect(["pr", "ready", "8", "--repo", REPO])
-    with pytest.raises(github.GhError, match="unexpected argv"):
-        github.mark_ready(REPO, 7)
-
-
-def test_strict_fake_matches_input_contents(fake_bin: Path, tmp_path: Path) -> None:
-    fake = FakeGh(fake_bin, tmp_path)
-    fake.expect(
+def test_strict_fake_checks_input_and_rejects_exhausted_calls(gh: FakeGh) -> None:
+    gh.expect(
         ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH", "--input", "<temp-file>", "--include"],
         {},
         input_files={"--input": json.dumps({"body": "new body"})},
     )
     github.update_body(REPO, 7, "new body")
-    fake.assert_complete()
+    gh.expect(
+        ["api", f"repos/{REPO}/pulls/7", "--include"], rest_pr_json(pr_json()),
+    )
+    assert github.pr_view(REPO, 7).number == 7
+    gh.assert_complete()
+    with pytest.raises(github.GhError, match="exhausted"):
+        github.pr_view(REPO, 7)
+
+
+def test_strict_fake_rejects_unexpected_argv(gh: FakeGh) -> None:
+    gh.expect(["pr", "ready", "8", "--repo", REPO])
+    with pytest.raises(github.GhError, match="unexpected argv"):
+        github.mark_ready(REPO, 7)

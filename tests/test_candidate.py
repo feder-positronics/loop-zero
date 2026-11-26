@@ -9,6 +9,7 @@ the Mergify Candidate Policy workflow pin in that directory as pinned_candidate.
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import subprocess
 from copy import deepcopy
 from functools import partial
@@ -19,9 +20,8 @@ from shutil import copytree
 
 import pytest
 
-from loopzero import candidate
+from loopzero import candidate, github
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
-from loopzero.types import LoopZeroError
 from tests.conftest import commit_file, git as isolated_git
 
 
@@ -32,7 +32,7 @@ def no_retry_delay(monkeypatch):
     monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
 
 
-def event() -> dict:
+def event(head: str = "c" * 40) -> dict:
     repo = {"id": 7, "full_name": "owner/repo"}
     bot = {
         "id": 37929162,
@@ -49,7 +49,7 @@ def event() -> dict:
             "state": "open",
             "draft": True,
             "user": bot,
-            "head": {"sha": "c" * 40, "ref": "mergify/merge-queue/batch", "repo": deepcopy(repo)},
+            "head": {"sha": head, "ref": "mergify/merge-queue/batch", "repo": deepcopy(repo)},
             "base": {"sha": "b" * 40, "ref": "main", "repo": deepcopy(repo)},
         },
     }
@@ -78,6 +78,15 @@ def pull(number: int, sha: str) -> dict:
         "head": {"sha": sha},
         "base": {"ref": "main", "repo": {"id": 7, "full_name": "owner/repo"}},
     }
+
+
+def expected_sources(*sources):
+    return [{"number": number, "head_sha": sha} for number, sha in sources]
+
+
+def tree_commit(git, tree, *parents, subject):
+    parent_args = [arg for parent in parents for arg in ("-p", parent)]
+    return git("commit-tree", f"{tree}^{{tree}}", *parent_args, "-m", subject)
 
 
 def source_payloads(values, head, *sources):
@@ -129,10 +138,8 @@ def run_attestation(
 
 def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
     seen: list[int] = []
-    assert run_attestation(source_policy=lambda number, _source: seen.append(number)) == [
-        {"number": 101, "head_sha": "1" * 40},
-        {"number": 102, "head_sha": "2" * 40},
-    ]
+    sources = run_attestation(source_policy=lambda number, _: seen.append(number))
+    assert sources == expected_sources((101, "1" * 40), (102, "2" * 40))
     assert seen == [101, 102]
 
 
@@ -259,8 +266,7 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
         main_after=None, extra_source=None, lineage="vanished", run=attest_candidate,
         held_source=None,
     ):
-        candidate_event = event()
-        candidate_event["pull_request"]["head"]["sha"] = head
+        candidate_event = event(head)
         values = payloads(candidate_event)
         source_payloads(values, head, (102, source))
         queue = status()
@@ -296,7 +302,7 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
 def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate):
     attest, _, _, _, _, source, _ = tree_candidate
     seen = []
-    assert attest(policy=lambda n, _: seen.append(n)) == [{"number": 102, "head_sha": source}]
+    assert attest(policy=lambda n, _: seen.append(n)) == expected_sources((102, source))
     assert seen == [102]
 
 
@@ -323,7 +329,7 @@ def test_candidate_transport_configuration_is_scoped_to_fetch(tree_candidate, mo
         return popen(argv, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", check_environment)
-    assert attest() == [{"number": 102, "head_sha": source}]
+    assert attest() == expected_sources((102, source))
     assert seen == {"fetch", "non-fetch"}
 
 
@@ -343,8 +349,7 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation):
         if mutation == "tampered":
             # A forged resolution retains the exact original merge parents.
             parents = git("show", "-s", "--format=%P", candidate_sha).split()
-            changed = git("commit-tree", git("rev-parse", f"{changed}^{{tree}}"),
-                          "-p", parents[0], "-p", parents[1], "-m", "forged merge")
+            changed = tree_commit(git, changed, *parents, subject="forged merge")
         kwargs["head"] = changed
     with pytest.raises(CandidateError, match=r"Missing Mergify parent batches parent:.*"
                        r"(tree mismatch|objects unavailable)"):
@@ -367,8 +372,7 @@ def test_vanished_parent_rejects_main_change(tree_candidate):
 
 def test_vanished_parent_rejects_ambiguous_topology(tree_candidate):
     attest, git, _, base, parent, source, candidate_sha = tree_candidate
-    head = git("commit-tree", git("rev-parse", f"{candidate_sha}^{{tree}}"),
-               "-p", base, "-p", parent, "-p", source, "-m", "octopus")
+    head = tree_commit(git, candidate_sha, base, parent, source, subject="octopus")
     with pytest.raises(CandidateError, match="parent: ambiguous"):
         attest(head=head)
 
@@ -410,17 +414,11 @@ def test_intelflo_candidate_policy_parity(tree_candidate, candidate_policy, monk
     attest, git, commit, base, parent, source, candidate_sha = tree_candidate
     implementation, run = candidate_policy
     if case == "single":
-        head = git("commit-tree", f"{source}^{{tree}}", "-p", base, "-p", source,
-                   "-m", "single source integration")
-        assert attest(run=run, lineage="single", head=head, main_head=base) == [
-            {"number": 102, "head_sha": source},
-        ]
+        head = tree_commit(git, source, base, source, subject="single source integration")
+        assert attest(run=run, lineage="single", head=head, main_head=base) == expected_sources((102, source))
         return
     if case == "stacked":
-        assert attest(run=run, lineage="stacked", main_head=base) == [
-            {"number": 101, "head_sha": parent},
-            {"number": 102, "head_sha": source},
-        ]
+        assert attest(run=run, lineage="stacked", main_head=base) == expected_sources((101, parent), (102, source))
         return
 
     # The earlier batch has landed by squash. Both live source heads still need
@@ -431,18 +429,14 @@ def test_intelflo_candidate_policy_parity(tree_candidate, candidate_policy, monk
     git("merge", "--no-ff", second, "-m", "second integration")
     head = git("rev-parse", "HEAD")
     if case == "combined":
-        assert attest(run=run, head=head, extra_source=second) == [
-            {"number": 101, "head_sha": second},
-            {"number": 102, "head_sha": source},
-        ]
+        assert attest(run=run, head=head, extra_source=second) == expected_sources((101, second), (102, source))
         return
 
     kwargs = {}
     if case == "mismatch":
         changed = commit("injected", "unreviewed\n")
         parents = git("show", "-s", "--format=%P", head).split()
-        head = git("commit-tree", f"{changed}^{{tree}}", "-p", parents[0], "-p", parents[1],
-                   "-m", "forged merge")
+        head = tree_commit(git, changed, *parents, subject="forged merge")
         diagnostic = "tree mismatch"
     elif case == "incomplete":
         kwargs["main_head"] = ""
@@ -451,8 +445,7 @@ def test_intelflo_candidate_policy_parity(tree_candidate, candidate_policy, monk
         kwargs["main_after"] = base
         diagnostic = "main changed"
     elif case == "ambiguous":
-        head = git("commit-tree", f"{head}^{{tree}}", "-p", candidate_sha, "-p", second,
-                   "-p", parent, "-m", "octopus")
+        head = tree_commit(git, head, candidate_sha, second, parent, subject="octopus")
         diagnostic = "ambiguous"
     else:
         monkeypatch.setattr(implementation, "_TREE_OBJECTS", 1)
@@ -475,11 +468,10 @@ def test_vanished_parent_rejects_conflicting_current_main(tree_candidate):
         attest(main_head=main)
 
 
-@pytest.mark.parametrize("timing", ["metadata", "policy", "initial"])
+@pytest.mark.parametrize("timing", ["metadata", "policy", "initial", TypeError, AttributeError, KeyError])
 def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monkeypatch, timing):
     _, git, _, _, parent, source, head = tree_candidate
-    candidate_event = event()
-    candidate_event["pull_request"]["head"]["sha"] = head
+    candidate_event = event(head)
     values = payloads(candidate_event)
     source_payloads(values, head, (101, parent), (102, source))
     main, vanished = git("rev-parse", "main"), status()
@@ -511,9 +503,11 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     def policy(number, snapshot):
         seen.append(number)
+        if isinstance(timing, type) and number == 101:
+            raise timing("policy implementation error")
         if timing == "policy" and number == 101:
             assert snapshot["state"] == "open" and source_reads == 1 and status_reads == 1
-            raise LoopZeroError("source #101: PR #101 is MERGED, not open")
+            raise CandidateError("source #101: PR #101 is MERGED, not open")
 
     def verify_tree(repo, main_sha, candidate_sha, sources):
         verified.append((main_sha, candidate_sha, sources))
@@ -521,8 +515,13 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(candidate, "_verify_tree", verify_tree)
+    if isinstance(timing, type):
+        with pytest.raises(timing, match="policy implementation error"):
+            run_attestation(candidate_event, github_get=get, mergify_status=lineage, source_policy=policy)
+        assert seen == [101] and source_reads == 1 and not sleeps
+        return
     assert run_attestation(candidate_event, github_get=get, mergify_status=lineage,
-                           source_policy=policy) == [{"number": 102, "head_sha": source}]
+                           source_policy=policy) == expected_sources((102, source))
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
     assert candidate_reads == (4 if timing == "metadata" else 3)
     assert verified == [(main, head, [source])] and sleeps == [2]
@@ -563,7 +562,7 @@ def test_metadata_retry_evaluates_fresh_policy(field, value):
 def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
     values, live = payloads(event()), status()
     sleeps, attempts, source_reads = [], [], []
-    expected = LoopZeroError("source #101: missing required review")
+    expected = CandidateError("source #101: missing required review")
     if failure == "closed":
         values["/repos/owner/repo/pulls/101"].update(state="closed", merged=False)
     if failure == "identity":
@@ -594,7 +593,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
             raise expected
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
-    with pytest.raises((CandidateError, LoopZeroError)) as caught:
+    with pytest.raises(CandidateError) as caught:
         run_attestation(github_get=get, status_reads=[live], source_policy=policy)
     assert not isinstance(caught.value, CandidateRaceError) and len(attempts) == 1 and sleeps == []
     if failure == "policy":
@@ -663,7 +662,7 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
         return run_attestation(github_payloads=values, mergify_status=read_status,
                                source_policy=lambda n, _: seen.append(n))
     if stop in {"settled", "changed"}:
-        assert run() == [{"number": 101, "head_sha": "1" * 40}, {"number": 102, "head_sha": "2" * 40}]
+        assert run() == expected_sources((101, "1" * 40), (102, "2" * 40))
         assert seen == [101, 102] * (2 if stop == "changed" and second else 1)
     else:
         with pytest.raises(CandidateError, match="superseded" if stop == "closed" else "not exactly one live"):
@@ -672,18 +671,16 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
         assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
 
 
-@pytest.mark.parametrize("exceeds_bound", [False, True])
-def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_bound):
-    waits = []
-    killed = []
-
+@pytest.mark.parametrize("outcome", ["normal", "bound", "fetch"])
+def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome):
+    waits, killed = [], []
     class Child:
         pid = 123
-        returncode = 0
-
         def __init__(self, argv, cwd, **kwargs):
-            self.root = cwd
-            self.running = "test-command" in argv
+            self.root, self.running = cwd, "test-command" in argv
+            self.returncode = 128 if outcome == "fetch" and "fetch" in argv else 0
+            if self.returncode:
+                kwargs["stderr"].write(b"fatal: The requested URL returned error: 503")
 
         def poll(self):
             return None if self.running else self.returncode
@@ -691,7 +688,7 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_
         def wait(self, timeout=None):
             if self.running:
                 waits.append(timeout)
-                if timeout is not None and exceeds_bound:
+                if timeout is not None and outcome == "bound":
                     (self.root / "oversized").write_bytes(b"x" * 65)
                     raise subprocess.TimeoutExpired("test-command", timeout)
                 self.running = False
@@ -703,12 +700,13 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_
     monkeypatch.setattr(candidate.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     monkeypatch.setattr(candidate.time, "sleep", lambda _: pytest.fail("used a fixed delay"))
 
-    with candidate.fetched_git("owner/repo", []) as git:
-        if exceeds_bound:
+    error = pytest.raises(github.GhUnavailable, match="temporarily unavailable") if outcome == "fetch" else nullcontext()
+    with error, candidate.fetched_git("owner/repo", []) as git:
+        if outcome == "bound":
             with pytest.raises(CandidateError, match="Git object/size bound exceeded"):
                 git("test-command")
         else:
             assert git("test-command") == ""
 
-    assert waits == ([0.02, None] if exceeds_bound else [0.02])
-    assert killed == ([(123, candidate.signal.SIGKILL)] if exceeds_bound else [])
+    assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": []}[outcome]
+    assert killed == ([(123, candidate.signal.SIGKILL)] if outcome == "bound" else [])
