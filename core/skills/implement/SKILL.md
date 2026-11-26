@@ -19,6 +19,8 @@ freeze them. Change Acceptance only with a recorded reason in Notes, before
 implementing the change. For changes touching guards, auth, permissions,
 sessions, secrets or trust boundaries, record a short design pass in Notes
 before the first code edit: threats, invariants and chosen approach.
+When deduplicating tests, list their distinct assertions before editing,
+keep each in a surviving test, and record where in the PR body.
 
 Use [write-tests](../write-tests/SKILL.md) to prove the bounded acceptance.
 Map migration, authorization, locking/concurrency and policy edge cases to tests
@@ -62,6 +64,8 @@ Before the check and draft push for primary review, rebase your own commits onto
 Leave base merges out of a branch awaiting its delta.
 For base or check-script changes after review, follow the
 [Review budget](../../CONTRACT.md#review-budget).
+If a reviewed branch needs a conflict refresh, confirm the review path and
+merge the base before starting the check for the resolved head.
 Preserve the primary for the delta and the delta for post-review fixes.
 
 Never bypass the sandbox, change the check list or enable `[checks].network` to pass checks.
