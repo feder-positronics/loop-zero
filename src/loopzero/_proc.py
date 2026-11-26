@@ -116,6 +116,7 @@ def run(
     input: str | None = None,
     encoding: str | None = None,
     preserve_newlines: bool = False,
+    pass_fds: tuple[int, ...] = (),
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
 
@@ -141,6 +142,7 @@ def run(
             text=not preserve_newlines,
             encoding=None if preserve_newlines else encoding,
             errors=None if preserve_newlines else "replace",
+            pass_fds=pass_fds,
             start_new_session=os.name == "posix",
         ) as proc:
             try:

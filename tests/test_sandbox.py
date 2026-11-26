@@ -37,6 +37,11 @@ env = {{}} if "--clearenv" in options else dict(os.environ)
 home_source = None
 i = 0
 while i < len(options):
+    if options[i] == "--args":
+        with os.fdopen(int(options[i + 1]), "rb") as arguments:
+            extra = [os.fsdecode(arg) for arg in arguments.read().split(b"\\0")[:-1]]
+        options[i:i + 2] = extra
+        continue
     if options[i] == "--setenv":
         env[options[i + 1]] = options[i + 2]
         i += 3
@@ -119,6 +124,37 @@ def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, command, exit_co
     assert len(result.tail.encode("utf-8")) <= 16 * 1024
 
 
+def test_check_environment_values_stay_out_of_launcher_arguments(
+    git_repo, bwrap_log, tmp_path, monkeypatch,
+):
+    secret = "synthetic-forwarded-value"
+    monkeypatch.setenv("LZ_KEEP", secret)
+    monkeypatch.setenv("LZ_DROP", "synthetic-unlisted-value")
+    alternate = tmp_path / "alternate"
+    alternate.mkdir()
+    (git_repo / ".git/objects/info/alternates").write_text(f"{alternate}\n")
+    real_run = sandbox._proc.run
+    launchers = []
+
+    def record(argv, **kwargs):
+        if argv[0] == "bwrap":
+            launchers.append(tuple(argv[argv.index("--") + 1:]))
+            assert secret not in argv
+            assert "LZ_KEEP" not in kwargs["env_allowlist"]
+            (fd,) = kwargs["pass_fds"]
+            assert os.pread(fd, 65536, 0).split(b"\0").count(secret.encode()) == 1
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(sandbox._proc, "run", record)
+    command = 'test -n "$LZ_KEEP" && test -z "$LZ_DROP" && test -d "$HOME" && test "$HOME" != "$PWD"'
+    report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
+
+    assert report.ok
+    assert [argv[0] for argv in launchers] == ["true", "/bin/sh", "prlimit"]
+    assert secret not in bwrap_log.read_text()
+    assert "synthetic-unlisted-value" not in bwrap_log.read_text()
+
+
 @pytest.mark.parametrize(
     ("command", "stage_exit"),
     [
@@ -142,7 +178,8 @@ def test_check_pipeline_verdict(git_repo, bwrap_log, monkeypatch, capsys, comman
 def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     monkeypatch.setenv("LZ_KEEP", "kept")
     monkeypatch.setenv("LZ_DROP", "dropped")
-    sandbox.run_checks(make_config(), git_repo)
+    values = 'printf "%s\\n" "$PATH" "$LZ_KEEP" "${LZ_DROP-unset}" "$UV_CACHE_DIR" "$PYTHONDONTWRITEBYTECODE"'
+    (result,) = sandbox.run_checks(make_config(checks=(values,)), git_repo).results
     argv = argv_of(bwrap_log)
     head, tail = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
     for flag in ("--die-with-parent", "--new-session", "--unshare-all", "--clearenv"):
@@ -157,11 +194,8 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert all(("--tmpfs", p) in windows for p in ("/tmp", "/run", "/var/run"))
     assert ("--dev", "/dev") in windows and ("--proc", "/proc") in windows
     assert head[head.index("--chdir") + 1] == str(git_repo)
-    setenv = dict(_pairs(head, "--setenv"))
-    assert setenv["PATH"] == os.environ["PATH"] and setenv["LZ_KEEP"] == "kept"
-    assert "LZ_DROP" not in setenv
-    assert setenv["HOME"] == sandbox.SANDBOX_HOME
-    assert setenv["UV_CACHE_DIR"] == "/tmp/uv-cache" and setenv["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert "--args" in head and "--setenv" not in head
+    assert result.tail.splitlines() == [os.environ["PATH"], "kept", "unset", "/tmp/uv-cache", "1"]
     binds = _pairs(head, "--bind")
     home_src, home_dst = binds[0]
     assert home_dst == sandbox.SANDBOX_HOME and Path(home_src).name.startswith("loopzero-home-")
@@ -178,7 +212,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert head.index("--tmpfs") < head.index(str(git_repo))
     assert tail == ["prlimit", f"--as={sandbox._cap_limit(4096 << 20, resource.RLIMIT_AS)}",
                     f"--fsize={sandbox._cap_limit(2048 << 20, resource.RLIMIT_FSIZE)}",
-                    "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", "echo hello"]
+                    "--", *sandbox.CHECK_SHELL, values]
 
 
 def test_probe_uses_real_flags(git_repo, bwrap_log):
@@ -216,13 +250,16 @@ def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch
     monkeypatch.setenv("RUFF_CACHE_DIR", "host-ruff")
     cfg = make_config(sandbox_ro=(str(extra),), writable=(str(cache),), scratch=())
     cfg = Config(**{**cfg.__dict__, "env_allowlist": ("PATH", "UV_CACHE_DIR", "RUFF_CACHE_DIR")})
-    sandbox.run_checks(Config(**{**cfg.__dict__, "env": (("RUFF_CACHE_DIR", "cfg"),)}), git_repo)
+    cfg = replace(
+        cfg, checks=('printf "%s\\n" "$UV_CACHE_DIR" "$RUFF_CACHE_DIR"',),
+        env=(("RUFF_CACHE_DIR", "cfg"),),
+    )
+    (result,) = sandbox.run_checks(cfg, git_repo).results
     argv = argv_of(bwrap_log)
     assert _pairs(argv, "--ro-bind-try") == [(str(extra),) * 2]
     assert _pairs(argv, "--bind-try") == [(str(cache),) * 2]
     assert len(_pairs(argv, "--bind")) == 1  # only HOME; no scratch
-    setenv = dict(_pairs(argv, "--setenv"))  # defaults < host allowlist < config.env
-    assert (setenv["UV_CACHE_DIR"], setenv["RUFF_CACHE_DIR"]) == (str(cache), "cfg")
+    assert result.tail.splitlines() == [str(cache), "cfg"]
 
 
 def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
@@ -244,6 +281,7 @@ def inject_check_timeout(monkeypatch, output, before_timeout=None):
 
 
 def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
+    monkeypatch.setenv("LZ_KEEP", "synthetic-timeout-value")
     inject_check_timeout(monkeypatch, b"x" * 20_000 + b"partial")
     report = sandbox.run_checks(
         make_config(checks=("echo partial", "echo after")), git_repo, timeout=0.3
@@ -251,6 +289,7 @@ def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
     (first,) = report.results
     assert (first.exit_code, len(first.tail.encode("utf-8"))) == (sandbox.TIMEOUT_EXIT, 16 * 1024)
     assert "partial\n[loopzero] timed out" in first.tail and not report.ok
+    assert "synthetic-timeout-value" not in first.tail
 
 
 def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, monkeypatch):
