@@ -1841,6 +1841,17 @@ def test_interrupted_review_save_preserves_previous_receipt(wt, gh, fake_bin, ca
         assert not saved.exists()
 
 
+def test_repost_refuses_a_saved_review_for_the_wrong_round(wt, gh, capsys, head, monkeypatch):
+    arm_empty_primary_review_history(gh, head)
+    cli._review_file(wt, head, "primary").touch()
+    result = ReviewResult("claude", head, "primary", "approve", (), "")
+    monkeypatch.setattr(cli, "_load_review", lambda *_args: (result, None))
+    monkeypatch.setattr(cli, "_select_review_round", lambda *_args: ("delta", None))
+    monkeypatch.setattr(cli, "_delta_patch", lambda *_args: pytest.fail("processed a mismatched review"))
+
+    expect_cli(capsys, 1, "review", "--repost", stderr_contains=("saved review kind differs",))
+
+
 @pytest.mark.parametrize("saved_state", ["missing", "stale", "hand-written", "retired"])
 def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_state, head):
     saved = cli._review_file(wt, head, "primary")
