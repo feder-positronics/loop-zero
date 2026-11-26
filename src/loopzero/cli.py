@@ -1723,29 +1723,30 @@ def _merge_with_mergify(
     assert queue is not None
     if not readiness.ready:
         return _follow_blocked_mergify(config, pr, readiness, queue, deadline)
-    requested, confirmed_marker = mergify.markers(
-        config.repo, pr.number, pr.head_sha, queue
-    )
-    state = mergify.membership(config.repo, pr.number, queue, deadline)
-    if sha := github.merged_sha(
-        config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
-    ):
-        return sha
-    confirmed = state is not None
-    if confirmed and not confirmed_marker:
-        _require_receipt(wt, config, pr.head_sha)
-        mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
-    if not confirmed and confirmed_marker:
-        closed: list[github.GhError] = []
-        if sha := _mergify_departure(config, pr, queue, closed, confirmed=True):
+    with worktree.lock_local_state(wt):
+        requested, confirmed_marker = mergify.markers(
+            config.repo, pr.number, pr.head_sha, queue
+        )
+        state = mergify.membership(config.repo, pr.number, queue, deadline)
+        if sha := github.merged_sha(
+            config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
+        ):
             return sha
-        raise closed[0]
-    if not confirmed and not requested:
-        _prequeue_size_budget(wt, config, pr, readiness, project=admit_by is None)
-        if admit_by is not None and time.monotonic() > admit_by:
-            raise _AdmissionDeadline
-        _require_receipt(wt, config, pr.head_sha)
-        mergify.request(config.repo, pr.number, pr.head_sha, queue)
+        confirmed = state is not None
+        if confirmed and not confirmed_marker:
+            _require_receipt(wt, config, pr.head_sha)
+            mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
+        if not confirmed and confirmed_marker:
+            closed: list[github.GhError] = []
+            if sha := _mergify_departure(config, pr, queue, closed, confirmed=True):
+                return sha
+            raise closed[0]
+        if not confirmed and not requested:
+            _prequeue_size_budget(wt, config, pr, readiness, project=admit_by is None)
+            if admit_by is not None and time.monotonic() > admit_by:
+                raise _AdmissionDeadline
+            _require_receipt(wt, config, pr.head_sha)
+            mergify.request(config.repo, pr.number, pr.head_sha, queue)
     if deadline is not None:
         return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), confirmed)
     state_name = "confirmed in" if confirmed else "requested from"
