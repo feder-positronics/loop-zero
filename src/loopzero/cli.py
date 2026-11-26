@@ -290,9 +290,8 @@ def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
 ) -> github.Readiness:
-    if "hold" in pr.labels:
-        reason = f"PR #{pr.number} {github.MERGE_HOLD_MESSAGE}"
-        return github.Readiness(ready=False, reasons=(reason,))
+    if hold := github.merge_hold(pr.number, pr.labels):
+        return github.Readiness(False, (hold,))
     if reviews is None:
         reviews = _pr_reviews(config.repo, pr.number)
     publishers = config.review_publishers or (github.login(),)

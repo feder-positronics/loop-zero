@@ -280,6 +280,9 @@ review publication; the existing reviewer selector and delivery gates still appl
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
+Local readiness and hosted source and candidate eligibility reject PRs with
+merge-authority holds. Adding or removing a hold refreshes source eligibility
+even when the head stays the same. Merge admission rechecks the live hold.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
