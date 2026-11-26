@@ -1244,7 +1244,8 @@ def _poll_until(
         pause = delay * random.uniform(0.9, 1.0)
         if bounded and remaining <= pause:
             # Reserve up to five seconds for the last bounded read.
-            _sleep(remaining - min(5.0, remaining / 10))
+            allowance = min(5.0, remaining / 2, max(0.5, remaining / 10))
+            _sleep(remaining - allowance)
             yield
             remaining = timeout - (time.monotonic() - started)
             if remaining > 0:
