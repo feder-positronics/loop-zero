@@ -221,7 +221,8 @@ def _fetch_base(repo_root: Path, base_branch: str) -> str:
     try:
         valid = run(("git", "check-ref-format", remote_ref), cwd=repo_root, env_allowlist=GIT_ENV, timeout=30)
         symbolic = run(("git", "symbolic-ref", "-q", tracking), cwd=repo_root, env_allowlist=GIT_ENV, timeout=30)
-        if valid.exit_code == 0 and symbolic.exit_code == 1:
+        modules = repo_root / _git(repo_root, "rev-parse", "--git-path", "modules", preserve_whitespace=True)
+        if valid.exit_code == 0 and symbolic.exit_code == 1 and not modules.exists():
             fetch = ("git", "fetch", "--porcelain", "--verbose", "--no-tags", "--no-prune",
                      "--no-write-fetch-head", "--refmap=", "origin", f"+{remote_ref}:{tracking}")
             result = run(fetch, cwd=repo_root, env_allowlist=GIT_ENV, timeout=120)
@@ -238,13 +239,12 @@ def _fetch_base(repo_root: Path, base_branch: str) -> str:
         _git(repo_root, "update-ref", "--no-deref", tracking, base)
         return base
     except GitError:
-        if "origin" not in _git(repo_root, "remote").splitlines():
-            raise WorktreeError(
-                "no Git remote named 'origin'. Add it with `git remote add origin <url>` "
-                "using the URL for the repository in `[repo] name`, or rename that remote "
-                "with `git remote rename <name> origin`."
-            ) from None
-        raise
+        if "origin" in _git(repo_root, "remote").splitlines():
+            raise
+        raise WorktreeError(
+            "no Git remote named 'origin'. Add it with `git remote add origin <url>` using the URL for the "
+            "repository in `[repo] name`, or rename that remote with `git remote rename <name> origin`."
+        ) from None
 
 
 def start(repo_root: Path, slug: str, base_branch: str) -> Path:
