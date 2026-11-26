@@ -767,9 +767,9 @@ def test_check_reuses_checkpoint_after_interruption(wt, gh, capsys, monkeypatch,
         inputs = {command: ("feature.py",) for command in commands}
         if changed_inputs:
             inputs["third"] = ("README.md",)
-        return path, replace(settings, check_runner=(sys.executable,), checks=commands, inputs=inputs)
+        return path, replace(settings, checks=commands, inputs=inputs)
 
-    def dispatch(_config, _wt, _head, _base, command, _timeout):
+    def dispatch(_config, _wt, _prefix, command, _timeout):
         calls.append(command)
         if interrupt and cut != "final validation" and len(calls) == (5 if changed_inputs else 2):
             raise KeyboardInterrupt
@@ -781,7 +781,7 @@ def test_check_reuses_checkpoint_after_interruption(wt, gh, capsys, monkeypatch,
         return original_git(config, path, *args, **kwargs)
 
     monkeypatch.setattr(cli, "_context", context)
-    monkeypatch.setattr(cli.sandbox, "_dispatch_one", dispatch)
+    monkeypatch.setattr(cli.sandbox, "_run_one", dispatch)
     if cut == "final validation":
         monkeypatch.setattr(cli.sandbox, "_git", check_git)
     if changed_inputs:
@@ -1826,13 +1826,10 @@ def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_sta
 
 @pytest.mark.parametrize("chunk_auth", [False, True])
 def test_review_chunks_oversized_diff_with_same_family(
-    wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys, chunk_auth, git_calls
+    wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys, chunk_auth, git_calls, monkeypatch
 ) -> None:
-    workflow = (wt / "workflow.toml").read_text().replace(
-        'reviewers = ["claude", "codex"]',
-        'reviewers = ["claude", "codex"]\nreview_chunk_bytes = 4096',
-    )
-    publish_workflow(wt, workflow)
+    split_diff = cli.runners.split_diff
+    monkeypatch.setattr(cli.runners, "split_diff", lambda diff: split_diff(diff, 4096))
     for name in ("large_a.py", "large_b.py"):
         (wt / name).write_text("x = 1\n" * 900)
     git(wt, "add", "large_a.py", "large_b.py")
@@ -3224,41 +3221,6 @@ def test_ready_checks_effective_receipt_environment(wt, gh, capsys, head, monkey
     assert passing or "not ready: check receipt has an incompatible settings fingerprint." in out
     if not (passing or inherited):
         expect_cli(capsys, 1, *args, "check")
-
-
-def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, head, tmp_path):
-    runner = tmp_path / "runner"
-    original = tmp_path / "runner-a"
-    replacement = tmp_path / "runner-b"
-    stage = (
-        f"#!{sys.executable}\n"
-        "import json, sys\n"
-        "frame = json.load(sys.stdin)\n"
-        "del frame['env']\n"
-        "frame.update(exit_code=0, duration_s=0, not_started=False, tail='')\n"
-    )
-    for target, extra in (
-        (original, f"from pathlib import Path\np = Path({str(runner)!r})\n"
-                   f"p.unlink()\np.symlink_to({str(replacement)!r})\n"),
-        (replacement, ""),
-    ):
-        target.write_text(stage + extra + "print(json.dumps(frame))\n")
-        target.chmod(0o755)
-    runner.symlink_to(original)
-    publish_workflow(wt, WORKFLOW.replace("[checks]", f"[checks]\nrunner = {json.dumps([str(runner)])}"))
-    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
-
-    out, err = expect_cli(capsys, 1, "check")
-    assert "receipt produced:" not in out and "PASS" not in out
-    assert "stages passed but the receipt is unverified" in err
-    assert "rerun loopzero check from the task worktree with a stable, readable configured runner" in err
-    report = cli._load_report(wt)
-    assert report.head == head and not report.dirty and report.ok
-    assert report.settings_sha256 is None
-    assert run(capsys, "ready")[0] == 1
-
-    expect_cli(capsys, 0, "check", stdout_contains=("receipt produced:",))
-    assert run(capsys, "ready")[0] == 0
 
 
 @pytest.mark.parametrize("change,exit_code", [("plain", 0), ("unrelated", 0), ("order", 0), ("policy", 1), ("slow", 3)])

@@ -140,9 +140,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    digest covers execution and stage reuse settings without recording raw
    environment values. For local sandbox receipts it omits inherited `PATH`,
    `LANG`, `LC_ALL`, `TERM`, and `HEAVY_SLOT_GRANTED_CORES` so readiness can
-   run in a different host environment. Explicit settings, delegated runner
-   environments, and stage reuse keys still bind these values. A receipt for
-   delegated or input-keyed checks binds the configured base branch. Only the
+   run in a different host environment. Explicit settings and stage reuse keys
+   still bind these values. A receipt for input-keyed checks binds the
+   configured base branch. Only the
    stage reuse key binds the exact base revision. Source-check waiters check for policy
    changes on every poll.
    Local readiness and hosted eligibility share the mergeability verdict.
@@ -435,43 +435,15 @@ updating the checker selections as well as the guide. Keep version-specific
 external compatibility research in a dated note with verified primary sources,
 leaving this guide evergreen.
 
-## Check stage runners
+## Check stages
 
 Local stages run in Bash POSIX mode with pipefail enabled. A pipeline returns
 the status of its rightmost failed member, or zero when all members succeed.
 The local shell is part of the receipt and stage reuse fingerprints.
 
-`[checks].runner` is an operator-trusted argv prefix executed outside local bwrap,
-from a fresh temporary directory outside the task worktree. Delegation does not
-require local bwrap. Its executable must
-be an absolute path or a bare PATH command; later arguments may be relative.
-Execute the configured path (or PATH lookup result) without resolving symlinks.
-For runner containment, resolve the executable, absolute arguments, joined short
-option paths, `--opt=/path` values and colon-separated path lists: none may
-reference task-tree files, including through symlinks. Relative parent traversal
-must remain inside the fresh runner directory. The runner program and its argv
-must remain operator-controlled and must not come from the task tree.
-
-Each stdin JSON object contains `worktree` (resolved absolute checkout path),
-`head` (exact SHA), `base` (resolved base SHA),
-`command` (one locally resolved stage), `env` (`SANDBOX_ENV` overlaid with
-configured checks env, excluding host allowlist values), `network` (boolean),
-and `env_sha256`. The digest is SHA-256 of UTF-8 JSON of `env`, with sorted keys,
-ASCII escaping and compact separators (`,` and `:`). Stdout must contain exactly
-one JSON object echoing worktree, head, base, command, network and env_sha256, plus
-`exit_code` (integer), `duration_s` (finite nonnegative number), `not_started`
-(boolean), and `tail` (string). Env values must not be echoed. Diagnostics belong
-on stderr. Missing, extra, duplicate, malformed or mismatched fields and runner
-process failures fail the stage closed. Runner timeouts report exit code 124
-and the measured elapsed duration. `not_started=true` requires exit_code=0,
-duration_s=0 and empty tail, and permits only local fallback through bwrap.
-
-The runner may read `worktree` as data to execute the exact clean head, including
-unpushed local commits, with the supplied environment and network policy under
-equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
-every stage and after execution, aggregates in order and stops on failure. No
-stage is retried after success or uncertain launch. Only the coordinator writes
-the authoritative `checks.json` receipt. Checks lock the task state directory
+The coordinator resolves stages, aggregates them in order, stops on failure and
+verifies that HEAD and the clean/dirty state match their starting values. Only the coordinator
+writes the authoritative `checks.json` receipt. Checks lock the task state directory
 through execution and receipt publication. A waiter can reuse a newly published
 passing receipt when it acquires the lock within 60 seconds and HEAD, settings
 and declared inputs match. Private review receipts use atomic replacement
@@ -480,11 +452,7 @@ HEAD and atomically replace the receipt from a synced sibling temporary file.
 Successful keyed stages are checkpointed in the same receipt for reuse.
 A successful stage checkpoint preserves a clean pass for the same head,
 settings and commands. A failed stage replaces an existing receipt immediately.
-Final worktree validation is required before publishing a pass. Runners cannot
-select stages or mint receipts. Stage admission
-belongs to the runner: the outer `loopzero check`
-must not hold a host concurrency slot when a runner is configured. Without a runner, the
-existing local execution path is unchanged.
+Final worktree validation is required before publishing a pass.
 
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
 Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
@@ -500,9 +468,6 @@ Consumers own complete input declarations.
 Reuse only successful keyed stages from this worktree's clean receipt or
 checkpoint. Dirty trees run fresh. A tracked receipt is never eligible for reuse.
 Receipts that use saved stage results bind the current head and check settings.
-For delegated checks, both the receipt and the stage key bind the runner's launch
-path, resolved executable path and executable bytes. Unavailable runner identity
-prevents receipt reuse.
 
 A worker running the entire check is itself the coordinator and writes a
 receipt with its own effective settings. Transferring it preserves the
