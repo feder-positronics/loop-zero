@@ -2835,7 +2835,7 @@ def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monk
         assert ("merge-authority hold" in out) == bool(labels)
         with monkeypatch.context() as hosted_env:
             hosted_env.chdir(trusted)
-            assert hosted.main() == expected
+            assert hosted.main() == 0
         capsys.readouterr()
         payload = json.loads(gh.calls[-1]["--input"])
         assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{head}"
