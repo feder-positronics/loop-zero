@@ -277,17 +277,20 @@ def test_cleanup_preserves_untracked_work_with_ignored_artifacts(repo: Path) -> 
     assert "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
-@pytest.mark.parametrize("other_repo", [False, True])
-def test_cleanup_preserves_ignored_nested_worktrees(repo: Path, tmp_path: Path, other_repo: bool) -> None:
+@pytest.mark.parametrize("kind", ["same repo", "other repo", "clone"])
+def test_cleanup_preserves_ignored_nested_worktrees(repo: Path, tmp_path: Path, kind: str) -> None:
     (repo / ".git/info/exclude").write_text("nested/\n")
     wt = worktree.start(repo, "parent", "main")
-    source = init_git_repo(tmp_path / "other") if other_repo else repo
     nested = wt / "nested"
-    git(source, "worktree", "add", "--detach", str(nested))
+    if kind == "clone":
+        git(repo, "clone", str(repo), str(nested))
+    else:
+        source = init_git_repo(tmp_path / "other") if kind == "other repo" else repo
+        git(source, "worktree", "add", "--detach", str(nested))
     assert not worktree.is_dirty(wt)
     with pytest.raises(worktree.WorktreeError, match=r"nested (Git )?worktree"):
         worktree.cleanup(wt, worktree.head(wt))
-    assert (nested / ".git").is_file()
+    assert (nested / ".git").exists()
     assert "lz/parent" in git(repo, "branch", "--list", "lz/parent")
 
 

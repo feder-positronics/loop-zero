@@ -381,9 +381,9 @@ def _require_no_nested_worktree(wt: Path, git_dir: Path) -> None:
     def fail_scan(exc: OSError) -> None:
         raise WorktreeError(f"could not inspect nested worktrees in {wt}: {exc}") from exc
 
-    # Other repositories' linked worktrees are absent from this Git registry.
-    for path, _, files in root.walk(on_error=fail_scan):
-        if path != root and ".git" in files:
+    # Other repositories' checkouts are absent from this Git registry.
+    for path, directories, files in root.walk(on_error=fail_scan):
+        if path != root and (".git" in files or ".git" in directories):
             raise WorktreeError(f"nested Git worktree at {path}, refusing to remove: {wt}")
 
 
