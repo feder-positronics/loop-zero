@@ -3050,54 +3050,48 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
-@pytest.mark.parametrize("draft,condition,reason", [
-    (False, "missing", "run loopzero check at this head"),
-    *((False, condition, "check receipt") for condition in ("wrong-head", "failed", "dirty")),
-    (False, "wrong-commands", "check receipt's plan differs from the trusted workflow."),
-    (False, "legacy", "check receipt is missing its settings fingerprint."),
-    (False, "incompatible", "check receipt has an incompatible settings fingerprint."),
-    (False, "matching", None),
-    (True, "stale", "check receipt is for aaaaaaaaaaaa."),
-    (True, "red", "check receipt records a failed stage."),
-    (True, "dirty", "check receipt was recorded in a dirty worktree."),
-    (True, "commands", "check receipt's plan differs from the trusted workflow."),
-    *((True, condition, "check receipt is incomplete.") for condition in ("empty", "checkpoint")),
+@pytest.mark.parametrize("command", ["ready", "merge"])
+@pytest.mark.parametrize("condition,reason", [
+    ("missing", "run loopzero check at this head"), ("head", "check receipt is for aaaaaaaaaaaa."),
+    ("failed", "check receipt records a failed stage."), ("dirty", "check receipt was recorded in a dirty worktree."),
+    ("plan", "check receipt's plan differs from the trusted workflow."),
+    ("legacy", "check receipt is missing its settings fingerprint."),
+    ("incompatible", "check receipt has an incompatible settings fingerprint."),
+    ("empty", "check receipt is incomplete."), ("checkpoint", "check receipt is incomplete."),
+    ("during-gates", "run loopzero check at this head"),
 ])
-def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, condition, head, draft, reason):
-    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=draft, readiness={
-        "local_exit": int(condition == "failed"), "dirty": condition == "dirty",
-    })
+def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, command, condition, reason):
+    head = commit_mergify_configuration(wt) if command == "merge" else head
+    monkeypatch.setattr(mergify, "configured", lambda *_: condition == "during-gates" or pytest.fail("remote gate read"))
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=command == "ready")
+    gh.respond(" ".join(BRANCH_READ), {"object": {"sha": head}})
     path = wt / ".loopzero/checks.json"
-    if condition == "missing":
-        path.unlink()
-    elif condition not in {"failed", "dirty", "matching"}:
-        report = json.loads(path.read_text())
-        if condition in {"wrong-head", "stale"}:
-            report["head"] = ("a" if draft else "0") * 40
-        elif condition == "wrong-commands":
-            report["results"].pop()
-        elif condition == "commands":
-            report["results"][0]["command"] = "changed"
-        elif condition == "empty":
-            report["results"] = []
-        elif condition == "checkpoint":
-            report["results"][1:] = [asdict(CheckResult("<checks incomplete>", 1, 0.0, ""))]
-        elif condition == "red":
-            report["results"][0]["exit_code"] = 1
-        elif condition == "legacy":
-            del report["settings_sha256"]
-        else:
-            report["settings_sha256"] = "0" * 64
-        path.write_text(json.dumps(report))
+    report = json.loads(path.read_text())
+    if condition == "during-gates":
+        readiness = github.readiness
 
-    out, _ = expect_cli(capsys, int(reason is not None), "ready")
-    if reason:
-        assert f"not ready: {reason}" in out
-    if draft:
-        assert "receipt accepted:" not in out
-    if condition in {"legacy", "incompatible"}:
-        assert ("Run loopzero check in this worktree at this head with the same current CLI and effective "
-                "settings as ready, using a local coordinator for delegated stages." in out)
+        def replace_receipt(*args, **kwargs):
+            path.unlink()
+            return readiness(*args, **kwargs)
+
+        monkeypatch.setattr(github, "readiness", replace_receipt)
+    elif condition == "missing":
+        path.unlink()
+    else:
+        results = report["results"]
+        report.update({
+            "head": {"head": "a" * 40}, "dirty": {"dirty": True},
+            "failed": {"results": [dict(results[0], exit_code=1), *results[1:]]},
+            "plan": {"results": results[:-1]}, "empty": {"results": []},
+            "legacy": {"settings_sha256": None}, "incompatible": {"settings_sha256": "0" * 64},
+            "checkpoint": {"results": [results[0], asdict(CheckResult("<checks incomplete>", 1, 0, ""))]},
+        }[condition])
+        path.write_text(json.dumps(report))
+    out, err = expect_cli(capsys, 1, command, *(["--wait"] if command == "merge" or condition == "during-gates" else []))
+    assert reason in out + err and "receipt accepted:" not in out
+    assert all(github._read_only(tuple(c["argv"])) for c in gh.calls)
+    if condition != "during-gates":
+        assert [c["argv"][:2] for c in gh.calls] == LOOKUP_CALLS[1:]
 
 
 @pytest.fixture
@@ -3108,8 +3102,8 @@ def check_environment(wt, gh, head, tmp_path):
     return path, policy, ("--config", str(path))
 
 
-@pytest.mark.parametrize("wait_for", [None, "ready", "merge"])
-def test_ready_requires_receipt_from_current_check_environment(gh, capsys, head, monkeypatch, wait_for, check_environment):
+@pytest.mark.parametrize("wait_for,fresh", [(None, False), ("ready", False), ("merge", True)])
+def test_ready_requires_receipt_from_current_check_environment(wt, gh, capsys, head, monkeypatch, wait_for, fresh, check_environment):
     config_path, config, args = check_environment
     config = config.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "old" }')
     config_path.write_text(config)
@@ -3124,10 +3118,16 @@ def test_ready_requires_receipt_from_current_check_environment(gh, capsys, head,
         def change_policy(_seconds):
             assert config_path.read_text() == config
             config_path.write_text(new_config)
+            if fresh:
+                cfg = cli._load_config(SimpleNamespace(config=config_path, command=wait_for), wt, pin_checks=True)
+                cli._save_report(wt, CheckReport(head, False, tuple(CheckResult(c, 0, 0, "") for c in cfg.checks),
+                                                 cli.sandbox.settings_fingerprint(cfg, wt)))
 
         monkeypatch.setattr(cli, "_sleep", change_policy)
-        code, _, err = run(capsys, *args, wait_for, "--wait")
-        assert code == 1 and "workflow settings changed while waiting; run loopzero check" in err
+        hint = "retry with the current settings" if fresh else "run loopzero check"
+        expect_cli(capsys, 1, *args, wait_for, "--wait", stderr_contains=(f"workflow settings changed while waiting; {hint}",))
+        if fresh:
+            return
         arm_check_runs(gh, head, [
             {"name": "checks", "status": "completed", "conclusion": "success"}])
     else:
@@ -3480,7 +3480,7 @@ def test_mergify_admission_rechecks_only_the_selected_pr(wt, gh, capsys, monkeyp
     code, out, err = run(capsys, "merge", *(["--wait=1"] if wait else []))
 
     calls = [c["argv"][:2] for c in gh.calls]
-    assert calls.count(LOOKUP_CALLS[0]) == 1
+    assert calls.count(LOOKUP_CALLS[0]) == 0
     assert calls.count(detail.split()) == 2
     if outcome == "merged":
         assert (code, err) == (0, "") and out.splitlines()[-1] == merged_sha
