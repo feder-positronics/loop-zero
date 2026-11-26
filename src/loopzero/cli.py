@@ -18,6 +18,7 @@ import shlex
 import random
 import re
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
@@ -73,9 +74,10 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 # --------------------------------------------------------------------------- git / context
 
 
-def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False) -> str:
+def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False,
+         extra_env: dict[str, str] | None = None) -> str:
     done = _proc.run(
-        ["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout,
+        ["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout, extra_env=extra_env,
         preserve_newlines=paths, encoding=sys.getfilesystemencoding() if paths else None,
     )
     if done.exit_code != 0:
@@ -125,6 +127,7 @@ def _repo_root(wt: Path) -> Path:
 
 def _load_config(
     args: argparse.Namespace, root: Path, *, pin_checks: bool = False, previous: Config | None = None,
+    refresh: bool = False,
 ) -> Config:
     path = args.config or root / "workflow.toml"
     if not pin_checks:
@@ -132,7 +135,7 @@ def _load_config(
     if args.config:
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
-    config = config_mod.load_trusted(root, previous=previous)
+    config = config_mod.load_trusted(root, previous=previous, refresh=refresh)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
@@ -145,7 +148,9 @@ def _load_config(
 
 def _context(args: argparse.Namespace, *, pin_checks: bool = False) -> tuple[Path, Config]:
     wt = _toplevel()
-    return wt, _load_config(args, wt, pin_checks=pin_checks)
+    return wt, _load_config(
+        args, wt, pin_checks=pin_checks, refresh=args.command in {"ready", "merge"},
+    )
 
 
 def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
@@ -624,6 +629,20 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_failure_preview(tail: str, limit: int = 1536) -> str:
+    if len(tail.encode()) <= limit:
+        return tail
+    edge = limit // 8
+    lines = (line.encode() for line in tail.splitlines())
+    preview = b"\n".join(
+        line if len(line) <= 2 * edge else line[:edge] + b" [...] " + line[-edge:]
+        for line in lines
+    )
+    if len(preview) > limit:
+        preview = b"[...]\n" + preview[6 - limit:]
+    return preview.decode(errors="ignore")
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
@@ -637,32 +656,30 @@ def cmd_check(args: argparse.Namespace) -> int:
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
+    shortened = False
     for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
-            print(tail, file=sys.stderr)
+            preview = _check_failure_preview(tail)
+            shortened |= preview != tail
+            print(preview, file=sys.stderr)
             if not config.network and (result.command.startswith("uv sync --offline --locked")
                                        or OFFLINE_FAILURE_RE.search(tail)):
-                env = {
-                    **sandbox.SANDBOX_ENV,
-                    **_proc.build_env(config.env_allowlist),
-                    **dict(config.env),
-                }
+                env = sandbox.SANDBOX_ENV | _proc.build_env(config.env_allowlist) | dict(config.env)
                 print(
                     "\nThe sandbox has no network because `[checks] network = false`; "
                     f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
-                    "To prepare offline, run UV_CACHE_DIR=<effective-cache> uv sync --group dev "
-                    "(use the groups your checks require) on the host, or the same commands, so the cache "
-                    "under `[checks] writable` is warm, or set `[checks] env` UV_CACHE_DIR to "
-                    "that cache.",
-                    file=sys.stderr,
+                    "Run UV_CACHE_DIR=<effective-cache> uv sync --group dev on the host "
+                    "(use the required groups) so the cache under `[checks] writable` is warm, "
+                    "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
                 )
-    current_head = _save_report(wt, report)
-    if current_head is not None:
+    if (current_head := _save_report(wt, report)) is not None:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
               file=sys.stderr)
         return 1
+    if shortened:
+        print(f"Full diagnostic tail: {CHECKS_FILE} (head {report.head})", file=sys.stderr)
     if report.ok and report.settings_sha256 is None:
         print("check stages passed but the receipt is unverified; rerun loopzero check from the task "
               "worktree with a stable, readable configured runner before running ready", file=sys.stderr)
@@ -833,11 +850,12 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         # Exact read-back above may confirm an older published note; a new post needs the current form.
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             raise CliError("saved fallback note is not in the published form; run without --repost")
-        allowed, _ = _decide_kind(
+        allowed, reviewed = _decide_kind(
             _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget")
+        _delta_patch(wt, config, reviewed, head, pr.number)
     else:
         if args.model is None and args.effort is None and _has_recoverable_review(
             wt, config, head, kind, publication_context,
@@ -1033,12 +1051,27 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     return True
 
 
-def _delta_merge_recovery(wt: Path, reviewed: str, merge: str) -> str:
-    pre_merge = _git(wt, "rev-parse", f"{merge}^1")
-    if not _is_ancestor(wt, reviewed, pre_merge):
-        return f"replay the fixes on the reviewed head {reviewed[:12]}"
-    return (f"save the current tip on a backup branch, use `git reset --hard {pre_merge}`, "
-            "and cherry-pick any later fixes from the backup")
+def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number: int | None) -> bytes:
+    if since is None:
+        return b""
+    if not _is_ancestor(wt, since, head):
+        raise CliError(
+            f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original tip with `git reflog`. "
+            "Back up your branch, reset to that tip and replay later fixes. To publish the restored head, "
+            f"run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR"
+        )
+    if not worktree.merges_since(wt, since):
+        return worktree.diff_since(wt, since)
+    patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
+             if number is not None else None)
+    if patch is None:
+        raise CliError(
+            f"could not verify merge history: {since[:12]} must be on the first-parent history and "
+            f"merged parents must come from {config.base_branch}. Save your work, then replay the fixes "
+            f"on the reviewed head {since[:12]}, including resolution edits. Push with `loopzero pr` "
+            "and run `loopzero review`, or open a new PR"
+        )
+    return patch
 
 
 def _run_review(
@@ -1048,28 +1081,13 @@ def _run_review(
 ) -> ReviewResult:
     lineage_base = _primary_base(wt, config)
     since = reviewed if kind == "delta" else lineage_base
-    if kind == "delta" and not _is_ancestor(wt, since, head):
-        raise CliError(
-            f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original "
-            "branch tip with `git reflog`. Save the current tip on a backup branch, then use "
-            "`git reset --hard <original-tip>` and replay any later fixes. To publish the restored "
-            f"head, run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR "
-            "from the current branch"
-        )
-    if kind == "delta" and (merges := worktree.merges_since(wt, since)):
-        recovery = _delta_merge_recovery(wt, since, merges[0])
-        raise CliError(
-            f"merge commit {merges[0][:12]} since the reviewed head {since[:12]} would put the "
-            f"merged-in changes in the delta material. To recover, {recovery}. "
-            f"To publish the recovered head, run `loopzero pr`, then `loopzero review` "
-            f"before merging {config.base_branch} again"
-        )
-    patch = worktree.diff_since(wt, since)
+    patch = (_delta_patch(wt, config, since, head, publication[1] if publication else None)
+             if kind == "delta" else worktree.diff_since(wt, since))
     diff = runners.render_patch(patch)
     task = worktree.task_text(wt)
     authors = runners.author_families(wt, head, lineage_base)
     candidates = [family for family in config.reviewers if family not in authors]
-    failures: list[str] = []
+    errors: dict[str, tuple[str, str]] = {}
     excluded = [family for family in config.reviewers if family in authors]
     def select(family: str) -> Callable[..., ReviewResult]:
         settings = config.review.get(family)
@@ -1103,7 +1121,7 @@ def _run_review(
     attempts = candidates + excluded
     for index, family in enumerate(attempts):
         if family in unusable:
-            failures.append(unusable[family])
+            errors[family] = unusable[family], ""
             continue
         if family in excluded and not fallback:
             fallback = ("independent reviewers failed: " + "; ".join(reasons)
@@ -1125,33 +1143,43 @@ def _run_review(
                 break
         except RUNNER_FAILURES as exc:
             reason, detail, fallback_reason = _review_failure(family, exc)
-            failures.append(detail)
+            errors[family] = detail, exc.tail if isinstance(exc, runners.RunnerMalformedOutput) else ""
             reasons.append(f"{family}: {fallback_reason}")
             if any(next_family in selected for next_family in attempts[index + 1:]):
                 print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
-            _independence_message(authors, excluded, failures)
+            _independence_message(authors, excluded, [detail for detail, _ in errors.values()])
+            + _save_review_failure_output(wt, head, kind, errors)
         )
     return dataclasses.replace(result, fallback=fallback)
 
 
+def _save_review_failure_output(wt: Path, head: str, kind: str, errors: dict[str, tuple[str, str]]) -> str:
+    if not (fragments := {family: tail for family, (_, tail) in errors.items() if tail}):
+        return ""
+    path = wt / ".loopzero" / f"reviewer-output-{head[:12]}-{kind}.json"
+    try:
+        with _lock_task_state(wt) as directory:
+            _write_json_atomically(directory, path.name, fragments)
+    except OSError as exc:
+        return f"\nCould not save reviewer output: {exc.strerror or exc}"
+    return f"\nReviewer output: {path.relative_to(wt)}"
+
+
 def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
     lines = str(exc).splitlines()
-    detail = "\n".join(lines[:3])
-    fallback_reason = _FALLBACK_REASONS[3]
+    detail = "\n".join(lines[:1 if isinstance(exc, runners.RunnerMalformedOutput) else 3])
     if isinstance(exc, runners.RunnerAuthFailed):
         login = "claude auth login" if family == "claude" else "codex login"
-        detail += f"\nFix: run `{login}`."
-        fallback_reason = _FALLBACK_REASONS[0]
-    elif isinstance(exc, runners.RunnerUsageLimit):
-        detail += "\nFix: wait for the limit to reset or switch this reviewer's account."
-        fallback_reason = _FALLBACK_REASONS[1]
-    elif isinstance(exc, runners.RunnerMissing):
+        return lines[0], detail + f"\nFix: run `{login}`.", _FALLBACK_REASONS[0]
+    if isinstance(exc, runners.RunnerUsageLimit):
+        fix = "\nFix: wait for the limit to reset or switch this reviewer's account."
+        return lines[0], detail + fix, _FALLBACK_REASONS[1]
+    if isinstance(exc, runners.RunnerMissing):
         package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
-        detail += f"\nFix: install it with `npm install -g {package}`."
-        fallback_reason = _FALLBACK_REASONS[2]
-    return lines[0], detail, fallback_reason
+        return lines[0], detail + f"\nFix: install it with `npm install -g {package}`.", _FALLBACK_REASONS[2]
+    return lines[0], detail, _FALLBACK_REASONS[3]
 
 
 def _independence_message(
@@ -1245,6 +1273,42 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
+_SIZE_BUDGET = "scripts/size_budget.sh"
+
+
+def _prequeue_size_budget(
+    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness,
+) -> None:
+    if not readiness.ready or config.merge_strategy != "mergify" or _SIZE_BUDGET not in config.checks:
+        return
+    origin = _git(wt, "remote", "get-url", "origin")
+    with tempfile.TemporaryDirectory(prefix="loopzero-size-") as directory:
+        root = Path(directory)
+        env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+               "PYTHON": sys.executable, "PYTHONSAFEPATH": "1"}
+        git = partial(_git, root, extra_env=env)
+        git("clone", "--shared", "--no-checkout", "--template=", str(wt), ".")
+        # Fetch with the user's credential configuration for private origins.
+        fetched = _proc.run(
+            ["git", "fetch", "--no-tags", "--no-recurse-submodules", "--",
+             origin, f"refs/heads/{config.base_branch}"],
+            cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
+        )
+        if fetched.exit_code != 0:
+            raise CliError(f"could not fetch {config.base_branch} from origin for the size budget check")
+        base = git("rev-parse", "FETCH_HEAD^{commit}")
+        script = git("show", f"{base}:{_SIZE_BUDGET}")
+        tree = git("merge-tree", "--write-tree", base, pr.head_sha)
+        # A candidate symlink must not read files outside the temporary checkout.
+        git("-c", "core.symlinks=false", "read-tree", "--reset", "-u", tree)
+        result = _proc.run(["bash", "-s", "--", base], input=script + "\n", cwd=root,
+                           env_allowlist=("PATH",), extra_env=env, timeout=GIT_TIMEOUT,
+                           merge_output=True)
+        if result.exit_code:
+            raise CliError("current target size budget failed:\n" + result.stdout.rstrip())
+
+
 def _activate_draft(wt: Path, config: Config, pr: github.PR, deadline: float | None,
                     args: argparse.Namespace | None) -> None:
     try:
@@ -1289,6 +1353,7 @@ def _recover_draft_activation(wt: Path, config: Config, pr: github.PR, deadline:
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not (readiness.ready or _draft_checks_waiting(config, current, readiness)):
             raise CliError("; ".join(readiness.reasons))
+        _prequeue_size_budget(wt, config, current, readiness)
         github.mark_ready(config.repo, pr.number, github._read_timeout(120))
 
 
@@ -1318,6 +1383,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
                 return 3
             pr, readiness, kicked = waited
         assert readiness is not None
+        _prequeue_size_budget(wt, config, pr, readiness)
         if readiness.ready and pr.is_draft and not kicked:
             _activate_draft(wt, config, pr, deadline, args)
             if args.wait is not None:
@@ -1472,6 +1538,16 @@ def _verify_wait_snapshot(
     raise CliError(f"{changed} changed while waiting; retry with the current settings")
 
 
+def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> None:
+    def by_check(reasons: tuple[str, ...]) -> dict[str, str]:
+        return {reason.rpartition("' ")[0] or reason: reason for reason in reasons}
+    previous, current = by_check(shown), by_check(pending)
+    if changed := [reason for key, reason in current.items() if previous.get(key) != reason]:
+        print("waiting: " + "; ".join(changed))
+    if cleared := [key.removeprefix("required check '") for key in previous if key not in current]:
+        print("cleared: " + "; ".join(cleared))
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
@@ -1505,11 +1581,11 @@ def _wait_for_checks(
         pending = _pending_checks(
             config, current, readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft),
         )
+        if pending or readiness.ready:
+            _print_wait_changes(shown, pending)
         if not pending:
             return current, readiness, kicked
-        if pending != shown:
-            print("waiting: " + "; ".join(pending))
-            shown = pending
+        shown = pending
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
             print(
@@ -1677,7 +1753,7 @@ class _AdmissionDeadline(Exception):
 
 
 def _merge_with_mergify(
-    config: Config, pr: github.PR,
+    wt: Path, config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
     """Request Mergify after readiness verifies the source gates and queue configuration."""
@@ -1704,6 +1780,7 @@ def _merge_with_mergify(
             return sha
         raise closed[0]
     if not confirmed and not requested:
+        _prequeue_size_budget(wt, config, pr, readiness)
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
@@ -1755,7 +1832,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
-            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by)
+            sha = _merge_with_mergify(wt, config, pr, readiness, deadline, admit_by)
         except _AdmissionDeadline:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3
