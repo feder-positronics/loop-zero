@@ -317,9 +317,9 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
     successful = max(0, 1000 - prior)
     publisher.respond(endpoint, *([{}] * successful), refused, refused)
     if prior >= 999:
-        statuses = [{"context": context, "state": "success"} for _ in range(prior)]
+        statuses = [{"id": i, "context": context, "state": "success"} for i in range(prior)]
         if prior == 999:
-            statuses.insert(0, {"context": context, "state": "pending"})
+            statuses.insert(0, {"id": prior, "context": context, "state": "pending"})
         pages = [statuses[i:i + 100] for i in range(0, 1001, 100)]
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *pages, *pages)
 
