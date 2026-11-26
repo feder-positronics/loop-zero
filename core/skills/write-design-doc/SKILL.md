@@ -9,8 +9,8 @@ Produce the smallest artifact that lets the next actor proceed without
 re-deriving intent or architecture. Do not implement it. Unless explicitly
 requested, skip the document for a clear, small, safely bounded change.
 
-Read only Grounding and Design Contract in [reference](reference.md) initially.
-Before drafting, read Artifact Choice conventions and its table if type is open.
+Read only Grounding and Design Contract in [reference](reference.md) first.
+Before drafting, read Artifact Choice conventions. Read its table if type is open.
 Use Decisions for material choices, Artifact Lifecycle for links or time gates,
 and Validate and matching Type-Specific Checks before handoff. Keep blockers owned.
 
