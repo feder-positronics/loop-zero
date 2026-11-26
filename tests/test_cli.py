@@ -3799,10 +3799,46 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     code, out, _ = run(capsys, "status")
     assert_git_cost(git_calls, 7, 1)
     assert code == 0 and "dirty:    yes" in out
+    assert "local checks: passed" not in out
     assert f"pr:       #7 {URL} (draft, OPEN)" in out
     assert f"review:   primary on {head[:12]} (approved)" in out
     assert "ready:    no" in out and "  - required check 'checks' is pending" in out
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", reviews_key()[4:]]) == 1
+
+
+@pytest.mark.parametrize("receipt", ["pass", "missing", "partial", "failed", "stale", "fingerprint"])
+def test_status_no_pr_reports_receipt_before_lookup(wt, gh, capsys, monkeypatch, head, receipt):
+    if receipt != "missing":
+        arm_readiness(gh, head, wt, local_exit=int(receipt == "failed"))
+        path = wt / ".loopzero" / "checks.json"
+        report = json.loads(path.read_text())
+        if receipt == "partial":
+            report["results"].pop()
+        elif receipt == "stale":
+            report["head"] = "0" * 40
+        elif receipt == "fingerprint":
+            report["settings_sha256"] = "0" * 64
+        path.write_text(json.dumps(report))
+
+    def lookup(*_):
+        local = capsys.readouterr().out
+        assert "local checks:" in local
+        assert ("local checks: passed" in local) == (receipt == "pass")
+
+    monkeypatch.setattr(github, "pr_for_branch", lookup)
+    code, out, _ = run(capsys, "status")
+    assert code == 0
+    hint = "run `loopzero pr`" if receipt == "pass" else "pass `loopzero check`"
+    assert hint in out
+
+
+def test_status_shows_local_pass_with_pending_ci(wt, gh, capsys, head):
+    arm_approved_pr_with_check_result(gh, head, wt, "pending")
+
+    code, out, _ = run(capsys, "status")
+
+    assert code == 0 and "local checks: passed" in out
+    assert "ready:    no" in out and "required check 'checks' is pending" in out
 
 
 @pytest.mark.parametrize(("signum", "status"), [
@@ -3834,7 +3870,7 @@ sys.exit(cli.main(["status"]))
         child = None
         try:
             # Read until the supervisor enters communicate on the offline gh child.
-            for _ in range(6):
+            for _ in range(7):
                 assert select([process.stdout], [], [], 5)[0]
                 line = process.stdout.readline().strip()
                 if line.isdigit():
