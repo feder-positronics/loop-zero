@@ -100,6 +100,7 @@ class PR:
     author: str = ""  # login of the PR author
     merge_state: str = "UNKNOWN"  # GitHub mergeStateStatus, e.g. "BEHIND" | "CLEAN"
     body: str = ""
+    labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -517,6 +518,13 @@ def _api(endpoint: str, payload: dict, method: str = "POST",
         path.unlink(missing_ok=True)
 
 
+MERGE_HOLD_MESSAGE = "has a merge-authority hold; ask the decisions owner to release it"
+
+
+def _pr_labels(data: dict) -> tuple[str, ...]:
+    return tuple(label["name"] for label in data.get("labels", []))
+
+
 def _pr_from_rest(data: object) -> PR:
     """Normalize one REST pull detail without treating absent merge evidence as clean."""
     try:
@@ -547,6 +555,7 @@ def _pr_from_rest(data: object) -> PR:
             merge_state=merge_state.upper() if merge_state else "UNKNOWN",
             author=str((data.get("user") or {}).get("login") or ""),
             body=str(data.get("body") or ""),
+            labels=_pr_labels(data),
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
@@ -1322,8 +1331,10 @@ class ClosedUnmerged(GhError):
     """A PR read as closed but not merged; right after a queue merge this can be transient."""
 
 
-def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> str | None:
-    """The merge commit of PR `number` once GitHub reports it MERGED, else None."""
+def merged_sha(
+    repo: str, number: int, *, expected_head: str | None = None, check_hold: bool = False,
+) -> str | None:
+    """The verified merge commit, or None while open. Admission may check the hold label."""
     argv = ("gh", "api", f"repos/{repo}/pulls/{number}")
     view = api_get(argv[2])
     if not isinstance(view, dict) or type(view.get("merged")) is not bool:
@@ -1336,6 +1347,8 @@ def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> s
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
             return sha
     elif not view["merged"] and view.get("state") == "open":
+        if check_hold and "hold" in _pr_labels(view):
+            raise GhError(argv, f"PR #{number} {MERGE_HOLD_MESSAGE}")
         return None  # An open PR's merge_commit_sha is only a test merge.
     if not view["merged"] and view.get("state") == "closed":
         raise ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")

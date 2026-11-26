@@ -301,6 +301,9 @@ def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
 ) -> github.Readiness:
+    if "hold" in pr.labels:
+        reason = f"PR #{pr.number} {github.MERGE_HOLD_MESSAGE}"
+        return github.Readiness(ready=False, reasons=(reason,))
     if reviews is None:
         headers: dict[str, str] = {}
         reviews = _pr_reviews(config.repo, pr.number, response_headers=headers if workflow_wait else None)
@@ -1511,7 +1514,9 @@ def _merge_with_mergify(
         config.repo, pr.number, pr.head_sha, queue
     )
     state = mergify.membership(config.repo, pr.number, queue)
-    if sha := github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha):
+    if sha := github.merged_sha(
+        config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
+    ):
         return sha
     confirmed = state is not None
     if confirmed and not confirmed_marker:
