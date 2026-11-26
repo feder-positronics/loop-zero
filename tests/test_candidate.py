@@ -21,7 +21,6 @@ import pytest
 
 from loopzero import candidate
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
-from loopzero.types import LoopZeroError
 from tests.conftest import commit_file, git as isolated_git
 
 
@@ -570,7 +569,7 @@ def test_metadata_retry_evaluates_fresh_policy(field, value):
 def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
     values, live = payloads(event()), status()
     sleeps, attempts, source_reads = [], [], []
-    expected = LoopZeroError("source #101: missing required review")
+    expected = CandidateError("source #101: missing required review")
     if failure == "closed":
         values["/repos/owner/repo/pulls/101"].update(state="closed", merged=False)
     if failure == "identity":
@@ -601,7 +600,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
             raise expected
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
-    with pytest.raises((CandidateError, LoopZeroError)) as caught:
+    with pytest.raises(CandidateError) as caught:
         run_attestation(github_get=get, status_reads=[live], source_policy=policy)
     assert not isinstance(caught.value, CandidateRaceError) and len(attempts) == 1 and sleeps == []
     if failure == "policy":
