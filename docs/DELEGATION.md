@@ -52,8 +52,9 @@ issue/PR, evidence, authority and holds; worktree/branch/head/dirty state;
 checks and interrupted tool outcomes; live child/task IDs, schedules and
 wakeups. Include the next authorized action. Git/GitHub and the handoff own
 state, not provider memory or resume tokens. Before a long `loopzero check`,
-push the head, open the draft PR and start the check as a transient unit: it
-then posts its verdict to the PR even if the session ends first.
+push the head, open the draft PR and start the check as a transient unit. The
+unit can finish after the session ends. Check PR Validation or the saved
+receipt when resuming.
 The new thread first reconciles live remote state and uncertain external
 effects; a lost tool response is not proof the write failed. Adopt partial work
 without resetting or cleaning away the diff, and never replay whole commands
