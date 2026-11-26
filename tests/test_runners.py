@@ -255,8 +255,7 @@ def repo(tmp_path):
 # ----------------------------------------------------------------- prompt
 
 
-@pytest.mark.parametrize("legacy_encoding", [False, True])
-def test_committed_diff_preserves_git_bytes_for_native_evidence(git_repo, legacy_encoding):
+def test_committed_legacy_diff_preserves_git_bytes(git_repo):
     import subprocess
 
     from loopzero import runners, worktree
@@ -265,40 +264,15 @@ def test_committed_diff_preserves_git_bytes_for_native_evidence(git_repo, legacy
 
     git(git_repo, "config", "core.autocrlf", "false")
     path = git_repo / "README.md"
-    if legacy_encoding:
-        path.write_bytes(b"caf\xe9\n")
-        git(git_repo, "commit", "-am", "add Latin-1 text")
+    path.write_bytes(b"caf\xe9\n")
+    git(git_repo, "commit", "-am", "add Latin-1 text")
     base = worktree.head(git_repo)
-    path.write_bytes(b"caf\xe8\r\n" if legacy_encoding else b"hello\r\n")
-    git(git_repo, "commit", "-am", "change line endings")
-    head = worktree.head(git_repo)
-    native = subprocess.check_output(["git", "diff", "--no-color", base, head], cwd=git_repo)
+    path.write_bytes(b"caf\xe8\r\n")
+    git(git_repo, "commit", "-am", "change Latin-1 byte and line ending")
+    native = subprocess.check_output(["git", "diff", "--no-color", base, "HEAD"], cwd=git_repo)
     patch = worktree.diff_since(git_repo, base)
     assert patch == native
-    diff = runners.render_patch(patch)
-    prompt = runners.build_prompt(kind="primary", head=head, task_text="", diff=diff)
-    if legacy_encoding:
-        assert "-caf\\xe9\n+caf\\xe8\r\n" in prompt
-    else:
-        assert b"-hello\n+hello\r\n" in native
-        assert prompt.split("\n", 1)[1].encode() == native
-    context = {
-        "cwd": str(git_repo), "head": head, "base": base,
-        "diff_sha256": hashlib.sha256(patch).hexdigest(), "diff_bytes": len(patch),
-    }
-    command = f"git -C {git_repo} rev-parse HEAD && git -C {git_repo} diff --no-color {base} {head}"
-    item = {"type": "command_execution", "id": "read-1", "command": command}
-    output = head + "\n" + native.decode(errors="replace")
-    events = [
-        {"type": "item.started", "item": item},
-        {"type": "item.completed",
-         "item": dict(item, status="completed", exit_code=0, aggregated_output=output)},
-    ]
-    inspection = runners._native_inspection({"events": events}, context)
-    if legacy_encoding:
-        assert not inspection
-    else:
-        assert inspection["diff_event"]["end"] == len(output)
+    assert "-caf\\xe9\n+caf\\xe8\r\n" in runners.render_patch(patch)
 
 
 def test_prompt_frames_exact_task_and_raw_diff() -> None:

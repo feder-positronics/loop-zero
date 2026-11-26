@@ -42,7 +42,7 @@ for index,argv in enumerate([['git','-C',cwd,'rev-parse','HEAD'],['git','-C',cwd
  command=' '.join(argv);item={'id':'read-'+str(index),'type':'command_execution','command':command}
  print(json.dumps({'type':'item.started','item':dict(item,status='in_progress')}))
  done=subprocess.run(argv,capture_output=True)
- print(json.dumps({'type':'item.completed','item':dict(item,status='completed',exit_code=done.returncode,aggregated_output=done.stdout.decode())}))
+ print(json.dumps({'type':'item.completed','item':dict(item,status='completed',exit_code=done.returncode,aggregated_output=done.stdout.decode(errors="replace"))}))
 message=json.dumps({'verdict':'approve','findings':[]})
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(message)
 print(json.dumps({'type':'item.completed','item':{'id':'final','type':'agent_message','text':message}}))
@@ -353,7 +353,7 @@ def test_retired_pair_marker_cannot_pass_eligibility(native, source, include_evi
     ) is None
 
 
-@pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta"])
+@pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_legacy"])
 def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_path, fake_bin, monkeypatch, kind):
     from tests.test_github import pr_json, rest_pr_json, threads_json
 
@@ -363,7 +363,8 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
     if kind.startswith("delta"):
         reviewed, merge_base = result.head, native[1]["base"]
         git(native[2], "config", "core.autocrlf", "false")
-        (native[2] / "delta.txt").write_bytes(b"delta only\r\n")
+        content = b"delta only\r\n" if kind == "delta" else b"caf\xe9\r\n"
+        (native[2] / "delta.txt").write_bytes(content)
         git(native[2], "add", "delta.txt")
         git(native[2], "commit", "-qm", "delta repair")
         head = git(native[2], "rev-parse", "HEAD").strip()
@@ -381,8 +382,8 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
         delta_diff = subprocess.check_output(
             ["git", "diff", "--no-color", reviewed, head], cwd=native[2]
         )
-        assert b"+delta only\r\n" in delta_diff
-        assert proof["calls"][0]["inspection"] == "verified"
+        assert b"+" + content in delta_diff
+        assert proof["calls"][0]["inspection"] == ("verified" if kind == "delta" else "unknown")
         assert proof["calls"][0]["diff_sha256"] == hashlib.sha256(delta_diff).hexdigest()
     head = result.head
     prefix = (
