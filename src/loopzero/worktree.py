@@ -21,6 +21,7 @@ from loopzero._proc import build_env, defer_sigterm, run, run_git_paths
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
 EXCLUDES = (b".worktrees/", b".loopzero/")
+_BASE_SECTION = re.compile(r"^## Base\n[^\n]+ @ ([0-9a-fA-F]{7,40})[ \t]*$", re.MULTILINE)
 _BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
 _TASK_TEMPLATE = """# {title}
 
@@ -38,7 +39,6 @@ Refs #<issue number, or remove this line>
 
 ## Base
 {base_branch} @ {base}
-Base: {base}
 
 ## Validation
 (filled by `loopzero check`)
@@ -348,9 +348,10 @@ def task_text(wt: Path) -> str:
 
 
 def base_sha(wt: Path) -> str:
-    match = _BASE_LINE.search(task_text(wt))
+    text = task_text(wt)
+    match = _BASE_LINE.search(text) or _BASE_SECTION.search(text)
     if not match:
-        raise WorktreeError(f"no 'Base: <sha>' line in {task_file(wt)}")
+        raise WorktreeError(f"no commit in the Base section or 'Base: <sha>' line in {task_file(wt)}")
     return match.group(1)
 
 

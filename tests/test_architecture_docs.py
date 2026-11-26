@@ -30,7 +30,7 @@ def run(repo, base, *args):
                           text=True, capture_output=True, check=False)
 
 
-@pytest.mark.parametrize("sync", ["missing", "guide", "trailer", "empty", "squash",
+@pytest.mark.parametrize("sync", ["missing", "guide", "trailer", "empty", "short", "squash",
                                   "untracked-non-utf8", "staged-non-utf8"])
 def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, sync):
     if sync.endswith("non-utf8"):
@@ -46,8 +46,8 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
     (git_repo / "core/CONTRACT.md").write_text("# New authority\n")
     if sync == "guide":
         (git_repo / "docs/ARCHITECTURE.md").write_text("# New authority explained\n")
-    if sync in {"trailer", "empty", "squash"}:
-        reason = "New wording preserves the documented authority boundary." if sync != "empty" else ""
+    if sync in {"trailer", "empty", "short", "squash"}:
+        reason = {"empty": "", "short": "Same boundary"}.get(sync, "New wording preserves the documented authority boundary.")
         git(git_repo, "add", ".")
         git(git_repo, "commit", "-m", "Update\n\nArchitecture-Review: unchanged; " + reason)
     if sync == "squash":
@@ -56,7 +56,9 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
         git(git_repo, "commit", "-m", "Squash without the source trailer")
     done = run(git_repo, base)
     assert done.returncode == (0 if sync in {"guide", "trailer"} else 1)
-    if done.returncode:
+    if sync in {"short", "empty"}:
+        assert "Architecture-Review reason must be at least 20 characters" in done.stderr
+    elif done.returncode:
         assert "without guide update or reasoned Architecture-Review trailer" in done.stderr
     if sync == "squash":
         assert run(git_repo, base, "--links-only").returncode == 0

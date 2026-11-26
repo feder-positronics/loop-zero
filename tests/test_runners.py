@@ -389,9 +389,10 @@ def test_codex_version_probe(fake_bin, tmp_path, monkeypatch, version, failure):
         return original(argv, **kwargs)
 
     monkeypatch.setattr(_proc, "run", probe)
-    with pytest.raises(RunnerBadOutput, match="version probe failed"):
-        _review("codex", tmp_path)
-    assert not (fake_bin / "codex.stdin").exists()
+    result = _review("codex", tmp_path)
+    assert result.verdict == "approve"
+    assert result.provenance["cli_version"] is None
+    assert (fake_bin / "codex.stdin").exists()
 
 
 @pytest.mark.parametrize("runtime", [False, True], ids=["default", "explicit"])

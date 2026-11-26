@@ -84,7 +84,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     prompts = [ln.split(":**", 1)[0] for ln in text.splitlines() if ln.startswith("- **")]
     assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
-    assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
+    assert base_section.strip().splitlines() == [f"main @ {upstream}"]
 
 
 @pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base", "detached"])
@@ -241,6 +241,10 @@ def test_task_helpers_errors(repo: Path) -> None:
     worktree.task_file(wt).write_text("# no base line\n")
     with pytest.raises(worktree.WorktreeError, match="Base:"):
         worktree.base_sha(wt)
+    worktree.task_file(wt).write_text("## Base\nmain @ " + "a" * 40 + "\n")
+    assert worktree.base_sha(wt) == "a" * 40
+    worktree.task_file(wt).write_text("Base: " + "b" * 40 + "\n")
+    assert worktree.base_sha(wt) == "b" * 40
     worktree.task_file(wt).unlink()
     with pytest.raises(worktree.WorktreeError, match="missing"):
         worktree.task_text(wt)
