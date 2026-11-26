@@ -434,6 +434,10 @@ leaving this guide evergreen.
 
 ## Check stage runners
 
+Local stages run in Bash POSIX mode with pipefail enabled. A pipeline returns
+the status of its rightmost failed member, or zero when all members succeed.
+The local shell is part of the receipt and stage reuse fingerprints.
+
 `[checks].runner` is an operator-trusted argv prefix executed outside local bwrap,
 from a fresh temporary directory outside the task worktree. Delegation does not
 require local bwrap. Its executable must
