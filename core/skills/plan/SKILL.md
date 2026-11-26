@@ -8,25 +8,19 @@ description: Plan outcome-sized tasks with observable acceptance, ownership, pat
 Read [the contract](../../CONTRACT.md), repository guidance, the issue/task and
 relevant code. Use [delegation guidance](../../../docs/DELEGATION.md) for executors.
 
-Before slicing, restate the ask in one precise sentence and check it against the
-issue or request. Size each task to one outcome someone can accept, or one
-failure family, in one PR by default. Every PR pays a fixed check, review and
-queue cost: keep tests, generated files, docs and related cleanup with their
-change, and batch queued, non-urgent chores of one risk class and area, never
-into a risky change or ahead of an urgent fix. Split an outcome only at a named
-seam. The seam must be separate rollout or rollback, a measurement that could
-change the design, a higher risk class (a destructive migration, a trust
-boundary), separate ownership or a diff too wide to review reliably. Scale
-planning depth to the cost of reversing a choice later: spend planning on
-persisted state, CLI or config interfaces, trust boundaries, public APIs and
-shared abstractions—asking "if this assumption changes after merge, what
-existing state or callers must still work?" (use a compact state table when
-transitions matter)—and settle cheap, reversible choices during implementation.
-When a cheap observation on real data or the real environment could change the design
-or its target, sequence that observation first and derive targets from it. Give
-each task an objective, observable acceptance, affected paths, owners, governing
-constraints and proving `workflow.toml` checks. Add checks only when existing
-checks cannot cover behavior.
+Restate the ask in one precise sentence and check it against the issue or request. Size work to one
+independently acceptable outcome or failure family in one PR by default. Keep tests, generated files, docs and related
+cleanup with their change to amortize checks, review and queueing. Batch non-urgent queued chores in
+the same area and risk class, away from risky changes and behind urgent fixes. Split only at a named seam:
+separate rollout or rollback, a design-changing measurement, higher risk (such as destructive migration
+or a trust boundary), separate ownership or a diff too wide for reliable review.
+Match planning depth to the cost of reversal. For persisted state, CLI/config interfaces, trust
+boundaries, public APIs and shared abstractions, identify state and callers that must survive changes
+to assumptions after merge. Use compact state tables for material transitions and settle cheap,
+reversible choices during implementation. Make cheap design- or target-changing observations on real
+data or environments first and derive targets from them. Record each task's objective, observable
+acceptance, paths, owners, constraints and proving `workflow.toml` checks. Add checks only where existing
+checks cannot cover the behavior.
 
 When authorized to file slices from an active goal or planned blueprint, use its
 tracking issue as the parent. Give each task a plain issue title and
