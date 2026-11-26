@@ -178,3 +178,21 @@ def test_strict_fake_matches_input_contents(fake_bin: Path, tmp_path: Path) -> N
     )
     github.update_body(REPO, 7, "new body")
     fake.assert_complete()
+
+
+def test_app_token_expires_after_wall_clock_rollback(tmp_path, monkeypatch):
+    helper = tmp_path / "app-token"
+    counter = tmp_path / "helper-calls"
+    helper.write_text(f'#!/bin/sh\necho called >> "{counter}"\nwc -l < "{counter}"\n')
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    wall_time = 10_000.0
+    boot_time = 10_000.0
+    monkeypatch.setattr(github.time, "time", lambda: wall_time)
+    monkeypatch.setattr(github.time, "CLOCK_BOOTTIME", 7, raising=False)
+    monkeypatch.setattr(github.time, "clock_gettime", lambda _clock_id: boot_time)
+    assert github.app_token() == "1"
+    assert github.app_token() == "1"
+    wall_time += 2_620
+    boot_time += 3_620
+    assert github.app_token() == "2"
