@@ -255,26 +255,6 @@ def repo(tmp_path):
 # ----------------------------------------------------------------- prompt
 
 
-def test_committed_legacy_diff_preserves_git_bytes(git_repo):
-    import subprocess
-
-    from loopzero import runners, worktree
-
-    from .conftest import git
-
-    git(git_repo, "config", "core.autocrlf", "false")
-    path = git_repo / "README.md"
-    path.write_bytes(b"caf\xe9\n")
-    git(git_repo, "commit", "-am", "add Latin-1 text")
-    base = worktree.head(git_repo)
-    path.write_bytes(b"caf\xe8\r\n")
-    git(git_repo, "commit", "-am", "change Latin-1 byte and line ending")
-    native = subprocess.check_output(["git", "diff", "--no-color", base, "HEAD"], cwd=git_repo)
-    patch = worktree.diff_since(git_repo, base)
-    assert patch == native
-    assert "-caf\\xe9\n+caf\\xe8\r\n" in runners.render_patch(patch)
-
-
 def test_prompt_frames_exact_task_and_raw_diff() -> None:
     prompt = build_prompt(kind="delta", head="deadbeef", task_text=" Objective ", diff="+line\n")
     header, diff = prompt.split("\n", 1)

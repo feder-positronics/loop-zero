@@ -363,9 +363,9 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
     if kind.startswith("delta"):
         reviewed, merge_base = result.head, native[1]["base"]
         git(native[2], "config", "core.autocrlf", "false")
-        content = b"delta only\r\n" if kind == "delta" else b"caf\xe9\r\n"
-        (native[2] / "delta.txt").write_bytes(content)
-        git(native[2], "add", "delta.txt")
+        content = b"hello\r\n" if kind == "delta" else b"caf\xe9\r\n"
+        (native[2] / "README.md").write_bytes(content)
+        git(native[2], "add", "README.md")
         git(native[2], "commit", "-qm", "delta repair")
         head = git(native[2], "rev-parse", "HEAD").strip()
         git(native[2], "update-ref", "refs/remotes/origin/main", merge_base)
@@ -382,7 +382,9 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
         delta_diff = subprocess.check_output(
             ["git", "diff", "--no-color", reviewed, head], cwd=native[2]
         )
-        assert b"+" + content in delta_diff
+        assert b"-hello\n+" + content in delta_diff
+        if kind == "delta_legacy":
+            assert "+caf\\xe9\r\n" in runners.render_patch(delta_diff)
         assert proof["calls"][0]["inspection"] == ("verified" if kind == "delta" else "unknown")
         assert proof["calls"][0]["diff_sha256"] == hashlib.sha256(delta_diff).hexdigest()
     head = result.head
