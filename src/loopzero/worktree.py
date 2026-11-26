@@ -171,7 +171,7 @@ def _add_task_worktree(repo_root: Path, wt: Path, branch: str, base: str) -> Non
     wt.mkdir(parents=True)
     try:
         _git(repo_root, "worktree", "add", "--quiet", "-b", branch, str(wt), base)
-    except (KeyboardInterrupt, Terminated):
+    except (KeyboardInterrupt, Terminated, ProcTimeout):
         with suppress(WorktreeError, ProcTimeout, OSError):
             _discard_interrupted_checkout(repo_root, wt, branch, base)
         raise
@@ -189,9 +189,10 @@ def _discard_interrupted_checkout(repo_root: Path, wt: Path, branch_name: str, b
         wt.rmdir()
         return
     common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-    if _git(wt, *common_dir) != _git(repo_root, *common_dir):
+    if (_git(wt, *common_dir, preserve_whitespace=True)
+            != _git(repo_root, *common_dir, preserve_whitespace=True)):
         return
-    git_dir = Path(_git(wt, "rev-parse", "--absolute-git-dir"))
+    git_dir = Path(_git(wt, "rev-parse", "--absolute-git-dir", preserve_whitespace=True))
     if (not (git_dir / "index.lock").is_file()
             or (git_dir / "locked").read_text().strip() != "initializing"
             or branch(wt) != branch_name or head(wt) != base):
