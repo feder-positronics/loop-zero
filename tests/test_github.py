@@ -1221,6 +1221,8 @@ def test_merge_success_verifies_rest_landing(
 
 def test_merge_command_failure(gh: FakeGh) -> None:
     gh.fail("pr merge", "head commit mismatch")
+    gh.respond(f"api repos/{REPO}/pulls/7", merge_json())
+    gh.respond("api graphql", _queue_json(False))
     with pytest.raises(github.MergeFailed) as info:
         github.merge(REPO, 7, "rebase", HEAD)
     assert "--rebase" in info.value.command and "mismatch" in info.value.tail
@@ -1239,7 +1241,7 @@ def test_delete_remote_branch_checks_encoded_ref(gh: FakeGh, remote_head: str | 
 
 
 def _queue_json(queued: bool) -> dict:
-    return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued}}}}
+    return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued, "headRefOid": HEAD}}}}
 
 
 @pytest.mark.parametrize("missing", [False, True])
@@ -1262,10 +1264,14 @@ def test_merge_queued_returns_none(gh: FakeGh, strategy, auto) -> None:
     accepted = _queue_json(not auto)
     if auto:
         accepted["data"]["repository"]["pullRequest"]["autoMergeRequest"] = {"enabledAt": "t"}
-    gh.respond("api graphql", accepted)
+    gh.respond("api graphql", *([_queue_json(False)] if strategy == "queue" else []), accepted)
     assert github.merge(REPO, 7, strategy, HEAD) is None
-    assert ("--squash" in gh.argv(0)) == (strategy == "squash")
-    assert "--queue" not in gh.argv(0)
+    if strategy == "queue":
+        assert github.merge(REPO, 7, strategy, HEAD) is None
+    writes = [c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"]]
+    assert len(writes) == 1
+    assert ("--squash" in writes[0]) == (strategy == "squash")
+    assert "--queue" not in writes[0]
 
 
 def test_merge_landed_between_reads_is_reported_merged(gh: FakeGh) -> None:
