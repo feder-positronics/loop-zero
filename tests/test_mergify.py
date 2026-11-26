@@ -212,41 +212,40 @@ def test_hosted_import_does_not_load_yaml():
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("failure", ["http503", "dropped_read", "truncated"])
-def test_api_get_retries_transient_reads(monkeypatch, failure):
-    calls = []
+@pytest.mark.parametrize("failure,expected_sleeps", [
+    ("http503", [2.0]), ("dropped_read", [2.0]), ("truncated", [2.0]),
+    ("DNS lookup failed", [2.0, 5.0]),
+    (ssl.SSLCertVerificationError("certificate verification failed"), []),
+])
+def test_api_get_retries_and_classifies_failures(monkeypatch, failure, expected_sleeps):
+    calls, sleeps = [], []
+    body_errors = {
+        "dropped_read": ConnectionResetError(),
+        "truncated": http.client.IncompleteRead(b"{"),
+    }
 
     class Body(io.BytesIO):
         def read(self, *args):
-            if len(calls) == 1 and failure != "http503":  # body read fails once
-                raise {"dropped_read": ConnectionResetError(), "truncated": mergify.http.client.IncompleteRead(b"{")}[failure]
+            if len(calls) == 1 and failure in body_errors:
+                raise body_errors[failure]
             return super().read(*args)
 
     def fake_open(request):
         calls.append(request.get_method())
         if failure == "http503" and len(calls) == 1:
             raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
+        if failure != "http503" and failure not in body_errors:
+            raise urllib.error.URLError(failure)
         return Body(b"{}")
 
     monkeypatch.setattr(mergify, "_open", fake_open)
-    monkeypatch.setattr(mergify, "_retry_sleep", lambda _: None)
-    monkeypatch.setattr(mergify, "_credential", lambda: "k")
-    assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
-    assert calls == ["GET", "GET"]
-
-@pytest.mark.parametrize("reason, expected_sleeps", [
-    ("DNS lookup failed", [2.0, 5.0]),
-    (ssl.SSLCertVerificationError("certificate verification failed"), []),
-])
-def test_api_get_classifies_terminal_transport_failure(monkeypatch, reason, expected_sleeps):
-    sleeps = []
-
-    def fail(_request):
-        raise urllib.error.URLError(reason)
-
-    monkeypatch.setattr(mergify, "_open", fail)
     monkeypatch.setattr(mergify, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(mergify, "_credential", lambda: "k")
-    with pytest.raises(mergify.MergifyError, match="transport failed") as info:
-        mergify.api_get("acme/widgets", "/merge-queue/status")
-    assert str(reason) in str(info.value) and sleeps == expected_sleeps
+    if failure == "http503" or failure in body_errors:
+        assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
+        assert calls == ["GET", "GET"]
+    else:
+        with pytest.raises(mergify.MergifyError, match="transport failed") as info:
+            mergify.api_get("acme/widgets", "/merge-queue/status")
+        assert str(failure) in str(info.value)
+    assert sleeps == expected_sleeps
