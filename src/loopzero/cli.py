@@ -649,6 +649,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
               file=sys.stderr)
         return 1
+    if report.ok and report.settings_sha256 is None:
+        print("check stages passed but the receipt is unverified; rerun loopzero check from the task "
+              "worktree with a stable, readable configured runner before running ready", file=sys.stderr)
+        _refresh_pr_checks(wt, config)
+        return 1
     if report.ok and not report.dirty:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
