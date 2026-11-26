@@ -260,12 +260,23 @@ def merges_since(wt: Path, sha: str) -> list[str]:
 
 
 def cleanup(wt: Path) -> None:
-    """Remove the worktree and its branch. Refuses when the worktree is dirty."""
+    """Remove the worktree and branch if there are no local user files."""
     wt = Path(wt).absolute()
     if not wt.exists():
         raise WorktreeError(f"no such worktree: {wt}")
     if is_dirty(wt):
         raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
+    ignored = _git(
+        wt, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", preserve_newlines=True
+    )
+    for path in ignored.split("\0")[:-1]:
+        if (
+            (path in {".loopzero/task.md", ".loopzero/checks.json"}
+             or re.fullmatch(r"\.loopzero/review-[0-9a-f]{12}-(primary|delta)\.json", path))
+            and not (wt / path).is_symlink()
+        ):
+            continue
+        raise WorktreeError(f"worktree contains ignored file {path!r}, refusing to remove: {wt}")
     name, gd = branch(wt), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
     _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
     try:

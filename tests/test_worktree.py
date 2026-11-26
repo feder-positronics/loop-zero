@@ -133,13 +133,11 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
 
 def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
     exclude = repo / ".git" / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text("*.log")  # no trailing newline on purpose
     old_inode = exclude.stat().st_ino
     wt = worktree.start(repo, "t1", "main")
     assert exclude.stat().st_ino != old_inode
-    lines = exclude.read_text().splitlines()
-    assert lines == ["*.log", ".worktrees/", ".loopzero/"]
+    assert exclude.read_text().splitlines() == ["*.log", ".worktrees/", ".loopzero/"]
     assert not worktree.is_dirty(wt), "fresh worktree with task.md is clean"
     assert git(repo, "status", "--porcelain") == ""
     installed = exclude.stat()
@@ -238,12 +236,14 @@ def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
 
-def test_cleanup_refuses_dirty(repo: Path) -> None:
+@pytest.mark.parametrize("file", ["scratch.txt", "local.env", ".loopzero/user-notes.md"])
+def test_cleanup_preserves_user_files(repo: Path, file: str) -> None:
+    (repo / ".git/info/exclude").write_text("local.env\n")
     wt = worktree.start(repo, "dirty", "main")
-    (wt / "scratch.txt").write_text("x")
-    with pytest.raises(worktree.WorktreeError, match="dirty"):
+    (wt / file).write_text("x")
+    with pytest.raises(worktree.WorktreeError, match="worktree is dirty" if file == "scratch.txt" else "ignored file"):
         worktree.cleanup(wt)
-    assert wt.exists() and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
+    assert (wt / file).read_text() == "x" and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
 def test_cleanup_missing_worktree(repo: Path) -> None:
