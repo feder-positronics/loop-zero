@@ -40,17 +40,11 @@ def main() -> int:
         return _run(cfg)
 
 
-class _MergeabilityPending(LoopZeroError):
-    pass
-
-
 def _attest(cfg: Config, event: dict) -> None:
     def policy(source_number: int, source: dict) -> None:
         result = eligibility.evaluate(cfg.repo, source_number, source["head"]["sha"],
                                       cfg.base_branch, cfg.review_publishers)
         if not result.ready:
-            if result.reasons == (github.MERGEABILITY_PENDING,):
-                raise _MergeabilityPending(f"source #{source_number}: {github.MERGEABILITY_PENDING}")
             raise LoopZeroError(f"source #{source_number}: " + "; ".join(result.reasons))
 
     candidate_mod.attest_candidate(
@@ -112,10 +106,6 @@ def _run(cfg: Config) -> int:
         publish(state, message)
         print(message)
         return 1 if state == "failure" else 0
-    except _MergeabilityPending as exc:
-        publish("pending", str(exc))
-        print(exc)
-        return 0
     except Exception as exc:
         _mark_refresh_failed(publish, exc)
         raise

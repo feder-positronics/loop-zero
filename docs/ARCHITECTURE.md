@@ -282,7 +282,9 @@ PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
 Local readiness and hosted eligibility both block while GitHub computes
 mergeability. Hosted eligibility rereads the same head with bounded backoff
-and keeps eligibility pending if mergeability is still the only blocker.
+and keeps source eligibility pending if mergeability is still its only blocker.
+Source eligibility can refresh through the existing workflow dispatch.
+Candidates fail attestation when a source remains unknown after the retry window.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential

@@ -140,7 +140,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
 
 @pytest.mark.parametrize("case,error,message", [
     ("valid", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
-    ("mergeability", None, ""),
+    ("mergeability", hosted.LoopZeroError, "source #101: GitHub is computing mergeability"),
     ("merged", CandidateError, "not open"),
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
@@ -205,10 +205,6 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
             hosted.main()
     else:
         assert hosted.main() == 0
-    if case == "mergeability":
-        assert [call[3] for call in published] == ["pending", "pending"]
-        assert published[-1][-1] == f"source #101: {github.MERGEABILITY_PENDING}"
-        return
     terminal = [] if case in {"manual", "metadata", "stale", "interrupt"} else ["failure"]
     expected = [] if case in {"manual", "metadata", "stale"} else ["pending", *terminal]
     assert case != "race" or (len(attempts) == 3 and sleeps == [2, 2] and len(evaluated) == 6)
