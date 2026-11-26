@@ -294,6 +294,16 @@ def host_fields(data, name):
     }
 
 
+def _complete_pr_commits(inputs, path, commits):
+    if commits is None:
+        return False
+    if len(commits) < 250:
+        return True
+    detail = inputs.get(path, lambda: run_json(["gh", "api", "--method", "GET", path]), dict)
+    count = (detail or {}).get("commits")
+    return type(count) is int and count == len(commits)
+
+
 def issue_progress(inputs, repo, issue, end):
     timeline = pages(inputs, f"repos/{repo}/issues/{issue['number']}/timeline")
     if timeline is None:
@@ -313,9 +323,10 @@ def issue_progress(inputs, repo, issue, end):
             if not match or timestamp(event["created_at"]) >= end:
                 continue
             dates += [timestamp(source["created_at"]), timestamp(event["created_at"])]
-            commits = pages(inputs, f"repos/{match[1]}/pulls/{match[2]}/commits")
+            pull = f"repos/{match[1]}/pulls/{match[2]}"
+            commits = pages(inputs, f"{pull}/commits")
             comments = pages(inputs, f"repos/{match[1]}/issues/{match[2]}/comments")
-            if commits is None or len(commits) >= 250 or comments is None:
+            if comments is None or not _complete_pr_commits(inputs, pull, commits):
                 raise ValueError("linked PR activity unavailable or truncated")
             dates += [timestamp(item["commit"]["committer"]["date"]) for item in commits]
             dates += [timestamp(item["created_at"]) for item in comments]
