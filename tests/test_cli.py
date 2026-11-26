@@ -2013,7 +2013,8 @@ def test_late_check_keeps_current_passing_receipt(wt, gh, capsys, monkeypatch):
     assert "receipt accepted:" in out
 
 
-def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, monkeypatch):
+@pytest.mark.parametrize("late_save", [False, True])
+def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, monkeypatch, late_save):
     run_checks = cli.sandbox.run_checks
     old_head = head_of(wt)
     receipt = wt / ".loopzero/checks.json"
@@ -2022,19 +2023,32 @@ def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, m
     assert run(capsys, "check")[0] == 0
     original_receipt = receipt.read_bytes()
 
+    save_report = cli._save_report
+
+    def advance_before_save(path, report):
+        nonlocal original_receipt
+        if report.head == old_head:
+            git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
+            assert run(capsys, "check")[0] == 0
+            original_receipt = receipt.read_bytes()
+        return save_report(path, report)
+
     def advance_after_checks(*args, **kwargs):
         report = run_checks(*args, **kwargs)
         assert report.ok
         git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
         return report
 
-    monkeypatch.setattr(cli.sandbox, "run_checks", advance_after_checks)
+    if late_save:
+        monkeypatch.setattr(cli, "_save_report", advance_before_save)
+    else:
+        monkeypatch.setattr(cli.sandbox, "run_checks", advance_after_checks)
     code, out, err = run(capsys, "check")
     assert code == 1
     assert "PASS" not in out
     assert "discarded" in err and old_head in err and head_of(wt) in err
     assert receipt.read_bytes() == original_receipt
-    assert refreshed == [old_head]
+    assert refreshed == ([old_head, head_of(wt)] if late_save else [old_head])
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -4267,6 +4281,8 @@ def test_wait_raises_when_closed_unmerged_persists(monkeypatch) -> None:
 
 def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
     path = tmp_path / cli.CHECKS_FILE
+    monkeypatch.setattr(cli.worktree, "head", lambda _: next(heads))
+    heads = iter(("a" * 40, "b" * 40))
     cli._save_report(tmp_path, CheckReport("a" * 40, False, ()))
 
     def interrupt(staged, dest):
