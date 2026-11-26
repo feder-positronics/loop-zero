@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-from . import github
+from . import candidate, github
 from .types import LoopZeroError
 
 API = "https://api.mergify.com/v1"
@@ -73,7 +74,11 @@ _retry_sleep = time.sleep
 
 
 def _open(request: urllib.request.Request):
-    return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    try:
+        return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    except ValueError:
+        # The HTTP client can include the Authorization value in a header error.
+        raise MergifyError("Mergify API request has an invalid URL or header") from None
 
 
 def api_get(repo: str, suffix: str) -> object | None:
@@ -96,7 +101,11 @@ def api_get(repo: str, suffix: str) -> object | None:
                 return None
             if delay is None or not (exc.code >= 500 or exc.code == 429):
                 raise MergifyError(f"Mergify queue lookup failed with HTTP {exc.code}") from exc
-        except (OSError, ValueError, http.client.IncompleteRead) as exc:
+        except (OSError, http.client.IncompleteRead) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if delay is None or isinstance(reason, ssl.SSLCertVerificationError):
+                raise MergifyError(f"Mergify queue transport failed: {reason}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             if delay is None:
                 raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
         _retry_sleep(delay)
@@ -136,6 +145,43 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise MergifyError("invalid Mergify queue membership response") from exc
+
+
+def queue_predecessors(repo: str, branch: str, queue: str, number: int) -> tuple[int, ...]:
+    """Identify a single chain of one-PR batches ahead of a new request."""
+    status = api_get(repo, f"/merge-queue/status?branch={quote(branch, safe='')}")
+    if (not isinstance(status, dict) or status.get("mode") != "serial"
+            or status.get("waiting_pull_requests") != [] or status.get("forming_batches") != []):
+        return ()
+    try:
+        batches = candidate.flatten_batches(status)
+        successors: dict[str | None, tuple[str, int]] = {}
+        for batch_id, batch in batches.items():
+            pulls, parents = batch["pull_requests"], batch["parent_ids"]
+            if pulls == [] and batch.get("sub_batches"):
+                continue  # Container batches carry no direct source.
+            if (batch.get("queue_rule_name") != queue or not isinstance(pulls, list)
+                    or len(pulls) != 1 or not isinstance(parents, list) or len(parents) > 1):
+                return ()
+            source = pulls[0]["number"]
+            parent = next(iter(parents), None)
+            if type(source) is not int or source <= 0 or source == number or parent in successors:
+                return ()
+            successors[parent] = batch_id, source
+        return _ordered_sources(successors)
+    except (candidate.CandidateError, KeyError, TypeError, RecursionError):
+        return ()
+
+
+def _ordered_sources(successors: dict[str | None, tuple[str, int]]) -> tuple[int, ...]:
+    if len(successors) > 32:
+        return ()
+    sources = []
+    cursor = None
+    while cursor in successors:
+        cursor, source = successors.pop(cursor)
+        sources.append(source)
+    return tuple(sources) if not successors and len(sources) == len(set(sources)) else ()
 
 
 def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
@@ -300,6 +346,8 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
         ("**The failure is in this pull request.** It failed tested alone on top of ", "isolated"),
         ("**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.", "stacked"),
     ) if any(line.startswith(prefix) for line in body.splitlines())), "")
+    if isinstance(reason, dict) and reason.get("code") == "CONFLICT_WITH_BASE_BRANCH":
+        attribution = "base_conflict"
     return Departure(f"{url}{latest['id']}", names, attribution)
 
 

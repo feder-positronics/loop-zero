@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loopzero import github, hosted
+from loopzero import eligibility, github, hosted
 from loopzero.candidate import CandidateError, CandidateRaceError
 from tests import test_github as fixtures
 from tests.test_candidate import event as candidate_event
@@ -53,18 +53,23 @@ def test_event_selection(event, number):
 def publisher(tmp_path, fake_bin, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
-    event = tmp_path / "event.json"
-    event.write_text(json.dumps({"pull_request": {"number": 7}}))
+    (event := tmp_path / "event.json").write_text(json.dumps({"pull_request": {"number": 7}}))
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
     Path("workflow.toml").write_text(f'[repo]\nname="{REPO}"\nbase="main"\n[delivery]\nreview_publishers=["trusted-publisher"]\n')
     gh = FakeGh(fake_bin, tmp_path)
-    gh.respond(f"api repos/{REPO}/pulls/7", {
-        "head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"},
-    })
-    gh.respond_pr_view(pr_json())
+    gh.respond_pr_view(pr_json(), branch="lz/task")
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
+    gh.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [])
     return gh
+
+
+def written_statuses(publisher):
+    return [json.loads(call["--input"]) for call in publisher.calls if "--input" in call]
+
+
+def written_states(publisher):
+    return [status["state"] for status in written_statuses(publisher)]
 
 
 @pytest.mark.parametrize("case,blocker,status", [
@@ -89,12 +94,24 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     if blocker == "conflict":
         publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(mergeable="CONFLICTING")))
     if blocker == "important":
-        publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding")))
+        publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding",
+                                                                         author="trusted-publisher")))
     assert hosted.main() == (1 if status == "failure" else 0)
-    statuses = [json.loads(c["--input"]) for c in publisher.calls if "--input" in c]
+    statuses = written_statuses(publisher)
     assert ([s["state"] for s in statuses] == ["pending", status]
             and all(s["context"] == "Loop-zero Eligibility" for s in statuses))
+    assert status != "success" or sum(c["argv"][1] != "graphql" for c in publisher.calls) <= 5
     assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
+
+
+def test_hosted_reviews_reject_a_repeated_full_page(publisher):
+    publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json()))
+    endpoint = f"api repos/{REPO}/pulls/7/reviews?per_page={github.PAGE}"
+    page = [{"id": i, "state": "COMMENTED"} for i in range(github.PAGE)]
+    for number in (1, 2):
+        publisher.respond(f"{endpoint}&page={number}", page)
+    with pytest.raises(github.GhError, match="GitHub repeated a full page"):
+        eligibility.evaluate(REPO, 7, HEAD, "main", ("trusted-publisher",))
 
 
 def test_merged_source_refresh_publishes_nothing(publisher):
@@ -112,7 +129,7 @@ def test_merged_source_refresh_publishes_nothing(publisher):
 def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
     ready = state == "success"
     monkeypatch.setattr(hosted.eligibility, "evaluate",
-                        lambda *_: github.Readiness(ready, () if ready else ("Blocking finding",)))
+                        lambda *_, **__: github.Readiness(ready, () if ready else ("Blocking finding",)))
     post = github.commit_status
     endpoint = f"api repos/{REPO}/commits/{HEAD}/statuses"
     monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
@@ -140,65 +157,81 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
     else:
         with pytest.raises(hosted.LoopZeroError, match="confirm eligibility status publication"):
             hosted.main()
-    assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == ["pending", state]
+    assert written_states(publisher) == ["pending", state]
 
 
-@pytest.mark.parametrize("error", ["api", "head", "publication", "config"])
-def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, error):
-    monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [])
-    if error == "api":
-        publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1",
-                          {"stdout": "HTTP/2.0 503 Service Unavailable\r\nX-GitHub-Request-Id: GHREQ-8774\r\n\r\n{\"message\":\"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ\"}", "stderr": "gh: Service unavailable (HTTP 503)", "exit": 1})
-    elif error == "head":
-        publisher.respond_pr_view(pr_json(), pr_json(headRefOid="b" * 40))
+@pytest.mark.parametrize("error", ["api", "recover", "head", "metadata", "merged", "publication", "config", "before"])
+def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, capsys, error):
+    sleeps = []
+    monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
+    endpoint = f"api repos/{REPO}/pulls/7" + ("" if error == "before" else "/reviews?per_page=100&page=1")
+    approval = [{"state": "APPROVED", "commit_id": HEAD, "user": {"login": "trusted-publisher"}, "body": f"<!-- loopzero:review head={HEAD} kind=primary -->\nreview: **approve**"}]
+    if error in {"api", "recover", "before"}:
+        fault = {"stdout": "HTTP/2.0 503 Service Unavailable\r\nX-GitHub-Request-Id: GHREQ-8774\r\n\r\n{\"message\":\"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ\"}", "exit": 1}
+        publisher.respond(endpoint, fault, approval if error == "recover" else fault)
+    elif error in {"head", "metadata", "merged"}:
+        changes = {"head": {"headRefOid": "b" * 40}, "metadata": {"labels": [{"name": "hold"}]}, "merged": {"state": "MERGED"}}
+        publisher.respond_pr_view(pr_json(**changes[error]))
+        publisher.respond(endpoint, approval)
     elif error == "publication":
-        publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {},
-                          {"stdout": "", "exit": 1, "stderr": "invalid description (HTTP 422)"})
+        publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {}, {"stdout": "", "exit": 1, "stderr": "invalid description (HTTP 422)"})
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [{"context": "other"}])
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
-    with pytest.raises((github.GhError, hosted.LoopZeroError), match=(r"method=GET endpoint=/repos/acme/widgets/pulls/7/reviews status=503 request_id=GHREQ-8774 message=Service unavailable \[REDACTED\]" if error == "api" else None)) as raised:
-        hosted.main()
-    if error == "publication":
-        assert "invalid description (HTTP 422)" in str(raised.value)
-    statuses = [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c]
-    assert statuses == ([] if error == "config" else ["pending", "pending"]
-                        if error == "publication" else ["pending", "failure"])
+    if error in {"api", "recover", "before", "merged"}:
+        assert hosted.main() == (1 if error == "before" else 0) and sleeps == ([] if error == "merged" else [5])
+        assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error in {"api", "before"})
+    else:
+        with pytest.raises(hosted.LoopZeroError, match="invalid description" if error == "publication" else None):
+            hosted.main()
+    states = {"before": [], "config": [], "head": ["pending", "failure"], "metadata": ["pending", "failure"], "merged": ["pending"], "api": ["pending"], "recover": ["pending", "success"]}
+    assert written_states(publisher) == states.get(error, ["pending", "pending"])
 
 
 @pytest.mark.parametrize("case,error,message", [
     ("valid", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
+    ("hold", hosted.LoopZeroError, "source #101: PR #101 has a merge-authority hold"),
     ("merged", CandidateError, "not open"),
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
-    ("interrupt", KeyboardInterrupt, ""),
+    ("interrupt", KeyboardInterrupt, ""), ("api", None, ""),
     ("manual", hosted.LoopZeroError, "pull_request_target creation"), ("metadata", None, ""),
     ("stale", hosted.LoopZeroError, "head is no longer current"),
     ("untrusted", CandidateError, "head event was not sent"),
 ])
-def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, error, message):
+def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatch, case, error, message):
     event = candidate_event()
-    event["action"] = "edited" if case == "metadata" else event["action"]
-    event["sender"]["id"] = 1 if case == "untrusted" else event["sender"]["id"]
+    event["action"], event["sender"]["id"] = (
+        "edited" if case == "metadata" else event["action"], 1 if case == "untrusted" else event["sender"]["id"])
     values = candidate_payloads(event)
+    if case in {"valid", "hold"}:
+        gh = FakeGh(fake_bin, tmp_path)
+        gh.respond("api graphql", threads_json())
+    for number, sha in [(101, "1" * 40), (102, "2" * 40), (900, "c" * 40)]:
+        path = f"/repos/owner/repo/pulls/{number}"
+        values[path] = fixtures.rest_pr_json(pr_json(
+            number=number, headRefOid=sha, isDraft=False,
+            labels=[{"name": "hold"}] if case == "hold" and number == 101 else [],
+        )) | values[path]
+        values[f"{path}/reviews?per_page=100&page=1"] = [{
+            "state": "APPROVED", "commit_id": sha, "user": {"login": "trusted-publisher"},
+            "body": f"<!-- loopzero:review head={sha} kind=primary -->\nreview: **approve**",
+        }]
     if case == "stale":
         values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
     if case == "malformed":
         values["/repos/owner/repo/pulls/101"] = []
-    (event_path := tmp_path / "event.json").write_text(json.dumps(event))
+    (tmp_path / "event.json").write_text(json.dumps(event))
     (tmp_path / "workflow.toml").write_text('[repo]\nname="owner/repo"\nbase="main"\n[delivery]\nreview_publishers=["trusted-publisher"]\n')
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
-    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
-    attempts, sleeps = [], []
-
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "event.json"))
+    sleeps, rest_calls = [], []
     def api_get(path):
-        if path == "apps/mergify":
-            attempts.append(path)
+        rest_calls.append(path)
         if case == "race" and path == "repos/owner/repo/pulls/101":
-            values["/" + path]["body"] += " changed"
+            values["/" + path]["labels"].append({"name": "changed"})
         return event["repository"] if path == "repos/owner/repo" else values["/" + path]
     monkeypatch.setattr(github, "api_get", api_get)
     monkeypatch.setattr("loopzero.candidate._retry_sleep", sleeps.append)
@@ -213,15 +246,18 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
         if args[3] == "failure" and case == "publisher":
             raise RuntimeError("publication details must not replace attestation error")
     monkeypatch.setattr(github, "commit_status", publish)
-    evaluated = []
+    evaluated, real_evaluate = [], hosted.eligibility.evaluate
 
-    def evaluate(repo, number, head, base, publishers):
+    def evaluate(repo, number, head, base, publishers, *, snapshot):
         evaluated.append((repo, number, head, base, publishers))
-        if case == "interrupt":
-            raise KeyboardInterrupt()
+        if case in {"valid", "hold"}:
+            return real_evaluate(repo, number, head, base, publishers, snapshot=snapshot)
+        if fault := {"interrupt": KeyboardInterrupt(), "api": github.GhUnavailable(("gh",), "HTTP 503")}.get(case):
+            raise fault
         reasons = (github.MISSING_REVIEW_REASON,) if case == "policy" else ()
         return github.Readiness(not reasons, reasons)
-    monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
+    if case not in {"valid", "hold"}:
+        monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
     monkeypatch.setattr("loopzero.mergify.api_get", lambda repo, suffix: candidate_status()
                         if (repo, suffix) == ("owner/repo", "/merge-queue/status?branch=main") else None)
@@ -230,10 +266,11 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
             hosted.main()
     else:
         assert hosted.main() == 0
-    terminal = [] if case in {"manual", "metadata", "stale", "interrupt"} else ["failure"]
+    terminal = [] if case in {"manual", "metadata", "stale", "interrupt", "api"} else ["failure"]
     expected = [] if case in {"manual", "metadata", "stale"} else ["pending", *terminal]
-    assert case != "race" or (len(attempts) == 3 and sleeps == [2, 2] and len(evaluated) == 6)
+    assert case != "race" or (rest_calls.count("apps/mergify") == 3 and sleeps == [2, 2] and len(evaluated) == 6)
     if case == "valid":
+        assert len(rest_calls) + len(published) <= 16
         assert evaluated == [("owner/repo", 101, "1" * 40, "main", ("trusted-publisher",)),
                              ("owner/repo", 102, "2" * 40, "main", ("trusted-publisher",))]
         assert published == [("owner/repo", "c" * 40, "Loop-zero Eligibility", "pending",
@@ -249,11 +286,14 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
 def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
     workflow = (Path(__file__).parents[1] / ".github/workflows/eligibility.yml").read_text()
     assert "pull_request_target:" in workflow
+    events = next(line for line in workflow.splitlines() if line.strip().startswith("types:"))
+    assert "labeled" in events and "unlabeled" in events
     source, candidate = workflow.split("\n  source-eligibility:\n", 1)[1].split(
         "\n  candidate-eligibility:\n", 1
     )
     assert "    environment:" not in source
     assert "${{ secrets.MERGIFY_API_KEY }}" not in source
+    assert "github.event.label.name == 'hold'" in source
     assert "environment:\n      name: mergify-metadata\n      deployment: false" in candidate
     assert "MERGIFY_API_KEY: ${{ secrets.MERGIFY_API_KEY }}" in candidate
     for job in (source, candidate):
@@ -285,22 +325,19 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
     successful = max(0, 1000 - prior)
     publisher.respond(endpoint, *([{}] * successful), refused, refused)
     if prior >= 999:
-        statuses = [{"context": context, "state": "success"} for _ in range(prior)]
+        statuses = [{"id": i, "context": context, "state": "success"} for i in range(prior)]
         if prior == 999:
-            statuses.insert(0, {"context": context, "state": "pending"})
+            statuses.insert(0, {"id": prior, "context": context, "state": "pending"})
         pages = [statuses[i:i + 100] for i in range(0, 1001, 100)]
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *pages, *pages)
 
-    monkeypatch.setattr(hosted.eligibility, "evaluate", lambda *args: SimpleNamespace(
+    monkeypatch.setattr(hosted.eligibility, "evaluate", lambda *args, **kwargs: SimpleNamespace(
         ready=True, reasons=(),
     ))
 
-    def written_states():
-        return [json.loads(call["--input"])["state"] for call in publisher.calls if "--input" in call]
-
     if prior == 998:
         assert hosted.main() == 0
-        assert written_states() == ["pending", "success"]
+        assert written_states(publisher) == ["pending", "success"]
         assert not any("/commits/" in " ".join(call["argv"]) for call in publisher.calls)
         return
 
@@ -308,9 +345,9 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
     expected = ["pending", "success"] if prior == 999 else ["pending"]
     with pytest.raises(github.GhError, match=message):
         hosted.main()
-    assert written_states() == expected
+    assert written_states(publisher) == expected
 
     with pytest.raises(github.GhError, match=message):
         hosted.main()
-    assert written_states() == [*expected, "pending"]
+    assert written_states(publisher) == [*expected, "pending"]
     assert capsys.readouterr().out == ""
