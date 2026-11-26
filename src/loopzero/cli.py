@@ -700,7 +700,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(
                 f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
             )
-        force_lease = not _is_ancestor(wt, pr.head_sha, head)
+        force_lease = pr.head_sha != head and not _is_ancestor(wt, pr.head_sha, head)
         if force_lease:
             previous_heads = _git(wt, "reflog", "show", "--format=%H", f"refs/heads/{branch}").splitlines()
             if not any(_is_ancestor(wt, pr.head_sha, previous) for previous in previous_heads):
@@ -813,24 +813,10 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         kind, reviewed = _decide_kind(
             _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
+    publication_context = {"repo": config.repo, "number": pr.number, "publisher": publisher}
     if args.repost:
-        authors = runners.author_families(wt, head, _primary_base(wt, config))
-        excluded = [family for family in config.reviewers if family in authors]
         result = _load_review(wt, head, kind)
-        if result.fallback and result.family not in excluded:
-            raise CliError(
-                f"saved review claims a same-family fallback, but {result.family} is not a configured "
-                "reviewer family that contributed to this PR lineage; run without --repost"
-            )
-        if not result.fallback and not any(family not in authors for family in config.reviewers):
-            raise IndependentReviewerUnavailable(
-                _independence_message(authors, excluded, [])
-            )
-        if result.family in authors and not result.fallback:
-            raise IndependentReviewerUnavailable(
-                f"saved reviewer family {result.family} contributed to this PR lineage; "
-                "run without --repost to obtain an independent review"
-            )
+        candidates, excluded = _repost_reviewer_families(wt, config, head, result)
         publication = json.loads(_review_file(wt, head, kind).read_text()).get("publication")
         if publication is not None:
             if (not isinstance(publication, dict) or publication.get("repo") != config.repo
@@ -845,7 +831,6 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         else:
             reviews = _pr_reviews(config.repo, pr.number)
         # Exact read-back above may confirm an older published note; a new post needs the current form.
-        candidates = [family for family in config.reviewers if family not in authors]
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             raise CliError("saved fallback note is not in the published form; run without --repost")
         allowed, _ = _decide_kind(
@@ -854,6 +839,10 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget")
     else:
+        if args.model is None and args.effort is None and _has_recoverable_review(
+            wt, config, head, kind, publication_context,
+        ):
+            raise CliError(f"saved {kind} review for {head[:12]}; run `loopzero review --repost`")
         try:
             result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
                                  runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
@@ -876,7 +865,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         raise CliError("native publication context changed; HOLD")
     if args.repost:
         prefix = _repost_prefix(result)
-    _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
+    _save_review(wt, result, publication_context)
     token = _refresh_publisher_token(token, publisher)
     try:
         github.post_review(
@@ -920,6 +909,47 @@ def _review_verdict(result: ReviewResult) -> int:
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
     print(f"{result.kind} review by {result.family} on {result.head[:12]}: {result.verdict} ({summary})")
     return 0 if result.verdict == "approve" else 5  # the exit code is the verdict, as for check
+
+
+def _repost_reviewer_families(
+    wt: Path, config: Config, head: str, result: ReviewResult,
+) -> tuple[list[str], list[str]]:
+    authors = runners.author_families(wt, head, _primary_base(wt, config))
+    excluded = [family for family in config.reviewers if family in authors]
+    if result.fallback and result.family not in excluded:
+        raise CliError(
+            f"saved review claims a same-family fallback, but {result.family} is not a configured "
+            "reviewer family that contributed to this PR lineage; run without --repost"
+        )
+    if not result.fallback and not any(family not in authors for family in config.reviewers):
+        raise IndependentReviewerUnavailable(
+            _independence_message(authors, excluded, [])
+        )
+    if result.family in authors and not result.fallback:
+        raise IndependentReviewerUnavailable(
+            f"saved reviewer family {result.family} contributed to this PR lineage; "
+            "run without --repost to obtain an independent review"
+        )
+    return [family for family in config.reviewers if family not in authors], excluded
+
+
+def _has_recoverable_review(
+    wt: Path, config: Config, head: str, kind: str, publication: dict,
+) -> bool:
+    other_kind = "delta" if kind == "primary" else "primary"
+    if not _review_file(wt, head, kind).exists() or _review_file(wt, head, other_kind).exists():
+        return False
+    try:
+        result = _load_review(wt, head, kind, publication=publication)
+        candidates, excluded = _repost_reviewer_families(wt, config, head, result)
+        if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
+            return False
+        evidence = runners.codex_evidence(result)
+    except (CliError, runners.RunnerBadOutput):
+        return False
+    return evidence is None or (evidence["repo"], evidence["pr"], evidence["publisher"]) == (
+        publication["repo"], publication["number"], publication["publisher"],
+    )
 
 
 def _repost_prefix(result: ReviewResult) -> str:
@@ -1153,22 +1183,24 @@ def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None
         _write_json_atomically(directory, path.name, data)
 
 
-def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
+def _load_review(
+    wt: Path, head: str, kind: str, *, publication: dict | None = None,
+) -> ReviewResult:
     path = _review_file(wt, head, kind)
     if not path.exists():
         raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost")
     try:
         data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
+    except (ValueError, OSError) as exc:
         raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
     if not isinstance(data, dict):
         raise CliError(f"{path} is not runner-produced: invalid saved review")
     if data.get("head") != head:
         raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
     try:
-        data.pop("publication", None)
-        if data.get("kind") != kind:
-            raise ValueError("saved review kind mismatch")
+        saved_publication = data.pop("publication", None)
+        if data.get("kind") != kind or (publication is not None and saved_publication != publication):
+            raise ValueError("saved review kind or publication mismatch")
         findings = tuple(Finding(**f) for f in data["findings"])
         # Ordinary receipts written before pair retirement still carry these defaults.
         for field, default in (("members", []), ("reconciliation", ""),
@@ -1184,11 +1216,11 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
 
 
 def _pr_readiness(
-    wt: Path, config: Config, *, allow_merged: bool = False, workflow_wait: bool = False,
+    wt: Path, config: Config, branch: str, *, allow_merged: bool = False, workflow_wait: bool = False,
     mergify_deadline: float | None = None,
 ) -> tuple[github.PR, github.Readiness | None]:
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
-    branch, head = worktree.branch(wt), worktree.head(wt)
+    head = worktree.head(wt)
     _require_task_branch(config, branch)
     pr = _require_pr(config, branch, allow_merged=allow_merged)
     _require_pushed(pr, head)
@@ -1216,7 +1248,7 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
 
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
-    pr, readiness = _pr_readiness(wt, config, workflow_wait=args.wait is not None)
+    pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None)
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
     kicked = bool(waiting)
@@ -1647,7 +1679,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     started = time.monotonic()
     deadline = None if args.wait is None else started + args.wait
     pr, readiness = _pr_readiness(
-        wt, config, allow_merged=True, workflow_wait=args.wait is not None, mergify_deadline=deadline,
+        wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None, mergify_deadline=deadline,
     )
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
     admit_by = deadline if args.wait else None
