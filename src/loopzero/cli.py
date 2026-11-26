@@ -532,6 +532,8 @@ def _append_review(body: str, result: ReviewResult) -> str:
     match = pattern.search(body)
     if not match:
         return f"{body.rstrip()}\n\n## Review\n{line}\n"
+    if line in match.group(2).splitlines():
+        return body
     existing = match.group(2).rstrip()
     if existing.startswith("(filled by `loopzero review`)"):
         existing = ""
