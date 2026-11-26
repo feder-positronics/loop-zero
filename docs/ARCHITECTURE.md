@@ -257,8 +257,12 @@ step, and a moved ref is left in place with a warning. GitHub REST uses separate
 read and delete requests, so the ref can still change between those requests.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
-An already-merged PR can resume cleanup from its task worktree. Local removal
-requires a clean worktree at the merged PR head.
+Local cleanup detaches a clean task worktree at the merged PR head, deletes
+the unchecked-out branch only at that exact tip, and then removes the
+worktree. After an interruption, merge can read the preceding branch name
+from the detached HEAD's checkout reflog and confirm the same source ref and
+tip against a merged PR through GitHub's commit associations. The same
+comparison can prove an unchecked-out residue branch safe for manual removal.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and latest ordering. It cannot recompute private raw or defeat a
 coherent forgery by a trusted publisher/editor; native claims do not attest the

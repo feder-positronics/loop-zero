@@ -252,17 +252,38 @@ def merges_since(wt: Path, sha: str) -> list[str]:
     return _git(Path(wt), "rev-list", "--first-parent", "--reverse", "--merges", f"{sha}..HEAD").split()
 
 
-def cleanup(wt: Path) -> None:
-    """Remove the worktree and its branch. Refuses when the worktree is dirty."""
+def detached_from(wt: Path) -> str | None:
+    """Identify the branch in the latest checkout to the current detached commit."""
+    if _git(wt, "branch", "--show-current"):
+        return None
+    message = _git(wt, "reflog", "-1", "--format=%gs", "HEAD")
+    match = re.fullmatch(rf"checkout: moving from (.+) to {head(wt)}", message)
+    return match[1] if match else None
+
+
+def cleanup(wt: Path, name: str, expected_head: str) -> None:
+    """Remove a clean worktree after deleting its verified merged branch tip."""
     wt = Path(wt).absolute()
     if not wt.exists():
         raise WorktreeError(f"no such worktree: {wt}")
     if is_dirty(wt):
         raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-    name, gd = branch(wt), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
+    if head(wt) != expected_head:
+        raise WorktreeError("local HEAD differs from merged PR head")
+    current = _git(wt, "branch", "--show-current")
+    if current and current != name:
+        raise WorktreeError(f"worktree switched to {current!r} before cleanup")
+    if current:
+        _git(wt, "switch", "--quiet", "--detach", expected_head)
+    gd = (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
+    ref = f"refs/heads/{name}"
+    row = _git(gd, f"--git-dir={gd}", "for-each-ref",
+               "--format=%(refname)%00%(objectname)%00%(symref)%00%(worktreepath)", ref)
+    if row:
+        if row != f"{ref}\0{expected_head}\0\0":
+            raise WorktreeError(
+                f"local branch {name!r} moved or is checked out; "
+                "delete it manually if it still points at the merged head"
+            )
+        _git(gd, f"--git-dir={gd}", "update-ref", "--no-deref", "-d", ref, expected_head)
     _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
-    try:
-        _git(gd, f"--git-dir={gd}", "branch", "-D", name)
-    except GitError:
-        if _git(gd, f"--git-dir={gd}", "branch", "--list", "--", name):
-            raise
