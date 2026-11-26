@@ -25,7 +25,8 @@ from loopzero._proc import ProcTimeout, ToolMissing, run
 from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, ReviewResult
 
-GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
+GH_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_HOST")
+GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
@@ -297,7 +298,7 @@ def app_token() -> str:
         return ""
     minted = _app_token_clock()  # before minting so a suspend mid-call ages the token
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_BASE_ENV, timeout=_read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
@@ -1463,7 +1464,7 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
     with tempfile.TemporaryDirectory(prefix="loopzero-cleanup-") as scratch:
         init = ("git", "init", "--bare", "--template=")
-        done = run(init, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
+        done = run(init, cwd=scratch, env_allowlist=GH_BASE_ENV, extra_env=env, timeout=120)
         if done.exit_code != 0:
             raise GhError(init, done.stderr or done.stdout)
         done = run(argv, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
