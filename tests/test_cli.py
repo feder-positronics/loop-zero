@@ -1445,13 +1445,16 @@ def test_review_runtime_paths_use_only_verified_base(
 def test_runtime_pinning_requires_trusted_workflow(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, command: str, missing: str,
 ) -> None:
+    origin = Path(git(wt, "remote", "get-url", "origin").strip())
     if missing == "default":
         git(wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
     elif missing == "remote":
         git(wt, "update-ref", "-d", "refs/remotes/origin/main")
+        git(origin, "update-ref", "-d", "refs/heads/main")
     else:
-        git(wt, "update-ref", "refs/remotes/origin/main",
-            git(wt, "rev-list", "--max-parents=0", "HEAD").strip())
+        initial = git(wt, "rev-list", "--max-parents=0", "HEAD").strip()
+        git(wt, "update-ref", "refs/remotes/origin/main", initial)
+        git(origin, "update-ref", "refs/heads/main", initial)
     prepare_review(wt, gh, fake_bin)
     code, out, err = run(capsys, command)
     assert "reviewer paths" not in out + err
@@ -2151,7 +2154,7 @@ def test_ready_after_reviewed_head(
     popen = subprocess.Popen
 
     def isolated_fetch(argv, **kwargs):
-        if "fetch" in argv:
+        if "fetch" in argv and f"https://github.com/{REPO}.git" in argv:
             if history == "missing history":
                 raise cli.eligibility.candidate.CandidateError("history unavailable")
             argv = [wt.as_uri() if arg == f"https://github.com/{REPO}.git" else arg for arg in argv]
@@ -3167,6 +3170,7 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     repo: Path, gh: FakeGh, capsys, monkeypatch, state
 ) -> None:
     primary = repo.parent / "origin.git"
+    git(primary, "remote", "add", "origin", str(primary))
     linked = repo.parent / "linked task"
     git(primary, "worktree", "add", "-q", "-b", "lz/bare", str(linked), "main")
     monkeypatch.chdir(linked)
@@ -3696,7 +3700,7 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
         git(wt, "checkout", "-q", "--ignore-other-worktrees", base)
     else:
         publish_workflow(wt, workflow.read_text())
-        git(wt, "update-ref", f"refs/remotes/origin/{base}", "refs/remotes/origin/main")
+        git(wt, "push", "-q", "origin", f"origin/main:refs/heads/{base}")
         git(wt, "checkout", "-q", "-b", base)
     for command in ("pr", "review", "ready", "merge"):
         code, out, err = run(capsys, command)
