@@ -3112,23 +3112,26 @@ def test_ready_wait_stops_if_pr_head_moves(wt, gh, capsys, monkeypatch, head):
                stderr_contains=(f"PR head changed while waiting: {head[:12]} to {moved[:12]}",))
 
 
-@pytest.mark.parametrize("running", [None, "upstream", "required-sibling", "queued-run"])
+@pytest.mark.parametrize("running", [None, "upstream", "required-sibling", "queued-run", "skipped"])
 def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, head, running):
     # #189: an upstream job can be running before the required job appears.
     if running == "required-sibling":
         publish_workflow(wt, WORKFLOW.replace('["checks"]', '["checks", "Backend Tests"]'))
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     arm_check_runs(gh, head, [{"name": "Backend Tests", "status": "in_progress"}]
-                   if running in ("upstream", "required-sibling") else [])
+                   if running in ("upstream", "required-sibling") else
+                   [{"name": "checks", "status": "completed", "conclusion": "skipped"}] if running == "skipped" else [])
     # A run waiting in a concurrency group has no check run yet (IntelFlo PR 14570).
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}",
                {"workflow_runs": [{"status": "queued"}] if running == "queued-run" else []})
     monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
 
-    wait = "--wait=0" if running else "--wait"
+    wait = "--wait=0" if running and running != "skipped" else "--wait"
     code, out, err = run(capsys, "ready", wait)
 
-    if running:
+    if running == "skipped":  # r7-c2-2: diagnosed after the grace, not held for the whole timeout.
+        assert code == 1 and "required check 'checks' is skipped after" in err
+    elif running:
         assert (code, err) == (3, "") and "timed out waiting for required checks" in out
     else:
         assert code == 1 and "waiting:" in out and f"head {head[:12]}" in err
