@@ -488,9 +488,10 @@ for reuse. The checkpoint cannot satisfy readiness before final worktree
 validation. Runners cannot select stages or mint receipts. Stage admission
 belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, stages
-execute in the local sandbox. A process-held lock excludes overlapping checks
-at the same head in one worktree. A clean checkout reuses a passing receipt
-that satisfies readiness without launching stages.
+execute in the local sandbox. A nonblocking filesystem lock on worktree Git
+metadata excludes overlapping checks at the same head. A clean checkout reuses
+a passing receipt that satisfies readiness and matches its declared input keys.
+Tracked task state is ineligible for reuse.
 
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
 Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,

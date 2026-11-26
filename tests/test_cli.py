@@ -572,8 +572,9 @@ def test_check_reuses_checkpoint_after_interruption(wt, gh, capsys, monkeypatch,
 
     def dispatch(_config, _wt, _head, _base, command, _timeout):
         if not calls:
-            with pytest.raises(cli.CliError, match="check already running in this worktree"):
-                cli.cmd_check(SimpleNamespace(config=None, command="check"))
+            overlap = subprocess.run([sys.executable, "-c", "from loopzero.cli import main; exit(main(['check']))"],
+                                     cwd=wt, capture_output=True, text=True)
+            assert overlap.returncode == 1 and "check already running in this worktree" in overlap.stderr
         calls.append(command)
         if interrupt and cut == "second stage" and len(calls) == 2:
             raise KeyboardInterrupt

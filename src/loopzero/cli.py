@@ -15,7 +15,6 @@ import os
 import shlex
 import random
 import re
-import socket
 import sys
 import tempfile
 import time
@@ -595,13 +594,16 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 @contextmanager
 def _lock_check(wt: Path, head: str) -> Iterator[None]:
-    # Abstract Unix addresses are released by the kernel and leave no lockfile.
-    digest = hashlib.sha256(os.fsencode(wt.resolve()) + b"\0" + head.encode()).hexdigest()
-    with socket.socket(socket.AF_UNIX) as lock:
+    git_dir = Path(_git(wt, "rev-parse", "--absolute-git-dir"))
+    # Lock existing worktree metadata, which Git leaves in place when HEAD moves.
+    path = git_dir / "commondir"
+    if not path.is_file():
+        path = git_dir / "config"
+    with path.open("r+b", buffering=0) as lock:
         try:
-            lock.bind("\0loopzero-check-" + digest)
+            fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, int(head[:15], 16))
         except OSError as exc:
-            if exc.errno != errno.EADDRINUSE:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
                 raise
             raise CliError(f"check already running in this worktree at {head[:12]}") from exc
         yield
@@ -613,7 +615,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     head = worktree.head(wt)
     with _lock_check(wt, head):
-        if (_current_check_report(wt, config, head) is not None
+        report = _current_check_report(wt, config, head)
+        if (report is not None and sandbox.receipt_inputs_match(config, wt, report)
                 and not worktree.is_dirty(wt) and worktree.head(wt) == head):
             _refresh_pr_checks(wt, config)
             print(f"PASS (reused {CHECKS_FILE} for {head[:12]} without running stages)")
