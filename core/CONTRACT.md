@@ -192,9 +192,9 @@ version.
 
 - Findings live only in PR review threads, expire at merge, and must not be
   copied into files, issues or backlogs.
-- Blocking marker:
+- Blocking marker, as the first line of a thread a review publisher opened:
   `<!-- loopzero:finding v=1 severity=critical head=<sha> id=<8-hex> -->`
-  (or `important`).
+  (or `important`). Other threads never block.
 - `critical`: wrong or unsafe; must fix. `important`: ships a bug or breaks
   acceptance; must fix. `suggestion`: never counted or blocking.
 - Missing diff or required evidence: return one `critical` finding; never
@@ -285,8 +285,8 @@ meta-directives; reviewers load no instruction files or skills from the reviewed
 Fail closed on missing tools and command errors, preserve the failing command
 and output tail, and keep a short, safe detail about the cause or stage when
 operator-facing code wraps an error. Stop on terminal failures or quota errors.
-Exit 3 means waiting: rerun the bounded waiter. Exit 5 means changes requested,
-not a crash.
+Exit 3 means waiting or timeout. Review exits 4 when independent review is
+unavailable and 5 when changes are requested. Interruption exits 130.
 
 **Never pipe a `loopzero` command, even with `set -o pipefail`: the pipeline
 can report the filter's exit code in place of the command's verdict.** Redirect

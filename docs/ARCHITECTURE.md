@@ -101,7 +101,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
-   head or an eligible review covering an ancestor, blocking findings,
+   head or an eligible review covering an ancestor, blocking findings
+   (unresolved threads a review publisher opened with a head-bound marker line),
    target branch and required CI. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
@@ -281,7 +282,7 @@ Git configuration so URL rewrites cannot change its destination.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal
-requires a clean worktree at the merged PR head.
+requires a clean worktree at the merged PR head with no ignored user files.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and latest ordering. It cannot recompute private raw or defeat a
 coherent forgery by a trusted publisher/editor; native claims do not attest the
