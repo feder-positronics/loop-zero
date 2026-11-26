@@ -114,9 +114,11 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    target branch and required CI. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
-   digest covers execution and stage reuse settings, including the effective
-   allowlisted environment, without recording raw environment values. Waiters
-   check for policy changes on every poll.
+   digest covers execution and stage reuse settings without recording raw
+   environment values. It excludes only inherited `HEAVY_SLOT_GRANTED_CORES`
+   for local sandbox receipts. Explicit settings, delegated runner environments
+   and stage reuse keys still bind the grant. Waiters check for policy changes
+   on every poll.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree
@@ -355,7 +357,8 @@ The current CLI writes PR bodies only when content changes, excluding volatile
 check timing from the generated validation block. Keep refreshes idempotent:
 one state transition should not become repeated writes that trigger policy CI.
 GitHub reads and the idempotent thread resolution mutation retry transient
-failures up to three times (5/20/60 seconds) and stop on rate limits. Mergify
+failures once after five seconds. They stop on exhausted quota and honor a
+secondary limit’s Retry-After when the delay fits the read budget. Mergify
 reads retry server errors, throttling and failed
 reads up to twice (2/5 seconds). Waits use bounded backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).
