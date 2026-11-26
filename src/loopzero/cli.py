@@ -107,14 +107,16 @@ def _repo_root(wt: Path) -> Path:
     return root
 
 
-def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = False) -> Config:
+def _load_config(
+    args: argparse.Namespace, root: Path, *, pin_checks: bool = False, previous: Config | None = None,
+) -> Config:
     path = args.config or root / "workflow.toml"
     if not pin_checks:
         return config_mod.load(path)
     if args.config:
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
-    config = config_mod.load_trusted(root)
+    config = config_mod.load_trusted(root, previous=previous)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
@@ -1213,7 +1215,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
                 return 3
             pr, readiness, kicked = waited
     assert readiness is not None
-    for reason in readiness.reasons:
+    for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
     if not readiness.ready:
         if args.wait is None and _pending_checks(config, pr, readiness):
@@ -1252,6 +1254,17 @@ def _pending_checks(
     waitable.add(MERGEABILITY_PENDING)
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
+
+
+def _readiness_messages(pr: github.PR, readiness: github.Readiness) -> Iterator[str]:
+    for reason in readiness.reasons:
+        check, separator, conclusion = reason.rpartition("' is ")
+        if (separator and check.startswith("required check '") and conclusion not in {"pending", "skipped"}
+                and reason not in readiness.waitable_failures):
+            yield (f"{reason}. Inspect {pr.url}/checks. Fix reproducible failures before retrying. "
+                   "Rerun the failed job only for a transient failure. Once green, run `loopzero ready --wait`.")
+        else:
+            yield reason
 
 
 def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness) -> str:
@@ -1319,17 +1332,18 @@ def _print_check_wait_timeout(pr: github.PR) -> None:
 
 def _verify_wait_snapshot(
     args: argparse.Namespace | None, wt: Path, config: Config, head: str, current_head: str,
-) -> None:
+    previous: Config | None = None,
+) -> Config:
     if current_head != head:
         raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}")
     if args is None:
-        return
-    latest = _load_config(args, wt, pin_checks=True)
+        return config
+    latest = _load_config(args, wt, pin_checks=True, previous=previous or config)
     changed = "workflow settings"
     if latest == config:
         if (latest.trusted_base_revision == config.trusted_base_revision
                 or not (config.check_runner or config.inputs)):
-            return
+            return latest
         changed = "check base"
     if _current_check_report(wt, latest, head) is None:
         raise CliError(f"{changed} changed while waiting; run loopzero check and retry")
@@ -1347,13 +1361,14 @@ def _wait_for_checks(
     started = grace_started if started is None else started
     current = pr
     stale_notice = False
+    previous = config
     for _ in _poll_until(started, timeout, bounded=bounded):
         if initial is not None:
             readiness = initial
             initial = None
         else:
             current = github.pr_view(config.repo, pr.number)
-            _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
+            previous = _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha, previous)
             if allow_merged and current.state == "MERGED":
                 return current, None, kicked
             readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
@@ -1541,7 +1556,7 @@ def _merge_with_mergify(
     """Request Mergify after readiness verifies the source gates and queue configuration."""
     if not readiness.ready:
         hint = _merge_check_hint(config, pr, readiness)
-        raise CliError("not ready to request Mergify: " + "; ".join(readiness.reasons) + hint)
+        raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
     queue = config.mergify_queue
     assert queue is not None
     requested, confirmed_marker = mergify.markers(
@@ -1622,7 +1637,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     else:
         if not readiness.ready:
             hint = _merge_check_hint(config, pr, readiness)
-            raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
+            raise CliError("not ready to merge: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
         if admit_by is not None and time.monotonic() > admit_by:
             print(f"timed out before merging PR #{pr.number}")
             return 3
