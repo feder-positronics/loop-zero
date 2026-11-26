@@ -1442,19 +1442,39 @@ def _mergify_timeout_detail(
     return detail
 
 
-MERGIFY_DEQUEUE_HINT = (
-    'Read Mergify\'s "Left the queue" comment on the PR for the reason. '
-    "Address it before requeueing. To requeue, post `@mergifyio queue` as the whole PR comment "
+MERGIFY_REQUEUE = (
+    "To requeue, post `@mergifyio queue` as the whole PR comment "
     "(same login), then rerun `loopzero merge --wait`."
+)
+MERGIFY_DEQUEUE_HINT = (
+    'Read Mergify\'s "Left the queue" comment on the PR for the reason. Address it before requeueing.'
 )
 
 
+def _mergify_departure_hint(report: mergify.Departure | None) -> str:
+    if report is None:
+        return f"{MERGIFY_DEQUEUE_HINT} {MERGIFY_REQUEUE}"
+    detail = f"Mergify report: {report.url}."
+    if report.checks:
+        detail += " Failing checks: " + ", ".join(repr(check) for check in report.checks) + "."
+    guidance = {
+        "stacked": "Mergify tested a stack and could not attribute the failure. Inspect the candidate in the report or requeue after the earlier PRs clear.",
+        "isolated": "Mergify tested this PR alone. Inspect or fix the failed check before requeueing unless it is a known flake.",
+    }
+    return f"{detail} {guidance.get(report.attribution, MERGIFY_DEQUEUE_HINT)} {MERGIFY_REQUEUE}"
+
+
 def _mergify_departure(
-    config: Config, pr: github.PR, queue: str, closed: list[github.GhError],
+    config: Config, pr: github.PR, queue: str, closed: list[github.GhError], confirmed: bool,
 ) -> str | None:
+    report = mergify.departure_report(config.repo, pr.number, pr.head_sha, queue)
+    if not confirmed and report is None:
+        return None
     sha = _landed(config, pr, closed)
     if not sha and not closed:
-        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+        raise CliError(
+            f"PR #{pr.number} left Mergify queue {queue} unmerged. {_mergify_departure_hint(report)}"
+        )
     return sha
 
 
@@ -1483,8 +1503,8 @@ def _wait_for_mergify(
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
-        elif state is None and confirmed:
-            if sha := _mergify_departure(config, pr, queue, closed):
+        elif state is None:
+            if sha := _mergify_departure(config, pr, queue, closed, confirmed):
                 return sha
     # A queued, open PR normally gets its next landing read on the next tick.
     if deferred_landing_read and (sha := _landed(config, pr, closed)):
@@ -1523,10 +1543,10 @@ def _merge_with_mergify(
         mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
         confirmed_marker = True
     if not confirmed and confirmed_marker:
-        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
-        if sha:
+        closed: list[github.GhError] = []
+        if sha := _mergify_departure(config, pr, queue, closed, confirmed=True):
             return sha
-        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+        raise closed[0]
     if not confirmed and not requested:
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
