@@ -174,7 +174,9 @@ person / agent session / T3 workspace
 ```
 
 The [sandbox](../src/loopzero/sandbox.py) bounds check writes, credentials,
-network access and resources. [Reviewer runners](../src/loopzero/runners.py)
+network access and resources. Checks and their Bubblewrap probes pass
+sandbox environment settings over a private file descriptor, keeping
+forwarded values out of process arguments. [Reviewer runners](../src/loopzero/runners.py)
 bound source access while allowing the network required by model CLIs; that
 network means the sandbox cannot prevent exfiltration of readable data.
 For a Codex executable installed inside protected native state, the implicit
