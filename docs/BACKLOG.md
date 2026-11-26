@@ -52,6 +52,4 @@ limit on the backlog.
 
 Each repository names its three labels and the script or sweep step that
 writes the summary in its own `AGENTS.md`. loop-zero ships no labels and no
-summary script. IntelFlo is the worked example: `problem`, `goal` and `monitor`
-labels, a pinned "Work still to do" issue refreshed by the delivery
-coordinator's sweep, and its existing `NEXT` label for next-up picks.
+summary script.

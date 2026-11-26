@@ -23,13 +23,10 @@ flowchart TD
     J --> K["Clean up: delete branch and worktree"]
 ```
 
-See the contract's [Blockers](../core/CONTRACT.md#blockers) for review coverage,
-head movement and readiness, and the [review budget](../core/CONTRACT.md#review-budget)
-for when another review is available.
-
-Summarizes [The six steps](../core/CONTRACT.md#the-six-steps) and
-[Blockers](../core/CONTRACT.md#blockers); the queue is described in
-[MERGIFY.md](MERGIFY.md).
+Summarizes [The six steps](../core/CONTRACT.md#the-six-steps),
+[Blockers](../core/CONTRACT.md#blockers) (review coverage, head movement and
+readiness) and the [review budget](../core/CONTRACT.md#review-budget); the queue
+is described in [MERGIFY.md](MERGIFY.md).
 
 ## 2. How many reviews a change gets
 

@@ -2,8 +2,9 @@
 
 Use this host-side default for loop-zero API integrations. Preserve existing
 project mechanisms with equivalent isolation. Provider CLI logins, OAuth and
-reviewer authentication retain their own mechanisms; SDKs do not load these
-files automatically.
+reviewer authentication retain their own mechanisms. SDKs do not load these
+files automatically: an application that needs them implements and tests its
+own loader; otherwise the host agent's API-calling process resolves keys.
 
 ## Configure an integration
 
@@ -74,6 +75,3 @@ Keep required tests deterministic with synthetic credentials/responses; run live
 evaluations separately and report limits. Never add application keys or credential
 directories to check/review mounts or allowlists. Existing loop-zero tool
 authentication remains separate.
-
-Implement and test a loader explicitly if an application needs this fallback;
-otherwise resolve keys in the host agent's API-calling process.

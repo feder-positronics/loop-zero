@@ -7,12 +7,13 @@ or exception record is required.
 
 ## Coordinator rollover
 
-Each owner role runs in one permanent T3 thread that resets its session in
-place. At a delivery milestone or the host context hook's nudge (roughly 150k
-tokens), overwrite the role's fixed handoff file, then send the same thread
+This section applies to every owner role. Each role runs in one permanent T3
+thread that resets its session in place. At a delivery milestone or the host
+context hook's nudge, overwrite the role's fixed handoff file, then send the same thread
 `freshContext: true` with only "Read <handoff path>". The thread keeps its
 schedules, PR watches and delegate completions, so a reset rebinds, retargets
-and settles nothing. Before resetting, start heavy or long-running jobs as
+and settles nothing; it changes no address, so it sends no routing notices,
+though state broadcasts still reach every owner. Before resetting, start heavy or long-running jobs as
 described in [Long-running jobs](#long-running-jobs) and name the unit, log and
 exit file in the handoff.
 
@@ -26,16 +27,15 @@ open `p0` issues. Long schedule bodies live in files their prompts point to.
 Changed decisions name the instruction superseded.
 
 Spend context on work, not on tool output: first acts read the handoff and only
-the files it links; bound every read (T3 thread reads at most 2 items of 600
-characters, helper and shell output at most 2,000 characters, no full
-activity, roster or schedule listings); repeat a call that echoes large state,
+the files it links; bound every read within host limits, with no full
+activity, roster or schedule listings; repeat a call that echoes large state,
 such as schedule updates or capability listings, only when that state changed.
 A child notice that only reports work still running needs no action: end that
-turn without calls. Do not watch a PR whose readiness or merge a child or your
-own `--wait` already reports. Batch independent notices to one owner into one
-send. After delivery, reset before monitoring or unrelated follow-ups. A bare
-"continue" means continue there. Workers report on the owning PR or issue,
-directly or through the parent; owners reconstruct delivery from live remote
+turn without calls. T3 watches are wakeups, not readiness waiters: do not
+watch a PR whose readiness or merge a child or your own `--wait` already
+reports, and unwatch before handing control to a person. After delivery, reset
+before monitoring or unrelated follow-ups. A bare "continue" means continue
+there. Owners reconstruct delivery from live remote
 state, revalidate recipients and carried decisions, and report what they cannot
 confirm as a blocker.
 
@@ -51,10 +51,7 @@ above; recovery cannot depend on a failed session's final summary. Link owning
 issue/PR, evidence, authority and holds; worktree/branch/head/dirty state;
 checks and interrupted tool outcomes; live child/task IDs, schedules and
 wakeups. Include the next authorized action. Git/GitHub and the handoff own
-state, not provider memory or resume tokens. Before a long `loopzero check`,
-push the head, open the draft PR and start the check as a transient unit. The
-unit can finish after the session ends. Check PR Validation or the saved
-receipt when resuming.
+state, not provider memory or resume tokens.
 The new thread first reconciles live remote state and uncertain external
 effects; a lost tool response is not proof the write failed. Adopt partial work
 without resetting or cleaning away the diff, and never replay whole commands
@@ -107,7 +104,8 @@ A long-running team gives each role one current owner. Owners read state from
 the owning issue and the live decision record, not from earlier sessions.
 Resolve every recipient when sending: the coordinator from the active delivery
 schedule, a campaign owner from its tracking issue, the decisions owner from
-its permanent thread. Never use a remembered ID; escalate ambiguity once.
+its permanent thread. After a provider move, never use a remembered ID;
+escalate ambiguity once.
 For agent-to-agent sends to a running Claude thread, use queue mode unless
 urgent; steer can cancel the receiver's in-flight tool call.
 For important T3 messages to an owner, verify receipt with `t3_thread_read`;
@@ -137,11 +135,12 @@ A schedule firing or a relayed approval grants no new authority.
   carries it, and replies with its link in the same turn. PRs reference it with
   `Refs`, not `Closes`: the issue closes only with a comment holding the result
   or blocker.
-- **Status thread:** a two-hourly schedule runs it as a fresh session. Each run
+- **Status thread:** a schedule that host policy sets runs it as a fresh
+  session. Each run
   rebuilds from GitHub and T3 records, tells the human owner what is done, not
   done and wrong under [Reporting](../core/CONTRACT.md#reporting), and sends the
-  decisions owner any `p0` with no commit, PR update or result for 3 h to
-  re-home. The decisions owner owns the schedule
+  decisions owner any `p0` with no commit, PR update or result within the host
+  policy's limit to re-home. The decisions owner owns the schedule
   but reads no runs.
 - **Campaign owner:** delivers one commissioned campaign while its tracking
   issue is open, and ends when it closes. Self-dispatches within approved scope
@@ -159,8 +158,7 @@ A schedule firing or a relayed approval grants no new authority.
   fixture or credential is a blocker, never a PASS.
 - **Lean warden:** keeps the delivery system lean: loop-zero improvement,
   host delivery tooling (test slots, remote hosts, CLI upgrades) and workflow
-  health. Reports to the decisions owner. Host role card:
-  `host-config/roles/lean-warden.md`.
+  health. Reports to the decisions owner.
 - **Monitor and watchdog:** detect regressions and idle work; send one packet
   or nudge per new finding, and never decide for an owner. A periodic review
   first asks why an existing mechanism failed and repairs it before adding one.
@@ -178,8 +176,7 @@ Fresh bounded runs send nothing when evidence is unchanged. Workers report delta
 on the owning PR or issue, directly or through the parent, and message the parent
 mid-task only for a blocker. Combine notices to one recipient into one packet;
 request an acknowledgement only when receipt changes the next action. Blockers
-and changed holds still go at once. Monitors and watchdogs keep sending one
-packet or nudge per new finding. Count productive work by verified activity (completed tool
+and changed holds still go at once. Count productive work by verified activity (completed tool
 calls or output on the deliverable), including nested reviewers; report test-slot,
 review, queue and hold waiters separately, excluding them from productive counts.
 Children waiting on a question or approval are waiters, not productive work.
@@ -332,7 +329,8 @@ operation or another observation suffices.
 
 Bound dispatch by shared resource slots and host guards, never by agent count.
 Implementation work does not require or reserve a test slot; a heavy command
-(more than one core for more than a minute) acquires one only while it runs.
+(more than one core for more than a minute, including builds, type checks,
+formatters and parallel tests) acquires one only while it runs.
 Host slot counts, load thresholds and quota guards belong in host policy.
 Tune dispatch from useful output, eligible work supply, review/test wait, rework
 and merge service; reduce new commissions when downstream work piles up.
@@ -342,10 +340,7 @@ Give every addressable issue a next-action owner or a named dependency. Work on
 the current bottleneck gets dispatch and shared test slots first; other running
 work finishes or checkpoints its current heavy command and releases its slot.
 
-**Rollover.** [Coordinator rollover](#coordinator-rollover) applies to every
-owner role. A reset changes no address, so it sends no routing notices;
-state broadcasts still reach every owner.
-A recurring schedule belongs to its role owner (the coordinator for delivery),
+**Schedules.** A recurring schedule belongs to its role owner (the coordinator for delivery),
 never to a worker or one-day owner; workers get one-shot wakeups only. Each run
 of a recurring task first checks that its previous run's PR merged and adopts
 that PR if not. An owner with queued work always keeps an enabled wake: nobody
@@ -414,8 +409,7 @@ Allowed paths: <owned scope>
 Acceptance evidence: <observable proof for each criterion>
 Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
-Launch policy: Children inherit this rule: never approval-required; use auto only for read-only children and say "read-only, do not edit" in the brief; a child that runs commands or edits inherits the parent's mode, because auto can stall on approval review. After launch, verify pendingRequestCount 0 and a completed tool call.
-Waiting: One blocking wait: Codex exec/write_stdin yield >=30 s (>=120 s for builds, tests, CI, review, ready or merge); shell `until <done>; do sleep 30; done`. Claude: background notification or t3_background_wait. Read the completed result once; never use t3_thread_read/task_status for liveness. Every ended turn wakes the parent: end it only with a final result, a blocker or a question, never with a progress note while your own job runs.
+Launch and waiting: Children inherit this rule: never approval-required; follow host rules for launch checks and blocking waits. Every ended turn wakes the parent: end it only with a final result, a blocker or a question, never with a progress note while your own job runs.
 Output: <Coordinator rollover caps. Select GitHub REST fields with `--jq`.>
 Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
 Verification: <focused owning tests and coverage; available proof methods and their task-scoped authorization within runtime permissions>
@@ -427,12 +421,6 @@ Report: Final message to the parent, which posts it on the owning PR or issue (p
 ```
 
 Follow the [Worker role](#team-roles) for blockers.
-The owner decides and continues anything
-within its authority; only a decision reserved to a person goes to the harness
-question tool with the PR/task link, exact decision and recommended option. If
-unavailable or unanswered, continue the work that decision does not block and
-report the blocker and next owner; silence is not approval. T3 watches are wakeups, not additional readiness waiters;
-the watch owner unwatches before handing control to a person.
 
 Before each preassigned follow-up, re-read live issue/PR state and dispatch
 ownership, record the finished item's current head and evidence directly on its
@@ -473,23 +461,18 @@ use a CLI delegate with `--sandbox read-only`.
 Launch independent tasks in small concurrent batches within host guards. Retain
 each child task ID and verify the batch concurrently.
 
-Running or working status does not prove progress. Before ending the turn
-after a launch, read the delegate's activity: a completed tool call and no
-pending approval (T3 `t3_thread_read`: `pendingRequestCount` 0). Answer an
-approval only within your authority; otherwise cancel, relaunch correctly or
-report the block. When a verified child stops producing output, re-read its
-pending approvals (T3 `pendingRequestCount`) and terminal task state, including
-provider/capacity failures. Recover or report the blocker in that turn using the
-same authorized routes; a launch-time check is insufficient. Inspect what ran
-before resuming interrupted work. A cancelled or declined tool call counts as
-a human stop only when the run is marked interrupted or Marcin says so;
-otherwise retry it once.
-Held automation messages release on the next successful run. For held human
-messages and runs after an explicit stop (`queueHeld=true`), save the full
-text, cancel with `t3_queue cancel`, combine still-needed messages into one
-fresh resend and verify receipt. For a terminal delegated task, launch a new
-task with the prior brief and result. PR watches survive restarts. Re-watch
-only a missing one.
+Running or working status does not prove progress. After a launch, and again
+when a child stops producing output, read its activity: a completed tool call,
+no pending request (T3 `pendingRequestCount` 0) and its terminal task state,
+including provider/capacity failures. Answer a request only within your
+authority; otherwise cancel, relaunch correctly or report the block in that
+turn. Inspect what ran before resuming interrupted work. A cancelled or declined
+tool call counts as a human stop only when the run is marked interrupted or the
+human owner says so; otherwise retry it once. Held automation messages release
+on the next successful run; for held human messages and runs after an explicit
+stop (T3 `queueHeld=true`), save the full text, cancel with `t3_queue cancel`,
+combine still-needed messages into one fresh resend and confirm it arrived. For
+a terminal delegated task, launch a new task with the prior brief and result.
 Before yielding on any delegate or long command, arrange a
 wakeup whose timeout covers the awaited event: a completion notice plus a
 fallback timer, or a bounded blocking wait. Rely on T3 delegate completion
@@ -522,9 +505,8 @@ Read-only work may share stable source. Sequence overlapping writers or
 integrate deliberately; never run them in one checkout. Do not pre-clear file
 overlap by message. Ask once, on the PR, only when both change the same function.
 Respect concurrency limits and avoid competing suites whose temporary-directory cleanup
-can interfere. Any command using more than one core for more than a minute runs
-under the repository's shared resource/test slots, including builds, type checks,
-formatters and parallel tests. When the host is saturated, shed out-of-slot CPU
+can interfere. Heavy commands take a test slot as in [Team roles](#team-roles).
+When the host is saturated, shed out-of-slot CPU
 commands before shedding agents; preserve their work. Grant only a needed cache
 directory (`--add-dir ~/.cache/uv`);
 shared `/tmp` caches can exhaust host inodes. If a linked worktree's shared Git
@@ -576,10 +558,8 @@ focused restricted-PATH probe and report the limitation. Only sandboxed
 
 ## Configuration and upgrades
 
-Follow [T3 upstream review](T3-UPSTREAM.md) weekly during active use and before
-relevant upgrades or compatibility repairs. Compare the running environment's
-tools and instructions with version-matched source before adopting upstream
-developments; discovery does not authorize an upgrade or change delivery policy.
+Follow [T3 upstream review](T3-UPSTREAM.md) for T3 updates; discovery does not
+authorize an upgrade or change delivery policy.
 
 [models.toml](../models.toml) owns selections; skills link here. Consumers
 maintain their own copy. Version 1 has profiles with `provider`, `model`, `effort`,

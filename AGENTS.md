@@ -7,10 +7,10 @@
   effort before delegation; select both explicitly when the runtime supports it.
 - Before committing changes to delivery interfaces (including commands, their
   options and configuration), state, trust boundaries, review/readiness or
-  ownership, read the [architecture guide](docs/ARCHITECTURE.md) and decide
-  whether its account still holds. If not, update it in the same change; if so,
-  add a commit trailer `Architecture-Review: unchanged;` followed by the specific
-  reason. For watched files `loopzero check` fails without one of them.
+  ownership, read the [architecture guide](docs/ARCHITECTURE.md). Edit it only
+  when a boundary it describes moves. When `loopzero check` reports a watched
+  change and the guide still holds, add a commit trailer
+  `Architecture-Review: unchanged;` followed by the specific reason.
 - Claude sessions here do not add commit or PR attribution automatically
   (`.claude/settings.json`). Add `Co-Authored-By` for each model that actually
   wrote the change, Claude included; committing another writer's patch is not
