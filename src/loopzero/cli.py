@@ -292,7 +292,7 @@ def _readiness(
     elif announce_receipt:
         _print_receipt(wt, report, "accepted")
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
-        behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+        behind = github.behind_reason(pr, head if review else None)
         reasons = result.reasons
         if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
             reasons = tuple(reason for reason in reasons if reason != behind)
