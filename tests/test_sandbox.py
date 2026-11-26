@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import itertools
 import json
 import os
@@ -17,7 +18,7 @@ from select import select
 
 import pytest
 
-from loopzero import sandbox
+from loopzero import cli, sandbox
 from loopzero.cli import _current_check_report, _save_report
 from loopzero.types import Config, ResourceLimits
 
@@ -118,6 +119,26 @@ def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, command, exit_co
     assert len(result.tail.encode("utf-8")) <= 16 * 1024
 
 
+@pytest.mark.parametrize(
+    ("command", "stage_exit"),
+    [
+        ("/bin/sh -c 'exit 7' | /bin/cat", 7),
+        ("/bin/sh -c 'kill -TERM $$' | /bin/cat", 143),
+        ("echo ok | /bin/cat", 0),
+        ("echo ok", 0),
+    ],
+)
+def test_check_pipeline_verdict(git_repo, bwrap_log, monkeypatch, capsys, command, stage_exit):
+    config = make_config(checks=(command,))
+    monkeypatch.setattr(cli, "_context", lambda *args, **kwargs: (git_repo, config))
+    monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *args: None)
+
+    assert cli.main(["check"]) == (1 if stage_exit else 0)
+    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
+    assert [stage["exit_code"] for stage in receipt["results"]] == [stage_exit]
+    assert capsys.readouterr().out.splitlines()[-1] == ("FAIL" if stage_exit else "PASS")
+
+
 def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     monkeypatch.setenv("LZ_KEEP", "kept")
     monkeypatch.setenv("LZ_DROP", "dropped")
@@ -157,7 +178,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert head.index("--tmpfs") < head.index(str(git_repo))
     assert tail == ["prlimit", f"--as={sandbox._cap_limit(4096 << 20, resource.RLIMIT_AS)}",
                     f"--fsize={sandbox._cap_limit(2048 << 20, resource.RLIMIT_FSIZE)}",
-                    "--", "/bin/sh", "-c", "echo hello"]
+                    "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", "echo hello"]
 
 
 def test_probe_uses_real_flags(git_repo, bwrap_log):
@@ -213,7 +234,7 @@ def inject_check_timeout(monkeypatch, output, before_timeout=None):
     communicate = subprocess.Popen.communicate
 
     def communicate_with_timeout(process, input=None, timeout=None):
-        if process.args[-3:-1] == ["/bin/sh", "-c"]:
+        if tuple(process.args[-6:-1]) == sandbox.CHECK_SHELL:
             if before_timeout is not None:
                 before_timeout()
             raise subprocess.TimeoutExpired(process.args, timeout, output=output)
@@ -239,7 +260,7 @@ def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, 
     argv = argv_of(bwrap_log)
     assert argv[argv.index("--") + 1:] == [
         "prlimit", "--as=33554432", "--fsize=3145728",
-        "--", "/bin/sh", "-c", "echo hello",
+        "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", "echo hello",
     ]
 
 
@@ -818,6 +839,42 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
 
+@pytest.mark.parametrize("error", [errno.E2BIG, errno.ENOENT])
+def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkeypatch, error):
+    command = "echo stage ran"
+    config = make_config(checks=(command,), inputs={command: ("README.md",)})
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    original = sandbox.run_checks(config, git_repo)
+    assert original.ok and not original.dirty
+    assert original.results[0].input_key
+    _save_report(git_repo, original)
+    assert sandbox.run_checks(config, git_repo).results[0].reused_from == fetched_base
+
+    run = sandbox._proc.run
+
+    def fail_fingerprint(argv, **kwargs):
+        if argv[0] == "git" and "diff-tree" in argv:
+            raise OSError(error, os.strerror(error))
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(sandbox._proc, "run", fail_fingerprint)
+    if error != errno.E2BIG:
+        with pytest.raises(OSError) as exc:
+            sandbox.run_checks(config, git_repo)
+        assert exc.value.errno == error
+        return
+
+    report = sandbox.run_checks(config, git_repo)
+    assert report.ok and not report.dirty
+    [result] = report.results
+    assert result.tail.strip() == "stage ran"
+    assert result.input_key is None and result.reused_from is None
+    assert _save_report(git_repo, report) is None
+    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
+    [saved] = receipt["results"]
+    assert saved.get("input_key") is None and saved.get("reused_from") is None
+
+
 def test_local_checks_run_fresh_without_a_base(git_repo, bwrap_log):
     (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
     config = make_config(inputs={"*": (".",)})
@@ -865,19 +922,65 @@ def test_no_inputs_preserves_receipt(git_repo, bwrap_log):
     assert set(row) == {'command', 'exit_code', 'duration_s', 'tail'}
 
 
-def test_input_key_distinguishes_runners(git_repo, fetched_base):
+def test_input_key_distinguishes_runners(git_repo, fetched_base, tmp_path):
+    runners = [tmp_path / name for name in ("runner-a", "runner-b")]
+    for runner in runners:
+        runner.touch()
     keys = {
         sandbox._input_key(make_config(inputs={'echo one': ('*.md',)}, check_runner=runner),
                            git_repo, 'echo one', fetched_base)
-        for runner in ((), ('runner-a',), ('runner-b',))
+        for runner in ((), *((str(path),) for path in runners))
     }
     assert None not in keys
     assert len(keys) == 3
 
 
-def test_receipt_settings_distinguish_runner_paths(git_repo, monkeypatch):
+def test_receipt_settings_distinguish_runner_paths(git_repo, monkeypatch, tmp_path):
     cfg = make_config(check_runner=("runner",), env_allowlist=())
-    monkeypatch.setattr(sandbox.shutil, "which", lambda _: "/first/runner")
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.touch()
+    second.touch()
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(first))
     original = sandbox.settings_fingerprint(cfg, git_repo, base="base")
-    monkeypatch.setattr(sandbox.shutil, "which", lambda _: "/second/runner")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(second))
     assert sandbox.settings_fingerprint(cfg, git_repo, base="base") != original
+
+
+@pytest.mark.parametrize("change", ["target", "content"])
+def test_runner_upgrade_invalidates_pass(git_repo, fetched_base, tmp_path, change):
+    def write_runner(path, exit_code):
+        path.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "frame = json.load(sys.stdin)\n"
+            "del frame['env']\n"
+            f"frame.update(exit_code={exit_code}, duration_s=0, not_started=False, tail='')\n"
+            "print(json.dumps(frame))\n"
+        )
+        path.chmod(0o755)
+
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    runner = tmp_path / "runner"
+    original = tmp_path / "runner-a"
+    write_runner(original, 0)
+    runner.symlink_to(original)
+    config = make_config(check_runner=(str(runner),), inputs={"echo hello": (".",)})
+    report = sandbox.run_checks(config, git_repo)
+    assert report.ok
+    _save_report(git_repo, report)
+    assert _current_check_report(git_repo, config, report.head)
+    assert sandbox.run_checks(config, git_repo).results[0].reused_from == report.head
+
+    if change == "target":
+        replacement = tmp_path / "runner-b"
+        write_runner(replacement, 17)
+        new_link = tmp_path / "runner-new"
+        new_link.symlink_to(replacement)
+        new_link.replace(runner)
+    else:
+        write_runner(original, 17)
+
+    assert _current_check_report(git_repo, config, report.head) is None
+    result = sandbox.run_checks(config, git_repo).results[0]
+    assert result.exit_code == 17
+    assert not result.reused_from
