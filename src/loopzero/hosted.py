@@ -62,10 +62,11 @@ def _source_status(result: github.Readiness, current: github.PR) -> tuple[str, s
         if not (blocker := github.mergeability_blocker(current)):
             return "success", "Reviewed source head"
         reasons = (blocker,)
-    if reasons == (github.MISSING_REVIEW_REASON,):
-        return "pending", "Awaiting trusted review of current source head"
-    state = "pending" if reasons == (github.MERGEABILITY_PENDING,) else "failure"
-    return state, "; ".join(reasons)
+    if reasons and set(reasons) <= {github.MISSING_REVIEW_REASON, github.MERGEABILITY_PENDING}:
+        if github.MISSING_REVIEW_REASON in reasons:
+            return "pending", "Awaiting trusted review of current source head"
+        return "pending", github.MERGEABILITY_PENDING
+    return "failure", "; ".join(reasons)
 
 
 def _run(cfg: Config) -> int:

@@ -70,13 +70,14 @@ def publisher(tmp_path, fake_bin, monkeypatch):
 @pytest.mark.parametrize("case,blocker,status", [
     ("COMMENTED", "", "success"), ("APPROVED", "", "success"),
     ("DISMISSED", "", "pending"), ("PENDING", "", "pending"),
-    ("absent", "", "pending"), ("untrusted", "", "pending"),
+    ("absent", "", "pending"), ("absent", "unknown", "pending"),
+    ("untrusted", "", "pending"),
     ("stale", "", "pending"), ("malformed", "", "pending"),
     ("revoked", "", "pending"), ("absent", "important", "failure"),
     ("absent", "conflict", "failure"), ("COMMENTED", "important", "failure"),
     ("APPROVED", "mergeability-reset", "pending"), ("APPROVED", "publish-reset", "pending"),
 ])
-def test_source_publication_is_bound_to_live_review(publisher, case, blocker, status):
+def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case, blocker, status):
     review = {"state": "COMMENTED", "commit_id": HEAD, "user": {"login": "trusted-publisher"},
               "body": f"<!-- loopzero:review v=1 head={HEAD} kind=primary source=model -->\n**approve**"}
     changed = {"state": case} if case in {"APPROVED", "DISMISSED", "PENDING"} else {
@@ -93,6 +94,9 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
                               for state in ("MERGEABLE", "UNKNOWN"))
         prefix = [mergeable] * (2 if blocker == "mergeability-reset" else 3)
         publisher.respond(endpoint, *prefix, unknown)
+    if blocker == "unknown":
+        monkeypatch.setattr(hosted.eligibility, "sleep", lambda _: None)
+        publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(mergeable="UNKNOWN")))
     if blocker == "conflict":
         publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(mergeable="CONFLICTING")))
     if blocker == "important":
