@@ -1049,12 +1049,12 @@ def test_pr_replaces_closed_never_merged_pr(wt: Path, gh: FakeGh, capsys) -> Non
     assert run(capsys, "pr") == (0, URL + "\n", "")
 
 
-def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
-    task = wt / ".loopzero" / "task.md"
-    task.write_text("## Objective\nx\n\n# Add the feature flag\n")
-    assert cli._pr_title(wt, "lz/t1") == "Add the feature flag"
-    task.write_text("## Objective\nonly sections\n")
-    assert cli._pr_title(wt, "lz/t1") == "lz/t1"
+@pytest.mark.parametrize(("heading", "expected"), [("", "lz/t1"), ("\n# Zażółć gęślą jaźń\n", "Zażółć gęślą jaźń")])
+def test_pr_title_prefers_human_heading(wt: Path, monkeypatch, heading, expected) -> None:
+    task, read_text = wt / ".loopzero" / "task.md", Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda path, encoding="ascii", **kw: read_text(path, encoding, **kw))
+    task.write_text(f"## Objective\nZażółć gęślą jaźń\n{heading}", encoding="utf-8")
+    assert cli._pr_title(wt, "lz/t1") == expected
 
 
 @pytest.mark.parametrize("name,value", [
