@@ -14,7 +14,6 @@ Refs #<issue number, or remove this line>
 
 ## Base
 <base branch> @ <sha>
-Base: <sha>
 
 ## Validation
 (filled by `loopzero check`)
