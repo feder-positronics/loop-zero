@@ -414,7 +414,7 @@ Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
 Launch policy: Children inherit this rule: never approval-required; use auto only for read-only children and say "read-only, do not edit" in the brief; a child that runs commands or edits inherits the parent's mode, because auto can stall on approval review. After launch, verify pendingRequestCount 0 and a completed tool call.
 Waiting: One blocking wait: Codex exec/write_stdin yield >=30 s (>=120 s for builds, tests, CI, review, ready or merge); shell `until <done>; do sleep 30; done`. Claude: background notification or t3_background_wait. Read the completed result once; never use t3_thread_read/task_status for liveness. Every ended turn wakes the parent: end it only with a final result, a blocker or a question, never with a progress note while your own job runs.
-Output: Cap at the producer: REST `gh api --jq` selected fields, shell `| head -c 2000`; t3_thread_read limit <=2, maxCharsPerItem <=600.
+Output: <Coordinator rollover caps. Use `gh api --jq` at source.>
 Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
 Verification: <focused owning tests and coverage; available proof methods and their task-scoped authorization within runtime permissions>
 Integration executor: <named executor for returned heads and one owner of any readiness/merge waiter; parent retains acceptance responsibility>
@@ -424,17 +424,7 @@ Return: <authorized finish: evidence, readiness, or merge; deployment needs its 
 Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Message the parent mid-task only for a blocker.
 ```
 
-Example using those fields, with an illustrative requester instruction:
-
-```text
-Context: Requester said “prepare the fix for review; leave it unmerged” (<request link>).
-Verification: Focused regression and browser observation on the local fixture, within existing task permissions; report unavailable proof.
-Integration executor: Parent integrates and owns the sole loopzero ready --wait; child starts no waiter.
-Return: Tested changes and evidence to parent; parent finishes through readiness, leaving merge to the requester.
-```
-
-The source request supplies authority; neither this example nor a finish label
-grants it. Follow the [Worker role](#team-roles) for blockers.
+Follow the [Worker role](#team-roles) for blockers.
 The owner decides and continues anything
 within its authority; only a decision reserved to a person goes to the harness
 question tool with the PR/task link, exact decision and recommended option. If

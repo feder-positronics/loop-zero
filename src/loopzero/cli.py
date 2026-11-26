@@ -286,6 +286,7 @@ def _readiness(
             workflow_wait and review_age is not None
             and -MAX_REVIEW_CLOCK_SKEW <= review_age < STALE_VERDICT_GRACE
         ),
+        publishers=publishers,
     )
     report = _load_report(wt)
     receipt_problem = _check_report_problem(report, wt, config, head)
@@ -1704,17 +1705,20 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
 
 def cmd_resolve(args: argparse.Namespace) -> int:
     """List open blocking findings, or reply to one with what changed and resolve its thread."""
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
     pr = _require_pr(config, worktree.branch(wt))
+    if pr.base_ref != config.base_branch:  # trusted publishers belong to the configured base
+        raise CliError(f"PR #{pr.number} targets {pr.base_ref}, configured base is {config.base_branch}")
+    publishers = config.review_publishers or (github.login(),)
     if not args.finding:
-        for marker_id, _thread, f in github.open_findings(config.repo, pr.number):
+        for marker_id, _thread, f in github.open_findings(config.repo, pr.number, publishers):
             print(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}")
         return 0
-    finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
+    finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply, publishers)
     print(f"resolved {args.finding}: {finding.title}")
     try:
         with github.api_error_diagnostics():
-            remaining = github.open_blocking_findings(config.repo, pr.number)
+            remaining = github.open_blocking_findings(config.repo, pr.number, None, publishers)
     except (github.GhError, _proc.ProcTimeout, OSError) as exc:
         retry = shlex.join(("gh", *github.eligibility_dispatch_args(
             config.repo, pr.number, config.base_branch,
