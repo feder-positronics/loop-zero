@@ -118,7 +118,7 @@ def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False
 
 
 def lock_local_state(wt: Path):
-    """Serialize receipt publication and PR-body updates for this worktree."""
+    """Serialize check execution, receipt publication and PR-body updates for this worktree."""
     return _local_state_directory(wt, create=True, lock=True)
 
 
@@ -147,9 +147,13 @@ def read_local_state(wt: Path, name: str) -> str:
 
 def write_local_state(
     wt: Path, name: str, text: str, *, private: bool = False, exclusive: bool = False,
-    expected_head: str | None = None,
+    expected_head: str | None = None, locked_fd: int | None = None,
 ) -> str | None:
-    with _local_state_directory(wt, create=True, lock=private or expected_head is not None) as fd:
+    with _local_state_directory(
+        wt, create=True, lock=locked_fd is None and (private or expected_head is not None),
+    ) as fd:
+        if locked_fd is not None and not os.path.samestat(os.fstat(fd), os.fstat(locked_fd)):
+            raise WorktreeError("local state directory changed during check")
         if expected_head is not None and (current_head := head(wt)) != expected_head:
             return current_head
         _regular_state(wt, fd, name)

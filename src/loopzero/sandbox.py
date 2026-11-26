@@ -265,10 +265,20 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
         raise
 
 
+def check_inputs_match(config: Config, worktree: Path, report: CheckReport) -> bool:
+    base = _check_base(config, worktree)
+    return all(r.input_key and r.input_key == _input_key(config, worktree, r.command, base)
+               for r in report.results if _has_inputs(config, r.command))
+
+
+def _has_inputs(config: Config, command: str) -> bool:
+    return command in config.inputs or "." in config.inputs.get("*", ())
+
+
 def _input_key(config: Config, worktree: Path, command: str, base: str, *,
                status: Callable[[str], None] | None = None,
                workflow: str | Path = "workflow.toml") -> str | None:
-    if command not in config.inputs and "." not in config.inputs.get("*", ()):
+    if not _has_inputs(config, command):
         return None
     if not base and status is None:
         return None
