@@ -201,6 +201,26 @@ def test_review_marker_quoted_in_prose_neither_voids_nor_hides_a_review(gh: Fake
     assert cli._pr_markers([review], head, (LOGIN,)) == [cli.Marker(head, "primary", "COMMENTED")]
 
 
+def test_second_review_marker_in_the_leading_block_voids_the_review() -> None:
+    head = "a" * 40
+    body = f"{marker(head, 'primary')}\n{marker('b' * 40, 'primary')}\nreview: **approve**"
+    review = {"body": body, "state": "APPROVED", "commit_id": head, "user": {"login": LOGIN}}
+    assert cli.eligibility.eligible_review([review], head, (LOGIN,)) is None
+    assert cli.eligibility.readiness_review(
+        [review], head, (LOGIN,), repo=REPO, number=7, base_branch="main") is None
+    assert cli._pr_markers([review], head, (LOGIN,)) == []
+
+
+def test_publication_recovery_ignores_markers_quoted_on_other_commits(wt: Path, gh: FakeGh, head) -> None:
+    config = cli.config_mod.load(wt / "workflow.toml")
+    result = ReviewResult("claude", head, "primary", "approve", (), "raw", provenance={"session_ids": ["s"]})
+    other = rev("f" * 40, "primary")
+    other["body"] += f"\nA finding quotes {marker(head, 'primary')}"
+    gh.respond_pr_view(pr_json(headRefOid=head))
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    assert cli._confirm_review(wt, config, pr, result, LOGIN, [other]) is False
+
+
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
         login: str = LOGIN, verdict: str = "approve") -> dict:
     """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""
