@@ -49,7 +49,7 @@ SANDBOX_ENV = {
 
 
 class SandboxUnavailable(LoopZeroError):
-    """bubblewrap is missing or cannot create a sandbox on this host."""
+    """Check execution infrastructure is unavailable."""
 
 
 class _Terminated(BaseException):
@@ -636,9 +636,8 @@ def _dispatch_one(
                              input=json.dumps({**binding, "env": env}), encoding="utf-8")
         if done.exit_code:
             stderr = _proc.tail(done.stderr)[-2000:]
-            detail = f"Stage runner failed: process exit {done.exit_code}"
-            return CheckResult(command, done.exit_code, done.duration_s,
-                               f"{detail}\n{stderr}".rstrip())
+            raise SandboxUnavailable(f"Stage runner failed: process exit {done.exit_code} "
+                                     f"({done.duration_s:.2f}s elapsed). Retry the check.\n{stderr}".rstrip())
         frame = _stage_frame(done.stdout, binding)
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed after stage")
@@ -655,8 +654,9 @@ def _dispatch_one(
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
                            _check_tail(frame["tail"]))
     except _proc.ProcTimeout as exc:
-        return CheckResult(command, TIMEOUT_EXIT,
-                           exc.duration_s if exc.duration_s is not None else timeout,
-                           _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
-    except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
+        elapsed = exc.duration_s if exc.duration_s is not None else timeout
+        raise SandboxUnavailable(
+            f"Stage runner timed out after {timeout:g}s ({elapsed:.2f}s elapsed). Retry the check.\n"
+            f"{_check_tail(exc.stderr or exc.stdout)}".rstrip()) from exc
+    except (_proc.ToolMissing, config_mod.ConfigError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
         return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {exc}"))
