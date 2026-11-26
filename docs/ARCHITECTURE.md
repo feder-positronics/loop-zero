@@ -45,8 +45,11 @@ The CLI also writes a head-bound checks receipt and saved review output in
 `.loopzero/` for local readiness and reposting. They do not form a second authoritative delivery history; new Codex native audit
 receipts have the restricted retention requirement described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
-review evidence using trusted base configuration. Losing local artifacts may
-require rerunning checks or review, and never creates a hosted approval.
+review evidence using trusted base configuration. Local readiness and merge fetch
+the configured origin base once at startup before loading its publisher policy.
+A receipt bound to the base may require a new check after that base advances.
+Losing local artifacts may require rerunning checks or review, and never creates
+a hosted approval.
 Saved runner artifacts also retain the repository, PR and actual request publisher
 before publication. A lost POST reply triggers a read-only reconciliation bounded
 by one 30-second transport deadline, with no read retries. Recovery regenerates
@@ -76,8 +79,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    source sandbox. It inventories Git object stores only when alternates may be
    present. Its simple-command preflight catches missing local scripts,
    prepares recognized uv dependency groups offline in that sandbox and prints
-   progress before each command, metadata-only stage heartbeats every 30 seconds
-   (including silent children), and exit code/duration immediately after each stage.
+   progress before each command, a metadata-only heartbeat after 30 seconds and every
+   five minutes thereafter, and exit code/duration immediately after each stage.
    Heartbeats stop on completion or cancellation and never supply a verdict.
    Local stages drain merged child output and retain a bounded diagnostic tail.
    Trusted-base commands remain authoritative;
@@ -103,15 +106,22 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    the PR-wide cap of one primary and one delta across head rewrites, and the
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
+   The delta requires the reviewed commit on the current head's first-parent
+   history and verifies merged parents against the live configured base. The
+   runner receives topic patches in first-parent order and the difference
+   between each automatic remerge and its recorded tree. Isolated Git verifies
+   the history and builds the patch, excluding unrelated base changes.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
    target branch and required CI. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
-   digest covers execution and stage reuse settings, including the effective
-   allowlisted environment, without recording raw environment values. Waiters
-   check for policy changes on every poll.
+   digest covers execution and stage reuse settings without recording raw
+   environment values. It excludes only inherited `HEAVY_SLOT_GRANTED_CORES`
+   for local sandbox receipts. Explicit settings, delegated runner environments
+   and stage reuse keys still bind the grant. Waiters check for policy changes
+   on every poll.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree
@@ -310,6 +320,10 @@ merge-authority holds. Adding or removing a hold refreshes source eligibility
 even when the head stays the same. Merge admission rechecks the live hold.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
+When delivery uses the existing size checker, local readiness and new Mergify
+requests evaluate a temporary integration with the freshly fetched target. The
+target supplies the checker and baseline. Existing requests continue to the
+queue wait path.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
 backoff capped at 30 seconds and a shared 90-second retry-admission deadline across
 both reads and all attestation attempts. Each wait revalidates the candidate before
@@ -350,7 +364,8 @@ The current CLI writes PR bodies only when content changes, excluding volatile
 check timing from the generated validation block. Keep refreshes idempotent:
 one state transition should not become repeated writes that trigger policy CI.
 GitHub reads and the idempotent thread resolution mutation retry transient
-failures up to three times (5/20/60 seconds) and stop on rate limits. Mergify
+failures once after five seconds. They stop on exhausted quota and honor a
+secondary limit’s Retry-After when the delay fits the read budget. Mergify
 reads retry server errors, throttling and failed
 reads up to twice (2/5 seconds). Waits use bounded backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).

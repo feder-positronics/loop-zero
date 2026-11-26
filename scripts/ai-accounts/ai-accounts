@@ -629,13 +629,17 @@ def check_codex(name: str) -> dict:
     model_usage = data.get("model_usage")
     if not isinstance(model_usage, dict) or not model_usage:
         return {**result, "error": "usage response has no model usage"}
-    if any(not isinstance(v, dict) or not isinstance(v.get("available"), bool)
-           for v in model_usage.values()):
-        return {**result, "error": "usage response has incomplete model usage"}
-    models = {m: v["available"] for m, v in model_usage.items()}
+    # Entries without a bool `available` are unknown, not a logged-out account: skip them and
+    # take the tier from the entries that do report availability (response shape drifts).
+    models = {m: v["available"] for m, v in model_usage.items()
+              if isinstance(v, dict) and isinstance(v.get("available"), bool)}
+    unknown = sorted(m for m in model_usage if m not in models)
+    if not models:
+        return {**result, "error": "usage response has no known model availability", "models_unknown": unknown}
     usable = [available for available in models.values() if available]
-    tier = 0 if not ok or (models and not usable) else (2 if all(models.values()) else 1)
-    return {**result, "tier": tier, "models": models}
+    tier = 0 if not ok or not usable else (2 if all(models.values()) else 1)
+    extra = {"models_unknown": unknown} if unknown else {}
+    return {**result, "tier": tier, "models": models, **extra}
 
 
 def select(provider: str, results: dict[str, dict], current: str | None) -> str | None:
@@ -1060,7 +1064,9 @@ def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None,
         t = threading.Thread(target=pump, daemon=True)
         t.start()
         code = proc.wait()
-        t.join()
+        t.join(timeout=1)
+        if t.is_alive():
+            return code
         text = b"".join(seen).decode("utf-8", "replace")
         retryable = code != 0 and (retry_exit is None or code in retry_exit)
         if (not retryable or attempt == 2 or not model or providers not in PROVIDERS

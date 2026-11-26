@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loopzero import github, hosted
+from loopzero import eligibility, github, hosted
 from loopzero.candidate import CandidateError, CandidateRaceError
 from tests import test_github as fixtures
 from tests.test_candidate import event as candidate_event
@@ -106,6 +106,16 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
 
 
+def test_hosted_reviews_reject_a_repeated_full_page(publisher):
+    publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json()))
+    endpoint = f"api repos/{REPO}/pulls/7/reviews?per_page={github.PAGE}"
+    page = [{"id": i, "state": "COMMENTED"} for i in range(github.PAGE)]
+    for number in (1, 2):
+        publisher.respond(f"{endpoint}&page={number}", page)
+    with pytest.raises(github.GhError, match="GitHub repeated a full page"):
+        eligibility.evaluate(REPO, 7, HEAD, "main", ("trusted-publisher",))
+
+
 def test_merged_source_refresh_publishes_nothing(publisher):
     body = json.dumps({"head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"}, "merged": True,
                        "title": "before\u2028after"}, ensure_ascii=False)
@@ -168,7 +178,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
     if error in {"api", "recover", "before"}:
-        assert hosted.main() == (1 if error == "before" else 0) and sleeps == ([5] if error == "recover" else list(github.RETRY_DELAYS))
+        assert hosted.main() == (1 if error == "before" else 0) and sleeps == [5]
         assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error != "recover")
     else:
         with pytest.raises(hosted.LoopZeroError, match="invalid description" if error == "publication" else None):
@@ -315,9 +325,9 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
     successful = max(0, 1000 - prior)
     publisher.respond(endpoint, *([{}] * successful), refused, refused)
     if prior >= 999:
-        statuses = [{"context": context, "state": "success"} for _ in range(prior)]
+        statuses = [{"id": i, "context": context, "state": "success"} for i in range(prior)]
         if prior == 999:
-            statuses.insert(0, {"context": context, "state": "pending"})
+            statuses.insert(0, {"id": prior, "context": context, "state": "pending"})
         pages = [statuses[i:i + 100] for i in range(0, 1001, 100)]
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *pages, *pages)
 
