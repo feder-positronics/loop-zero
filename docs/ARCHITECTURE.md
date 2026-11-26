@@ -289,6 +289,11 @@ PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 Local readiness and hosted source and candidate eligibility reject PRs with
 merge-authority holds. Adding or removing a hold refreshes source eligibility
 even when the head stays the same. Merge admission rechecks the live hold.
+Local readiness and hosted eligibility both block while GitHub computes
+mergeability. Hosted eligibility rereads the same head with bounded backoff
+and keeps source eligibility pending if mergeability is still its only blocker.
+Source eligibility can refresh through the existing workflow dispatch.
+Candidates fail attestation when a source remains unknown after the retry window.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential

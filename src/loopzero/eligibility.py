@@ -10,6 +10,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from time import sleep
 
 from loopzero import candidate, config, github, runners
 from loopzero.types import LoopZeroError
@@ -161,12 +162,22 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     return latest
 
 
+def _source_snapshot(repo: str, number: int, head: str) -> github.PR:
+    pr = github.pr_view(repo, number)
+    for delay in (2, 4, 8):
+        if pr.head_sha != head or github.mergeability_blocker(pr) != github.MERGEABILITY_PENDING:
+            break
+        sleep(delay)
+        pr = github.pr_view(repo, number)
+    return pr
+
+
 def evaluate(repo: str, number: int, head: str, base: str,
              publishers: tuple[str, ...]) -> github.Readiness:
     """Re-fetch reviews and threads; no local receipts, CI identity or source execution."""
     if not publishers or not re.fullmatch(r"[0-9a-f]{40}", head):
         raise LoopZeroError("eligibility requires trusted publishers and a full source SHA")
-    pr = github.pr_view(repo, number)
+    pr = _source_snapshot(repo, number, head)
     if pr.head_sha != head:
         return github.Readiness(False, ("source head changed; refresh eligibility",))
     if hold := github.merge_hold(pr.number, pr.labels):
@@ -183,8 +194,11 @@ def evaluate(repo: str, number: int, head: str, base: str,
     review = readiness_review(reviews, head, publishers, repo=repo, number=number, base_branch=base)
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head)
-    if github.pr_view(repo, number).head_sha != head:
+    current = github.pr_view(repo, number)
+    if current.head_sha != head:
         return github.Readiness(False, ("source head changed during eligibility refresh",))
+    if result.ready and (blocker := github.mergeability_blocker(current)):
+        return github.Readiness(False, (blocker,))
     return result
 
 

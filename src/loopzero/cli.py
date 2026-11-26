@@ -251,9 +251,6 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     return "delta", reviewed
 
 
-MERGEABILITY_PENDING = "GitHub is computing mergeability"
-
-
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
@@ -306,8 +303,6 @@ def _readiness(
                 f"review cap spent (primary + delta) and {head[:12]} has no eligible review. "
                 "Open a new PR for the changes that need review",
             ))
-    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
-        result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
     return result
 
 
@@ -1184,7 +1179,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if waiting:
         github.mark_ready(config.repo, pr.number)
         if args.wait is None:
-            pending = f"; {MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
+            pending = f"; {github.MERGEABILITY_PENDING}" if github.MERGEABILITY_PENDING in readiness.reasons else ""
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
@@ -1220,7 +1215,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
 def _draft_checks_waiting(
     config: Config, pr: github.PR, readiness: github.Readiness
 ) -> tuple[str, ...]:
-    reasons = set(readiness.reasons) - {MERGEABILITY_PENDING}
+    reasons = set(readiness.reasons) - {github.MERGEABILITY_PENDING}
     if not pr.is_draft or not reasons:
         return ()
     expected: dict[str, str] = {}
@@ -1243,7 +1238,7 @@ def _pending_checks(
     states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if allow_skipped else [])]
     waitable = {f"required check '{n}' {state}" for n in config.required_ci for state in states}
     waitable.update(readiness.waitable_failures)
-    waitable.add(MERGEABILITY_PENDING)
+    waitable.add(github.MERGEABILITY_PENDING)
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
@@ -1305,7 +1300,7 @@ def _wait_with_deadline(
 
 
 def _print_check_wait_timeout(pr: github.PR) -> None:
-    if pr.mergeable == "UNKNOWN":
+    if github.mergeability_blocker(pr) == github.MERGEABILITY_PENDING:
         print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
     else:
         print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
