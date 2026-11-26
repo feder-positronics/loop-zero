@@ -608,7 +608,7 @@ def pr_from_rest(data: object) -> PR:
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
-        raise _not_found(number, exc) from exc
+        raise GhError(("gh", "api"), f"malformed PR detail for #{number} ({exc!r})") from exc
 
 
 def _pr_detail(repo: str, number: int) -> tuple[PR, dict]:

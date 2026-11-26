@@ -176,8 +176,8 @@ def test_comment_writes_use_github_rest_api(monkeypatch, writer, body):
 
 
 @pytest.mark.parametrize("unsafe,diagnostic", [
-    ("file", "unsafe Mergify credential file permissions"),
-    ("directory", "unsafe Mergify credential directory permissions"),
+    ("file", r"unsafe Mergify credential file permissions: .*expected mode 0600"),
+    ("directory", r"unsafe Mergify credential directory permissions: .*expected mode 0700"),
     ("symlink", "unable to open Mergify credential file"),
 ])
 def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnostic):
@@ -202,6 +202,12 @@ def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnost
 def test_malformed_membership_never_confirms(request_log, field, value):
     request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "main", field: value})
     with pytest.raises(mergify.MergifyError):
+        mergify.membership("acme/widgets", 7, "main")
+
+
+def test_membership_names_a_different_queue(request_log):
+    request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "other"})
+    with pytest.raises(mergify.MergifyError, match="PR #7 is in Mergify queue 'other', expected 'main'"):
         mergify.membership("acme/widgets", 7, "main")
 
 

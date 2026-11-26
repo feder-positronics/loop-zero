@@ -54,7 +54,7 @@ def _credential(path: Path | None = None) -> str:
         ) from exc
     if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
             or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
-        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}")
+        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}; expected mode 0700 and user ownership")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
@@ -63,7 +63,7 @@ def _credential(path: Path | None = None) -> str:
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600):
         os.close(fd)
-        raise MergifyError(f"unsafe Mergify credential file permissions: {path}")
+        raise MergifyError(f"unsafe Mergify credential file permissions: {path}; expected mode 0600 and user ownership")
     with os.fdopen(fd, encoding="utf-8") as handle:
         token = handle.read().strip()
     if not token:
@@ -170,9 +170,11 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
     try:
         if type(data["number"]) is not int or data["number"] != number:
             raise ValueError("pull request number mismatch")
-        actual = str(data["queue_rule_name"])
+        actual = data["queue_rule_name"]
+        if not isinstance(actual, str) or not actual:
+            raise ValueError("invalid queue name")
         if actual != queue:
-            raise ValueError(f"expected queue {queue!r}, got {actual!r}")
+            raise MergifyError(f"PR #{number} is in Mergify queue {actual!r}, expected {queue!r}")
         if (not isinstance(data["queued_at"], str) or not data["queued_at"]
                 or type(data["position"]) is not int or data["position"] < 0):
             raise ValueError("invalid queue position or admission time")

@@ -677,7 +677,7 @@ def test_open_blocking_findings_missing_pr_is_gh_error(gh: FakeGh, data: dict) -
 
 def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
     gh.respond_pr_list([{"number": 7, "url": "u"}], branch="lz/x")
-    with pytest.raises(github.GhError, match="PR #7 not found or not accessible"):
+    with pytest.raises(github.GhError, match="malformed PR detail for #7"):
         github.pr_for_branch(REPO, "lz/x")
 
 
