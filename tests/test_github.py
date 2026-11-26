@@ -870,6 +870,23 @@ def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
     assert "after=C1" not in gh.argv(0) and "after=C1" in gh.argv(1)
 
 
+@pytest.mark.parametrize("cursors", [(None,), ("C1", "C1"), ("C1", "C2", "C1")])
+def test_open_blocking_findings_rejects_invalid_cursor(gh: FakeGh, cursors) -> None:
+    gh.respond("api graphql", *(threads_json(has_next=True, cursor=c) for c in cursors))
+    with pytest.raises(github.GhError, match="missing or repeated review thread cursor"):
+        github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
+    assert len(gh.calls) == len(cursors)
+
+
+def test_thread_reply_read_rejects_repeated_cursor(gh: FakeGh) -> None:
+    page = {"hasNextPage": True, "endCursor": "C1"}
+    gh.respond("api graphql", {"data": {"node": {"comments": {"pageInfo": page, "nodes": []}}}})
+    node = {"id": "T1", "comments": {"pageInfo": page}}
+    with pytest.raises(github.GhError, match="missing or repeated review thread cursor"):
+        github._has_thread_reply(node, "reply")
+    assert len(gh.calls) == 1 and "after=C1" in gh.argv(0)
+
+
 # --- checks --------------------------------------------------------------------------------
 
 
