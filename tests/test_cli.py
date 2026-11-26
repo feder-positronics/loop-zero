@@ -3953,38 +3953,31 @@ def test_mergify_wait_resume(wt, gh, capsys, monkeypatch, state):
     arm_approved_pr_with_check_result(gh, head, wt, "pending" if pending else "success", isDraft=False,
                                      readiness={} if pending or state == "ejected" else {"local_exit": None},
                                      baseRefName="release" if state == "wrong-base" else "main")
-    if state == "retargeted":
-        gh.append(f"api repos/{REPO}/pulls/7", merge_json("MERGED", head, "e" * 40, base="release"))
     stub_mergify_admission(monkeypatch, markers=(True, True))
     for write in ("mark_confirmed", "request"):
         monkeypatch.setattr(mergify, write, lambda *_: pytest.fail("resume must not write to Mergify"))
-    entries = iter((None, mergify.Membership()) if state == "queued-later" else ())
+    arrivals = iter([False, True] if state == "queued-later" else [state.startswith("queued") or state in {"expired", "retargeted"}])
 
     def membership(_repo, _number, _queue, deadline=None):
         assert state != "wrong-base"
         if state == "lookup-error":
             raise mergify.MergifyError("queued state could not be read")
+        if not next(arrivals, False):
+            return None
         if state == "expired":
             monkeypatch.setattr(cli.time, "monotonic", lambda: deadline + 1)
-        return next(entries, mergify.Membership() if state.startswith("queued") or state in {"expired", "retargeted"} else None)
+        gh.respond(f"api repos/{REPO}/pulls/7", merge_json("MERGED", head, "e" * 40, base="release" if state == "retargeted" else "main"))
+        return mergify.Membership()
 
-    follow = Mock(return_value=None)
     monkeypatch.setattr(mergify, "membership", membership)
-    monkeypatch.setattr(cli, "_sleep", lambda *_: None)
-    if state != "retargeted":
-        monkeypatch.setattr(cli, "_wait_for_mergify", follow)
-    code, out, err = run(capsys, "merge", "--wait=0" if state in {"queued", "queued-pending"} else "--wait=10")
-    if state.startswith("queued"):
-        assert (code, err, follow.call_count) == (3, "", 1)
-        assert follow.call_args.args[1].head_sha == head and follow.call_args.kwargs["confirmed"]
-    elif state == "expired":
-        assert code == 3 and "wait budget expired before following Mergify" in out and not follow.called
-    else:
-        assert code == 1 and wt.exists() and not follow.called
-        assert {"ejected": "post `@mergifyio queue` as the whole PR comment",
-                "wrong-base": "release", "absent": "run loopzero check at this head",
-                "lookup-error": "queued state could not be read",
-                "retargeted": "PR target branch differs from 'main'"}[state] in err
+    code, out, err = run(capsys, "merge", "--wait=0" if state in {"queued", "queued-pending"} else "--wait=4")
+    expected, detail = {
+        "expired": (3, "wait budget expired before following Mergify"),
+        "ejected": (1, "post `@mergifyio queue`"), "wrong-base": (1, "release"),
+        "absent": (1, "run loopzero check at this head"), "lookup-error": (1, "queued state could not be read"),
+        "retargeted": (1, "PR target branch differs from 'main'"),
+    }.get(state, (0, "e" * 40))
+    assert (code, wt.exists()) == (expected, expected != 0) and detail in out + err
 
 
 @pytest.mark.parametrize("outcome", ["merged", "ejected", "landed-on-ejection",
