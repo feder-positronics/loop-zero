@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .types import LoopZeroError
@@ -147,15 +147,11 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float) -
     return suffix
 
 
-def _output_mode(argv: list[str], preserve_newlines: bool, encoding: str | None) -> tuple[bool, str | None]:
-    # Git path records use filesystem bytes, including literal carriage returns.
-    if (
-        argv == ["git", "worktree", "list", "--porcelain", "-z"]
-        or argv[:2] == ["git", "rev-parse"]
-        and {"--git-dir", "--git-common-dir", "--absolute-git-dir"}.intersection(argv[2:])
-    ):
-        return True, encoding or sys.getfilesystemencoding()
-    return preserve_newlines, encoding
+def run_git_paths(argv: Sequence[str], *, cwd: Path, env_allowlist: Sequence[str], timeout: float) -> Completed:
+    """Read Git path records, removing the final LF from line-terminated output."""
+    done = run(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout,
+               preserve_newlines=True, encoding=sys.getfilesystemencoding())
+    return replace(done, stdout=done.stdout.removesuffix("\n"))
 
 
 def run(
@@ -182,10 +178,9 @@ def run(
     newlines on completion and retaining them for timeout diagnostics.
     Nonzero exit is reported in `Completed.exit_code`; callers decide whether to raise.
     """
-    argv = [str(part) for part in argv]
-    preserve_newlines, encoding = _output_mode(argv, preserve_newlines, encoding)
     if tail_chars is not None and (not merge_output or preserve_newlines or input is not None or tail_chars <= 0):
         raise ValueError("bounded tails require merged text output, no input and a positive length")
+    argv = [str(part) for part in argv]
     started = time.monotonic()
     raw_encoding = encoding or "utf-8"
     stdin = input.encode(raw_encoding) if preserve_newlines and input is not None else input

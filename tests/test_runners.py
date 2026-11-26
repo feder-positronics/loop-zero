@@ -612,7 +612,7 @@ def test_reviewer_does_not_bind_missing_auth_paths(repo, fake_bin, tmp_path, fak
     assert all(destination == SANDBOX_HOME for _, destination in _pairs(_bwrap_argv(fake_bwrap), "--bind"))
 
 
-@pytest.mark.parametrize("repo_name", ["repo", "repo\ncommon", "repo\rcommon"])
+@pytest.mark.parametrize("repo_name", ["repo", "repo\ncommon", "repo\rcommon"], ids=["ordinary", "newline", "carriage-return"])
 def test_linked_worktree_and_git_directory_are_read_only(
     git_repo: Path, tmp_path: Path, fake_bin: Path, monkeypatch, repo_name: str,
 ) -> None:

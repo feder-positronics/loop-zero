@@ -6,7 +6,6 @@ import errno
 import re
 import stat
 import subprocess
-import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -14,7 +13,7 @@ from pathlib import Path
 from select import select
 from uuid import uuid4
 
-from loopzero._proc import build_env, run
+from loopzero._proc import build_env, run, run_git_paths
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -62,14 +61,13 @@ def _git(
     preserve_whitespace: bool = False, preserve_newlines: bool = False,
 ) -> str:
     argv = ("git", *args)
-    done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-               preserve_newlines=preserve_newlines or preserve_whitespace,
-               encoding=sys.getfilesystemencoding() if preserve_whitespace else None)
+    if preserve_whitespace:
+        done = run_git_paths(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
+    else:
+        done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout, preserve_newlines=preserve_newlines)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
-    if preserve_newlines and not preserve_whitespace:
-        return done.stdout
-    return done.stdout.removesuffix("\n") if preserve_whitespace else done.stdout.strip()
+    return done.stdout if preserve_newlines or preserve_whitespace else done.stdout.strip()
 
 
 def branch_name(repo_root: Path, slug: str) -> str:
@@ -178,14 +176,15 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
 
 
 def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | None:
-    registered = _git(repo_root, "worktree", "list", "--porcelain", "-z").split("\0\0")
+    registered = _git(repo_root, "worktree", "list", "--porcelain", "-z", preserve_whitespace=True).split("\0\0")
     path_field = f"worktree {wt.resolve()}"
     entry = next((item for item in registered if item.startswith(f"{path_field}\0")), "")
     fields = entry.split("\0")
     if (len(fields) != 3 or fields[2] != f"branch refs/heads/{expected_branch}"
             or not (wt / ".git").is_file()):
         return None
-    if _git(wt, *_ABSOLUTE_COMMON_DIR) != _git(repo_root, *_ABSOLUTE_COMMON_DIR) or branch(wt) != expected_branch:
+    common = _git(repo_root, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True)
+    if _git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True) != common or branch(wt) != expected_branch:
         return None
     current_head = head(wt)
     if fields[1] != f"HEAD {current_head}" or is_dirty(wt):
@@ -225,8 +224,8 @@ def head(wt: Path) -> str:
 
 
 def is_linked_checkout(wt: Path) -> bool:
-    git_dir = _git(wt, "rev-parse", "--absolute-git-dir")
-    common_dir = _git(wt, *_ABSOLUTE_COMMON_DIR)
+    git_dir = _git(wt, "rev-parse", "--absolute-git-dir", preserve_whitespace=True)
+    common_dir = _git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True)
     return git_dir != common_dir
 
 
@@ -327,7 +326,7 @@ def cleanup(wt: Path, expected_head: str) -> None:
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
         _require_no_ignored_user_files(wt)
         _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
-    worktrees = _git(gd, f"--git-dir={gd}", "worktree", "list", "--porcelain", "-z")
+    worktrees = _git(gd, f"--git-dir={gd}", "worktree", "list", "--porcelain", "-z", preserve_whitespace=True)
     if f"branch {ref}" in worktrees.split("\0"):
         raise WorktreeError(f"local branch {name!r} is checked out in another worktree")
     try:
