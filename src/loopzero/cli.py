@@ -413,7 +413,7 @@ def _load_report(wt: Path) -> CheckReport | None:
                            settings_sha256=data.get("settings_sha256"))
     except FileNotFoundError:
         return None
-    except (OSError, TypeError, KeyError, ValueError) as exc:
+    except (TypeError, KeyError, ValueError) as exc:
         print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
         return None
 
@@ -594,13 +594,23 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_reuse_candidate(wt: Path, config: Config, head: str) -> CheckReport | None:
+    try:
+        return _current_check_report(wt, config, head)
+    except PermissionError:
+        path = wt / CHECKS_FILE
+        if not path.is_file() or not os.access(path.parent, os.W_OK | os.X_OK):
+            raise
+        return None
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     if not worktree.is_dirty(wt):
         head = worktree.head(wt)
-        report = _current_check_report(wt, config, head)
+        report = _check_reuse_candidate(wt, config, head)
         if (report is not None and sandbox.receipt_checkout_matches(config, wt, report)
                 and not worktree.is_dirty(wt) and worktree.head(wt) == head):
             _refresh_pr_checks(wt, config)
