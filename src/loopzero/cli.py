@@ -1868,7 +1868,8 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
 def cmd_resolve(args: argparse.Namespace) -> int:
     """List open blocking findings, or reply to one with what changed and resolve its thread."""
     wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
-    pr = _require_pr(config, worktree.branch(wt))
+    branch = worktree.branch(wt)
+    pr = _require_pr(config, branch)
     if pr.base_ref != config.base_branch:  # trusted publishers belong to the configured base
         raise CliError(f"PR #{pr.number} targets {pr.base_ref}, configured base is {config.base_branch}")
     publishers = config.review_publishers or (github.login(),)
@@ -1892,7 +1893,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             f"Then, if no findings remain, run `{retry}`."
         ) from exc
     if not remaining:
-        github.refresh_eligibility(config.repo, pr.number, config.base_branch)
+        github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers)
         print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
     return 0
 
