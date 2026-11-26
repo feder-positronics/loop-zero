@@ -56,6 +56,7 @@ PR_LIST_READ = pr_list_key().split()
 LOOKUP_CALLS = [BRANCH_READ, PR_LIST_READ, ["api", f"repos/{REPO}/pulls/7"]]
 HISTORY_CALLS = [BRANCH_READ, branch_history_key().split()]
 LOGIN = "lz-bot"
+PUBLISHERS = f'review_publishers = ["{LOGIN}"]'
 WORKFLOW = f"""
 [repo]
 name = "{REPO}"
@@ -68,6 +69,7 @@ required_ci = ["checks"]
 [delivery]
 merge = "squash"
 reviewers = ["claude", "codex"]
+{PUBLISHERS}
 """
 
 
@@ -1907,8 +1909,8 @@ def test_review_publisher_check_uses_app_identity(
     publisher: str, allowed: bool,
 ) -> None:
     app_token_helper()
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
-    git(wt, "commit", "-qam", "configure publisher")
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]'))
+    git(wt, "commit", "--allow-empty", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
@@ -1928,7 +1930,7 @@ def test_review_reminted_app_token_keeps_publisher(
     boot, run_review = [1_000_000.0], cli._run_review
     monkeypatch.setattr(github, "_app_token_clock", lambda: boot[0])
     monkeypatch.setattr(cli, "_run_review", lambda *a, **k: (run_review(*a, **k), boot.append(boot.pop() + 3601))[0])
-    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["app[bot]"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, 'review_publishers = ["app[bot]"]'))
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     head = prepare_review(wt, gh, fake_bin, post_id=3)
@@ -1948,7 +1950,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     monkeypatch.setattr(github, "app_token", lambda: tokens[0])  # flips after the publisher check
     monkeypatch.setattr(github, "login", lambda token=None, f=github.login: (
         f(token), len(tokens) > 1 and tokens.pop(0))[0])
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]'))
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     prepare_review(wt, gh, fake_bin, post_id=3)
@@ -1964,7 +1966,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
 
 @pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])
 def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher) -> None:
-    commit_file(wt, "workflow.toml", WORKFLOW + '\nreview_publishers = ["lz-bot", "other"]\n', "configure trusted publishers")
+    commit_file(wt, "workflow.toml", WORKFLOW.replace(PUBLISHERS, 'review_publishers = ["lz-bot", "other"]'), "configure trusted publishers")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     head = head_of(wt)
     arm_pr(gh, head)
@@ -2302,6 +2304,23 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> No
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
+@pytest.mark.parametrize("command,publishers", [
+    ("ready", ""), ("merge", ""), ("ready", "review_publishers = []"),
+    ("merge", "review_publishers = []"), ("ready", PUBLISHERS),
+])
+def test_delivery_requires_trusted_review_publishers(wt, gh, capsys, head, command, publishers):
+    if publishers != PUBLISHERS:
+        arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    publish_workflow(wt, WORKFLOW.replace(PUBLISHERS, publishers) + "\n")
+    if publishers == PUBLISHERS:
+        arm_approved_ready_pr(gh, head, wt, isDraft=False)
+        expect_cli(capsys, 0, command, stderr="")
+    else:
+        code, _, err = run(capsys, command)
+        assert code == 1 and not gh.calls
+        assert "origin/main:workflow.toml: delivery.review_publishers must list the intended publisher logins" in err
+
+
 @pytest.mark.parametrize("retargeted,reason", [
     (True, "PR targets release, configured base is main"),
     (False, f"required check 'checks' is failure{FAILED_CHECK_HINT}"),
@@ -2554,7 +2573,7 @@ def test_hold_blocks_ready_and_merge(wt, gh, capsys, monkeypatch, command, check
 def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monkeypatch, capsys):
     trusted = tmp_path / "trusted"
     trusted.mkdir()
-    (trusted / "workflow.toml").write_text(WORKFLOW + f'review_publishers = ["{LOGIN}"]\n')
+    (trusted / "workflow.toml").write_text(WORKFLOW)
     event = trusted / "event.json"
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
@@ -4172,7 +4191,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
 
 @pytest.mark.parametrize("publisher", ["stranger", "lz-bot"])
 def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]'))
     arm_approved_pr_with_check_result(
         gh, head, wt, "success", review_login=publisher, isDraft=False
     )

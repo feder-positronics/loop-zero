@@ -135,6 +135,12 @@ def _load_config(
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
     config = config_mod.load_trusted(root, previous=previous)
+    if (args.command in {"ready", "merge"} and not getattr(args, "cancel", False)
+            and not config.review_publishers):
+        raise config_mod.ConfigError(
+            f"origin/{config.base_branch}:workflow.toml: delivery.review_publishers must list "
+            "the intended publisher logins"
+        )
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
