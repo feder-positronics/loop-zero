@@ -1678,9 +1678,9 @@ def test_review_reminted_app_token_keeps_publisher(
     helper.write_text(f"#!/bin/sh\necho called >> {counter}\n{fail}echo synthetic-token-$(wc -l < {counter})\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    wall, run_review = [1_000_000.0], cli._run_review
-    monkeypatch.setattr(github.time, "time", lambda: wall[0])
-    monkeypatch.setattr(cli, "_run_review", lambda *a, **k: (run_review(*a, **k), wall.append(wall.pop() + 3601))[0])
+    boot, run_review = [1_000_000.0], cli._run_review
+    monkeypatch.setattr(github, "_app_token_clock", lambda: boot[0])
+    monkeypatch.setattr(cli, "_run_review", lambda *a, **k: (run_review(*a, **k), boot.append(boot.pop() + 3601))[0])
     (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["app[bot]"]\n')
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
