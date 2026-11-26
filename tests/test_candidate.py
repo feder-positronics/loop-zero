@@ -264,7 +264,7 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
     def attest(
         *, head=candidate_sha, main_head=main, policy=lambda _n, _s: None,
         main_after=None, extra_source=None, lineage="vanished", run=attest_candidate,
-        held_source=None,
+        held_source=None, base_branch="main",
     ):
         candidate_event = event(head)
         values = payloads(candidate_event)
@@ -286,23 +286,29 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
             )
             for endpoint in ("commits", "files"):
                 values[f"/repos/owner/repo/pulls/{number}/{endpoint}?per_page=100&page=1"] = []
+        if base_branch != "main":
+            for number in (102, 900):
+                values[f"/repos/owner/repo/pulls/{number}"]["base"]["ref"] = base_branch
         reads = cycle([main_head, main_after or main_head])
 
         def get(path):
-            if not path.endswith("/git/ref/heads/main"):
+            if not path.endswith(f"/git/ref/heads/{base_branch}"):
                 return deepcopy(values[path])
             return {"object": {"sha": sha}} if (sha := next(reads)) else {}
 
+        if base_branch != "main":
+            run = partial(run, base_branch=base_branch)
         return run_attestation(candidate_event, github_get=get, status_reads=[queue],
                                source_policy=policy, run=run)
 
     return attest, git, commit, base, parent, source, candidate_sha
 
 
-def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate):
+@pytest.mark.parametrize("base_branch", ["main", "trunk"])
+def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate, base_branch):
     attest, _, _, _, _, source, _ = tree_candidate
     seen = []
-    assert attest(policy=lambda n, _: seen.append(n)) == expected_sources((102, source))
+    assert attest(base_branch=base_branch, policy=lambda n, _: seen.append(n)) == expected_sources((102, source))
     assert seen == [102]
 
 

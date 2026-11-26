@@ -22,7 +22,6 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from functools import partial, wraps
 from pathlib import Path
 
@@ -199,11 +198,11 @@ def _require_pushed(pr: github.PR, head: str) -> None:
 # --------------------------------------------------------------------------- review markers
 
 
-def _rest_rows(endpoint: str, what: str) -> list[dict]:
+def _rest_rows(endpoint: str, what: str, **kwargs) -> list[dict]:
     """Every row of a REST list, oldest first, following pages until a short one."""
     rows: list[dict] = []
     for page in range(1, 101):
-        batch = github.api_get(f"{endpoint}?per_page={github.PAGE}&page={page}")
+        batch = github.api_get(f"{endpoint}?per_page={github.PAGE}&page={page}", **kwargs)
         if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
             raise CliError(f"invalid GitHub {what} response")
         rows += batch
@@ -212,8 +211,8 @@ def _rest_rows(endpoint: str, what: str) -> list[dict]:
     raise CliError(f"GitHub {what} pagination limit exceeded")
 
 
-def _pr_reviews(repo: str, number: int) -> list[dict]:
-    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews")
+def _pr_reviews(repo: str, number: int, **kwargs) -> list[dict]:
+    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews", **kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -317,26 +316,29 @@ def _readiness(
 ) -> github.Readiness:
     if problem := _readiness_precheck(wt, config, pr, head, diagnostics):
         return github.Readiness(False, (problem,))
-    if reviews is None:
-        reviews = _pr_reviews(config.repo, pr.number)
+    dates: list[str] = []
+    reviews = (_pr_reviews(config.repo, pr.number, **({"dates": dates} if workflow_wait else {}))
+               if reviews is None else reviews)
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
     )
-    review_at = review.get("submitted_at") if review else None
-    # GitHub's review timestamp is in UTC and predates this process.
-    review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
-                  .replace(tzinfo=UTC).timestamp()) if review_at else None
+    review_at = github.readiness_timestamp(review.get("submitted_at")) if review else None
+    server = github.response_date(dates[-1]) if dates else None
+    now = server.timestamp() if server else time.time()
+    review_age = now - review_at[0].timestamp() if review_at else None
+    if server and review_age is not None and -1 < review_age < 0:
+        review_age = 0  # HTTP Date rounds down to the second.
     result = github.readiness(
         config.repo, pr, config.base_branch, config.required_ci,
         head if review else None, review_at=review_at,
         ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
-        # Allow skew only for verdicts GitHub timestamps establish are stale.
+        # Allow host clock skew only when GitHub did not supply a usable Date.
         stale_verdict_grace=(
             workflow_wait and review_age is not None
-            and -MAX_REVIEW_CLOCK_SKEW <= review_age < STALE_VERDICT_GRACE
+            and (0 if server else -MAX_REVIEW_CLOCK_SKEW) <= review_age < STALE_VERDICT_GRACE
         ),
         publishers=publishers,
     )
@@ -419,7 +421,7 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
         return
 
 
-def _save_report(wt: Path, report: CheckReport) -> str | None:
+def _save_report(wt: Path, report: CheckReport, *, checkpoint_checks: tuple[str, ...] | None = None) -> str | None:
     """Publish the receipt or return the current HEAD if the result is stale."""
     results = [
         {k: v for k, v in dataclasses.asdict(result).items()
@@ -429,8 +431,15 @@ def _save_report(wt: Path, report: CheckReport) -> str | None:
     payload = {"head": report.head, "dirty": report.dirty, "results": results}
     if report.settings_sha256 is not None:
         payload["settings_sha256"] = report.settings_sha256
+    def preserve_pass() -> bool:
+        saved = _load_report(wt)
+        return (saved is not None and saved.ok and not saved.dirty and saved.head == report.head
+                and saved.settings_sha256 == report.settings_sha256
+                and tuple(result.command for result in saved.results) == checkpoint_checks)
+
     return worktree.write_local_state(
         wt, CHECKS_FILE.name, json.dumps(payload, indent=2) + "\n", expected_head=report.head,
+        preserve=preserve_pass if checkpoint_checks is not None else None,
     )
 
 
@@ -654,7 +663,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     report = sandbox.run_checks(
         config, wt, progress=lambda command: print(f"running: {github.redact_credentials(command)}", flush=True),
-        status=lambda message: print(message, flush=True), checkpoint=lambda partial: _save_report(wt, partial),
+        status=lambda message: print(message, flush=True),
+        checkpoint=lambda partial: _save_report(wt, partial, checkpoint_checks=config.checks),
         workflow=args.config or f"origin/{config.base_branch}:workflow.toml",
     )
     shortened = False
