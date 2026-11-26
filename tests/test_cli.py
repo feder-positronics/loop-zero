@@ -55,6 +55,7 @@ PR_LIST_READ = pr_list_key().split()
 LOOKUP_CALLS = [BRANCH_READ, PR_LIST_READ, ["api", f"repos/{REPO}/pulls/7"]]
 HISTORY_CALLS = [BRANCH_READ, branch_history_key().split()]
 LOGIN = "lz-bot"
+PUBLISHERS = f'review_publishers = ["{LOGIN}"]'
 WORKFLOW = f"""
 [repo]
 name = "{REPO}"
@@ -67,6 +68,7 @@ required_ci = ["checks"]
 [delivery]
 merge = "squash"
 reviewers = ["claude", "codex"]
+{PUBLISHERS}
 """
 
 
@@ -270,7 +272,7 @@ def arm_readiness(
         {"name": "checks", "status": "completed", "conclusion": conclusion}])
     gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [])
     if local_exit is not None:
-        config = cli._load_config(SimpleNamespace(config=None, command="ready"), wt, pin_checks=True)
+        config = cli.config_mod.load_trusted(wt)
         results = tuple(CheckResult(command, local_exit, 0.1, "") for command in config.checks)
         cli._save_report(
             wt, CheckReport(head, dirty, results, cli.sandbox.settings_fingerprint(config, wt))
@@ -1928,7 +1930,7 @@ def test_review_publisher_check_uses_app_identity(
     helper.write_text("#!/bin/sh\necho synthetic-app-token\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]\n'))
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     prepare_review(wt, gh, fake_bin, post_id=3)
@@ -1952,7 +1954,7 @@ def test_review_reminted_app_token_keeps_publisher(
     boot, run_review = [1_000_000.0], cli._run_review
     monkeypatch.setattr(github, "_app_token_clock", lambda: boot[0])
     monkeypatch.setattr(cli, "_run_review", lambda *a, **k: (run_review(*a, **k), boot.append(boot.pop() + 3601))[0])
-    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["app[bot]"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, 'review_publishers = ["app[bot]"]\n'))
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     head = prepare_review(wt, gh, fake_bin, post_id=3)
@@ -1972,7 +1974,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     monkeypatch.setattr(github, "app_token", lambda: tokens[0])  # flips after the publisher check
     monkeypatch.setattr(github, "login", lambda token=None, f=github.login: (
         f(token), len(tokens) > 1 and tokens.pop(0))[0])
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]\n'))
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     prepare_review(wt, gh, fake_bin, post_id=3)
@@ -1988,7 +1990,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
 
 @pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])
 def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher) -> None:
-    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["lz-bot", "other"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, 'review_publishers = ["lz-bot", "other"]\n'))
     git(wt, "add", "workflow.toml")
     git(wt, "commit", "-qm", "configure trusted publishers")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
@@ -2374,6 +2376,47 @@ def test_ready_uses_base_required_ci_when_worktree_empties_it(
     assert out == "not ready: required check 'checks' is failure\n"
 
 
+@pytest.mark.parametrize("publishers", ["", "review_publishers = []", 'review_publishers = ["app[bot]"]'])
+def test_ready_requires_explicit_review_publishers(wt, gh, capsys, head, publishers):
+    publish_workflow(wt, WORKFLOW.replace(PUBLISHERS, publishers))
+    login = "app[bot]" if "app[bot]" in publishers else LOGIN
+    arm_approved_pr_with_check_result(gh, head, wt, "success", review_login=login, isDraft=False)
+
+    if login == "app[bot]":
+        assert run(capsys, "ready")[0] == 0
+    else:
+        for command in ("ready", "merge"):
+            code, _, err = run(capsys, command)
+            assert code == 1
+            assert "origin/main:workflow.toml: delivery.review_publishers" in err
+            assert "list the intended publisher logins" in err
+
+
+@pytest.mark.parametrize("required_ci", ["", "required_ci = []", 'required_ci = ["checks"]'])
+def test_ready_requires_explicit_ci_policy(wt, gh, capsys, head, required_ci):
+    if required_ci != 'required_ci = ["checks"]':
+        publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', required_ci))
+    if not required_ci:
+        gh.respond_pr_list([])
+        code, out, err = run(capsys, "status")
+        assert code == 0 and "pr:       none" in out and not err
+    arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
+
+    if not required_ci:
+        gh.fail(reviews_key(), "HTTP 503 reviews unavailable")
+        for command in ("ready", "merge", "status"):
+            code, _, err = run(capsys, command)
+            assert code == 1
+            assert "origin/main:workflow.toml: checks.required_ci" in err
+            assert "required_ci = []" in err
+    else:
+        code, out, _ = run(capsys, "ready")
+        if required_ci.endswith("[]"):
+            assert code == 0
+        else:
+            assert code == 1 and "required check 'checks' is failure" in out
+
+
 def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
@@ -2635,7 +2678,7 @@ def test_hold_blocks_ready_and_merge(wt, gh, capsys, monkeypatch, command, check
 def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monkeypatch, capsys):
     trusted = tmp_path / "trusted"
     trusted.mkdir()
-    (trusted / "workflow.toml").write_text(WORKFLOW + f'review_publishers = ["{LOGIN}"]\n')
+    (trusted / "workflow.toml").write_text(WORKFLOW)
     event = trusted / "event.json"
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
@@ -3240,7 +3283,7 @@ def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> Non
     code, out, _ = run(capsys, "ready")
     out = without_accepted_receipt(out)
     assert code == 1 and out == "not ready: no review recorded for the current head\n"
-    assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "graphql"]) == 2
+    assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "graphql"]) == 1
 
 
 @pytest.mark.parametrize("state", ["DISMISSED", "PENDING", "COMMENTED"])
@@ -3343,6 +3386,17 @@ def test_merge_wait_waits_out_a_pending_check_then_merges(
     gh.append(f"api repos/{REPO}/pulls/7", *polls)
     gh.respond("api -X", "")
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
+
+    if already_landed:
+        pr_view = cli.github.pr_view
+
+        def view_after_policy_change(*args, **kwargs):
+            pr = pr_view(*args, **kwargs)
+            if pr.state == "MERGED":
+                publish_workflow(wt, WORKFLOW.replace(PUBLISHERS, ""))
+            return pr
+
+        monkeypatch.setattr(cli.github, "pr_view", view_after_policy_change)
 
     code, out, err = run(capsys, "merge", "--wait")
 
@@ -4379,7 +4433,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     gh.respond("api graphql", threads_json())
     assert eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is expected
     cfg = wt / ".loopzero" / "hosted.toml"
-    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    cfg.write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{LOGIN}"]\n'))
     gh.respond(f"api repos/{REPO}/statuses/{head}", {})
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head,
                              "--publish"]) == (0 if expected else 1)
@@ -4391,7 +4445,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
 
 @pytest.mark.parametrize("publisher", ["stranger", "lz-bot"])
 def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]\n'))
     arm_approved_pr_with_check_result(
         gh, head, wt, "success", review_login=publisher, isDraft=False
     )
@@ -4520,7 +4574,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
-        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
+        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
     if outcome in {"merged", "already_merged", "worktree_removed"}:
         assert code == 0 and "e" * 40 in out and not wt.exists(), err
@@ -4868,6 +4922,7 @@ def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
 
 
 def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head):
+    publish_workflow(wt, WORKFLOW.replace(PUBLISHERS, ""))
     (wt / ".loopzero" / "review-existing.json").write_text("{broken")
     arm_pr(gh, head, isDraft=False, state="MERGED")
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="c" * 40))

@@ -46,6 +46,7 @@ class Config:
     review: dict[str, ReviewConfig] = field(default_factory=dict)
     mergify_queue: str | None = None
     inputs: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    readiness_error: str = field(default="", compare=False, repr=False)
     trusted_base_revision: str | None = field(default=None, compare=False)
 
 

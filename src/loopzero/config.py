@@ -70,7 +70,7 @@ def load(path: Path | str) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     try:
-        return _build(data)
+        return _build(data, path)
     except ConfigError as exc:
         raise ConfigError(f"{path}: {exc}") from None
 
@@ -110,7 +110,7 @@ def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{source}: invalid TOML: {exc}. {hint}") from None
     try:
-        return _build(data), revision
+        return _build(data, source), revision
     except ConfigError as exc:
         raise ConfigError(f"{source}: {exc}. {hint}") from None
 
@@ -138,7 +138,21 @@ def load_trusted(worktree: Path) -> Config:
     return replace(base, trusted_base_revision=revision)
 
 
-def _build(data: dict[str, Any]) -> Config:
+def require_readiness(config: Config) -> None:
+    if config.readiness_error:
+        raise ConfigError(config.readiness_error)
+
+
+def _readiness_error(source: str | Path, publishers: tuple[str, ...], checks: dict[str, Any]) -> str:
+    if not publishers:
+        return f"{source}: delivery.review_publishers must list the intended publisher logins"
+    if "required_ci" not in checks:
+        return (f"{source}: checks.required_ci must list the required contexts or explicitly set "
+                "required_ci = [] if none are required")
+    return ""
+
+
+def _build(data: dict[str, Any], source: str | Path) -> Config:
     _reject_unknown("top level", data, _SECTIONS)
     for section, keys in _SECTIONS.items():
         table = data.get(section, {})
@@ -232,6 +246,7 @@ def _build(data: dict[str, Any]) -> Config:
     reviewer_ro_paths = _host_paths(
         "delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])
     )
+    publishers = _strings("delivery.review_publishers", delivery.get("review_publishers", []))
     return Config(
         repo=name,
         base_branch=base,
@@ -240,8 +255,8 @@ def _build(data: dict[str, Any]) -> Config:
         merge_strategy=merge,
         mergify_queue=mergify_queue,
         reviewers=reviewers,
-        review_publishers=_strings("delivery.review_publishers",
-                                   delivery.get("review_publishers", [])),
+        review_publishers=publishers,
+        readiness_error=_readiness_error(source, publishers, checks),
         review=review,
         reviewer_ro_paths=reviewer_ro_paths,
         review_chunk_bytes=review_chunk_bytes,

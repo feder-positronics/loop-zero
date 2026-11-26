@@ -158,6 +158,9 @@ def test_recovery_requires_exact_live_publication(
 def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
     wt, gh, fake_bin, monkeypatch, capsys, change,
 ):
+    if change == "login":
+        publishers = f'review_publishers = ["{LOGIN}", "other-login"]'
+        support.publish_workflow(wt, support.WORKFLOW.replace(support.PUBLISHERS, publishers))
     head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5, interrupted=True)
     assert run(capsys, "review")[0] == 130
     path = wt / ".loopzero" / f"review-{head[:12]}-delta.json"

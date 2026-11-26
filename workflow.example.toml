@@ -54,7 +54,7 @@ merge = "squash"
 # mergify_queue = "main"
 # Reviewer preference, in order. `loopzero review` picks the first family
 # that is installed and differs from the author's family when that is known.
-# Hosted eligibility requires explicit GitHub publisher logins from trusted base config.
+# Readiness, merge and hosted eligibility require explicit GitHub publisher logins.
 # review_publishers = ["your-github-login"]
 reviewers = ["claude", "codex"]
 # Optional absolute paths for reviewer binaries and runtimes, pinned from the

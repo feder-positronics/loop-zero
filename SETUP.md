@@ -140,8 +140,9 @@ Point it at the GitHub repository you set in `[repo] name`. Use
 if you already configured it under a different name.
 
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
-repository root, set `[repo] name`, and commit your initial `[checks]` commands
-to the base branch before starting your first task. If the base has a
+repository root. Set `repo.name`, `checks.commands`, `checks.required_ci` and
+`delivery.review_publishers` before pushing the workflow to the base branch.
+Set `checks.required_ci = []` only when the repository requires no hosted checks. If the base has a
 `workflow.toml`, `loopzero check` uses its checks configuration even when
 `[checks]` is absent. To try task-side changes explicitly, run
 `loopzero --config workflow.toml check` from the task worktree. Then:
@@ -484,9 +485,7 @@ helper is unavailable. Other GitHub writes and git push use the operator identit
 every repository loop-zero delivers: reads through the app do not fall back on 404.
 
 Set `[delivery].review_publishers` to the GitHub logins that publish model reviews.
-Local readiness reads that list from the base configuration (legacy installations
-without it use the local GitHub login). Hosted evaluation requires an explicit list;
-its CI token's login is never a reviewer identity.
+Local readiness and hosted evaluation require that list in the trusted workflow.
 
 Codex evidence v1 can include configured settings. For that shape the hosted
 reader needs [07ad5643 (#344)](https://github.com/feder-positronics/loop-zero/commit/07ad5643b3fc32541eee3c9f88ff5f4e917b7de7)
