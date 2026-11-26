@@ -37,7 +37,7 @@ adopts it ([The six steps](../core/CONTRACT.md#the-six-steps)).
 flowchart TD
     A["Primary review"] -->|approved| Z["Done: continue to ready"]
     A -->|fixes needed| B["Make all fixes in one batch"]
-    B --> C["One review of only the new changes<br/><sub>delta, at most one</sub>"]
+    B --> C["One review of only the new changes<br/><sub>delta</sub>"]
     C -->|approved| Z
     C -->|findings remain| D["PR owner fixes or rejects findings with reasons"]
     D -->|ready| Z
