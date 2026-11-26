@@ -725,10 +725,10 @@ def test_check_reuses_checkpoint_after_interruption(wt, gh, capsys, monkeypatch,
             raise KeyboardInterrupt
         return CheckResult(command, 0, 0.0, "")
 
-    def check_git(config, path, *args):
+    def check_git(config, path, *args, **kwargs):
         if interrupt and len(calls) == 2 and args == ("rev-parse", "HEAD"):
             raise KeyboardInterrupt
-        return original_git(config, path, *args)
+        return original_git(config, path, *args, **kwargs)
 
     monkeypatch.setattr(cli, "_context", context)
     monkeypatch.setattr(cli.sandbox, "_dispatch_one", dispatch)
