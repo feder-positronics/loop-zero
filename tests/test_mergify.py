@@ -89,7 +89,7 @@ def test_dequeue_posts_to_documented_endpoint(request_log):
 def queue_api(monkeypatch):
     def github_config(text, *, default="main", changed=False, file_overrides=None, queues=True, inplace=True):
         rows = [{"name": "main", "config": {"allow_inplace_checks": inplace}}] if queues else []
-        monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix: (
+        monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix, *_: (
             {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status")
             else {"configuration": rows}
         ))
@@ -206,17 +206,14 @@ def test_hosted_import_does_not_load_yaml():
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("failure,expected_sleeps", [
-    ("http503", [2.0]), ("dropped_read", [2.0]), ("truncated", [2.0]),
-    ("DNS lookup failed", [2.0, 5.0]),
-    (ssl.SSLCertVerificationError("certificate verification failed"), []),
+@pytest.mark.parametrize("failure,status,budget,wait", [
+    ("http", 503, None, 2), ("reset", None, None, 2), ("truncated", None, None, 2),
+    ("http", 429, 100, 40), ("http", 429, None, None), ("http", 403, 20, None), ("http", 429, 20, None),
+    ("DNS lookup failed", None, None, 2), (ssl.SSLCertVerificationError("certificate verification failed"), None, None, None),
 ])
-def test_api_get_retries_and_classifies_failures(monkeypatch, failure, expected_sleeps):
+def test_api_get_retries_and_classifies_failures(monkeypatch, failure, status, budget, wait):
     calls, sleeps = [], []
-    body_errors = {
-        "dropped_read": ConnectionResetError(),
-        "truncated": http.client.IncompleteRead(b"{"),
-    }
+    body_errors = {"reset": ConnectionResetError(), "truncated": http.client.IncompleteRead(b"{")}
 
     class Body(io.BytesIO):
         def read(self, *args):
@@ -225,24 +222,27 @@ def test_api_get_retries_and_classifies_failures(monkeypatch, failure, expected_
             return super().read(*args)
 
     def fake_open(request):
-        calls.append(request.get_method())
-        if failure == "http503" and len(calls) == 1:
-            raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
-        if failure != "http503" and failure not in body_errors:
+        calls.append((request.get_method(), sum(sleeps)))
+        if status in {403, 429} or (status == 503 and len(calls) == 1):
+            raise urllib.error.HTTPError(request.full_url, status, "x", {"Retry-After": "40"} if status < 500 else {}, None)
+        if not status and failure not in body_errors:
             raise urllib.error.URLError(failure)
         return Body(b"{}")
 
     monkeypatch.setattr(mergify, "_open", fake_open)
     monkeypatch.setattr(mergify, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(mergify, "_credential", lambda: "k")
-    if failure == "http503" or failure in body_errors:
+    if status in {403, 429}:
+        with pytest.raises(mergify.MergifyError, match="Retry-After: 40s" + ("; retry delay exceeds" if wait is None else "")):
+            mergify.api_get("acme/widgets", "/merge-queue/status", None if budget is None else mergify.time.monotonic() + budget)
+    elif status == 503 or failure in body_errors:
         assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
-        assert calls == ["GET", "GET"]
     else:
         with pytest.raises(mergify.MergifyError, match="transport failed") as info:
             mergify.api_get("acme/widgets", "/merge-queue/status")
         assert str(failure) in str(info.value)
-    assert sleeps == expected_sleeps
+    assert calls == ([("GET", 0)] if wait is None else [("GET", 0), ("GET", wait)])
+    assert sleeps == ([] if wait is None else [wait])
 
 
 @pytest.mark.parametrize("phase", ["headers", "body", "cleanup"])
