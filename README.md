@@ -31,9 +31,11 @@ ownership and the contributor routine that keeps documentation current.
 
 For a picture of the whole flow, see the [workflow diagrams](docs/WORKFLOW.md).
 
-`loopzero status` shows GitHub's draft state on its `pr:` line and the
-delivery readiness verdict on its `ready:` line; only `ready: yes` permits
-merging, and the command can exit 0 with `ready: no`.
+`loopzero status` shows GitHub's draft state on its `pr:` line and, when a PR
+exists, the local readiness verdict that `loopzero merge` uses on its `ready:`
+line; it can exit 0 with `ready: no`. Queueing directly in GitHub with a red
+local check receipt is covered only by the contract's
+[owner queue route](core/CONTRACT.md#blockers).
 It requires authenticated GitHub access even before a PR exists.
 `loopzero resolve` lists the open blocking findings with their ids;
 `loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
