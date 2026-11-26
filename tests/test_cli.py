@@ -4696,3 +4696,44 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
     assert "unverified" not in draft
     assert f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0" in draft
     assert "Manual validation evidence." in draft
+
+
+@pytest.mark.parametrize("command", ["ready", "merge", "resume"])
+def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, command):
+    # PR #1230 fit its fork point at 7,482. Current main added 26 independent lines.
+    checker = Path(__file__).resolve().parents[1] / "scripts/size_budget.sh"
+    (repo / "scripts").mkdir()
+    shutil.copyfile(checker, repo / "scripts/size_budget.sh")
+    policy = (repo / "workflow.toml").read_text().replace(
+        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
+    ).replace('commands = ["echo ok", "test -f README.md"]', 'commands = ["scripts/size_budget.sh"]')
+    git(repo, "add", "scripts")
+    publish_workflow(wt, policy)
+    fork = head_of(repo)
+    git(wt, "merge", "--no-edit", fork)
+    for checkout, name, lines in [(wt, "feature", 7482), (repo, "upstream", 26)]:
+        folder = checkout / "src/loopzero"
+        folder.mkdir(parents=True)
+        (folder / f"{name}.py").write_text("# counted line\n" * lines)
+        git(checkout, "add", "src")
+        git(checkout, "commit", "-qm", name)
+    # Deliberately leave origin/main stale in the source repository.
+    git(repo, "push", "--no-verify", str(repo.parent / "origin.git"), "main")
+    git(repo, "update-ref", "refs/remotes/origin/main", fork)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False)
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (command == "resume", False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("must not request admission"))
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+
+    args = ("merge", "--wait=0") if command == "resume" else (command,)
+    code, out, err = run(capsys, *args)
+
+    if command == "resume":
+        assert code == 3 and "size budget" not in out + err
+    else:
+        assert code == 1 and "src=7508 (base 26, delta 7482, cap 7500" in out + err
+    assert head_of(wt) == head
+    assert not (wt / "src/loopzero/upstream.py").exists()
