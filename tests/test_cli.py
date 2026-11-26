@@ -3147,7 +3147,7 @@ def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> Non
     code, out, _ = run(capsys, "ready")
     out = without_accepted_receipt(out)
     assert code == 1 and out == "not ready: no review recorded for the current head\n"
-    assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "graphql"]) == 2
+    assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "graphql"]) == 1
 
 
 @pytest.mark.parametrize("state", ["DISMISSED", "PENDING", "COMMENTED"])
@@ -4391,7 +4391,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
-        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
+        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
     if outcome in {"merged", "already_merged", "worktree_removed"}:
         assert code == 0 and "e" * 40 in out and not wt.exists(), err
