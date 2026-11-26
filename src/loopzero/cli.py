@@ -179,8 +179,8 @@ def _require_task_branch(config: Config, branch: str) -> None:
         raise CliError(f"branch {branch!r} is the configured base; use a task branch")
 
 
-def _require_pr(config: Config, branch: str, *, allow_merged: bool = False) -> github.PR:
-    pr = github.pr_for_branch(config.repo, branch)
+def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, list_only: bool = False) -> github.PR:
+    pr = github.pr_for_branch(config.repo, branch, list_only=list_only)
     if pr is None:
         raise CliError(f"no pull request for {branch}; run `loopzero pr` first")
     if pr.state != "OPEN" and not (allow_merged and pr.state == "MERGED"):
@@ -304,12 +304,18 @@ def _review_cap_reason(config: Config, pr: github.PR, head: str, reviews: list[d
 MERGEABILITY_PENDING = "GitHub is computing mergeability"
 
 
+def _readiness_precheck(wt: Path, config: Config, pr: github.PR, head: str, diagnostics: bool) -> str | None:
+    return github.merge_hold(pr.number, pr.labels) or (
+        None if diagnostics else _check_report_problem(_load_report(wt), config, head)
+    )
+
+
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
-    *, workflow_wait: bool = False, announce_receipt: bool = False,
+    *, workflow_wait: bool = False, announce_receipt: bool = False, diagnostics: bool = False,
 ) -> github.Readiness:
-    if hold := github.merge_hold(pr.number, pr.labels):
-        return github.Readiness(False, (hold,))
+    if problem := _readiness_precheck(wt, config, pr, head, diagnostics):
+        return github.Readiness(False, (problem,))
     if reviews is None:
         reviews = _pr_reviews(config.repo, pr.number)
     publishers = config.review_publishers or (github.login(),)
@@ -333,12 +339,6 @@ def _readiness(
         ),
         publishers=publishers,
     )
-    report = _load_report(wt)
-    receipt_problem = _check_report_problem(report, config, head)
-    if receipt_problem:
-        result = github.Readiness(False, (*result.reasons, receipt_problem))
-    elif announce_receipt:
-        _print_receipt(wt, report, "accepted")
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
         behind = github.behind_reason(pr, head if review else None)
         reasons = result.reasons
@@ -356,6 +356,12 @@ def _readiness(
             ))
     if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
         result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
+    report = _load_report(wt)
+    receipt_problem = _check_report_problem(report, config, head)
+    if receipt_problem:
+        result = github.Readiness(False, (*result.reasons, receipt_problem))
+    elif announce_receipt:
+        _print_receipt(wt, report, "accepted")
     return result
 
 
@@ -393,6 +399,11 @@ def _check_report_problem(
 def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
     report = _load_report(wt)
     return None if _check_report_problem(report, config, head) else report
+
+
+def _require_receipt(wt: Path, config: Config, head: str) -> None:
+    if problem := _check_report_problem(_load_report(wt), config, head):
+        raise CliError(problem)
 
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
@@ -1189,7 +1200,7 @@ def _pr_readiness(
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
     head = worktree.head(wt)
     _require_task_branch(config, branch)
-    pr = _require_pr(config, branch, allow_merged=allow_merged)
+    pr = _require_pr(config, branch, allow_merged=allow_merged, list_only=True)
     _require_pushed(pr, head)
     if pr.state == "MERGED":
         return pr, None
@@ -1291,6 +1302,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     kicked = bool(waiting)
     started = time.monotonic()
     if waiting:
+        _require_receipt(wt, config, pr.head_sha)
         github.mark_ready(config.repo, pr.number)
         if args.wait is None:
             pending = f"; {MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
@@ -1310,6 +1322,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     assert readiness is not None
     _prequeue_size_budget(wt, config, pr, readiness)
     if readiness.ready and pr.is_draft and not kicked:
+        _require_receipt(wt, config, pr.head_sha)
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
             waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=True, started=started,
@@ -1500,6 +1513,7 @@ def _wait_for_checks(
                 return current, None, kicked
             readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
+            _require_receipt(wt, config, current.head_sha)
             github.mark_ready(config.repo, pr.number)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
@@ -1702,6 +1716,7 @@ def _merge_with_mergify(
         return sha
     confirmed = state is not None
     if confirmed and not confirmed_marker:
+        _require_receipt(wt, config, pr.head_sha)
         mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
     if not confirmed and confirmed_marker:
         closed: list[github.GhError] = []
@@ -1712,6 +1727,7 @@ def _merge_with_mergify(
         _prequeue_size_budget(wt, config, pr, readiness, project=admit_by is None)
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
+        _require_receipt(wt, config, pr.head_sha)
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
     if deadline is not None:
         return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), confirmed)
@@ -1769,6 +1785,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         if admit_by is not None and time.monotonic() > admit_by:
             print(f"timed out before merging PR #{pr.number}")
             return 3
+        _require_receipt(wt, config, pr.head_sha)
         sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
         if sha is None and args.wait is not None:
             sha = _wait_for_merge(config, pr, max(0.0, deadline - time.monotonic()))
@@ -1862,7 +1879,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         print("review:   none on this PR")
-    readiness = _readiness(wt, config, pr, head, reviews)
+    readiness = _readiness(wt, config, pr, head, reviews, diagnostics=True)
     print(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         print(f"  - {reason}")
