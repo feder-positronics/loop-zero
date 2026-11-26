@@ -400,7 +400,7 @@ def _sandbox_prefix(
                          state_file, *private)
             if any(path.is_relative_to(root) or root.is_relative_to(path)
                    for path in (source, destination) for root in roots):
-                raise sandbox.SandboxUnavailable(
+                raise RunnerBadOutput(
                     f"sandbox mount {source} -> {destination} exposes protected reviewer state; "
                     "use a runtime installation outside state directories"
                 )

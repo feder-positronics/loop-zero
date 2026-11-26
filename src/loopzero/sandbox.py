@@ -490,7 +490,9 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         if any(word in probe_error for word in ("permission", "user namespace", "userns")):
             remedy = ("\nRun outside the enclosing agent sandbox or ask the host operator "
                       "to allow user namespaces for bwrap.")
-        raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}{remedy}")
+        detail = _proc.tail(probe.stderr, 1)
+        raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}"
+                                 f"{f': {detail}' if detail else ''}{remedy}")
 
 
 def check_environment(config: Config) -> dict[str, str]:

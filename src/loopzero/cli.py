@@ -1138,7 +1138,10 @@ def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
     detail = "\n".join(lines[:1 if isinstance(exc, runners.RunnerMalformedOutput) else 3])
     if isinstance(exc, runners.RunnerAuthFailed):
         login = "claude auth login" if family == "claude" else "codex login"
-        return lines[0], detail + f"\nFix: run `{login}`.", _FALLBACK_REASONS[0]
+        fix = f"run `{login}`"
+        if family == "claude" and (names := [name for name in runners.CLAUDE_AUTH_ENV if os.environ.get(name)]):
+            fix = "replace or unset " + " and ".join(f"`{name}`" for name in names)
+        return lines[0], detail + f"\nFix: {fix}.", _FALLBACK_REASONS[0]
     if isinstance(exc, runners.RunnerUsageLimit):
         return lines[0], detail + "\nFix: wait for the limit to reset or switch this reviewer's account.", _FALLBACK_REASONS[1]
     if isinstance(exc, runners.RunnerMissing):
@@ -1256,7 +1259,9 @@ def _prequeue_size_budget(
             cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
         )
         if fetched.exit_code != 0:
-            raise CliError(f"could not fetch {config.base_branch} from origin for the size budget check")
+            reason = github.redact_credentials(_proc.tail(fetched.stderr or fetched.stdout, 1))
+            raise CliError(f"could not fetch {config.base_branch} from origin for the size budget check: "
+                           f"{reason or f'git exited {fetched.exit_code}'}")
         base = git("rev-parse", "FETCH_HEAD^{commit}")
         script = git("show", f"{base}:{_SIZE_BUDGET}")
 

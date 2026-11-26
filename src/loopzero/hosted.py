@@ -117,8 +117,8 @@ def _run(cfg: Config) -> int:
         state, message = (("success", "All attested candidate sources are reviewed") if candidate
                           else _source_status(result, current))
     except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable) as exc:
-        print(f"Eligibility pending: evidence unavailable ({exc})", file=sys.stderr)
-        return 0
+        print(f"Eligibility pending: evidence unavailable ({exc}); rerun this workflow", file=sys.stderr)
+        return 1
     except (Exception, Terminated) as exc:
         _mark_refresh_failed(cfg.repo, head, exc)
         raise
