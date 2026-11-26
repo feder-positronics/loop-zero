@@ -433,6 +433,7 @@ def _run_one(
             env_allowlist=config.env_allowlist,
             timeout=timeout,
             merge_output=True,
+            tail_chars=CHECK_TAIL_BYTES,
         )
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import codecs
+import io
 import os
+import selectors
 import signal
 import subprocess
 import time
@@ -55,6 +58,45 @@ def build_env(
     return env
 
 
+def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float) -> str:
+    stream = proc.stdout
+    assert stream is not None
+    decode = io.IncrementalNewlineDecoder(
+        codecs.getincrementaldecoder(stream.encoding)(errors="replace"), translate=True,
+    ).decode
+    deadline = time.monotonic() + timeout
+    suffix = ""
+    newlines = 0
+
+    def append(chunk: str) -> None:
+        nonlocal suffix, newlines
+        content = chunk.rstrip("\n")
+        if content:
+            suffix = (suffix + "\n" * newlines + content)[-limit:]
+            newlines = 0
+        newlines = min(limit, newlines + len(chunk) - len(content))
+
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(stream, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise subprocess.TimeoutExpired(proc.args, timeout)
+                chunk = os.read(stream.fileno(), 64 * 1024)
+                if not chunk:
+                    break
+                append(decode(chunk))
+        proc.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as exc:
+        append(decode(b"", final=True))
+        exc.output = (suffix + "\n" * newlines)[-limit:]
+        raise
+    append(decode(b"", final=True))
+    # Check tails strip trailing newlines on success, even when there are many.
+    return suffix
+
+
 def run(
     argv: Sequence[str],
     *,
@@ -65,14 +107,19 @@ def run(
     merge_output: bool = False,
     input: str | None = None,
     encoding: str | None = None,
+    tail_chars: int | None = None,
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
 
     `merge_output=True` sends stderr into stdout so interleaving is preserved.
     `input` is written to the child's stdin; without it stdin is /dev/null.
     `encoding` overrides the parent locale for text I/O; None retains subprocess defaults.
+    `tail_chars` bounds capture for a merged stream without input, stripping trailing
+    newlines on completion and retaining them for timeout diagnostics.
     Nonzero exit is reported in `Completed.exit_code`; callers decide whether to raise.
     """
+    if tail_chars is not None and (not merge_output or input is not None or tail_chars <= 0):
+        raise ValueError("bounded tails require merged output, no input and a positive length")
     argv = [str(part) for part in argv]
     started = time.monotonic()
     try:
@@ -89,7 +136,10 @@ def run(
             start_new_session=os.name == "posix",
         ) as proc:
             try:
-                stdout, stderr = proc.communicate(input, timeout=timeout)
+                if tail_chars is None:
+                    stdout, stderr = proc.communicate(input, timeout=timeout)
+                else:
+                    stdout, stderr = _read_output_tail(proc, tail_chars, timeout), ""
             except BaseException:
                 if os.name == "posix":
                     with suppress(ProcessLookupError):
