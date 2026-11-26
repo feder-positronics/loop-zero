@@ -102,10 +102,11 @@ authorized.
 
 A long-running team gives each role one current owner. Owners read state from
 the owning issue and the live decision record, not from earlier sessions.
-Resolve every recipient when sending: the coordinator from the active delivery
-schedule, a campaign owner from its tracking issue, the decisions owner from
-its permanent thread. After a provider move, never use a remembered ID;
-escalate ambiguity once.
+Address each role at its permanent thread; an in-place reset keeps that
+address, and a campaign owner is found from its tracking issue. Only a
+[provider move](#provider-portable-handoff) changes an address: after one,
+resolve the recipient again instead of using a remembered ID, and escalate
+ambiguity once.
 For agent-to-agent sends to a running Claude thread, use queue mode unless
 urgent; steer can cancel the receiver's in-flight tool call.
 For important T3 messages to an owner, confirm arrival with `t3_thread_read`;
