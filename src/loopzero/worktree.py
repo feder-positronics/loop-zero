@@ -140,11 +140,12 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
     remote_ref = f"refs/heads/{base_branch}"
+    lookup = ("ls-remote", "--refs", "origin", remote_ref)
     try:
-        advertised = _git(repo_root, "ls-remote", "--exit-code", "--refs", "origin", remote_ref)
+        advertised = _git(repo_root, *lookup)
         base, _, ref = advertised.partition("\t")
         if ref != remote_ref:
-            raise WorktreeError(f"origin did not report a unique {remote_ref}")
+            raise GitError(("git", *lookup), f"origin did not report a unique {remote_ref}")
         _git(repo_root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", base)
     except GitError:
         if "origin" not in _git(repo_root, "remote").splitlines():
