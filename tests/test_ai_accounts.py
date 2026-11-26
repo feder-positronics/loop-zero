@@ -384,7 +384,7 @@ def test_claude_window_report_prefers_api_and_labels_fallback(helper, monkeypatc
     assert ('fallback' in output and 'HTTP 403' in output) is (api == 403)
 
 
-@pytest.mark.parametrize('short_reset', [None, 1793912400, 'offline'])
+@pytest.mark.parametrize('short_reset', [None, 1793912400, 'offline', 'all-unknown'])
 def test_codex_json_and_text_share_each_existing_window(helper, monkeypatch, capsys, short_reset):
     helper.write_private(helper.codex_home('c2') / 'auth.json', '{"tokens":{"access_token":"fake"}}')
     monkeypatch.setattr(helper, 'now', lambda: 10000)
@@ -396,10 +396,17 @@ def test_codex_json_and_text_share_each_existing_window(helper, monkeypatch, cap
         assert 'unknown (network: offline)' in capsys.readouterr().out
         return
     week = {'used_percent': 96, 'limit_window_seconds': 604800, 'reset_at': 1794384770}
-    short = {'used_percent': 99, 'limit_window_seconds': 18000, 'reset_at': short_reset} if short_reset else None
-    data = {'rate_limit': {'primary_window': short or week, 'secondary_window': week if short else None}, 'model_usage': {'m': {'available': True}}}
+    short = {'used_percent': 99, 'limit_window_seconds': 18000, 'reset_at': short_reset} if isinstance(short_reset, int) else None
+    data = {'rate_limit': {'primary_window': short or week, 'secondary_window': week if short else None}, 'model_usage': {'m': {'available': True}, 'partial': {}}}
+    if short_reset == 'all-unknown':
+        del data['model_usage']['m']
     monkeypatch.setattr(helper, '_http', lambda req: (200, {}, json.dumps(data).encode()))
     result = helper.check_codex('c2')
+    assert result['models_unknown'] == ['partial']
+    if short_reset == 'all-unknown':
+        assert result['tier'] == -1 and result['error'] == 'usage response has no known model availability'
+        return
+    assert result['models'] == {'m': True}
     assert result['next_reset'] == 1794384770
     status = {'checked_at': 10000, 'providers': {'codex': {'active': 'c2', 'accounts': {'c2': result}}}}
     helper.write_private(helper.STATE / 'status.json', json.dumps(status))

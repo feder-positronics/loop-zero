@@ -336,6 +336,8 @@ Implementation work does not require or reserve a test slot; a heavy command
 Host slot counts, load thresholds and quota guards belong in host policy.
 Tune dispatch from useful output, eligible work supply, review/test wait, rework
 and merge service; reduce new commissions when downstream work piles up.
+Commission whole ready outcomes; do not slice an outcome to occupy an idle
+builder, and sequence tasks likely to edit the same files.
 Give every addressable issue a next-action owner or a named dependency. Work on
 the current bottleneck gets dispatch and shared test slots first; other running
 work finishes or checkpoints its current heavy command and releases its slot.
@@ -396,8 +398,8 @@ Formal delivery review is `loopzero review`.
 
 ## Briefs and ownership
 
-Give each writing delegate its own `loopzero start` worktree outside any
-protected production checkout and a self-contained brief:
+Give each writing delegate a worktree from `loopzero start <task-slug>`
+outside protected production checkouts and a self-contained brief:
 
 The first shell command enters that task tree; repeat `cd <own-task-tree> &&`
 at the start of every shell command, including reads and background launches.
@@ -414,7 +416,7 @@ Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
 Launch policy: Children inherit this rule: never approval-required; use auto only for read-only children and say "read-only, do not edit" in the brief; a child that runs commands or edits inherits the parent's mode, because auto can stall on approval review. After launch, verify pendingRequestCount 0 and a completed tool call.
 Waiting: One blocking wait: Codex exec/write_stdin yield >=30 s (>=120 s for builds, tests, CI, review, ready or merge); shell `until <done>; do sleep 30; done`. Claude: background notification or t3_background_wait. Read the completed result once; never use t3_thread_read/task_status for liveness. Every ended turn wakes the parent: end it only with a final result, a blocker or a question, never with a progress note while your own job runs.
-Output: <Coordinator rollover caps. Use `gh api --jq` at source.>
+Output: <Coordinator rollover caps. Select GitHub REST fields with `--jq`.>
 Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
 Verification: <focused owning tests and coverage; available proof methods and their task-scoped authorization within runtime permissions>
 Integration executor: <named executor for returned heads and one owner of any readiness/merge waiter; parent retains acceptance responsibility>
