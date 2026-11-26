@@ -4706,8 +4706,7 @@ def test_task_state_lock_times_out_with_a_live_holder(git_repo, monkeypatch):
         nonlocal now
         now += seconds
 
-    monkeypatch.setattr(cli.worktree.time, "monotonic", lambda: now)
-    monkeypatch.setattr(cli.worktree.time, "sleep", advance)
+    monkeypatch.setattr(cli.worktree, "time", SimpleNamespace(monotonic=lambda: now, sleep=advance))
     with cli.worktree.lock_local_state(git_repo):
         with (
             pytest.raises(TimeoutError, match=r"task state is busy.*retry"),
