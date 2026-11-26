@@ -490,14 +490,15 @@ belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 
-Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
-Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
-command, version, sandbox configuration and the resolved base SHA. A stage runs
-fresh when a matched path cannot be identified as a readable regular file.
-The receipt fingerprint also binds the base SHA when reuse
-is configured, so advancing the base invalidates a pass at the same task head.
-If the remote ref is absent, checks use the task's recorded base. Without
-either base, local stages run fresh.
+Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse
+and bind their receipts for readiness and merge. Keys cover committed paths and
+blob IDs, the bytes of the checked-out regular files, the command, version,
+sandbox configuration and the resolved base SHA. Stages run fresh when keys
+are unavailable. Readiness and merge require matching keys for declared stages
+even after a successful check. Restore an available base or narrow oversized
+pathspecs and declarations that match unreadable or non-regular paths, then rerun
+`loopzero check`. The fingerprint also binds the base SHA when reuse is configured.
+If the remote ref is absent, checks use the task's recorded base.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.
