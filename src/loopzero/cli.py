@@ -1601,7 +1601,6 @@ def _queue_wait(
 
 def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str | None:
     """Merge SHA if landed; a closed-unmerged read is held as not final."""
-    github.read_timeout(0)
     try:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
     except github.ClosedUnmerged as exc:
@@ -1864,8 +1863,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
     elif config.merge_strategy == "mergify":
         try:
             sha = _merge_with_mergify(wt, config, pr, readiness, deadline, admit_by)
-        except _AdmissionDeadline:
-            print(f"timed out before requesting Mergify for PR #{pr.number}")
+        except (_AdmissionDeadline, github.ReadDeadline) as exc:
+            action = "before requesting Mergify for" if isinstance(exc, _AdmissionDeadline) else "waiting for Mergify to land"
+            print(f"timed out {action} PR #{pr.number}")
             return 3
         if sha is None:
             return 3 if args.wait is not None else 0
