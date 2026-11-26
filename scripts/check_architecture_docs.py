@@ -95,8 +95,11 @@ def check(root, base):
         acknowledged = re.search(r"^unchanged;[ \t]*\S.{19,}$",
                                  messages, re.MULTILINE)
         if not acknowledged:
-            errors.append("architecture sources changed without guide update or reasoned "
-                          "Architecture-Review trailer: " + ", ".join(sorted(watched)))
+            if re.search(r"^unchanged;", messages, re.MULTILINE):
+                errors.append("Architecture-Review reason must be at least 20 characters: " + ", ".join(sorted(watched)))
+            else:
+                errors.append("architecture sources changed without guide update or reasoned "
+                              "Architecture-Review trailer: " + ", ".join(sorted(watched)))
     return errors
 
 
