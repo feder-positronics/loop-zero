@@ -142,6 +142,7 @@ def base_merge_material(
         if pr["head"]["sha"] != head or pr["base"]["ref"] != base_branch or not is_sha(base):
             return None
         with candidate.fetched_git(repo, [reviewed, head, base]) as git:
+            git("merge-base", "--is-ancestor", reviewed, head)
             if not _verified_base_chain(git, reviewed, head, base, clean=clean, conflict_only=conflict_only):
                 return None
             if clean:

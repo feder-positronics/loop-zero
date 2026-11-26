@@ -297,6 +297,8 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
 
 @pytest.mark.parametrize("case,error,message", [
     ("valid", None, ""), ("trunk", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
+    ("settled_mergeability", None, ""), ("pending_mergeability", None, ""),
+    ("poll_drift", CandidateRaceError, "changed during mergeability polling"),
     ("hold", hosted.LoopZeroError, "source #101: PR #101 has a merge-authority hold"),
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
@@ -313,17 +315,20 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         "edited" if case == "metadata" else event["action"], 1 if case == "untrusted" else event["sender"]["id"])
     branch = "trunk" if case == "trunk" else "main"
     values = candidate_payloads(event)
-    if case in {"valid", "trunk", "hold"}:
+    polling = case in {"settled_mergeability", "pending_mergeability", "poll_drift"}
+    if polling or case in {"valid", "trunk", "hold"}:
         gh = FakeGh(fake_bin, tmp_path)
         gh.respond("api graphql", threads_json())
     for number, sha in [(101, "1" * 40), (102, "2" * 40), (900, "c" * 40)]:
         path = f"/repos/owner/repo/pulls/{number}"
         values[path] = fixtures.rest_pr_json(pr_json(
             number=number, headRefOid=sha, isDraft=False,
-            labels=[{"name": "hold"}] if case == "hold" and number == 101 else [],
+            labels=[{"name": "hold"}] if case in {"hold", "poll_drift"} and number == 101 else [],
         )) | values[path]
         values[path]["base"]["ref"] = branch
         values[f"{path}/reviews"] = [approval(sha)]
+    if polling:
+        values["/repos/owner/repo/pulls/101"]["mergeable"] = None
     if case == "stale":
         values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
     if case == "malformed":
@@ -339,6 +344,8 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     monkeypatch.setattr(github, "api_get", api_get)
     monkeypatch.setattr(github, "paged", api_get)
     monkeypatch.setattr("loopzero.candidate._retry_sleep", sleeps.append)
+    mergeability_sleeps = []
+    monkeypatch.setattr(hosted.eligibility, "sleep", mergeability_sleeps.append)
     published = []
     def publish(*args):
         published.append(args)
@@ -351,13 +358,25 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
 
     def evaluate(repo, number, head, base, publishers, *, snapshot):
         evaluated.append((repo, number, head, base, publishers))
-        if case in {"valid", "trunk", "hold"}:
+        if polling or case in {"valid", "trunk", "hold"}:
             return real_evaluate(repo, number, head, base, publishers, snapshot=snapshot)
         if fault := {"interrupt": KeyboardInterrupt(), "api": github.GhUnavailable(("gh",), "HTTP 503")}.get(case):
             raise fault
         reasons = (github.MISSING_REVIEW_REASON,) if case == "policy" else ()
         return github.Readiness(not reasons, reasons)
-    if case not in {"valid", "trunk", "hold"}:
+    if polling:
+        pr_view = github.pr_view
+
+        def poll(repo, number):
+            if number == 101:
+                source = values[f"/repos/{repo}/pulls/{number}"]
+                if case == "poll_drift":
+                    source = source | {"labels": []}
+                return github.pr_from_rest(source | {"mergeable": None if case == "pending_mergeability" else True})
+            return pr_view(repo, number)
+
+        monkeypatch.setattr(github, "pr_view", poll)
+    elif case not in {"valid", "trunk", "hold"}:
         monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
     http_codes = {"mergify": 503, "mergify_auth": 401}
@@ -372,10 +391,13 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         monkeypatch.setattr(hosted.mergify, "api_get", lambda repo, suffix: candidate_status()
                             if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     with pytest.raises(error, match=message or None) if error else nullcontext():
-        assert hosted.main() == int(case in {"api", "mergify"})
+        assert hosted.main() == int(case in {"api", "mergify", "pending_mergeability"})
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
               "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
+    states |= {"settled_mergeability": ["pending", "success"], "pending_mergeability": ["pending"]}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
+    if case in {"settled_mergeability", "pending_mergeability"}:
+        assert mergeability_sleeps == ([2] if case == "settled_mergeability" else [2, 4, 8])
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":
         assert rest_calls.count("apps/mergify") == 3 and sleeps == [2, 2] and len(evaluated) == 6
