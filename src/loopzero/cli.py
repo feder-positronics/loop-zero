@@ -542,6 +542,14 @@ def _append_review(body: str, result: ReviewResult) -> str:
 
 
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
+    try:
+        with _lock_task_state(wt):
+            _refresh_existing_pr_checks(wt, config)
+    except OSError as exc:
+        print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
+
+
+def _refresh_existing_pr_checks(wt: Path, config: Config) -> None:
     """Best-effort refresh only when local HEAD is the existing PR head."""
     argv = ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
     try:
@@ -661,8 +669,13 @@ def cmd_pr(args: argparse.Namespace) -> int:
     push.append(branch)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
-        if body != (pr.body or "").replace("\r\n", "\n"):
-            github.update_body(config.repo, pr.number, body)
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            if live.state != "OPEN":
+                raise CliError(f"PR #{pr.number} closed during publication")
+            body = _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))
+            if body != live.body.replace("\r\n", "\n"):
+                github.update_body(config.repo, pr.number, body)
     else:
         pr = github.create_draft_pr(
             config.repo, branch, config.base_branch, _pr_title(wt, branch), body
@@ -785,7 +798,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             confirmed, reviews = _recover_review(wt, config, pr, result,
                                                  publication["publisher"], token)
             if confirmed:
-                return _finish_review(config, pr, result)
+                return _finish_review(wt, config, pr, result)
         else:
             reviews = _pr_reviews(config.repo, pr.number)
         # Exact read-back above may confirm an older published note; a new post needs the current form.
@@ -831,7 +844,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         path = _review_file(wt, head, kind)
         try:
             if _recover_review(wt, config, pr, result, publisher, token)[0]:
-                return _finish_review(config, pr, result)
+                return _finish_review(wt, config, pr, result)
         except (github.GhError, CliError, _proc.ProcTimeout) as recovery:
             raise CliError(f"{exc} | publication read-back blocked: {recovery}; "
                            f"review saved at {path}; retry `loopzero review --repost` "
@@ -840,15 +853,16 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             f"{exc} | publication unconfirmed; review saved at {path}; "
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
-    return _finish_review(config, pr, result)
+    return _finish_review(wt, config, pr, result)
 
 
-def _finish_review(config: Config, pr: github.PR, result: ReviewResult) -> int:
+def _finish_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult) -> int:
     try:
-        live = github.pr_view(config.repo, pr.number)
-        body = _append_review(live.body, result)
-        if body != live.body:
-            github.update_body(config.repo, pr.number, body)
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            body = _append_review(live.body, result)
+            if body != live.body:
+                github.update_body(config.repo, pr.number, body)
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
