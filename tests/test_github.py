@@ -40,13 +40,11 @@ def closed_history_row(data: dict) -> dict:
             "merged_at": "2026-10-07T05:04:29Z" if data.get("state") == "MERGED" else None}
 
 
-# `respond` preserves the original key-based fake. New tests use `expect`, which
-# consumes complete argv interactions in order and never repeats a response.
 class FakeGh:
     def __init__(self, fake_bin: Path, tmp_path: Path) -> None:
         self.calls_file = tmp_path / "gh-calls.json"
         self.scenario_file = tmp_path / "gh-scenario.json"
-        self.scenario_file.write_text(json.dumps({"compat": {}}))
+        self.scenario_file.write_text("{}")
         script = fake_bin / "gh"
         replay_source = Path(__file__).with_name("fake_gh.py").read_text()
         script.write_text(
@@ -68,10 +66,7 @@ class FakeGh:
 
     def _set_responses(self, key, responses, *, append=False):
         plan = json.loads(self.scenario_file.read_text())
-        if "strict" in plan:
-            raise AssertionError("cannot mix compatibility responses with strict expect() rules")
-        compat = plan["compat"]
-        compat[key] = [*compat.get(key, ()), *responses] if append else responses
+        plan[key] = [*plan.get(key, ()), *responses] if append else responses
         self.scenario_file.write_text(json.dumps(plan))
 
     def respond_pr_list(self, *snapshots: list[dict], branch: str = "lz/t1") -> None:
@@ -109,27 +104,6 @@ class FakeGh:
             "stdout": response if isinstance(response, str) else json.dumps(response),
             "stderr": stderr, "exit_code": exit,
         }
-
-    def expect(
-        self, argv: list[str], response: object = "", *,
-        exit: int = 0, stderr: str = "", input_files: dict[str, str] | None = None,
-    ) -> None:
-        """Queue one exact interaction; temp path arguments are ``<temp-file>``."""
-        plan = json.loads(self.scenario_file.read_text())
-        if plan.get("compat"):
-            raise AssertionError("cannot mix strict expect() rules with respond() compatibility rules")
-        item = self._response(response, exit=exit, stderr=stderr)
-        item["argv"] = argv
-        item["input_files"] = input_files or {}
-        plan.setdefault("strict", []).append(item)
-        plan.pop("compat", None)
-        self.scenario_file.write_text(json.dumps(plan))
-
-    def assert_complete(self) -> None:
-        plan = json.loads(self.scenario_file.read_text())
-        expected = len(plan.get("strict", []))
-        if "strict" in plan and len(self.calls) != expected:
-            raise AssertionError(f"fake gh: {expected - len(self.calls)} expected interactions remain")
 
     def fail(self, key: str, stderr: str, exit: int = 1) -> None:
         self.respond(key, {"stdout": "", "stderr": stderr, "exit": exit})
@@ -744,9 +718,8 @@ def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path
     monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), boot[0] == 1e6 and suspend())[0])
     monkeypatch.setattr(github, "_retry_sleep", lambda delay: suspend())
     monkeypatch.setenv("GH_TOKEN", "operator-token")
-    gh.expect(["api", "repos/acme/widgets", "--include"], {})
-    gh.expect(["api", "repos/acme/widgets", "--include"], exit=1, stderr="HTTP 502: Bad Gateway")
-    gh.expect(["api", "repos/acme/widgets", "--include"], {})
+    gh.respond("api repos/acme/widgets", {}, {"stdout": "", "exit_code": 1,
+                                              "stderr": "HTTP 502: Bad Gateway"}, {})
     github.api_get("repos/acme/widgets")  # mint, then suspend before the token is used
     github.api_get("repos/acme/widgets")  # fails transiently, then suspends in the backoff
     assert [c["token"] for c in gh.calls] == ["operator-token", "synthetic-token-2", "synthetic-token-3"]
@@ -1089,10 +1062,10 @@ def test_readiness_without_required_ci_skips_check_lookup(gh: FakeGh) -> None:
 
 
 def test_merge_success_verifies_rest_landing(gh: FakeGh) -> None:
-    gh.expect(["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD])
-    gh.expect(["api", f"repos/{REPO}/pulls/7", "--include"], merge_json("MERGED", sha="c" * 40))
+    gh.respond("pr merge", "")
+    gh.respond(f"api repos/{REPO}/pulls/7", merge_json("MERGED", sha="c" * 40))
     assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
-    gh.assert_complete()
+    assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
 
 
 def test_merge_command_failure(gh: FakeGh) -> None:

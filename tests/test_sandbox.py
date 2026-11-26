@@ -23,6 +23,7 @@ from unittest.mock import Mock
 import pytest
 
 from loopzero import cli, sandbox
+from tests.conftest import bwrap_argv
 from loopzero.cli import _current_check_report, _save_report
 from loopzero.types import Config, ResourceLimits
 
@@ -78,11 +79,6 @@ def bwrap_log(fake_tool, tmp_path) -> Path:
     log = tmp_path / "bwrap.argv"
     fake_tool("bwrap", FAKE_BWRAP.format(log=log))
     return log
-
-
-def argv_of(log: Path) -> list[str]:
-    """argv of the last bwrap invocation (the probe runs first, checks overwrite it)."""
-    return log.read_text().splitlines()
 
 
 def test_report_head_and_results(git_repo, bwrap_log):
@@ -156,7 +152,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch, limited):
     monkeypatch.setenv("LZ_DROP", "dropped")
     values = 'printf "%s\\n" "$PATH" "$LZ_KEEP" "${LZ_DROP-unset}" "$UV_CACHE_DIR" "$PYTHONDONTWRITEBYTECODE"'
     (result,) = sandbox.run_checks(make_config(checks=(values,), **options), git_repo).results
-    argv = argv_of(bwrap_log)
+    argv = bwrap_argv(bwrap_log)
     head, tail = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
     for flag in ("--die-with-parent", "--new-session", "--unshare-all", "--clearenv"):
         assert flag in head
@@ -196,7 +192,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch, limited):
 @pytest.mark.parametrize("checks", [(), ("echo hello",)], ids=["probe", "stage"])
 def test_network_binds_resolv_conf_after_run_tmpfs(git_repo, bwrap_log, checks):
     sandbox.run_checks(make_config(checks=checks, network=True), git_repo)
-    argv = argv_of(bwrap_log)
+    argv = bwrap_argv(bwrap_log)
     if not checks:
         assert argv[argv.index("--") + 1 :] == ["true"]
     assert argv.index("--unshare-all") < argv.index("--share-net") < argv.index("--clearenv")
@@ -223,7 +219,7 @@ def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch
         checks=('printf "%s\\n" "$UV_CACHE_DIR" "$RUFF_CACHE_DIR"',),
     )
     (result,) = sandbox.run_checks(cfg, git_repo).results
-    argv = argv_of(bwrap_log)
+    argv = bwrap_argv(bwrap_log)
     assert _pairs(argv, "--ro-bind-try") == [(str(extra),) * 2]
     assert _pairs(argv, "--bind-try") == [(str(cache),) * 2]
     assert len(_pairs(argv, "--bind")) == 1  # only HOME; no scratch
@@ -279,7 +275,7 @@ def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
     linked = tmp_path / "linked"
     git(git_repo, "worktree", "add", "-q", str(linked), "-b", "feature")
     sandbox.run_checks(make_config(), linked)
-    binds = _pairs(argv_of(bwrap_log), "--ro-bind")
+    binds = _pairs(bwrap_argv(bwrap_log), "--ro-bind")
     common = (git_repo / ".git").resolve()
     assert binds[-2:] == [(str(linked.resolve()),) * 2, (str(common),) * 2]
 
