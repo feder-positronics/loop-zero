@@ -182,6 +182,7 @@ def rest_pr_json(data: dict, *, branch: str = "lz/t1") -> dict:
         "mergeable_state": (data.get("mergeStateStatus") or "unknown").lower(),
         "user": data.get("author", {"login": "someone-else"}),
         "body": data.get("body"),
+        "labels": data.get("labels", []),
     }
 
 
@@ -308,13 +309,14 @@ def test_pr_for_branch_rejects_changed_or_foreign_detail(gh: FakeGh, head_change
 def test_pr_view_maps_rest_merge_evidence(
     gh: FakeGh, mergeable, merge_state, expected
 ) -> None:
-    detail = rest_pr_json(pr_json())
+    detail = rest_pr_json(pr_json(labels=[{"name": "hold"}]))
     detail["mergeable"], detail["mergeable_state"] = mergeable, merge_state
     gh.respond(f"api repos/{REPO}/pulls/7", detail)
 
     pr = github.pr_view(REPO, 7)
 
     assert (pr.mergeable, pr.merge_state) == expected
+    assert pr.labels == ("hold",)
     assert pr.head_sha == HEAD and pr.base_ref == "main" and pr.is_draft
 
 
