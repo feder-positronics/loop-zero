@@ -72,7 +72,8 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    worktree is clean, still at the remote base, and missing its task file.
 2. Implementation proves the owning behavior at the narrowest public seam;
    focused tests start early. `check` runs deterministic checks in a read-only
-   source sandbox. Its simple-command preflight catches missing local scripts,
+   source sandbox. It inventories Git object stores only when alternates may be
+   present. Its simple-command preflight catches missing local scripts,
    prepares recognized uv dependency groups offline in that sandbox and prints
    progress before each command, metadata-only stage heartbeats every 30 seconds
    (including silent children), and exit code/duration immediately after each stage.
