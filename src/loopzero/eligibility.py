@@ -70,13 +70,17 @@ def review_projection(review: dict, head: str, repo: str, number: int):
         return True, None
 
 
+def _trusted_marker(review: dict, trusted: set[str], head: str | None = None) -> bool:
+    return ((review.get("user") or {}).get("login", "").casefold() in trusted
+            and (head is None or review.get("commit_id") == head)
+            and "loopzero:review" in (review.get("body") or ""))
+
+
 def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
                     repo: str = "", number: int = 0) -> dict | None:
     """Latest trusted evidence on this exact head; revocation cannot revive older evidence."""
     trusted = {login.casefold() for login in publishers}
-    latest = next((r for r in reversed(reviews)
-                   if (r.get("user") or {}).get("login", "").casefold() in trusted
-                   and r.get("commit_id") == head and "loopzero:review" in (r.get("body") or "")), None)
+    latest = next((r for r in reversed(reviews) if _trusted_marker(r, trusted, head)), None)
     if latest is None or latest.get("state") not in {"APPROVED", "COMMENTED", "CHANGES_REQUESTED"}:
         return None
     body = latest.get("body") or ""
@@ -129,8 +133,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
                      repo: str, number: int, base_branch: str) -> dict | None:
     """An eligible review at the current head or an ancestor that covers it."""
     trusted = {login.casefold() for login in publishers}
-    marked = [r for r in reviews if (r.get("user") or {}).get("login", "").casefold() in trusted
-              and "loopzero:review" in (r.get("body") or "")]
+    marked = [r for r in reviews if _trusted_marker(r, trusted)]
     if not marked or any(r.get("commit_id") == head for r in marked):
         return eligible_review(marked, head, publishers, repo=repo, number=number)
     latest = marked[-1]
@@ -171,15 +174,8 @@ def evaluate(repo: str, number: int, head: str, base: str,
         return github.Readiness(False, ("source head changed; refresh eligibility",))
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
-    reviews, page = [], 1
-    while True:
-        batch = github.api_get(f"repos/{repo}/pulls/{number}/reviews?per_page=100&page={page}")
-        if not isinstance(batch, list):
-            raise LoopZeroError("invalid GitHub reviews response")
-        reviews.extend(batch)
-        if len(batch) < 100:
-            break
-        page += 1
+    reviews = github.rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews",
+                               limit=None, validate_rows=False)
     review = readiness_review(reviews, head, publishers, repo=repo, number=number, base_branch=base)
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head)
