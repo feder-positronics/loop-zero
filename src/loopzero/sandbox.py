@@ -254,7 +254,7 @@ def _previous(worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
 def _check_base(config: Config, worktree: Path) -> str:
     if config.check_runner or config.inputs:
         try:
-            return config_mod.base_revision(worktree, config.base_branch)
+            return config.trusted_base_revision or config_mod.base_revision(worktree, config.base_branch)
         except (config_mod.ConfigError, WorktreeError):
             if config.check_runner:
                 raise
