@@ -148,6 +148,11 @@ to the base branch before starting your first task. If the base has a
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
+- Check, review, ready, merge, and status load the workflow from the
+  remote-tracking delivery branch selected by `[repo] base` in the workflow
+  at `origin/HEAD`. Missing trusted policy blocks these commands. Fetch and
+  run `git remote set-head origin --auto` if the local default-branch pointer
+  is missing. Supply `--config <path>` during bootstrap or to override policy.
 - For offline checks, warm the configured writable uv cache on the host with
   `UV_CACHE_DIR=<configured-cache> uv sync --group dev` (use the groups your
   checks require). This also fetches build backends such as hatchling.
@@ -494,10 +499,9 @@ boundary or replace this publisher with a dedicated GitHub App and bind the
 required status check to that App's integration ID. Do not describe the Actions
 publisher as protection from a malicious repository writer.
 
-The evaluator preserves COMMENT model reviews with resolved blocking findings,
-and the existing outdated-thread policy: outdated findings on other SHAs do not
-block, but unresolved current critical/important findings do. Suggestions do not
-block. Dismissing the latest review cannot restore an earlier approval.
+The evaluator preserves COMMENT model reviews with resolved blocking findings.
+See [Blockers](core/CONTRACT.md#blockers) for the outdated-thread rule. Suggestions
+do not block. Dismissing the latest review cannot restore an earlier approval.
 
 Before queue adoption, wire source pushes, review submissions/edits/dismissal,
 review-comment edits/deletions and an explicit refresh to this publisher.

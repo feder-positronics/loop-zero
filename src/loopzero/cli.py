@@ -111,24 +111,14 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     if args.config:
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
-    config = config_mod.load(path, checks={})
-    base, revision = config_mod.load_base(root, config.base_branch)
-    if base is None:
-        return config_mod.load(path)
-    base_checks = config_mod.base_section(base, config.base_branch, "checks")
-    config = config_mod.load(
-        path, checks=base_checks, validation_source=f"origin/{config.base_branch}:workflow.toml",
-    )
-    delivery = config_mod.base_section(base, config.base_branch, "delivery")
-    config = dataclasses.replace(config, review_publishers=config_mod._strings(
-        "delivery.review_publishers", delivery.get("review_publishers", [])))
+    config = config_mod.load_trusted(root)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
                 f"origin/{config.base_branch}:workflow.toml: checks.commands must list "
                 "at least one command to run checks"
             )
-        print(f"checks pinned to origin/{config.base_branch}@{revision}")
+        print(f"checks pinned to origin/{config.base_branch}@{config.trusted_base_revision}")
     return config
 
 
@@ -137,42 +127,20 @@ def _context(args: argparse.Namespace, *, pin_checks: bool = False) -> tuple[Pat
     return wt, _load_config(args, wt, pin_checks=pin_checks)
 
 
-def _review_launch_config(args: argparse.Namespace, wt: Path, config: Config) -> tuple[Config, str]:
-    """Pin native launch settings without changing other commands' fallback policy."""
-    if args.config:
-        return config, "reviewer paths are unpinned because --config was provided"
-    try:
-        revision = _git(wt, "rev-parse", "--verify", f"refs/remotes/origin/{config.base_branch}")
-    except CliError as exc:
-        raise CliError("native review needs a remote base; fetch it or supply --config") from exc
-    base, _ = config_mod.load_base(wt, config.base_branch, revision=revision)
-    if base is None:
-        raise CliError("native review needs a base workflow.toml; supply --config for bootstrap")
-    checks = config_mod.base_section(base, config.base_branch, "checks")
-    delivery = config_mod.base_section(base, config.base_branch, "delivery")
-    pinned = dataclasses.replace(
-        config_mod.load(
-            wt / "workflow.toml", checks=checks,
-            validation_source=f"origin/{config.base_branch}:workflow.toml",
-        ),
-        review_publishers=config_mod._strings(
-            "delivery.review_publishers", delivery.get("review_publishers", [])),
-        reviewer_ro_paths=config_mod._host_paths(
-            "delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])),
-    )
-    return pinned, f"reviewer paths pinned to origin/{config.base_branch}@{revision}"
-
-
 def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
     done = _proc.run(
         ["git", "merge-base", "--is-ancestor", sha, head],
         cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
     )
+    if done.exit_code not in (0, 1):
+        detail = _proc.tail(done.stderr or done.stdout, 1)
+        raise CliError(f"git merge-base --is-ancestor failed (exit {done.exit_code}): "
+                       f"{detail or 'retry the ancestry check'}")
     return done.exit_code == 0
 
 
 def _primary_base(wt: Path, config: Config) -> str:
-    base = config_mod.base_revision(wt, config.base_branch)
+    base = config.trusted_base_revision or config_mod.base_revision(wt, config.base_branch)
     done = _proc.run(
         ["git", "merge-base", base, "HEAD"],
         cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
@@ -252,7 +220,7 @@ def _pr_markers(reviews: list[dict], head: str,
         if not eligibility.review_projection(review, head, repo, number)[0] and any(
                 runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1]):
             continue
-        match = REVIEW_MARKER_RE.search(body)
+        match = eligibility.leading_marker(body)
         if not match or review.get("commit_id") != match.group(1):
             continue
         if not trusted:
@@ -327,11 +295,12 @@ def _readiness(
             and min_age <= review_age < STALE_VERDICT_GRACE
         ),
     )
-    report = _current_check_report(wt, config, head)
-    if report is None:
+    report = _load_report(wt)
+    receipt_problem = _check_report_problem(report, wt, config, head)
+    if receipt_problem:
         result = github.Readiness(
             ready=False,
-            reasons=(*result.reasons, "run loopzero check at this head"),
+            reasons=(*result.reasons, receipt_problem),
         )
     elif announce_receipt:
         _print_receipt(wt, report, "accepted")
@@ -358,18 +327,24 @@ def _readiness(
 # --------------------------------------------------------------------------- checks report
 
 
-def _check_report_matches(report: CheckReport, wt: Path, config: Config, head: str) -> bool:
-    return (report.head == head and not report.dirty
-            and tuple(result.command for result in report.results) == config.checks
-            and report.settings_sha256 is not None
-            and report.settings_sha256 == sandbox.settings_fingerprint(config, wt))
+def _check_report_problem(
+    report: CheckReport | None, wt: Path, config: Config, head: str, *, require_pass: bool = True,
+) -> str | None:
+    if (report is None or report.head != head or report.dirty or (require_pass and not report.ok)
+            or tuple(result.command for result in report.results) != config.checks):
+        return "run loopzero check at this head"
+    recovery = ("Run loopzero check in this worktree at this head with the same current CLI and effective "
+                "settings as ready, using a local coordinator for delegated stages.")
+    if report.settings_sha256 is None:
+        return f"check receipt is missing its settings fingerprint. {recovery}"
+    if report.settings_sha256 != sandbox.settings_fingerprint(config, wt):
+        return f"check receipt has an incompatible settings fingerprint. {recovery}"
+    return None
 
 
 def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
     report = _load_report(wt)
-    if report is not None and report.ok and _check_report_matches(report, wt, config, head):
-        return report
-    return None
+    return None if _check_report_problem(report, wt, config, head) else report
 
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
@@ -456,7 +431,7 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
         return "(no `loopzero check` run recorded)"
     recorded, results = loaded.head, loaded.results
     lines = [f"Recorded for `{recorded[:12]}`" + ("" if recorded == head else " (not current head)")]
-    if not _check_report_matches(loaded, wt, config, head):
+    if _check_report_problem(loaded, wt, config, head, require_pass=False):
         lines[0] += " (unverified, run `loopzero check`)"
     lines += [
         f"- `{r.command}`: exit {r.exit_code}" for r in results
@@ -577,6 +552,14 @@ def _append_review(body: str, result: ReviewResult) -> str:
 
 
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
+    try:
+        with _lock_task_state(wt):
+            _refresh_existing_pr_checks(wt, config)
+    except OSError as exc:
+        print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
+
+
+def _refresh_existing_pr_checks(wt: Path, config: Config) -> None:
     """Best-effort refresh only when local HEAD is the existing PR head."""
     argv = ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
     try:
@@ -680,9 +663,9 @@ def cmd_pr(args: argparse.Namespace) -> int:
         )
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
     body = _pr_body(wt, head, config, existing)
-    force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
+    force_lease = False
     push = ["push", "-u", "origin"]
-    if force_lease:
+    if pr is not None and pr.state == "OPEN":
         # Only rewrite history this worktree has seen; an unknown remote head is someone else's.
         known = _proc.run(["git", "cat-file", "-e", f"{pr.head_sha}^{{commit}}"], cwd=wt,
                           env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
@@ -690,12 +673,19 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(
                 f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
             )
-        push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
+        force_lease = not _is_ancestor(wt, pr.head_sha, head)
+        if force_lease:
+            push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
     push.append(branch)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
-        if body != (pr.body or "").replace("\r\n", "\n"):
-            github.update_body(config.repo, pr.number, body)
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            if live.state != "OPEN":
+                raise CliError(f"PR #{pr.number} closed during publication")
+            body = _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))
+            if body != live.body.replace("\r\n", "\n"):
+                github.update_body(config.repo, pr.number, body)
     else:
         pr = github.create_draft_pr(
             config.repo, branch, config.base_branch, _pr_title(wt, branch), body
@@ -759,6 +749,10 @@ def _lock_review(run_review: Callable[[argparse.Namespace, Path, Config], int]):
 
 @_lock_review
 def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
+    if args.config:
+        runtime_source = "reviewer paths are unpinned because --config was provided"
+    else:
+        runtime_source = f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}"
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
@@ -766,8 +760,6 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
-    if not args.repost:
-        config, runtime_source = _review_launch_config(args, wt, config)
     token = github.app_token()  # one identity for the publisher check and the post
     publisher = github.login(token=token)
     if config.review_publishers and publisher.casefold() not in {
@@ -872,8 +864,9 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
-        live = github.pr_view(config.repo, pr.number)
-        github.update_body(config.repo, pr.number, _append_review(live.body, result))
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            github.update_body(config.repo, pr.number, _append_review(live.body, result))
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
@@ -934,8 +927,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
     trusted = config.review_publishers or (publisher,)
-    evidence = [r for r in reviews if "loopzero:review" in (r.get("body") or "") and (r.get("commit_id") == result.head or any(
-                    m.group(1) == result.head for m in REVIEW_MARKER_RE.finditer(r["body"])))]
+    evidence = [r for r in reviews if "loopzero:review" in (r.get("body") or "") and (
+        r.get("commit_id") == result.head
+        or ((marker := eligibility.leading_marker(r["body"])) and marker.group(1) == result.head))]
     fresh = github.pr_view(config.repo, pr.number)
     if fresh.head_sha != result.head or fresh.state != "OPEN" or fresh.base_ref != pr.base_ref:
         raise CliError("PR changed during publication recovery")
@@ -1007,7 +1001,8 @@ def _run_review(
             f"To publish the recovered head, run `loopzero pr`, then `loopzero review` "
             f"before merging {config.base_branch} again"
         )
-    diff = worktree.diff_since(wt, since)
+    patch = worktree.diff_since(wt, since)
+    diff = runners.render_patch(patch)
     task = worktree.task_text(wt)
     authors = runners.author_families(wt, head, lineage_base)
     candidates = [family for family in config.reviewers if family not in authors]
@@ -1027,8 +1022,8 @@ def _run_review(
             model=model or (settings.model if settings else None), effort=chosen,
             review_context=({"repo": config.repo, "pr": publication[1], "publisher": publication[2],
                              "head": head, "kind": kind, "base": since,
-                             "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
-                             "diff_bytes": len(diff.encode())} if publication and family == "codex" else None),
+                             "diff_sha256": hashlib.sha256(patch).hexdigest(),
+                             "diff_bytes": len(patch)} if publication and family == "codex" else None),
         )
     selected = {family: select(family) for family in candidates}
     # Settle fallback settings before any launch; an unusable one only matters if reached.
@@ -1329,11 +1324,18 @@ def _verify_wait_snapshot(
 ) -> None:
     if current_head != head:
         raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}")
-    if args is None or (latest := _load_config(args, wt, pin_checks=True)) == config:
+    if args is None:
         return
+    latest = _load_config(args, wt, pin_checks=True)
+    changed = "workflow settings"
+    if latest == config:
+        if (latest.trusted_base_revision == config.trusted_base_revision
+                or not (config.check_runner or config.inputs)):
+            return
+        changed = "check base"
     if _current_check_report(wt, latest, head) is None:
-        raise CliError("workflow settings changed while waiting; run loopzero check and retry")
-    raise CliError("workflow settings changed while waiting; retry with the current settings")
+        raise CliError(f"{changed} changed while waiting; run loopzero check and retry")
+    raise CliError(f"{changed} changed while waiting; retry with the current settings")
 
 
 def _wait_for_checks(

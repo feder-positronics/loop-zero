@@ -51,11 +51,17 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(cwd: Path, *args: str, timeout: float = 120, preserve_whitespace: bool = False) -> str:
+def _git(
+    cwd: Path, *args: str, timeout: float = 120,
+    preserve_whitespace: bool = False, preserve_newlines: bool = False,
+) -> str:
     argv = ("git", *args)
-    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
+    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
+               preserve_newlines=preserve_newlines)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
+    if preserve_newlines:
+        return done.stdout
     return done.stdout.removesuffix("\n") if preserve_whitespace else done.stdout.strip()
 
 
@@ -130,8 +136,9 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
+    base_ref = f"refs/remotes/origin/{base_branch}"
     try:
-        _git(repo_root, "fetch", "--quiet", "origin", f"refs/heads/{base_branch}")
+        _git(repo_root, "fetch", "--quiet", "origin", f"+refs/heads/{base_branch}:{base_ref}")
     except GitError:
         if "origin" not in _git(repo_root, "remote").splitlines():
             raise WorktreeError(
@@ -140,8 +147,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
                 "with `git remote rename <name> origin`."
             ) from None
         raise
-    base_ref = f"origin/{base_branch}"
-    base = _git(repo_root, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+    base = _git(repo_root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
     if existing:
         existing_head = _resumable_head(repo_root, wt, branch)
         if existing_head is None:
@@ -149,7 +155,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         if existing_head != base:
             raise WorktreeError(
                 f"cannot resume start at {wt}: existing HEAD {existing_head} does not match "
-                f"{base_ref} at {base}; run loopzero start with a new slug"
+                f"origin/{base_branch} at {base}; run loopzero start with a new slug"
             )
     _ensure_excludes(repo_root)
     if not existing:
@@ -243,8 +249,9 @@ def is_dirty(wt: Path) -> bool:
     return bool(_git(Path(wt), "status", "--porcelain", "--untracked-files=all"))
 
 
-def diff_since(wt: Path, sha: str) -> str:
-    return _git(Path(wt), "diff", "--no-color", sha, "HEAD")
+def diff_since(wt: Path, sha: str) -> bytes:
+    diff = _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
+    return diff.encode("utf-8", errors="surrogateescape")
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:
