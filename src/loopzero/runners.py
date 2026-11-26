@@ -6,6 +6,7 @@ Host authentication is bound read-write into the sandbox HOME so OAuth refreshes
 from __future__ import annotations
 
 import base64
+import codecs
 import contextlib
 import hashlib
 import json
@@ -15,7 +16,6 @@ import shlex
 import shutil
 import stat
 import sys
-import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -1131,8 +1131,7 @@ def _review_claude(
         "--disallowedTools",
         "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
-    with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
-        home = Path(tmp)
+    with sandbox.private_directory("loopzero-review-home-") as home:
         auth_binds = _auth_binds("claude", home)
         prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths, auth_binds)
         argv[0] = str(binary)
@@ -1216,8 +1215,7 @@ def _review_codex(
     prompt: str, *, policy: str, cwd: Path, head: str, kind: str, timeout: int,
     ro_paths: tuple[str, ...], model: str | None, effort: str | None, review_context: dict | None = None,
 ) -> ReviewResult:
-    with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
-        home = Path(tmp)
+    with sandbox.private_directory("loopzero-review-home-") as home:
         schema_file = home / "schema.json"
         last_file = home / "last.json"
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
@@ -1399,13 +1397,13 @@ def split_diff(diff: str, budget: int) -> list[str]:
 def _summarize_deleted(block: str) -> str:
     if "\ndeleted file mode " not in block and "\n+++ /dev/null" not in block:
         return block
-    match = re.match(r"diff --git a/(.+?) b/(.+?)\n", block)
-    path = match.group(2) if match else "(unknown file)"
-    deleted = sum(
-        1 for line in block.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-    )
-    return f"diff --git a/{path} b/{path}\n{path}: deleted, {deleted} lines\n"
+    header = block.partition("\n")[0]
+    match = re.fullmatch(r'diff --git ("?)a/(.*)\1 \1b/\2\1', header)
+    path = match[2] if match else "(unknown file)"
+    if match and match[1]:
+        path = codecs.escape_decode(path.encode())[0].decode(errors="replace")
+    deleted = sum(line.startswith("-") and not line.startswith("---") for line in block.splitlines())
+    return f"{header}\n{path}: deleted, {deleted} lines\n"
 
 
 def _split_bytes(text: str, budget: int) -> list[str]:
