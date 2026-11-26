@@ -358,6 +358,33 @@ def expect_cli(capsys, exit_code, *argv, stdout=None, stderr=None, stdout_contai
     return out, err
 
 
+@pytest.mark.parametrize("command", ["ready", "merge"])
+def test_wait_reports_only_check_changes(wt, gh, head, capsys, monkeypatch, command):
+    names = ["checks"] + [f"verify deployment / integration shard {n:02d}" for n in range(23)]
+    cfg = cli.dataclasses.replace(config.load(wt / "workflow.toml"), required_ci=tuple(names))
+    monkeypatch.setattr(cli, "_context", lambda *a, **k: (wt, cfg))
+    monkeypatch.setattr(cli, "_verify_wait_snapshot", lambda *a: None)
+    monkeypatch.setattr(cli, "WAIT_INTERVAL", 0.1)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    runs = [
+        [{"name": name, "status": "completed", "conclusion": "success"}
+         if i < cleared else {"name": name, "status": "in_progress"}
+         for i, name in enumerate(names)]
+        for cleared in (0, *range(25))
+    ]
+    arm_check_runs(gh, head, *runs)
+    poll_clock(monkeypatch)
+    if command == "merge":
+        monkeypatch.setattr(github, "merge", lambda *a: "c" * 40)
+        monkeypatch.setattr(cli, "_cleanup_remote_refs", lambda *a: None)
+        monkeypatch.setattr(cli, "_cleanup", lambda *a: None)
+    code, out, err = run(capsys, command, "--wait=1800")
+    assert len((out + err).encode()) < 3200 and out.count("waiting:") == 1
+    assert not err and all(f"required check '{name}' is pending" in out for name in names)
+    assert code == 0 and out.endswith(f"ready: {URL}\n" if command == "ready" else "c" * 40 + "\n")
+    assert all(f"cleared: {name}\n" in out for name in names)
+
+
 # --- start / check --------------------------------------------------------------------
 
 
@@ -1049,12 +1076,12 @@ def test_pr_replaces_closed_never_merged_pr(wt: Path, gh: FakeGh, capsys) -> Non
     assert run(capsys, "pr") == (0, URL + "\n", "")
 
 
-def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
-    task = wt / ".loopzero" / "task.md"
-    task.write_text("## Objective\nx\n\n# Add the feature flag\n")
-    assert cli._pr_title(wt, "lz/t1") == "Add the feature flag"
-    task.write_text("## Objective\nonly sections\n")
-    assert cli._pr_title(wt, "lz/t1") == "lz/t1"
+@pytest.mark.parametrize(("heading", "expected"), [("", "lz/t1"), ("\n# Zażółć gęślą jaźń\n", "Zażółć gęślą jaźń")])
+def test_pr_title_prefers_human_heading(wt: Path, monkeypatch, heading, expected) -> None:
+    task, read_text = wt / ".loopzero" / "task.md", Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda path, encoding="ascii", **kw: read_text(path, encoding, **kw))
+    task.write_text(f"## Objective\nZażółć gęślą jaźń\n{heading}", encoding="utf-8")
+    assert cli._pr_title(wt, "lz/t1") == expected
 
 
 @pytest.mark.parametrize("name,value", [
@@ -2348,6 +2375,7 @@ def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypat
     assert without_accepted_receipt(out).splitlines() == [
         "marked ready; required check 'checks' is skipped",
         "waiting: required check 'checks' is pending",
+        "cleared: checks",
         f"ready: {URL}",
     ]
 
@@ -3781,21 +3809,36 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
-def test_mergify_wait_resume_does_not_resubmit_and_reports_ejection(
-    wt: Path, gh: FakeGh, capsys, monkeypatch
+@pytest.mark.parametrize("command", ["ready", "merge", "resume"])
+def test_mergify_checks_current_target_before_queueing_or_resumes(
+    wt: Path, repo: Path, gh: FakeGh, capsys, monkeypatch, command
 ) -> None:
-    head = commit_mergify_configuration(wt)
+    commit_mergify_configuration(wt)
+    checker = (Path(__file__).resolve().parents[1] / "scripts/size_budget.sh").read_text()
+    (repo / "scripts").mkdir()
+    commit_file(repo, "scripts/size_budget.sh", re.sub(r"(?m)^SRC_CAP=\d+$", "SRC_CAP=3", checker), "add budget")
+    publish_workflow(wt, (repo / "workflow.toml").read_text().replace(
+        'commands = ["echo ok", "test -f README.md"]', 'commands = ["scripts/size_budget.sh"]'))
+    for checkout, filename in ((wt, "feature"), (repo, "upstream")):
+        (checkout / "src/loopzero").mkdir(parents=True)
+        commit_file(checkout, f"src/loopzero/{filename}.py", "# first line\n# second line\n", filename)
+    commit_file(wt, "ast.py", "raise AssertionError('loaded candidate module')\n", "add candidate module")
+    git(repo, "push", str(repo.parent / "origin.git"), "main")  # leave origin/main stale locally
+    head = head_of(wt)
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.append(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, isDraft=False)))
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=head, sha=None))
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
+    monkeypatch.setattr(mergify, "markers", lambda *_: (command == "resume",) * 2)
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
-    monkeypatch.setattr(
-        mergify, "request", lambda *_: pytest.fail("resume must not submit another command")
-    )
+    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("must not submit a queue request"))
 
-    code, _out, err = run(capsys, "merge", "--wait=1")
+    args = ("merge", "--wait=1") if command == "resume" else (command,)
+    code, _out, err = run(capsys, *args)
+    assert head_of(wt) == head and not (wt / "src/loopzero/upstream.py").exists()
+    if command != "resume":
+        assert code == 1 and "src=4 (base 2, delta 2, cap 3" in err and "loaded candidate module" not in err
+        return
 
     assert 'Read Mergify\'s "Left the queue" comment' in err
     assert code == 1 and "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`" in err

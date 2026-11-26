@@ -1478,10 +1478,9 @@ def merge(
         _gh(*argv, timeout=300)
     except GhError as exc:
         raise MergeFailed(exc.command, exc.tail) from exc
-    if strategy != "queue":
-        # A synchronous merge already in flight still needs verification and cleanup.
-        if sha := merged_sha(repo, number, expected_head=head_sha):
-            return sha
+    # A synchronous merge already in flight still needs verification and cleanup.
+    if strategy != "queue" and (sha := merged_sha(repo, number, expected_head=head_sha)):
+        return sha
     budget = (bounded_reads(observation_deadline, token=None, retry=True)
               if observation_deadline is not None else nullcontext())
     sha = None

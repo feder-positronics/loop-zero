@@ -244,7 +244,7 @@ def task_text(wt: Path) -> str:
             "or recreate the file using the handoff template at "
             "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md"
         )
-    return task.read_text()
+    return task.read_text(encoding="utf-8")
 
 
 def base_sha(wt: Path) -> str:

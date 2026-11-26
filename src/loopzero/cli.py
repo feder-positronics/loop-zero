@@ -19,6 +19,7 @@ import shlex
 import random
 import re
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
@@ -74,9 +75,10 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 # --------------------------------------------------------------------------- git / context
 
 
-def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False) -> str:
+def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False,
+         extra_env: dict[str, str] | None = None) -> str:
     done = _proc.run(
-        ["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout,
+        ["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout, extra_env=extra_env,
         preserve_newlines=paths, encoding=sys.getfilesystemencoding() if paths else None,
     )
     if done.exit_code != 0:
@@ -1246,6 +1248,42 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
+_SIZE_BUDGET = "scripts/size_budget.sh"
+
+
+def _prequeue_size_budget(
+    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness,
+) -> None:
+    if not readiness.ready or config.merge_strategy != "mergify" or _SIZE_BUDGET not in config.checks:
+        return
+    origin = _git(wt, "remote", "get-url", "origin")
+    with tempfile.TemporaryDirectory(prefix="loopzero-size-") as directory:
+        root = Path(directory)
+        env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+               "PYTHON": sys.executable, "PYTHONSAFEPATH": "1"}
+        git = partial(_git, root, extra_env=env)
+        git("clone", "--shared", "--no-checkout", "--template=", str(wt), ".")
+        # Fetch with the user's credential configuration for private origins.
+        fetched = _proc.run(
+            ["git", "fetch", "--no-tags", "--no-recurse-submodules", "--",
+             origin, f"refs/heads/{config.base_branch}"],
+            cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
+        )
+        if fetched.exit_code != 0:
+            raise CliError(f"could not fetch {config.base_branch} from origin for the size budget check")
+        base = git("rev-parse", "FETCH_HEAD^{commit}")
+        script = git("show", f"{base}:{_SIZE_BUDGET}")
+        tree = git("merge-tree", "--write-tree", base, pr.head_sha)
+        # A candidate symlink must not read files outside the temporary checkout.
+        git("-c", "core.symlinks=false", "read-tree", "--reset", "-u", tree)
+        result = _proc.run(["bash", "-s", "--", base], input=script + "\n", cwd=root,
+                           env_allowlist=("PATH",), extra_env=env, timeout=GIT_TIMEOUT,
+                           merge_output=True)
+        if result.exit_code:
+            raise CliError("current target size budget failed:\n" + result.stdout.rstrip())
+
+
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None)
@@ -1270,6 +1308,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
             return 3
         pr, readiness, kicked = waited
     assert readiness is not None
+    _prequeue_size_budget(wt, config, pr, readiness)
     if readiness.ready and pr.is_draft and not kicked:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
@@ -1373,7 +1412,6 @@ def _wait_with_deadline(
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr, args)
         return None
-    sha = None
     reported_timeout = False
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
@@ -1418,6 +1456,16 @@ def _verify_wait_snapshot(
     raise CliError(f"{changed} changed while waiting; retry with the current settings")
 
 
+def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> None:
+    def by_check(reasons: tuple[str, ...]) -> dict[str, str]:
+        return {reason.rpartition("' ")[0] or reason: reason for reason in reasons}
+    previous, current = by_check(shown), by_check(pending)
+    if changed := [reason for key, reason in current.items() if previous.get(key) != reason]:
+        print("waiting: " + "; ".join(changed))
+    if cleared := [key.removeprefix("required check '") for key in previous if key not in current]:
+        print("cleared: " + "; ".join(cleared))
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
@@ -1451,11 +1499,11 @@ def _wait_for_checks(
         pending = _pending_checks(
             config, current, readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft),
         )
+        if pending or readiness.ready:
+            _print_wait_changes(shown, pending)
         if not pending:
             return current, readiness, kicked
-        if pending != shown:
-            print("waiting: " + "; ".join(pending))
-            shown = pending
+        shown = pending
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
             print(
@@ -1666,7 +1714,7 @@ class _AdmissionDeadline(Exception):
 
 
 def _merge_with_mergify(
-    config: Config, pr: github.PR,
+    wt: Path, config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
     """Request Mergify after readiness verifies the source gates and queue configuration."""
@@ -1693,6 +1741,7 @@ def _merge_with_mergify(
             return sha
         raise closed[0]
     if not confirmed and not requested:
+        _prequeue_size_budget(wt, config, pr, readiness)
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
@@ -1747,7 +1796,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
-            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by)
+            sha = _merge_with_mergify(wt, config, pr, readiness, deadline, admit_by)
         except _AdmissionDeadline:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3
