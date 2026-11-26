@@ -59,19 +59,14 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(
-    cwd: Path, *args: str, timeout: float = 120,
-    preserve_whitespace: bool = False, preserve_newlines: bool = False, graceful_interrupt: bool = False,
-) -> str:
+def git(cwd: Path, *args: str, env_allowlist: tuple[str, ...] = GIT_ENV, timeout: float = 120,
+        paths: bool = False, raw: bool = False, **kwargs) -> str:
+    """Run git, raising GitError on failure; scalar output is stripped unless `raw`."""
     argv = ("git", *args)
-    if preserve_whitespace:
-        done = run_git_paths(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
-    else:
-        done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-                   preserve_newlines=preserve_newlines, graceful_interrupt=graceful_interrupt)
+    done = (run_git_paths if paths else run)(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout, **kwargs)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
-    return done.stdout if preserve_newlines or preserve_whitespace else done.stdout.strip()
+    return done.stdout if raw or paths or kwargs.get("preserve_newlines") else done.stdout.strip()
 
 
 def branch_name(repo_root: Path, slug: str) -> str:
@@ -103,7 +98,7 @@ def task_file(wt: Path) -> Path:
 @contextmanager
 def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False):
     path = wt / ".loopzero"
-    if _git(wt, "ls-files", "-z", "--", ".loopzero"):
+    if git(wt, "ls-files", "-z", "--", ".loopzero"):
         raise WorktreeError(f"refusing repository-tracked local state: {path}")
     if create:
         with suppress(FileExistsError):
@@ -197,7 +192,7 @@ def _branch_exists(repo_root: Path, branch: str) -> bool:
 
 
 def _ensure_excludes(repo_root: Path) -> None:
-    common = Path(_git(repo_root, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True)).resolve()
+    common = Path(git(repo_root, *_ABSOLUTE_COMMON_DIR, paths=True)).resolve()
     info = (common / "info").resolve()
     exclude = (info / "exclude").resolve()
     if not info.is_relative_to(common) or not exclude.is_relative_to(common):
@@ -224,7 +219,7 @@ def _fetch_base(repo_root: Path, base_branch: str) -> str:
     try:
         valid = run(("git", "check-ref-format", remote_ref), cwd=repo_root, env_allowlist=GIT_ENV, timeout=30)
         symbolic = run(("git", "symbolic-ref", "-q", tracking), cwd=repo_root, env_allowlist=GIT_ENV, timeout=30)
-        modules = repo_root / _git(repo_root, "rev-parse", "--git-path", "modules", preserve_whitespace=True)
+        modules = repo_root / git(repo_root, "rev-parse", "--git-path", "modules", paths=True)
         if valid.exit_code == 0 and symbolic.exit_code == 1 and not modules.exists():
             fetch = ("git", "fetch", "--porcelain", "--verbose", "--no-tags", "--no-prune",
                      "--no-write-fetch-head", "--refmap=", "origin", f"+{remote_ref}:{tracking}")
@@ -235,14 +230,14 @@ def _fetch_base(repo_root: Path, base_branch: str) -> str:
                     raise GitError(fetch, result.stderr or result.stdout or f"origin did not report {remote_ref}")
                 return row[1]
         lookup = ("ls-remote", "--refs", "origin", remote_ref)
-        base, _, ref = _git(repo_root, *lookup).partition("\t")
+        base, _, ref = git(repo_root, *lookup).partition("\t")
         if ref != remote_ref:
             raise GitError(("git", *lookup), f"origin did not report a unique {remote_ref}")
-        _git(repo_root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", base)
-        _git(repo_root, "update-ref", "--no-deref", tracking, base)
+        git(repo_root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", base)
+        git(repo_root, "update-ref", "--no-deref", tracking, base)
         return base
     except GitError:
-        if "origin" in _git(repo_root, "remote").splitlines():
+        if "origin" in git(repo_root, "remote").splitlines():
             raise
         raise WorktreeError(
             "no Git remote named 'origin'. Add it with `git remote add origin <url>` using the URL for the "
@@ -284,25 +279,25 @@ def _prepare_checkout(repo_root: Path, wt: Path, branch: str, base: str, *, exis
     if not existing:
         wt.parent.mkdir(parents=True, exist_ok=True)
         # Let Git clean up the interrupted checkout before creating the final branch.
-        _git(repo_root, "worktree", "add", "--quiet", "--detach", str(wt), base, graceful_interrupt=True)
+        git(repo_root, "worktree", "add", "--quiet", "--detach", str(wt), base, graceful_interrupt=True)
     if detached:
         with defer_sigterm():
-            _git(wt, "switch", "--quiet", "-c", branch, graceful_interrupt=True)
+            git(wt, "switch", "--quiet", "-c", branch, graceful_interrupt=True)
 
 
 def _resumable_checkout(repo_root: Path, wt: Path, expected_branch: str) -> tuple[str, bool] | None:
-    registered = _git(repo_root, "worktree", "list", "--porcelain", "-z", preserve_whitespace=True).split("\0\0")
+    registered = git(repo_root, "worktree", "list", "--porcelain", "-z", paths=True).split("\0\0")
     path_field = f"worktree {wt.resolve()}\0"
     fields = next((item for item in registered if item.startswith(path_field)), "").split("\0")
     if (len(fields) != 3 or fields[2] not in ("detached", f"branch refs/heads/{expected_branch}")
             or not (wt / ".git").is_file()):
         return None
-    common = _git(repo_root, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True)
-    if _git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True) != common:
+    common = git(repo_root, *_ABSOLUTE_COMMON_DIR, paths=True)
+    if git(wt, *_ABSOLUTE_COMMON_DIR, paths=True) != common:
         return None
     detached = fields[2] == "detached"
     if detached:
-        admin = Path(_git(wt, "rev-parse", "--absolute-git-dir", preserve_whitespace=True))
+        admin = Path(git(wt, "rev-parse", "--absolute-git-dir", paths=True))
         try:
             backlink = os.fsdecode((admin / "gitdir").read_bytes().removesuffix(b"\n"))
         except OSError:
@@ -331,11 +326,11 @@ def _initialize_task(task: Path, text: str) -> None:
 
 
 def head(wt: Path) -> str:
-    return _git(Path(wt), "rev-parse", "HEAD")
+    return git(Path(wt), "rev-parse", "HEAD")
 
 
 def branch(wt: Path, *, native: bool = False) -> str:
-    name = _git(Path(wt), "branch", "--show-current", preserve_whitespace=True)
+    name = git(Path(wt), "branch", "--show-current", paths=True)
     if not name:
         raise WorktreeError("HEAD is detached. Switch to a branch and retry.")
     return name if native else os.fsencode(name).decode("utf-8", "surrogateescape")
@@ -360,20 +355,20 @@ def base_sha(wt: Path) -> str:
 
 
 def is_dirty(wt: Path) -> bool:
-    return bool(_git(Path(wt), "status", "--porcelain", "--untracked-files=all"))
+    return bool(git(Path(wt), "status", "--porcelain", "--untracked-files=all"))
 
 
 def diff_since(wt: Path, sha: str) -> bytes:
     # Show every file as text, whatever attributes or NUL bytes the reviewed head adds,
     # without diff drivers, and keep submodule pointers even if .gitmodules ignores them.
-    diff = _git(Path(wt), "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+    diff = git(Path(wt), "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
                 "--ignore-submodules=none", "--submodule=short", sha, "HEAD", preserve_newlines=True)
     return diff.encode("utf-8", errors="surrogateescape")
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:
     """First-parent merges between ``sha`` and HEAD, oldest first."""
-    return _git(Path(wt), "rev-list", "--first-parent", "--reverse", "--merges", f"{sha}..HEAD").split()
+    return git(Path(wt), "rev-list", "--first-parent", "--reverse", "--merges", f"{sha}..HEAD").split()
 
 
 @contextmanager
@@ -403,8 +398,8 @@ def _lock_verified_ref(wt: Path, ref: str, expected_head: str) -> Iterator[None]
 
 def _require_no_nested_worktree(wt: Path, git_dir: Path) -> None:
     root = wt.resolve()
-    records = _git(git_dir, f"--git-dir={git_dir}", "worktree", "list", "--porcelain", "-z",
-                   preserve_whitespace=True)
+    records = git(git_dir, f"--git-dir={git_dir}", "worktree", "list", "--porcelain", "-z",
+                   paths=True)
     for field in records.split("\0"):
         if field.startswith("worktree "):
             path = Path(field.removeprefix("worktree "))
@@ -428,7 +423,7 @@ def cleanup(wt: Path, expected_head: str) -> None:
     if head(wt) != expected_head:
         raise WorktreeError("local HEAD differs from merged PR head")
     name = branch(wt, native=True)
-    gd = Path(_git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True))
+    gd = Path(git(wt, *_ABSOLUTE_COMMON_DIR, paths=True))
     ref = f"refs/heads/{name}"
     with _lock_verified_ref(wt, ref, expected_head):
         if branch(wt, native=True) != name:
@@ -436,12 +431,12 @@ def cleanup(wt: Path, expected_head: str) -> None:
         if is_dirty(wt):
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
         _require_no_nested_worktree(wt, gd)
-        _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
-    worktrees = _git(gd, f"--git-dir={gd}", "worktree", "list", "--porcelain", "-z", preserve_whitespace=True)
+        git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
+    worktrees = git(gd, f"--git-dir={gd}", "worktree", "list", "--porcelain", "-z", paths=True)
     if f"branch {ref}" in worktrees.split("\0"):
         raise WorktreeError(f"local branch {name!r} is checked out in another worktree")
     try:
-        _git(gd, f"--git-dir={gd}", "update-ref", "--no-deref", "-d", ref, expected_head)
+        git(gd, f"--git-dir={gd}", "update-ref", "--no-deref", "-d", ref, expected_head)
     except GitError:
-        if _git(gd, f"--git-dir={gd}", "branch", "--list", "--", name):
+        if git(gd, f"--git-dir={gd}", "branch", "--list", "--", name):
             raise

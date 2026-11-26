@@ -5,6 +5,7 @@ description: Explore a UI direction with a standalone HTML/CSS mockup before pro
 
 # Design Mockup
 
+Delegate the direction to the repository's `ui_design` route when you are not on it.
 Make the UI decision inspectable in a clearly non-production artifact; omit
 backend implementation. Read the request, design, existing surface and relevant
 component, token and browser guidance. Identify actors, scenarios, consequential

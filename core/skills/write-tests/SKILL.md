@@ -21,5 +21,5 @@ and behavior consumed, avoiding shared mutable state, timing tolerance and dupli
 For a bug fix, observe the regression test fail on pre-fix code. If impossible, explain the oracle and its limits.
 Infrastructure failure cannot prove regression detection. Coverage-only tests may pass existing code.
 
-Run focused and affected neighboring tests, then [contract delivery checks](../../CONTRACT.md#blockers).
+Run focused and affected neighboring tests.
 Record commands, results and limits in task Notes.

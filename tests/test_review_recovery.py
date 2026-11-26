@@ -23,7 +23,7 @@ from tests.test_cli import (
 
 gh, git_seed, repo, wt = support.gh, support.git_seed, support.repo, support.wt
 replay_gh = support.replay_gh
-REVIEW_COMMENTS = f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1"
+REVIEW_COMMENTS = f"api repos/{REPO}/pulls/7/reviews/17/comments --method GET"
 
 
 def published_review(head, body, *, state="COMMENTED"):
@@ -191,13 +191,13 @@ def test_recovery_requires_exact_live_publication(
             rows[-1]["id"] = 18
             if change == "newer":
                 rows[-1]["state"] = "PENDING"
-            gh.respond(f"api repos/{REPO}/pulls/7/reviews/18/comments?per_page=100&page=1",
+            gh.respond(f"api repos/{REPO}/pulls/7/reviews/18/comments --method GET",
                        [{**c, "pull_request_review_id": 18} for c in comments])
         elif change == "head":
             arm_pr(gh, "b" * 40)
         elif change == "comment_page":
             comments[:] = comments * 100
-            gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=2", None)
+            gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments page=2", None)
         elif change in {"bad_page", "auth", "quota"}:
             rows[:] = [copy.deepcopy(rows[-1]) for _ in range(100)]
             gh.respond(reviews_key(2), None)
@@ -239,12 +239,12 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
     replay_gh, wt, gh, fake_bin, monkeypatch, capsys, change,
 ):
     lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5)
-    original, monotonic = github.api_get, github.time.monotonic
-    def read(endpoint):
-        data = original(endpoint)
-        if "/comments?" in endpoint:
+    original, monotonic = github.paged, github.time.monotonic
+    def read(endpoint, *args, **kwargs):
+        data = original(endpoint, *args, **kwargs)
+        if endpoint.endswith("/comments"):
             if change == "revoked":
-                rows = original(reviews_key().removeprefix("api "))
+                rows = original(reviews_key().split()[1])
                 rows[-1]["state"] = "DISMISSED"
                 gh.respond(reviews_key(), rows)
             elif change == "deadline":
@@ -252,7 +252,7 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
             else:
                 raise _proc.ProcTimeout("read timed out")
         return data
-    monkeypatch.setattr(github, "api_get", read)
+    monkeypatch.setattr(github, "paged", read)
     out, _ = expect_cli(capsys, 1, "review", stderr_contains=("read-back blocked",))
     assert out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
     assert len([c for c in gh.calls if "--input" in c]) == 1
