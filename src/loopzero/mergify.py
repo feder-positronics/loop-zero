@@ -81,17 +81,20 @@ def _open(request: urllib.request.Request):
         raise MergifyError("Mergify API request has an invalid URL or header") from None
 
 
+def _api_request(repo: str, suffix: str, method: str | None = None) -> urllib.request.Request:
+    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
+    return urllib.request.Request(
+        f"{API}/repos/{owner}/{name}{suffix}", method=method,
+        headers={"Accept": "application/json", "User-Agent": "loopzero",
+                 "Authorization": f"Bearer {_credential()}"},
+    )
+
+
 def api_get(repo: str, suffix: str) -> object | None:
     """GET one documented endpoint below this repository's fixed Mergify API path."""
     if not suffix.startswith("/") or "://" in suffix or ".." in suffix:
         raise ValueError("Mergify API suffix must be a repository-relative absolute path")
-    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
-    endpoint = f"{API}/repos/{owner}/{name}{suffix}"
-    request = urllib.request.Request(
-        endpoint,
-        headers={"Accept": "application/json", "User-Agent": "loopzero",
-                 "Authorization": f"Bearer {_credential()}"},
-    )
+    request = _api_request(repo, suffix)
     for delay in (2.0, 5.0, None):  # reads retry server errors, throttling and dropped reads
         try:
             with _open(request) as response:
@@ -249,13 +252,7 @@ def configured(repo: str, branch: str, queue: str) -> bool:
 
 
 def dequeue(repo: str, number: int) -> None:
-    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
-    endpoint = f"{API}/repos/{owner}/{name}/merge-queue/pull/{number}/dequeue"
-    request = urllib.request.Request(
-        endpoint, method="POST",
-        headers={"Accept": "application/json", "User-Agent": "loopzero",
-                 "Authorization": f"Bearer {_credential()}"},
-    )
+    request = _api_request(repo, f"/merge-queue/pull/{number}/dequeue", "POST")
     try:
         with _open(request):
             return
