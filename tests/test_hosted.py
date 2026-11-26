@@ -1,5 +1,6 @@
 """Trusted publisher behavior against GitHub metadata, without candidate execution."""
 import json
+import signal
 import subprocess
 import sys
 from contextlib import nullcontext
@@ -108,6 +109,39 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     assert all(s["context"] == "Loop-zero Eligibility" for s in statuses)
     assert status != "success" or sum(c["argv"][1] != "graphql" for c in publisher.calls) <= 5
     assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
+
+
+@pytest.mark.parametrize("phase,expected", [("evaluate", "failure"), ("publish", "success")])
+def test_sigterm_does_not_strand_or_overwrite_eligibility(publisher, phase, expected):
+    script = """
+import signal
+import sys
+from loopzero import github, hosted
+
+def evaluate(*_, **_kwargs):
+    if sys.argv[1] == "evaluate":
+        signal.raise_signal(signal.SIGTERM)
+    return github.Readiness(True, ())
+
+post = github.commit_status
+def publish(*args, **kwargs):
+    post(*args, **kwargs)
+    if sys.argv[1] == "publish" and args[3] == "success":
+        signal.raise_signal(signal.SIGTERM)
+
+hosted.eligibility.evaluate = evaluate
+github.commit_status = publish
+raise SystemExit(hosted.main())
+"""
+    def statuses():
+        return [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c]
+
+    stopped = subprocess.run([sys.executable, "-c", script, phase], timeout=10)
+    assert stopped.returncode == -signal.SIGTERM
+    assert statuses() == ["pending", expected]
+
+    subprocess.run([sys.executable, "-c", script, "retry"], timeout=10, check=True)
+    assert statuses() == ["pending", expected, "pending", "success"]
 
 
 @pytest.mark.parametrize("candidate", [False, True])

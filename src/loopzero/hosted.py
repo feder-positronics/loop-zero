@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import quote
 
 from loopzero import candidate as candidate_mod
 from loopzero import config, eligibility, github, mergify
+from loopzero._proc import Terminated, unwind_on_sigterm
 from loopzero.types import Config, LoopZeroError
 
 
@@ -41,7 +43,7 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 1
     try:
-        with github.api_error_diagnostics():
+        with unwind_on_sigterm(), github.api_error_diagnostics():
             return _run(cfg)
     except (github.GhUnavailable, github.ProcTimeout) as exc:
         print(f"Eligibility unconfirmed before pending status publication: {exc}", file=sys.stderr)
@@ -74,9 +76,8 @@ def _run(cfg: Config) -> int:
     active = _candidate_event(event, head) if candidate else pr.get("merged") is not True
     if not active:
         return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
-    def publish(state: str, message: str) -> None:
-        github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
-    publish("pending", "Refreshing live source review evidence")
+    github.commit_status(cfg.repo, head, eligibility.CONTEXT, "pending",
+                         "Refreshing live source review evidence")
     snapshot = None
     try:
         if candidate:
@@ -108,10 +109,8 @@ def _run(cfg: Config) -> int:
     except (github.GhUnavailable, github.ProcTimeout) as exc:
         print(f"Eligibility pending: evidence unavailable ({exc})", file=sys.stderr)
         return 0
-    except Exception as exc:
-        if not isinstance(exc, github.StatusLimitReached):
-            with suppress(Exception):
-                publish("failure", "Eligibility refresh failed; inspect workflow logs")
+    except (Exception, Terminated) as exc:
+        _mark_refresh_failed(cfg.repo, head, exc)
         raise
     _publish_verdict(cfg.repo, head, state, message[:140])
     print(message)
@@ -140,6 +139,20 @@ def _publish_verdict(repo: str, head: str, state: str, description: str) -> None
             if github.status_matches(repo, head, context, state, description):
                 return
         raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
+
+
+def _mark_refresh_failed(repo: str, head: str, exc: Exception | Terminated) -> None:
+    if isinstance(exc, github.StatusLimitReached):
+        return
+    with suppress(Exception):
+        if isinstance(exc, Terminated):
+            timeout = 2.0
+            with github.bounded_reads(time.monotonic() + timeout):
+                github.commit_status(repo, head, eligibility.CONTEXT, "failure",
+                                     "Eligibility refresh interrupted", timeout=timeout)
+        else:
+            github.commit_status(repo, head, eligibility.CONTEXT, "failure",
+                                 "Eligibility refresh failed; inspect workflow logs")
 
 
 if __name__ == "__main__":
