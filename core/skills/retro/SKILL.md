@@ -8,7 +8,7 @@ description: Judge recent workflow changes and choose at most one next change in
 ## Evidence
 
 - Run [retro_metrics.py](../../../scripts/retro_metrics.py) once with the
-  commissioned repo, fixed UTC window end, the outcome and order (`p0`) labels its AGENTS.md names,
+  commissioned repo, fixed UTC window end, the outcome, order and p0 labels its AGENTS.md names,
   agreed stall threshold, and available receipt and host inputs. Save JSON
   stdout to scratch. Take numbers only from the script and query fields needed for decisions.
   Compare the last seven days with the prior seven and the four-week trend.
