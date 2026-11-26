@@ -62,8 +62,7 @@ Before the check and draft push for primary review, rebase your own commits onto
 Leave base merges out of a branch awaiting its delta.
 For base or check-script changes after review, follow the
 [Review budget](../../CONTRACT.md#review-budget).
-Preserve the primary for the delta and the delta for
-post-review fixes. Split the PR if resolving conflicts requires rewriting its reviewed history.
+Preserve the primary for the delta and the delta for post-review fixes.
 
 Never bypass the sandbox, change the check list or enable `[checks].network` to pass checks.
 Report base failures without working around them. If a deterministic out-of-scope
