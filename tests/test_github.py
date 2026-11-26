@@ -842,15 +842,24 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
     assert pages == ["page=1", "page=2"]
 
 
-@pytest.mark.parametrize(("runs", "expected"), [
-    ([check_run("skipped", id=10), check_run("success", id=11)], {"checks": "success"}),
-    ([check_run(None, id=20, status="in_progress"), check_run("success", id=19)], {"checks": "pending"}),
-    ([check_run("success", id=30), check_run("failure", name="lint", id=31)],
-     {"checks": "success", "lint": "failure"}),
-    ([check_run("failure", id=40, started_at="2026-09-18T01:00:00Z"),
-      check_run("success", id=40, started_at="2026-09-18T02:00:00Z")], {"checks": "success"}),
-], ids=["stale-skipped", "newer-pending", "distinct-names", "timestamp-tie"])
-def test_check_runs_ordering(gh: FakeGh, runs: list[dict], expected: dict) -> None:
+@pytest.mark.parametrize("rows,expected", [
+    ([(10, "checks", None, "skipped"), (11, "checks", None, "success")], {"checks": "success"}),
+    ([(20, "checks", "01:00:00Z", None), (19, "checks", "02:00:00Z", "success")], {"checks": "pending"}),
+    ([(30, "checks", None, "success"), (31, "lint", None, "failure")], {"checks": "success", "lint": "failure"}),
+    ([(40, "checks", "01:00:00Z", "failure"), (40, "checks", "02:00:00Z", "success")], {"checks": "success"}),
+    ([(7, "checks", "12:00:00Z", "success"), (7, "checks", "12:00:00.250Z", "failure")], {"checks": "failure"}),
+    ([(None, "checks", "12:00:00Z", "success"), (None, "checks", "09:00:01-03:00", "failure")], {"checks": "failure"}),
+    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "14:00:00+02:00", "success")], {"checks": "failure"}),
+    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "23:00:00+00:99", "success")], {"checks": "failure"}),
+    ([(None, "checks", None, "failure"), (None, "checks", "23:00:00", "success")], {"checks": "failure"}),
+], ids=[
+    "stale-skipped", "id-before-time", "distinct-names", "timestamp-tie", "same-id-fraction",
+    "missing-ids-offset", "equal-instants", "invalid-loses-to-valid", "unusable-times-tie",
+])
+def test_check_runs_ordering(gh: FakeGh, rows: list[tuple], expected: dict) -> None:
+    runs = [check_run(conclusion, name=name, status="completed" if conclusion else "in_progress",
+                      started_at=stamp and f"2026-09-23T{stamp}", **({"id": number} if number is not None else {}))
+            for number, name, stamp, conclusion in rows]
     arm_check_pages(gh, {"check_runs": runs})
     assert github._check_signals(REPO, HEAD)[0] == expected
 
@@ -982,13 +991,16 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh, failure, wait, grace) -
 @pytest.mark.parametrize("check,producer,replacement,statuses,waitable", [
     *(pytest.param(
         failed_check(failure, id=100, started_at="2026-09-23T21:53:00Z", completed_at="2026-09-23T21:54:41Z"),
-        producing_run(), replacement_run() | changes, [], not changes, id=case,
-    ) for case, failure, changes in (
-        ("failed", "failure", {}), ("cancelled", "cancelled", {}),
-        ("different-workflow", "failure", {"workflow_id": 8}),
-        ("different-head", "failure", {"head_sha": "b" * 40}),
-        ("completed", "failure", {"status": "completed"}),
-        ("older", "failure", {"created_at": "2026-09-23T21:52:00Z"}),
+        producing_run(), replacement_run() | changes, [], waitable, id=case,
+    ) for case, failure, changes, waitable in (
+        ("failed", "failure", {}, True), ("cancelled", "cancelled", {}, True),
+        ("different-workflow", "failure", {"workflow_id": 8}, False),
+        ("different-head", "failure", {"head_sha": "b" * 40}, False),
+        ("completed", "failure", {"status": "completed"}, False),
+        ("older", "failure", {"created_at": "2026-09-23T21:52:00Z"}, False),
+        ("offset-tie", "failure", {"created_at": "2026-09-23T22:53:00+01:00", "id": 0}, False),
+        ("newer-fraction", "failure", {"created_at": "2026-09-23T21:53:00.250Z"}, True),
+        ("invalid-creation", "failure", {"created_at": "invalid"}, False),
     )),
     pytest.param(failed_check(id=100), producing_run(created_at=replacement_run()["created_at"]),
                  replacement_run(), [], True, id="same-second-newer-run"),
@@ -1062,13 +1074,14 @@ def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
 
 
 @pytest.mark.parametrize("started,waitable", [
-    ("2026-09-23T21:55:00Z", True), ("2026-09-23T21:54:00Z", False),
+    ("21:55:00Z", True), ("21:54:00Z", False), ("21:54:41.250Z", True),
+    ("22:54:41+01:00", False), ("23:54:40.999+02:00", False), ("invalid", False), (None, False),
 ])
 def test_readiness_rerun_attempt_requires_start_after_old_failure(
-    gh: FakeGh, started: str, waitable: bool
+    gh: FakeGh, started: str | None, waitable: bool
 ) -> None:
     arm_workflow_check(gh, failed_check(id=100, completed_at="2026-09-23T21:54:41Z"))
-    arm_workflow_runs(gh, producing_run(status="in_progress", run_attempt=2, run_started_at=started))
+    arm_workflow_runs(gh, producing_run(status="in_progress", run_attempt=2, run_started_at=started and f"2026-09-23T{started}"))
     result = readiness(workflow_wait=True)
     assert result.waitable_failures == (result.reasons if waitable else ())
 
