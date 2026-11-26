@@ -72,10 +72,12 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    focused tests start early. `check` runs deterministic checks in a read-only
    source sandbox. Its simple-command preflight catches missing local scripts,
    prepares recognized uv dependency groups offline in that sandbox and prints
-   progress before each command, metadata-only stage heartbeats every 30 seconds
-   (including silent children), and exit code/duration immediately after each stage.
+   progress before each command, metadata-only stage heartbeats after 30 seconds
+   and every five minutes thereafter (including silent children), and exit
+   code/duration immediately after each stage.
    Heartbeats stop on completion or cancellation and never supply a verdict; child
-   streams remain captured for the existing final report and failing output tail.
+   streams remain captured for the final report. Oversized failure output gets a
+   terminal preview and keeps its diagnostic tail in the check receipt.
    Trusted-base commands remain authoritative;
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
@@ -111,6 +113,7 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    that requested changes also requires resolved findings at the reviewed head.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
+   The shared check waiter reports initial blockers and subsequent changes.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge
    admission checks readiness again. Missing-run diagnosis keeps its two-minute
