@@ -23,20 +23,16 @@ Record observable acceptance and the issue link. Deliver through
 [seeded browser state or changed prerequisites](reference.md#fresh-stack-proof),
 and [implementation or repairs without a base merge queue](reference.md#integration-without-a-queue).
 
-Before review, record documentation impact; update docs or give an
-evidence-backed reason they need no update.
-Before publication, inspect the issue and linked artifacts for its lifecycle
-blueprint. Include required completion in the closing delivery. A child issue
-does not own its parent's blueprint.
-Recheck collisions before publication and again before merge, rereading live
-acceptance, prior delivery and ownership. Reconcile changed state before proceeding.
-On approval, run readiness at the approved head and defer suggestions and cleanup.
-Before making a source edit for the [delta](../../CONTRACT.md#review-budget), name
-the unmet acceptance criterion or newly verified defect that requires it.
-Review, CI and post-merge acceptance waits remain this task.
-Before using [CI or observation-based acceptance](reference.md#acceptance-evidence)
-or [resuming after interruption or context loss](reference.md#re-entry),
-follow the linked safeguards.
+Before review, update docs as needed and record changes or evidence that none are needed.
+Before publication, inspect the issue and links for its lifecycle blueprint and
+include required completion in the closing delivery. A child does not own its parent's blueprint.
+Recheck collisions, live acceptance, prior delivery and ownership before
+publication and merge. Reconcile changes before proceeding.
+On approval, run readiness at the approved head and defer optional changes.
+Before a source edit for [delta](../../CONTRACT.md#review-budget), name the unmet
+criterion or verified defect. Own review, CI and post-merge acceptance waits.
+Use the [acceptance evidence](reference.md#acceptance-evidence) and
+[re-entry](reference.md#re-entry) safeguards when applicable.
 
 Partial delivery uses `Refs #N` and never closes the issue, including work needing
 post-merge observation. Closing keywords belong only to complete acceptance;

@@ -60,19 +60,17 @@ class FakeGh:
         script.chmod(0o755)
 
     def respond(self, key: str, *responses: object, exit: int = 0, stderr: str = "") -> None:
-        plan = json.loads(self.scenario_file.read_text())
-        if "strict" in plan:
-            raise AssertionError("cannot mix respond() compatibility rules with strict expect() rules")
-        plan.setdefault("compat", {})[key] = [
-            self._response(r, exit=exit, stderr=stderr) for r in responses
-        ]
-        self.scenario_file.write_text(json.dumps(plan))
+        self._set_responses(key, [self._response(r, exit=exit, stderr=stderr) for r in responses])
 
     def append(self, key: str, *responses: object) -> None:
+        self._set_responses(key, [self._response(r) for r in responses], append=True)
+
+    def _set_responses(self, key, responses, *, append=False):
         plan = json.loads(self.scenario_file.read_text())
         if "strict" in plan:
-            raise AssertionError("cannot append compatibility response to strict scenario")
-        plan["compat"].setdefault(key, []).extend(self._response(r) for r in responses)
+            raise AssertionError("cannot mix compatibility responses with strict expect() rules")
+        compat = plan["compat"]
+        compat[key] = [*compat.get(key, ()), *responses] if append else responses
         self.scenario_file.write_text(json.dumps(plan))
 
     def respond_pr_list(self, *snapshots: list[dict], branch: str = "lz/t1") -> None:
@@ -223,8 +221,8 @@ PR_FILES = [
 ]
 
 
-def arm_review(gh: FakeGh, files: list | None = None, author: str = "someone-else") -> None:
-    gh.respond_pr_view( pr_json(author={"login": author}))
+def arm_review(gh: FakeGh, files: list | None = None, author: str = "someone-else", *, branch="lz/t1") -> None:
+    gh.respond_pr_view(pr_json(author={"login": author}), branch=branch)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
     gh.respond(REVIEWS_KEY, {"id": 1})
     gh.respond(FILES_KEY, PR_FILES if files is None else files)
@@ -877,15 +875,16 @@ def check_run(conclusion, *, name="checks", status="completed", **fields):
     return {"name": name, "status": status, "conclusion": conclusion, **fields}
 
 
+def arm_check_pages(gh, *pages, statuses=()):
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", *pages)
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *(statuses or ([],)))
+
+
 def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
     filler = [check_run("success", name=f"job{i}") for i in range(99)]
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
-               {"check_runs": [*filler, check_run("success")]},
-               {"check_runs": [check_run(None, name="lint", status="in_progress")]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [
-        {"context": "ci/legacy", "state": "failure"},
-        {"context": "checks", "state": "pending"},
-    ])
+    statuses = [{"context": "ci/legacy", "state": "failure"}, {"context": "checks", "state": "pending"}]
+    arm_check_pages(gh, {"check_runs": [*filler, check_run("success")]},
+                    {"check_runs": [check_run(None, name="lint", status="in_progress")]}, statuses=(statuses,))
     runs = github._check_signals(REPO, HEAD)[0]
     assert {k: v for k, v in runs.items() if not k.startswith("job")} == {
         "checks": "pending", "lint": "pending", "ci/legacy": "failure"}
@@ -902,16 +901,14 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
       check_run("success", id=40, started_at="2026-09-18T02:00:00Z")], {"checks": "success"}),
 ], ids=["stale-skipped", "newer-pending", "distinct-names", "timestamp-tie"])
 def test_check_runs_ordering(gh: FakeGh, runs: list[dict], expected: dict) -> None:
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    arm_check_pages(gh, {"check_runs": runs})
     assert github._check_signals(REPO, HEAD)[0] == expected
 
 
 @pytest.mark.parametrize("page", [{"total_count": 1}, {"check_runs": 1}, {"check_runs": []}])
 def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
     endpoint = f"repos/{REPO}/commits/{HEAD}/check-runs"
-    gh.respond(f"api {endpoint}", page)
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    arm_check_pages(gh, page)
 
     if page.get("check_runs") == []:
         assert github._check_signals(REPO, HEAD)[0] == {}
@@ -921,15 +918,10 @@ def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
 
 
 def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
     page = [{"context": f"old-{i}", "state": "success"} for i in range(99)]
     page += [{"context": "duplicate", "state": "failure"}]
-    gh.respond(
-        f"api repos/{REPO}/commits/{HEAD}/statuses",
-        page,
-        [{"context": "required-page-two", "state": "success"},
-         {"context": "duplicate", "state": "success"}],
-    )
+    second = [{"context": "required-page-two", "state": "success"}, {"context": "duplicate", "state": "success"}]
+    arm_check_pages(gh, {"check_runs": []}, statuses=(page, second))
     runs = github._check_signals(REPO, HEAD)[0]
     assert runs["required-page-two"] == "success"
     assert runs["duplicate"] == "failure", "the first (latest) status wins"
@@ -957,8 +949,7 @@ def arm_readiness(gh: FakeGh, *, threads=(), runs=None) -> None:
 
 def arm_workflow_check(gh: FakeGh, *checks: dict, statuses=(), threads=()) -> None:
     gh.respond("api graphql", threads_json(*threads))
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": list(checks)})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", list(statuses))
+    arm_check_pages(gh, {"check_runs": list(checks)}, statuses=(list(statuses),))
 
 
 def readiness(*, reviewed=HEAD, workflow_wait=False):
@@ -1049,33 +1040,27 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh, failure, wait, grace) -
     assert r.waitable_failures == ((f"required check 'checks' is {failure}",) if wait and grace else ())
 
 
-@pytest.mark.parametrize("failure,changes", [
-    pytest.param("failure", {}, id="failed"), pytest.param("cancelled", {}, id="cancelled"),
-    pytest.param("failure", {"workflow_id": 8}, id="different-workflow"),
-    pytest.param("failure", {"head_sha": "b" * 40}, id="different-head"),
-    pytest.param("failure", {"status": "completed"}, id="completed"),
-    pytest.param("failure", {"created_at": "2026-09-23T21:52:00Z"}, id="older"),
+@pytest.mark.parametrize("check,producer,replacement,statuses,waitable", [
+    *(pytest.param(
+        failed_check(failure, id=100, started_at="2026-09-23T21:53:00Z", completed_at="2026-09-23T21:54:41Z"),
+        producing_run(), replacement_run() | changes, [], not changes, id=case,
+    ) for case, failure, changes in (
+        ("failed", "failure", {}), ("cancelled", "cancelled", {}),
+        ("different-workflow", "failure", {"workflow_id": 8}),
+        ("different-head", "failure", {"head_sha": "b" * 40}),
+        ("completed", "failure", {"status": "completed"}),
+        ("older", "failure", {"created_at": "2026-09-23T21:52:00Z"}),
+    )),
+    pytest.param(failed_check(id=100), producing_run(created_at=replacement_run()["created_at"]),
+                 replacement_run(), [], True, id="same-second-newer-run"),
+    pytest.param(failed_check(id=100), producing_run(), replacement_run(),
+                 [{"context": "checks", "state": "failure"}], False, id="failing-commit-status"),
 ])
-def test_readiness_waits_only_for_newer_active_producing_workflow(gh, failure, changes):
-    arm_workflow_check(gh, failed_check(
-        failure, id=100, started_at="2026-09-23T21:53:00Z", completed_at="2026-09-23T21:54:41Z",
-    ))
-    arm_workflow_runs(gh, producing_run(), {**replacement_run(), **changes})
+def test_readiness_defers_only_replaceable_failure(gh, check, producer, replacement, statuses, waitable):
+    arm_workflow_check(gh, check, statuses=statuses)
+    arm_workflow_runs(gh, producer, replacement)
     result = readiness(workflow_wait=True)
-    assert result.reasons == (f"required check 'checks' is {failure}",)
-    assert result.waitable_failures == (() if changes else result.reasons)
-    assert not result.ready
-
-
-@pytest.mark.parametrize("created_at,statuses,waitable", [
-    ("2026-09-23T21:54:21Z", [], True),
-    ("2026-09-23T21:53:00Z", [{"context": "checks", "state": "failure"}], False),
-], ids=["same-second-newer-run", "failing-commit-status"])
-def test_readiness_defers_only_replaceable_failure(gh: FakeGh, created_at, statuses, waitable):
-    arm_workflow_check(gh, failed_check(id=100), statuses=statuses)
-    arm_workflow_runs(gh, producing_run(created_at=created_at), replacement_run())
-    result = readiness(workflow_wait=True)
-    assert result.reasons == ("required check 'checks' is failure",)
+    assert not result.ready and result.reasons == (f"required check 'checks' is {check['conclusion']}",)
     assert result.waitable_failures == (result.reasons if waitable else ())
 
 

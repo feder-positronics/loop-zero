@@ -318,12 +318,12 @@ def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Conf
 
 
 def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
-    raw = _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag)
-    return (cwd / raw.strip()).resolve()
+    return (cwd / _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag, paths=True)).resolve()
 
 
-def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str) -> str:
-    done = _proc.run(["git", *args], cwd=cwd, env_allowlist=allowlist, timeout=30)
+def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str, paths: bool = False) -> str:
+    run = _proc.run_git_paths if paths else _proc.run
+    done = run(["git", *args], cwd=cwd, env_allowlist=allowlist, timeout=30)
     if done.exit_code != 0:
         raise RunnerBadOutput(f"git {label} exited {done.exit_code}", _tail(done.stderr))
     return done.stdout
@@ -331,12 +331,10 @@ def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str) -
 
 def _git_dirs(cwd: Path, env_allowlist: tuple[str, ...]) -> tuple[Path, Path]:
     argv = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir"]
-    done = _proc.run(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=30)
-    paths = done.stdout.removesuffix("\n").split("\n")
-    if done.exit_code == 0 and len(paths) == 2:
-        common_dir, git_dir = map(Path, paths)
-        if common_dir.is_absolute() and git_dir.is_absolute():
-            return common_dir.resolve(), git_dir.resolve()
+    done = _proc.run_git_paths(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=30)
+    paths = [Path(path) for path in done.stdout.split("\n")]
+    if done.exit_code == 0 and len(paths) == 2 and all(path.is_absolute() for path in paths):
+        return paths[0].resolve(), paths[1].resolve()
     # A path may contain a newline, which makes the combined output ambiguous.
     return _git_dir(cwd, "--git-common-dir", env_allowlist), _git_dir(cwd, "--git-dir", env_allowlist)
 
