@@ -8,6 +8,7 @@ import subprocess
 import re
 import stat
 import tempfile
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -266,7 +267,7 @@ def diff_since(wt: Path, sha: str) -> str:
     """
     wt = Path(wt)
     patch = _git_bytes(wt, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
-                       "--full-index", sha, "HEAD")
+                       "--full-index", "--ignore-submodules=none", "--submodule=short", sha, "HEAD")
     blocks = [block for block in re.split(rb"(?m)^(?=diff --git )", patch) if block]
     # Classify each file by its own content (HEAD, or the base when deleted), not its patch.
     sides = [_content_side(block) for block in blocks]
@@ -285,7 +286,7 @@ def diff_since(wt: Path, sha: str) -> str:
 
 def _content_side(block: bytes) -> tuple[str, str] | None:
     # Full object IDs: an abbreviated one could resolve as a ref name instead.
-    index = re.search(rb"(?m)^index ([0-9a-f]{40}|[0-9a-f]{64})\.\.([0-9a-f]{40}|[0-9a-f]{64})",
+    index = re.search(rb"(?m)^index ([0-9a-f]{40}(?:[0-9a-f]{24})?)\.\.([0-9a-f]{40}(?:[0-9a-f]{24})?)(?= |$)",
                       block.partition(b"\n@@")[0])
     if not index:
         return None  # rename or mode change only: no content changed
@@ -299,19 +300,27 @@ def _non_utf8_sizes(wt: Path, blobs: list[str]) -> dict[str, int]:
     sizes = {}
     with subprocess.Popen(argv, cwd=wt, env=build_env(GIT_ENV), stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+        deadline = threading.Timer(120, proc.kill)  # a stalled read then ends in EOF below
+        deadline.start()
         try:
             for blob in dict.fromkeys(blobs):
                 proc.stdin.write(f"{blob}\n".encode())
                 proc.stdin.flush()
                 fields = proc.stdout.readline().split()
-                if len(fields) != 3:  # missing or ambiguous: no payload follows
+                if fields[1:] == [b"missing"]:  # e.g. a submodule commit not fetched here
                     continue
+                if len(fields) != 3:
+                    raise GitError(argv, f"no usable response for {blob}")
                 size = int(fields[2])
                 utf8 = _stream_is_utf8(proc.stdout, size, argv)
-                proc.stdout.read(1)  # each payload ends with a newline, whatever its type
+                if proc.stdout.read(1) != b"\n":
+                    raise GitError(argv, f"truncated response for {blob}")
                 if fields[1] == b"blob" and not utf8:
                     sizes[blob] = size
+        except (OSError, ValueError) as exc:
+            raise GitError(argv, str(exc)) from exc
         finally:
+            deadline.cancel()
             proc.stdin.close()
             proc.kill()
     return sizes

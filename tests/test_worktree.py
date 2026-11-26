@@ -200,11 +200,8 @@ def test_start_reports_git_failure_with_command(repo: Path) -> None:
 
 def _commit_files(repo: Path, files: dict[str, bytes | None]) -> str:
     for name, content in files.items():
-        if content is None:
-            git(repo, "rm", "-q", name)
-            continue
-        (repo / name).write_bytes(content)
-        git(repo, "add", name)
+        (repo / name).write_bytes(content) if content is not None else (repo / name).unlink()
+    git(repo, "add", "-A", "--", *files)
     git(repo, "commit", "-q", "-m", "change")
     return git(repo, "rev-parse", "HEAD").strip()
 
@@ -212,22 +209,28 @@ def _commit_files(repo: Path, files: dict[str, bytes | None]) -> str:
 def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path) -> None:
     base = _commit_files(git_repo, {"attr.py": b"old\n", "nul.py": b"old\n", "was_latin1.txt": b"caf\xe9\n",
                                     "far.bin": b"\xff" + b"line\n" * 40})
-    # A gitlink whose commit is in the object database returns a commit payload first.
     git(git_repo, "update-index", "--add", "--cacheinfo", f"160000,{base},a-sub")
     _commit_files(git_repo, {
         ".gitattributes": b"attr.py -diff\nnul.py binary\n", "attr.py": b"new = 'attr hunk'\n",
         "nul.py": b"new = 'nul hunk'\x00\n", "image.png": b"\x89PNG\r\n\x1a\n\x00\xff\xfe",
         "was_latin1.txt": "café \u00a0\n".encode(), "far.bin": b"\xff" + b"line\n" * 39 + b"changed\n",
-        "deleted file mode 100644": b"\xff\xfe", "r\u00e9sum\u00e9.bin": b"\xff"})
+        "deleted file mode 100644": b"\xff\xfe", "r\u00e9sum\u00e9.bin": b"\xff",
+        ".gitmodules": b'[submodule "a-sub"]\n\tpath = a-sub\n\tignore = all\n'})
     diff = worktree.diff_since(git_repo, base)
-    assert "Binary files" not in diff and f"+Subproject commit {base}" in diff
-    assert "+new = 'attr hunk'" in diff and "+new = 'nul hunk'\x00" in diff
-    assert "+café \u00a0" in diff.split("\n"), "UTF-8 additions survive a non-UTF-8 old side, untrimmed"
+    assert "Binary files" not in diff and f"+Subproject commit {base}" in diff and "+new = 'attr hunk'" in diff
+    assert "+new = 'nul hunk'\x00" in diff and "+café \u00a0" in diff.split("\n")  # untrimmed, old side not UTF-8
     for header, size in (("a/image.png b/image.png", 11), ("a/far.bin b/far.bin", 204),
                          ('"a/r\\303\\251sum\\303\\251.bin" "b/r\\303\\251sum\\303\\251.bin"', 1)):
         assert f"diff --git {header}\ncontent not shown: not UTF-8 text, {size} bytes at HEAD\n" in diff
-    chunks = "".join(split_diff(diff, 400))
-    assert "diff --git a/deleted file mode 100644 b/deleted file mode 100644\ncontent not shown" in chunks
+    notice = "diff --git a/deleted file mode 100644 b/deleted file mode 100644\ncontent not shown"
+    assert notice in "".join(split_diff(diff, 400))
+
+
+def test_blob_classification_fails_closed_and_keeps_full_ids(git_repo: Path, monkeypatch) -> None:
+    assert worktree._content_side(b"index " + b"a" * 64 + b".." + b"b" * 64 + b" 100644") == ("b" * 64, "HEAD")
+    monkeypatch.setattr(worktree.subprocess, "Popen", lambda _, real=subprocess.Popen, **kw: real(["true"], **kw))
+    with pytest.raises(worktree.GitError, match="no usable response"):
+        worktree._non_utf8_sizes(git_repo, ["b" * 40])
 
 
 def test_split_diff_summarizes_only_files_git_reports_deleted(git_repo: Path) -> None:
