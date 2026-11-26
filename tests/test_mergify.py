@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
 import subprocess
 import sys
+import traceback
 import urllib.error
 import urllib.request
 
@@ -15,6 +17,26 @@ from loopzero import mergify
 
 def response(payload: object) -> io.BytesIO:
     return io.BytesIO(json.dumps(payload).encode())
+
+
+
+@pytest.mark.parametrize(("operation", "args"), [
+    (mergify.api_get, ("acme/widgets", "/merge-queue/status")),
+    (mergify.dequeue, ("acme/widgets", 7)),
+])
+def test_malformed_authorization_is_not_logged(monkeypatch, operation, args):
+    fake_key = "synthetic-mergify-key"
+    monkeypatch.setenv("MERGIFY_API_KEY", fake_key + "\nsecond-line")
+    monkeypatch.setattr(urllib.request, "getproxies", dict)
+    monkeypatch.setattr(mergify, "_retry_sleep", lambda _delay: None)
+
+    def reject_network(_connection):
+        pytest.fail("invalid Authorization header reached the network")
+
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", reject_network)
+    with pytest.raises(mergify.MergifyError, match="invalid URL or header") as failure:
+        operation(*args)
+    assert fake_key not in "".join(traceback.format_exception(failure.value))
 
 
 def test_membership_uses_bearer_and_validates_queue(monkeypatch):
