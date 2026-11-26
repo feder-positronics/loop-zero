@@ -17,6 +17,7 @@ from importlib import import_module
 from itertools import cycle
 from os import environ
 from shutil import copytree
+from unittest.mock import Mock
 
 import pytest
 
@@ -158,10 +159,9 @@ def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
 )
 def test_rejects_forged_bot_or_prefix(mutation, message: str) -> None:
     candidate_event = event()
-    original_payloads = payloads(candidate_event)
     mutation(candidate_event)
     with pytest.raises(CandidateError, match=message):
-        run_attestation(candidate_event=candidate_event, github_payloads=original_payloads)
+        run_attestation(candidate_event=candidate_event, github_payloads=payloads(event()))
 
 
 @pytest.mark.parametrize("case,diagnostic", [
@@ -243,8 +243,21 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
         return git("rev-parse", "HEAD")
 
     popen = subprocess.Popen
+    observed_transport = set()
 
     def isolated_fetch(argv, **kwargs):
+        if environ.get("HTTPS_PROXY") == "http://proxy.invalid:8080" and "git" in argv:
+            env = kwargs["env"]
+            transport = {"HTTPS_PROXY", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"}
+            if "fetch" in argv:
+                observed_transport.add("fetch")
+                assert env["HTTPS_PROXY"] == environ["HTTPS_PROXY"]
+                assert (env["GIT_CONFIG_COUNT"], env["GIT_CONFIG_KEY_0"]) == ("1", "http.extraHeader")
+                header = env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
+                assert base64.b64decode(header) == b"x-access-token:secret-token"
+            else:
+                observed_transport.add("plumbing")
+                assert not transport & env.keys()
         assert not any(arg.startswith("--as") for arg in argv)  # arm64 Git exceeds RLIMIT_AS
         if "fetch" in argv:
             assert "https://github.com/owner/repo.git" in argv
@@ -294,45 +307,22 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
 
         if base_branch != "main":
             run = partial(run, base_branch=base_branch)
-        return run_attestation(candidate_event, github_get=get, status_reads=[queue],
-                               source_policy=policy, run=run)
+        sources = run_attestation(candidate_event, github_get=get, status_reads=[queue],
+                                  source_policy=policy, run=run)
+        if environ.get("HTTPS_PROXY") == "http://proxy.invalid:8080":
+            assert observed_transport == {"fetch", "plumbing"}
+        return sources
 
     return attest, git, commit, base, parent, source, candidate_sha
 
 
 @pytest.mark.parametrize("base_branch", ["main", "trunk"])
-def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate, base_branch):
+def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate, base_branch, monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
     attest, _, _, _, _, source, _ = tree_candidate
     seen = []
     assert attest(base_branch=base_branch, policy=lambda n, _: seen.append(n)) == expected_sources((102, source))
     assert seen == [102]
-
-
-def test_candidate_transport_configuration_is_scoped_to_fetch(tree_candidate, monkeypatch):
-    attest, _, _, _, _, source, _ = tree_candidate
-    popen = subprocess.Popen
-    seen = set()
-    proxy = "http://proxy.invalid:8080"
-    monkeypatch.setenv("HTTPS_PROXY", proxy)
-
-    def check_environment(argv, **kwargs):
-        if "git" in argv:
-            env = kwargs["env"]
-            if "fetch" in argv:
-                seen.add("fetch")
-                assert env["HTTPS_PROXY"] == proxy
-                assert env["GIT_CONFIG_COUNT"] == "1"
-                assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
-                header = env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
-                assert base64.b64decode(header) == b"x-access-token:secret-token"
-            else:
-                seen.add("non-fetch")
-                assert not {"HTTPS_PROXY", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} & env.keys()
-        return popen(argv, **kwargs)
-
-    monkeypatch.setattr(subprocess, "Popen", check_environment)
-    assert attest() == expected_sources((102, source))
-    assert seen == {"fetch", "non-fetch"}
 
 
 @pytest.mark.parametrize("mutation,diagnostic", [
@@ -403,10 +393,7 @@ def intelflo_policy(monkeypatch):
 
 @pytest.fixture(params=["loopzero", "intelflo"])
 def candidate_policy(request):
-
-    if request.param == "intelflo":
-        return request.getfixturevalue("intelflo_policy")
-    return candidate, attest_candidate
+    return request.getfixturevalue("intelflo_policy") if request.param == "intelflo" else (candidate, attest_candidate)
 
 
 @pytest.mark.parametrize("case", [
@@ -566,10 +553,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
         live["batches"].pop(0)
         values["/repos/owner/repo/git/ref/heads/main"] = {"object": {"sha": "b" * 40}}
 
-        def mismatch(*_):
-            raise CandidateError("candidate tree mismatch")
-
-        monkeypatch.setattr(candidate, "_verify_tree", mismatch)
+        monkeypatch.setattr(candidate, "_verify_tree", Mock(side_effect=CandidateError("candidate tree mismatch")))
 
     def get(path):
         if path == "/apps/mergify":
@@ -583,10 +567,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
                 return deepcopy(reread)
         return result
 
-    def policy(*_):
-        if failure == "policy":
-            raise expected
-
+    policy = Mock(side_effect=expected if failure == "policy" else None)
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     with pytest.raises(CandidateError) as caught:
         run_attestation(github_get=get, status_reads=[live], source_policy=policy)
