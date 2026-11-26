@@ -263,6 +263,117 @@ def run(capsys, *argv: str) -> tuple[int, str, str]:
     return code, captured.out, captured.err
 
 
+# Transcript size regressions
+@pytest.mark.parametrize("command", ["ready", "merge"])
+@pytest.mark.parametrize("stable", [False, True])
+def test_wait_reports_only_check_changes(wt, gh, head, capsys, monkeypatch, stable, command):
+    names = ["checks"] + [f"verify deployment / integration shard {n:02d}" for n in range(23)]
+    cfg = config.load(wt / "workflow.toml")
+    monkeypatch.setattr(cli, "_context", lambda *a, **k: (
+        wt, cli.dataclasses.replace(cfg, required_ci=tuple(names)),
+    ))
+    monkeypatch.setattr(cli, "_verify_wait_snapshot", lambda *a: None)
+    monkeypatch.setattr(cli, "WAIT_INTERVAL", 0.1)
+    monkeypatch.setattr(github, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    runs = [
+        [{"name": name, "status": "completed", "conclusion": "success"}
+         if i < cleared else {"name": name, "status": "in_progress"}
+         for i, name in enumerate(names)]
+        for cleared in ([0] if stable else [0, *range(25)])
+    ]
+    arm_check_runs(gh, head, *runs)
+    clock = [0.0]
+    monkeypatch.setattr(cli, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(cli, "_sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    if command == "merge":
+        monkeypatch.setattr(github, "merge", lambda *a: "c" * 40)
+        monkeypatch.setattr(cli, "_cleanup_remote_refs", lambda *a: None)
+        monkeypatch.setattr(cli, "_cleanup", lambda *a: None)
+    code, out, err = run(capsys, command, "--wait=1" if stable else "--wait=1800")
+    size = len((out + err).encode())
+    assert size < 3200, size
+    assert not err and all(f"required check '{name}' is pending" in out for name in names)
+    if stable:
+        assert code == 3 and f"timed out waiting for required checks on {head[:12]}" in out
+        assert out.count("waiting:") == 1 and "cleared:" not in out
+    else:
+        assert code == 0 and out.endswith(f"ready: {URL}\n" if command == "ready" else "c" * 40 + "\n")
+        assert all(f"cleared: {name}\n" in out for name in names)
+        assert out.count("waiting:") == 1
+
+
+@pytest.mark.parametrize("receipt", ["saved", "head moved", "write failed"])
+def test_check_bounds_large_failure_and_preserves_receipt(wt, head, capsys, monkeypatch, receipt):
+    tail = 'TEST_FAILURES={"detail":"' + "é" * 7500 + '","error":"Failed to fetch package"}\n'
+    tail += "migration failed: relation widgets already exists"
+    monkeypatch.setattr(cli.sandbox, "run_checks", lambda *a, **k: CheckReport(
+        "a" * 40 if receipt == "head moved" else head, False,
+        (CheckResult("apply migrations", 7, 0.1, tail),),
+    ))
+    if receipt == "write failed":
+        def fail(*args):
+            raise PermissionError("receipt write denied")
+        monkeypatch.setattr(cli, "_save_report", fail)
+    code, out, err = run(capsys, "check")
+    size = len((out + err).encode())
+    assert size < 2500, size
+    assert code == 1 and "apply migrations (exit 7)" in err
+    assert "migration failed: relation widgets already exists" in err
+    assert "uv sync --group dev" in err
+    if receipt == "saved":
+        assert out.endswith("FAIL\n") and ".loopzero/checks.json" in err and head in err
+        assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["tail"] == tail
+    else:
+        assert ".loopzero/checks.json" not in err
+        assert ("current HEAD" if receipt == "head moved" else "receipt write denied") in err
+
+
+def test_check_hour_long_stage_transcript(wt, head, capsys, monkeypatch):
+    sandbox = cli.sandbox
+    clock = [0.0]
+    limit = [0.0]
+
+    class Event:
+        def wait(self, seconds):
+            clock[0] += seconds
+            return clock[0] >= limit[0]
+
+        def set(self):
+            pass
+
+    def thread(*, target, daemon):
+        return SimpleNamespace(start=target, join=lambda: None)
+
+    monkeypatch.setattr(sandbox, "threading", SimpleNamespace(Event=Event, Thread=thread))
+    monkeypatch.setattr(sandbox, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def run_checks(cfg, path, *, progress, status, checkpoint):
+        results = []
+        for ordinal in range(1, 25):
+            command = f"run tool {ordinal:02d}"
+            duration = 3600.0 if ordinal == 1 else 0.1
+            limit[0] = clock[0] + duration
+            progress(command)
+            with sandbox._stage_status(status, ordinal, 24):
+                pass
+            status(f"stage {ordinal}/24: exit 0 ({duration:.1f}s)")
+            results.append(CheckResult(command, 0, duration, ""))
+        return CheckReport(head, False, tuple(results))
+
+    monkeypatch.setattr(sandbox, "run_checks", run_checks)
+    code, out, err = run(capsys, "check")
+    size = len((out + err).encode())
+    assert size < 2400, size
+    assert (code, err) == (0, "") and out.endswith("PASS\n")
+    assert f"receipt produced: head={head}" in out and "stage 24/24: exit 0" in out
+    assert out.count("running: run tool") == 24
+    assert [float(seconds) for seconds in re.findall(r"running \(([\d.]+)s elapsed\)", out)] == list(
+        range(30, 3600, 300)
+    )
+    assert out.rindex("s elapsed)") < out.index("stage 1/24: exit 0 (3600.0s)")
+
+
 # --- start / check --------------------------------------------------------------------
 
 
@@ -2289,6 +2400,7 @@ def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypat
     assert without_accepted_receipt(out).splitlines() == [
         "marked ready; required check 'checks' is skipped",
         "waiting: required check 'checks' is pending",
+        "cleared: checks",
         f"ready: {URL}",
     ]
 
