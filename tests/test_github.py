@@ -473,6 +473,7 @@ def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: s
     findings = (
         Finding("important", path, 2, "In diff", ""),
         Finding("critical", path, 3, "Outside diff", ""),
+        Finding("suggestion", path, 3, "Off-diff suggestion", ""),
     )
 
     github.post_review(REPO, 7, HEAD, review(findings=findings))
@@ -481,6 +482,7 @@ def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: s
     comments = comments_posted(gh)
     assert [(c["path"], c["line"]) for c in comments] == [(path, 2), (path, 1)]
     assert "Reviewer location src/a.py:3 is not in the diff" in comments[1]["body"]
+    assert "Off-diff suggestion" in review_payloads(gh)[0]["body"]
 
 
 @pytest.mark.parametrize(("files", "severity", "anchor"), [
