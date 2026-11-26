@@ -3054,14 +3054,15 @@ def test_ready_wait_tolerates_a_late_required_job_of_a_running_workflow(
 @pytest.mark.parametrize("count", [1, 40])
 def test_blocking_finding_output_stays_bounded(wt, gh, capsys, head, command, count):
     findings = [_finding_thread(f"{i:08x}", head) for i in range(count)]
+    findings[0]["path"] = "directory/" * 100 + "a.py"
     body = findings[0]["comments"]["nodes"][0]
     body["body"] = body["body"].replace("Off by one", "界" * 3000)
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", readiness={"threads": findings})
     code, out, err = run(capsys, command)
     output = out + err
     assert code == int(command in {"ready", "merge"})
-    assert len(output.encode()) < 2048 and "src/a.py:3" in output and "…" in output
-    assert ("36 more" in output and "/pull/7" in output) == (count == 40)
+    assert len(output.encode()) < 2048 and "…/a.py:3" in output and "/pull/7" in output
+    assert ("36 more" in output) == (count == 40)
     assert all(c["argv"][:2] not in (["pr", "ready"], ["pr", "merge"]) for c in gh.calls)
 
 

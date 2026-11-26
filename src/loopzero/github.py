@@ -1007,10 +1007,25 @@ def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
     ]
 
 
-def finding_preview(rows: list[str], url: str) -> list[str]:
-    shown = [preview(row, 240) for row in rows[:4]]
-    if len(rows) > len(shown):
-        shown.append(f"{len(rows) - len(shown)} more blocking findings. See {url}")
+def finding_preview(findings: list[tuple[str | None, Finding]], url: str) -> list[str]:
+    shown = []
+    shortened = False
+    for marker, finding in findings[:4]:
+        path = finding.path or "-"
+        if len(path.encode()) > 112:
+            path = "…/" + preview(path.rsplit("/", 1)[-1], 108)
+        title = preview(finding.title, 128)
+        shortened |= path != (finding.path or "-") or title != finding.title
+        if marker is not None:
+            shown.append(f"{marker}  {finding.severity}  {path}:{finding.line or '-'}  {title}")
+        else:
+            where = f"{path}:{finding.line}" if finding.path else "(no location)"
+            shown.append(f"open {finding.severity} finding at {where}: {title}")
+    omitted = len(findings) - len(shown)
+    if omitted:
+        shown.append(f"{omitted} more blocking findings. See {url}")
+    elif shortened:
+        shown.append(f"See {url} for full findings.")
     return shown
 
 
@@ -1302,10 +1317,7 @@ def readiness(
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
     findings = open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha)
-    reasons.extend(finding_preview([
-        f"open {f.severity} finding at {f'{f.path}:{f.line}' if f.path else '(no location)'}: {f.title}"
-        for f in findings
-    ], pr.url))
+    reasons.extend(finding_preview([(None, finding) for finding in findings], pr.url))
     checks, stale, stale_verdicts, capped = (_check_signals(
         repo, pr.head_sha, review_at, review_grace, required_ci if workflow_wait else (),
         workflow_wait and stale_verdict_grace,
