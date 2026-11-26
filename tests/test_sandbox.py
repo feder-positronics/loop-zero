@@ -771,16 +771,20 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
-@pytest.mark.parametrize("paths", [("ipnut.txt",), ()])
-def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, paths):
+@pytest.mark.parametrize("case", ["typo", "empty", "dirty", "no_base"])
+def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case):
     (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
     command = 'test "$(cat README.md)" = hello'
+    paths = () if case == "empty" else ("ipnut.txt",)
     config = make_config(checks=(command,), inputs={command: paths})
     first = sandbox.run_checks(config, git_repo)
     assert first.ok
     _save_report(git_repo, first)
     (git_repo / "README.md").write_text("fail\n")
-    git(git_repo, "commit", "-qam", "change actual input")
+    if case != "dirty":
+        git(git_repo, "commit", "-qam", "change actual input")
+    if case == "no_base":
+        git(git_repo, "update-ref", "-d", "refs/remotes/origin/main")
 
     result = sandbox.run_checks(config, git_repo, status=(messages := []).append)
     assert result.results[0].exit_code == 1
