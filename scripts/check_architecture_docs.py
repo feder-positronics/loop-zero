@@ -1,6 +1,7 @@
 """Offline architecture links and public-interface review gate; see docs/ARCHITECTURE.md."""
 import argparse
 import ast
+import os
 import re
 import subprocess
 import sys
@@ -15,15 +16,15 @@ WATCHED = {
 }
 # Compare selected owning interfaces rather than requiring doc churn for every bug fix.
 INTERFACES = {
-    "src/loopzero/cli.py": {"build_parser"},
+    "src/loopzero/_cli_args.py": {"build_parser", "WAIT_TIMEOUT"},
     "src/loopzero/config.py": {"_SECTIONS", "MERGE_STRATEGIES", "REVIEWER_FAMILIES"},
     "src/loopzero/types.py": {"Config", "ResourceLimits", "ReviewConfig"},
 }
 
 
-def git(root, *args):
+def git(root, *args, text=True):
     return subprocess.run(["git", *args], cwd=root, check=True,
-                          capture_output=True, text=True).stdout
+                          capture_output=True, text=text, timeout=60).stdout
 
 
 def interface(text, names):
@@ -75,8 +76,10 @@ def link_errors(root):
 
 def check(root, base):
     git(root, "rev-parse", "--verify", f"{base}^{{commit}}")
-    changed = set(git(root, "diff", "--name-only", "-z", base).split("\0"))
-    changed.update(git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0"))
+    tracked = git(root, "diff", "--name-only", "-z", base, text=False)
+    untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z", text=False)
+    changed = set(os.fsdecode(tracked).split("\0"))
+    changed.update(os.fsdecode(untracked).split("\0"))
     watched = changed.intersection(WATCHED)
     watched.update(p for p in changed if p.startswith(".github/workflows/"))
     for name, names in INTERFACES.items():
@@ -112,7 +115,7 @@ def main():
         else:
             base = args.base or git(root, "merge-base", "HEAD", "origin/main").strip()
             errors = check(root, base)
-    except (OSError, ValueError, SyntaxError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, SyntaxError, subprocess.SubprocessError) as exc:
         print(f"architecture docs: FAIL ({exc})", file=sys.stderr)
         return 1
     if errors:

@@ -74,6 +74,14 @@ symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
+Before resuming automated PR check refreshes or explicit PR resyncs after an
+upgrade, advance every PR-body writer to the selected CLI revision. For
+unverified receipt warnings, use a revision containing
+[3ff80bd9 (#1160)](https://github.com/feder-positronics/loop-zero/commit/3ff80bd91c92f12d557cead31776df40d4328097).
+Once the writers are updated, run `loopzero check` for the current head to
+replace old receipts. If you roll back across that fix, pause those writes before
+switching the CLI and resume them once the writers support the warning again.
+
 If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
 after GitHub may have accepted a Claude review, run `loopzero review --repost`
 with the publishing CLI revision or a newer compatible revision. The rollback
@@ -148,6 +156,11 @@ to the base branch before starting your first task. If the base has a
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
+- Check, review, ready, merge, and status load the workflow from the
+  remote-tracking delivery branch selected by `[repo] base` in the workflow
+  at `origin/HEAD`. Missing trusted policy blocks these commands. Fetch and
+  run `git remote set-head origin --auto` if the local default-branch pointer
+  is missing. Supply `--config <path>` during bootstrap or to override policy.
 - For offline checks, warm the configured writable uv cache on the host with
   `UV_CACHE_DIR=<configured-cache> uv sync --group dev` (use the groups your
   checks require). This also fetches build backends such as hatchling.
@@ -241,10 +254,12 @@ Lock the vault and remove `BW_SESSION` before starting the agent.
 ### Several subscription accounts (optional)
 
 `scripts/ai-accounts/` rotates Claude and Codex subscription accounts behind the plain
-`claude`, `codex` and `loopzero` commands. Install the monitor and its three shims:
+`claude`, `codex` and `loopzero` commands. Install the monitor and its three shims
+from the [pinned source checkout](#connect-your-agent):
 
 ```sh
-install -m 755 scripts/ai-accounts/ai-accounts ~/.local/bin/
+ACCOUNTS=~/.local/share/loopzero/source/scripts/ai-accounts
+install -m 755 "$ACCOUNTS/ai-accounts" ~/.local/bin/
 mkdir -p ~/.local/lib/ai-accounts/bin
 for n in claude codex loopzero; do ln -sf ~/.local/bin/ai-accounts ~/.local/lib/ai-accounts/bin/$n; done
 ```
@@ -252,8 +267,9 @@ for n in claude codex loopzero; do ln -sf ~/.local/bin/ai-accounts ~/.local/lib/
 Put the shims first on PATH by making this the last line of `~/.profile` and
 `~/.bashrc`, after anything that prepends `~/.local/bin`:
 `export PATH="$HOME/.local/lib/ai-accounts/bin:$PATH"`. Point an agent host's binary
-path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Enable the monitor by copying
-the two systemd units to `~/.config/systemd/user/`, then
+path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Copy
+`"$ACCOUNTS/ai-accounts.service"` and `"$ACCOUNTS/ai-accounts.timer"` to
+`~/.config/systemd/user/`, then run
 `systemctl --user enable --now ai-accounts.timer`.
 
 - Claude accounts are long-lived tokens: run `claude setup-token` per account and
@@ -325,10 +341,39 @@ loopzero start hello-loopzero        # new worktree + branch; cd to the printed 
 $EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
 ```
 
-Use the [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) to navigate
-the contract's [six steps](core/CONTRACT.md#the-six-steps). Run `loopzero status`
-to see the next step. See [Blockers](core/CONTRACT.md#blockers) for how to
-resolve review findings.
+Make and commit a change in the task worktree, then run `loopzero check` there.
+Afterward, `loopzero status` shows the next step and requires authenticated
+access to the configured GitHub repository even before a PR exists. See the
+[workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) and
+[Blockers](core/CONTRACT.md#blockers) for the rest of the workflow.
+
+### Check receipts with remote execution
+
+Use one pinned CLI revision and the same effective settings for `check`,
+`ready`, and `merge`. If a shared install can change mid-task, use the
+[isolated install](#install). The coordinator runs in the task worktree and
+writes the receipt. For remote stages, configure an operator-trusted
+`[checks].runner` using the [stage protocol](docs/ARCHITECTURE.md#check-stage-runners).
+
+Without a stage adapter, run the whole check locally. Use a local slot if the
+host requires one. On miki, if you used the isolated install, run these from
+the task worktree with the `install_dir` from that recipe.
+
+```sh
+export PATH="$install_dir/venv/bin:$PATH"
+HEAVY_SLOT_REMOTE_HOSTS="$HOME/.cache/intelflo-scratch/locks/no-remote-hosts.json" "$HOME/.cache/intelflo-scratch/locks/heavy-slot.sh" loopzero check
+# After opening and reviewing the PR, keep this PATH for delivery.
+loopzero ready --wait
+loopzero merge --wait
+```
+
+A whole-job remote worker writes its own receipt. Ready can use it only if it
+passes the existing checks for a clean, passing receipt at the exact head,
+with the current ordered commands and matching settings fingerprint. An older
+worker can omit the fingerprint. A current worker can produce a different
+fingerprint, for example when its inherited `PATH` differs. GitHub required
+CI supplies separate evidence. The [owner queue route](core/CONTRACT.md#blockers)
+applies only under its documented conditions.
 
 ## Removing an abandoned task worktree
 
@@ -490,10 +535,9 @@ boundary or replace this publisher with a dedicated GitHub App and bind the
 required status check to that App's integration ID. Do not describe the Actions
 publisher as protection from a malicious repository writer.
 
-The evaluator preserves COMMENT model reviews with resolved blocking findings,
-and the existing outdated-thread policy: outdated findings on other SHAs do not
-block, but unresolved current critical/important findings do. Suggestions do not
-block. Dismissing the latest review cannot restore an earlier approval.
+The evaluator preserves COMMENT model reviews with resolved blocking findings.
+See [Blockers](core/CONTRACT.md#blockers) for the outdated-thread rule. Suggestions
+do not block. Dismissing the latest review cannot restore an earlier approval.
 
 Before queue adoption, wire source pushes, review submissions/edits/dismissal,
 review-comment edits/deletions and an explicit refresh to this publisher.
