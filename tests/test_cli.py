@@ -108,7 +108,14 @@ def repo(git_seed: Path, tmp_path: Path, fake_tool, monkeypatch, request: pytest
     shutil.copytree(git_seed / seed_checkout, checkout)
     origin = shutil.copytree(git_seed / "origin.git", tmp_path / "origin.git")
     git(checkout, "remote", "set-url", "origin", str(origin))
-    run_command = github.run
+    run_command, git_command = github.run, cli._git
+
+    def local_push_url(cwd, *args, **kwargs):
+        output = git_command(cwd, *args, **kwargs)
+        if args == ("remote", "get-url", "--push", "--all", "origin"):
+            return "\n".join(f"https://github.com/{REPO}.git" if url == str(origin) else url
+                             for url in output.splitlines())
+        return output
 
     def local_transport(argv, **kwargs):
         if argv[0] == "git" and "push" in argv:
@@ -120,6 +127,7 @@ def repo(git_seed: Path, tmp_path: Path, fake_tool, monkeypatch, request: pytest
         return run_command(argv, **kwargs)
 
     monkeypatch.setattr(github, "run", local_transport)
+    monkeypatch.setattr(cli, "_git", local_push_url)
     fake_tool("bwrap", FAKE_BWRAP.format(log=tmp_path / "bwrap.argv"))
     return checkout
 
@@ -713,13 +721,21 @@ def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys, bootstrap)
     assert out.startswith("checks are unpinned because --config was provided\n")
 
 
-def test_invalid_workflow_utf8_names_file(wt, capsys):
-    filename = "broken-workflow.toml"
-    (wt / filename).write_bytes(bytes([255]))
-    args = ["--config", filename, "status"]
+@pytest.mark.parametrize("trusted", [False, True])
+def test_invalid_workflow_utf8_names_file(wt, capsys, trusted):
+    data = WORKFLOW.encode().replace(b"echo ok", b"echo \xff")
+    filename = "origin/main:workflow.toml" if trusted else "broken-workflow.toml"
+    if trusted:
+        (wt / "workflow.toml").write_bytes(data)
+        git(wt, "add", "workflow.toml")
+        git(wt, "commit", "-qm", "invalid workflow bytes")
+        git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
+    else:
+        (wt / filename).write_bytes(data)
+    args = ["status"] if trusted else ["--config", filename, "status"]
 
     _, err = expect_cli(capsys, 1, *args)
-    assert filename in err and "utf-8" in err.lower() and "position 0" in err
+    assert filename in err and "utf-8" in err.lower() and "position " in err
     assert "Traceback" not in err
 
 
@@ -1153,16 +1169,20 @@ exec /usr/bin/git "$@"
     assert all("--method" not in call["argv"] for call in gh.calls)
 
 
-@pytest.mark.parametrize("hook_fails", [False, True])
+@pytest.mark.parametrize("case", ["rewrite", "hook-fails", "wrong-destination"])
 def test_pr_uses_lease_for_rewritten_open_pr(
-    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, hook_fails: bool
+    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, case: str
 ) -> None:
     old = head_of(wt)
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     git(wt, "reset", "-q", "--soft", "HEAD~1")
     git(wt, "commit", "-q", "-m", "rebased feature")
     head = head_of(wt)
-    if hook_fails:
+    origin, other = repo.parent / "origin.git", tmp_path / "other.git"
+    if case == "wrong-destination":
+        shutil.copytree(origin, other)
+        git(wt, "remote", "set-url", "--push", "origin", str(other))
+    if case == "hook-fails":
         hook = fake_tool("pre-push", "echo 'lint failed in widget.py' >&2\nexit 1\n")
         git(wt, "config", "core.hooksPath", str(hook.parent))
     pushes = trace_pushes(fake_tool, tmp_path)
@@ -1171,7 +1191,12 @@ def test_pr_uses_lease_for_rewritten_open_pr(
 
     code, out, err = run(capsys, "pr")
 
-    if hook_fails:
+    if case == "wrong-destination":
+        assert (code, out) == (1, "") and "origin push URL does not target" in err
+        assert not pushes.exists()
+        assert all(git(remote, "rev-parse", "refs/heads/lz/t1").strip() == old for remote in (origin, other))
+        return
+    if case == "hook-fails":
         assert (code, out) == (1, "") and "lint failed in widget.py" in err
         assert "remote moved" not in err and all("PATCH" not in call["argv"] for call in gh.calls)
     else:
@@ -1179,11 +1204,12 @@ def test_pr_uses_lease_for_rewritten_open_pr(
     assert pushes.read_text().strip() == (
         f"push -u origin --porcelain --force-with-lease=lz/t1:{old} lz/t1"
     )
-    assert git(repo.parent / "origin.git", "rev-parse", "refs/heads/lz/t1").strip() == (old if hook_fails else head)
+    assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == (old if case == "hook-fails" else head)
 
 
+@pytest.mark.parametrize("shared_object", [False, True])
 def test_pr_reports_rejected_lease_without_overwriting_remote(
-    wt: Path, repo: Path, gh: FakeGh, tmp_path: Path, capsys
+    wt: Path, repo: Path, gh: FakeGh, tmp_path: Path, capsys, shared_object: bool
 ) -> None:
     old = head_of(wt)
     origin = repo.parent / "origin.git"
@@ -1196,9 +1222,12 @@ def test_pr_reports_rejected_lease_without_overwriting_remote(
     commit_file(mover, "remote.txt", "moved\n", "remote move")
     git(mover, "push", "-q", "origin", "lz/t1")
     moved = git(origin, "rev-parse", "refs/heads/lz/t1").strip()
-    gh.respond_pr_list([pr_json(headRefOid=old)])
+    if shared_object:
+        git(repo, "fetch", "-q", "origin", "lz/t1")
+    gh.respond_pr_list([pr_json(headRefOid=moved if shared_object else old)])
 
-    expect_cli(capsys, 1, "pr", stdout="", stderr_contains=("remote moved",))
+    diagnostic = "absent from this task branch's history" if shared_object else "remote moved"
+    expect_cli(capsys, 1, "pr", stdout="", stderr_contains=(diagnostic,))
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == moved
 
 
@@ -4527,23 +4556,35 @@ def test_wait_rechecks_closed_unmerged_pr(monkeypatch, final) -> None:
         assert _closed_unmerged_wait(monkeypatch, reads, steps=1) == final
 
 
-def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
+@pytest.mark.parametrize("redirected", [False, True])
+def test_checks_report_survives_failed_publication(tmp_path, monkeypatch, redirected):
     path = tmp_path / cli.CHECKS_FILE
     monkeypatch.setattr(cli.worktree, "head", lambda _: next(heads))
     heads = iter(("a" * 40, "b" * 40))
     cli._save_report(tmp_path, CheckReport("a" * 40, False, ()))
 
-    def interrupt(staged, dest):
-        assert Path(staged).parent == dest.parent
-        assert json.loads(Path(staged).read_text())["head"] == "b" * 40
-        assert json.loads(dest.read_text())["head"] == "a" * 40
+    def interrupt(staged, dest, *, src_dir_fd, dst_dir_fd):
+        assert src_dir_fd == dst_dir_fd and dest == path.name
+        assert json.loads(path.with_name(staged).read_text())["head"] == "b" * 40
+        assert json.loads(path.read_text())["head"] == "a" * 40
         raise OSError("publication interrupted")
 
+    if redirected:
+        external = path.parent.rename(tmp_path / "external")
+        path.parent.symlink_to(external, target_is_directory=True)
     monkeypatch.setattr(cli.os, "replace", interrupt)
-    with pytest.raises(OSError, match="publication interrupted"):
+    with pytest.raises(OSError, match="Not a directory" if redirected else "publication interrupted"):
         cli._save_report(tmp_path, CheckReport("b" * 40, False, ()))
     assert json.loads(path.read_text())["head"] == "a" * 40
     assert list(path.parent.iterdir()) == [path]
+    if redirected:
+        external.chmod(0o755)
+        review = ReviewResult("claude", "a" * 40, "primary", "approve", (), "")
+        receipt = cli._review_file(tmp_path, review.head, review.kind)
+        receipt.write_text("user file")
+        with pytest.raises(OSError, match="Not a directory"):
+            cli._save_review(tmp_path, review)
+        assert receipt.read_text() == "user file" and external.stat().st_mode & 0o777 == 0o755
 
 
 def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head):

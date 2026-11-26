@@ -69,7 +69,11 @@ class GhError(Exception):
         super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
 
 
-class ReadDeadline(GhError):
+class GhUnavailable(GhError):
+    """GitHub could not supply a result because of a transient fault or limit."""
+
+
+class ReadDeadline(GhUnavailable):
     """A shared GitHub read deadline elapsed."""
 
 
@@ -306,10 +310,20 @@ def _select_token(token: str | None, scope: tuple[float, str | None, bool] | Non
     return selected if selected is not None else (app_token() if read_only else "")
 
 
-def _transient_error(tail: str, retry_idempotent: bool) -> bool:
-    return bool(TRANSIENT_RE.search(tail)) or (
+def _transient_error(tail: str, retry_idempotent: bool, status: str | None = None) -> bool:
+    return (status or "").startswith("5") or bool(TRANSIENT_RE.search(tail)) or (
         retry_idempotent and "something went wrong while executing your query" in tail.lower()
     )
+
+
+def _request_error(transient: bool) -> type[GhError]:
+    return GhUnavailable if transient else GhError
+
+
+def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> bool:
+    return (status == "429"
+            or (status == "403" and (headers.get("x-ratelimit-remaining") == "0" or "retry-after" in headers))
+            or bool(re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)))
 
 
 def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
@@ -356,16 +370,16 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         status, headers, body = (_included_response(done.stdout) if rest_api or diagnostic_api
                                  else (None, {}, done.stdout))
         tail = "\n".join(part for part in (done.stderr, body if rest_api else done.stdout) if part)
-        if done.exit_code and ((rest_api and status == "429")
-                               or re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)):
+        if done.exit_code and _rate_limited(status, headers, tail):
             guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api
                         else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
             if diagnostic_api or patch_error:
                 detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                            message_tail=None if diagnostic_api else tail)
-                raise GhError(("GitHub API request",), detail, token=selected, guidance=guidance)
-            raise GhError(argv, tail, token=selected, guidance=guidance)
-        if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
+                raise GhUnavailable(("GitHub API request",), detail, token=selected, guidance=guidance)
+            raise GhUnavailable(argv, tail, token=selected, guidance=guidance)
+        transient = _transient_error(tail, retry_idempotent, status)
+        if done.exit_code == 0 or delay is None or not retryable or not transient:
             break
         _retry_sleep(_read_timeout(delay) if scope else delay)
     if done.exit_code != 0:
@@ -376,7 +390,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
-        raise GhError(error_command, error_tail, token=selected, guidance=guidance)
+        raise _request_error(transient)(error_command, error_tail, token=selected, guidance=guidance)
     return body
 
 

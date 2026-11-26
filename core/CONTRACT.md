@@ -39,15 +39,16 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    Merge rechecks readiness, uses the configured strategy, verifies the landed
    SHA, and deletes the branch and worktree. If cleanup warns, the merge landed.
    Follow the recovery step it names. A queue initially enqueues;
-   `--wait` shares a budget across source-check and landing waits. Cleanup follows
-   verified landing. Enqueueing without `--wait` returns 0 without cleanup.
+   `--wait` shares a budget across source-check and landing waits. Enqueueing
+   without `--wait` returns 0 without cleanup.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
-On every start/resume, run `loopzero status`, then rerun the last `--wait`
-command if any; both are idempotent. Status derives the branch's stage from
-Git, GitHub and the check receipt. Never end a turn waiting for notice of an
-event that may already have happened; notifications never replace the waiter.
+On start/resume, use `loopzero status` in an existing worktree to read Git, GitHub
+and the receipt. Rerun the last `--wait` if pending. After ejection, read the
+reason and follow [Mergify recovery](../SETUP.md#mergify). If cleanup removed the
+worktree, verify the merge in GitHub. Never yield waiting for a notice that
+may already have fired. Notifications never replace the waiter.
 Before yielding, record head, last exit code, awaited event and next command
 in one PR comment per owner. Post on first yield; update the existing comment ID
 with the full replacement Markdown from `body_file` on later yields:
@@ -212,9 +213,9 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
   another may advise read-only and review independently. Before committing
   imported work, record every actual writing delegate in truthful
   `Co-Authored-By` trailers; the committer does not replace the writer.
-  Preserve all actual contributors through squash/amend except under the
-  authorized disclosure route below; otherwise retain every writer's
-  truthful trailers. Missing attribution stays unknown; never invent it.
+  Preserve every actual contributor's truthful trailers through squash/amend
+  except under the authorized disclosure route below. Missing attribution
+  stays unknown; never invent it.
 - Primary and delta prefer families absent from recognized trailers across
   all commits/trailers from configured-base merge-base through HEAD,
   including repairs. Narrower diffs, prose and a main-author-only HEAD cannot

@@ -78,8 +78,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    prepares recognized uv dependency groups offline in that sandbox and prints
    progress before each command, metadata-only stage heartbeats every 30 seconds
    (including silent children), and exit code/duration immediately after each stage.
-   Heartbeats stop on completion or cancellation and never supply a verdict; child
-   streams remain captured for the existing final report and failing output tail.
+   Heartbeats stop on completion or cancellation and never supply a verdict.
+   Local stages drain merged child output and retain a bounded diagnostic tail.
    Trusted-base commands remain authoritative;
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
@@ -94,7 +94,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    newer duplicate exists. If the head commit cannot prove completion, the
    pull-list fallback also checks earlier commits of the branch. Failed,
    malformed, repeated or truncated history blocks publication, with a limit of
-   100 pages. An unfinished branch creates or refreshes a draft PR.
+   100 pages. An unfinished branch creates or refreshes a draft PR. Publication
+   checks that every effective origin push URL targets the configured GitHub
+   repository. A leased rewrite also requires the PR head in the task branch's
+   local history.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
    the PR-wide cap of one primary and one delta across head rewrites, and the
@@ -161,7 +164,7 @@ For a Codex executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable and its existing sibling
 `codex-code-mode-host`, read-only. Neighboring history and configuration remain
 hidden; helper aliases into protected state and explicit state mounts fail closed.
-Check, review, ready, merge, and status use the workflow at one remote-tracking
+Check, pr, review, ready, merge, and status use the workflow at one remote-tracking
 delivery revision selected by the workflow at Git's local `origin/HEAD`.
 Missing trusted refs or workflows block these commands. An explicit
 `--config` supplies validated policy for bootstrap or operator overrides.
@@ -510,8 +513,8 @@ command, version, sandbox configuration and the resolved base SHA. A stage runs
 fresh when a matched path cannot be identified as a readable regular file.
 The receipt fingerprint also binds the base SHA when reuse
 is configured, so advancing the base invalidates a pass at the same task head.
-If the remote ref is absent, checks use the task's recorded base. Without
-either base, local stages run fresh.
+With explicit `--config`, reuse can fall back to the recorded task base if the
+remote ref is absent. Without either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.
