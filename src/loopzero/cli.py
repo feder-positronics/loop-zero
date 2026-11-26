@@ -1468,7 +1468,7 @@ def _verify_wait_snapshot(
         raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}")
     if args is None:
         return config
-    latest = _load_config(args, wt, pin_checks=True, previous=previous or config)
+    latest = _load_config(args, wt, pin_checks=True, previous=previous or config, refresh=True)
     if latest == config:
         return latest
     if _current_check_report(wt, latest, head) is None:

@@ -3173,7 +3173,7 @@ def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, 
     assert run(capsys, "ready")[0] == 0
 
 
-def test_ready_receipt_follows_effective_policy_when_main_advances(wt, repo, gh, head, capsys):
+def test_ready_receipt_follows_effective_policy_when_main_advances(wt, repo, gh, head, capsys, monkeypatch, tmp_path):
     policy = WORKFLOW.replace("[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]')
     publish_workflow(wt, policy)
     arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
@@ -3183,7 +3183,18 @@ def test_ready_receipt_follows_effective_policy_when_main_advances(wt, repo, gh,
     git(repo, "push", "-q", "origin", "main")
     expect_cli(capsys, 0, "ready", stdout_contains=("receipt accepted:",))
 
-    publish_workflow(wt, policy.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "changed" }'))
+    external = tmp_path / "external"
+    git(tmp_path, "clone", "-q", "--branch", "main", str(repo.parent / "origin.git"), str(external))
+    arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
+
+    def change_policy():
+        changed = policy.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "changed" }')
+        commit_file(external, "workflow.toml", changed, "change the check environment")
+        git(external, "push", "-q", "origin", "main")
+
+    poll_clock(monkeypatch, after_sleep=change_policy)
+    expect_cli(capsys, 1, "ready", "--wait=60",
+               stderr_contains=("workflow settings changed while waiting; run loopzero check",))
     expect_cli(capsys, 1, "ready", stdout_contains=("incompatible settings fingerprint",))
 
 

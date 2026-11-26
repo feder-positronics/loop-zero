@@ -46,8 +46,9 @@ The CLI also writes a head-bound checks receipt and saved review output in
 receipts have the restricted retention requirement described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
 review evidence using trusted base configuration. Local readiness and merge fetch
-the configured origin base once at startup before loading its publisher policy.
-A receipt bound to the base may require a new check after that base advances.
+the configured origin base before loading its publisher policy. Waiters refresh
+the trusted policy on each poll. A base advance requires a new receipt only
+when it changes the effective check settings.
 Losing local artifacts may require rerunning checks or review, and never creates
 a hosted approval.
 Saved runner artifacts also retain the repository, PR and actual request publisher
@@ -535,8 +536,8 @@ Declared `[checks.inputs]` pathspecs opt commands into local passing-result reus
 Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
 command, version, sandbox configuration and the resolved base SHA. A stage runs
 fresh when a matched path cannot be identified as a readable regular file.
-The receipt fingerprint also binds the base SHA when reuse
-is configured, so advancing the base invalidates a pass at the same task head.
+A base advance prevents reuse in a fresh check. Readiness can still accept
+the existing passing receipt at the same task head if its settings match.
 With explicit `--config`, reuse can fall back to the recorded task base if the
 remote ref is absent. Without either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
