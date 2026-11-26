@@ -27,10 +27,11 @@ from tests.test_github import (
 REAL_GH = shutil.which("gh")
 
 
-@pytest.fixture
-def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
+@pytest.fixture(scope="module")
+def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
     """Drive every public operation through production code and retain its exact argv."""
-    fake = FakeGh(fake_bin, tmp_path)
+    tmp_path = tmp_path_factory.mktemp("gh-contract")
+    fake = FakeGh(tmp_path, tmp_path)
     merged = merge_json(state='MERGED', head=HEAD, sha='c' * 40)
     fake.respond_pr_list([pr_json()], branch="lz/x")
     fake.respond_pr_view(pr_json(), pr_json(), branch="lz/x")
@@ -48,24 +49,22 @@ def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
     fake.respond(f"api repos/{REPO}/git/ref/heads/lz/x", {"object": {"sha": HEAD}})
     fake.respond("api -X", "")
 
-    github.pr_for_branch(REPO, "lz/x")
-    github.pr_view(REPO, 7)
-    github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body\n")
-    github.update_body(REPO, 7, "new body")
-    result = ReviewResult(
-        family="codex",
-        head=HEAD,
-        kind="primary",
-        verdict="request_changes",
-        findings=(Finding("important", "src/a.py", 10, "Problem", "Details"),),
-        raw="raw",
-    )
-    github.post_review(REPO, 7, HEAD, result)
-    github.open_blocking_findings(REPO, 7, HEAD)
-    github.check_runs(REPO, HEAD)
-    github.mark_ready(REPO, 7)
-    github.merge(REPO, 7, "squash", HEAD)
-    github.delete_remote_branch(REPO, "lz/x", HEAD)
+    with pytest.MonkeyPatch.context() as env:
+        env.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+        env.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token")
+        env.setattr(github, "_app_token_cache", ("", 0.0))
+        github.pr_for_branch(REPO, "lz/x")
+        github.pr_view(REPO, 7)
+        github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body\n")
+        github.update_body(REPO, 7, "new body")
+        result = ReviewResult("codex", HEAD, "primary", "request_changes",
+                              (Finding("important", "src/a.py", 10, "Problem", "Details"),), "raw")
+        github.post_review(REPO, 7, HEAD, result)
+        github.open_blocking_findings(REPO, 7, HEAD)
+        github._check_signals(REPO, HEAD)
+        github.mark_ready(REPO, 7)
+        github.merge(REPO, 7, "squash", HEAD)
+        github.delete_remote_branch(REPO, "lz/x", HEAD)
     return fake.calls
 
 
@@ -156,7 +155,7 @@ def test_strict_fake_rejects_exhausted_calls(
 ) -> None:
     fake = FakeGh(fake_bin, tmp_path)
     fake.expect(
-        ["api", f"repos/{REPO}/pulls/7"], rest_pr_json(pr_json()),
+        ["api", f"repos/{REPO}/pulls/7", "--include"], rest_pr_json(pr_json()),
     )
     assert github.pr_view(REPO, 7).number == 7
     fake.assert_complete()
@@ -174,7 +173,7 @@ def test_strict_fake_rejects_unexpected_argv(fake_bin: Path, tmp_path: Path) -> 
 def test_strict_fake_matches_input_contents(fake_bin: Path, tmp_path: Path) -> None:
     fake = FakeGh(fake_bin, tmp_path)
     fake.expect(
-        ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH", "--input", "<temp-file>"],
+        ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH", "--input", "<temp-file>", "--include"],
         {},
         input_files={"--input": json.dumps({"body": "new body"})},
     )

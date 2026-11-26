@@ -27,9 +27,9 @@ for that acceptance slice. On the owning issue or PR, recommend **continue**,
 rebased first. Closure, history rewriting and replacement PRs still need their
 applicable authorization. Continue in place by default, preserving original
 commits and contributor credit under the [handoff rules](../../../docs/DELEGATION.md#coordinator-rollover).
-When authorized integration rewrites commits, use `git range-diff` to inspect
-what changed, then obtain behavior proof, checks and review for the resulting
-head under the existing rules. A series comparison is not behavior proof.
+Before an authorized rewrite, save the old base and tip; identify the new base
+and tip afterward. Inspect `git range-diff "$old_base..$old_tip" "$new_base..$new_tip"`.
+Obtain behavior proof, checks and review for the resulting head.
 
 ## Integration without a queue
 
@@ -45,8 +45,8 @@ required behavior is not closure evidence.
 
 ## Re-entry
 
-After interruption/context loss, re-read the issue, PR head, remote branch,
-CI and open threads before resuming.
+Re-read the issue, PR head, remote branch, CI and open threads after interruption or context loss.
+Follow the contract's [resume rules](../../CONTRACT.md#the-six-steps).
 
 ## Premature closure
 

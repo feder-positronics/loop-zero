@@ -20,23 +20,26 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 4. `loopzero review` reviews the exact head, independently by default, and
    posts one GitHub review with inline findings: exit 0 `approve`,
    5 `request_changes`.
-5. `loopzero ready --wait` computes readiness and marks a ready PR ready for review.
-   A draft blocked only by missing/skipped required checks is activated to
-   trigger CI; without `--wait` it exits 3. `--wait[=SECONDS]` (default 1800)
-   observes the unchanged head, including after activation within the same
-   budget: 0 ready, 1 blocked, 3 timeout. Immediate green can precede
-   asynchronous CI scheduling. After two minutes of missing checks without
-   visible pending checks, inspect scheduling, triggers and permissions,
-   correct the cause, then retry.
-6. After step 5 exits 0, run `(cd <worktree> && loopzero merge --wait)` from
-   the repository root; the subshell avoids leaving the shell inside a deleted
-   worktree. Merge rechecks readiness, uses the configured strategy, verifies
-   the landed SHA, and deletes branch/worktree. A cleanup warning still means
-   the merge landed; follow the next step it names. A queue initially enqueues;
-   `--wait[=SECONDS]` follows landing and cleanup. It first waits out
-   pending/missing required checks on the unchanged head within that same
-   budget; without it, those checks block merge and the command names the
-   waiter. Enqueueing without `--wait` returns 0 without cleanup.
+5. `loopzero ready --wait` marks ready PRs ready for review. It also activates
+   drafts blocked only by missing/skipped checks to trigger CI, even with
+   mergeability pending. Without waiting, activation exits 3.
+   Both waiters observe the unchanged head while all blockers can settle,
+   with `--wait[=SECONDS]` (default 1800). Pending mergeability can block with
+   green checks and gets its own timeout message (exit 3).
+   Green can precede CI scheduling. After two minutes with only missing checks
+   and none pending, inspect scheduling, triggers and permissions, then retry.
+6. After step 5 exits 0, run from a durable directory such as `/tmp`
+   using the absolute path to the task worktree.
+
+   ```sh
+   (cd "/absolute/path/to/task-worktree" && loopzero merge --wait)
+   ```
+
+   Merge rechecks readiness, uses the configured strategy, verifies the landed
+   SHA, and deletes the branch and worktree. If cleanup warns, the merge landed.
+   Follow the recovery step it names. A queue initially enqueues;
+   `--wait` covers readiness, landing and cleanup within the same budget.
+   Enqueueing without `--wait` returns 0 without cleanup.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
@@ -44,10 +47,11 @@ On every start/resume, run `loopzero status`, then rerun the last `--wait`
 command if any; both are idempotent. Status derives the branch's stage from
 Git, GitHub and the check receipt. Never end a turn waiting for notice of an
 event that may already have happened; notifications never replace the waiter.
-Before yielding, record the head, last exit code, awaited event and next
-command in one PR comment per owner. Post it on the first yield and edit it in
-place on later yields (`gh api -X PATCH repos/O/R/issues/comments/ID`). Post a
-separate comment only for a request to a human, a blocker or stall, or the final
+Before yielding, record head, last exit code, awaited event and next command
+in one PR comment per owner. Post on first yield; update the existing comment ID
+with the full replacement Markdown from `body_file` on later yields:
+`gh api --method PATCH "repos/$owner/$repo/issues/comments/$comment_id" -f "body=$(cat "$body_file")"`.
+Post separately only for a human request, blocker, stall or final
 result. End delivery responses with complete, blocked (exact
 dependency/decision), or waiting (event, next action, automatic resume or
 requester needed).
@@ -112,15 +116,19 @@ holds also block the owner queue route below.
 - An unresolved `critical`/`important` review thread, unless GitHub marks it
   outdated and its marker names another head. When relying on an ancestor review,
   every unresolved blocking thread counts, including outdated threads.
-- Missing eligible review of the current head or an ancestor covered by an
-  approved primary, an eligible delta review, or a request_changes primary
-  whose blocking findings are resolved and followed only by clean base merges.
+- Missing eligible review of the current head. An ancestor review qualifies only
+  across verified clean merges from the configured base. A request_changes
+  primary also requires resolution of its blocking findings.
 - A target other than configured `repo.base`.
 - `BEHIND`, unless configured Mergify integration is verified
-  source-preserving. It validates a separate integration candidate,
-  preserving authored-head review across base movement. Conflicts still
-  block; source edits require fresh checks and eligible review.
+  source-preserving. Its separate integration candidate preserves authored-head
+  review across base movement. Source edits need fresh checks and eligible review.
+- GitHub reports `UNKNOWN` mergeability for an open PR. Local waiters can
+  retry this state. Confirmed conflicts block immediately.
 - Any `[checks].required_ci` check missing or not green on the exact head.
+  If a check is absent and GitHub returns runs from 1,000 or more distinct
+  suites, the suite-limit diagnostic blocks readiness until the verdict is
+  visible. Ordinary missing-run grace and draft activation do not apply.
 
 Push fixes or use `loopzero resolve <id> "<reason>"` to reply to and resolve
 one finding; no bulk or silent resolution. The CLI has no waiver file or override
@@ -217,11 +225,11 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
 - After round two, the owner merges once every finding is fixed or rejected
   with reasons and readiness passes, or splits the PR. A head that needs another review goes in a new PR. No escalation is required.
 - After an approved primary or a delta review, take base changes by merging the
-  base into the existing branch. Readiness can inherit that review when GitHub
-  reports the new head is ahead of the reviewed commit. A request_changes
-  primary whose blocking findings are all resolved carries only across clean
-  merges of the base; an own commit or a conflicted merge needs a delta. A rebase that rewrites
-  the reviewed commit breaks ancestry even if it preserves the patch.
+  base into the existing branch. Readiness and hosted eligibility can inherit
+  coverage only across proven clean base merges. A request_changes primary
+  additionally requires resolution of every blocking finding. Source commits,
+  modified merges, and rebases that rewrite the reviewed commit require
+  review coverage for the new head.
 - Reviewer runs yielding no verdict (missing tool, authentication failure,
   unparseable output) consume no budget; the CLI tries the next eligible
   configured family and reports reasons/nonzero if all fail. Only
@@ -231,15 +239,8 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.
-  After a rollback across #732, confirm an already-published Claude review with
-  the publishing CLI revision or a newer compatible one. See
+  See
   [setup and rollback](../SETUP.md#connect-your-agent).
-
-A native structured fatal startup event reporting that Code Mode cannot spawn
-its host invalidates the attempt even if the process exits zero and emits a
-parseable verdict. It consumes no new budget and must not be published, merged
-with chunks or replayed from a saved result. Quoted diagnostic text and absence
-of tool calls alone do not invalidate a review.
 
 [Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
 

@@ -16,6 +16,7 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
 @pytest.mark.parametrize('body,verdict,tails', [
     ('print(json.dumps(r))', True, ['ok', 'ok']),
     ('r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
+    ('print("x" * 3000 + "worker socket unavailable", file=sys.stderr);sys.exit(42)', False, None),
     ('r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
      ['Ω' * 8188 + ' newest']),
     ('subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
@@ -58,6 +59,10 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
     assert report.ok is verdict
     if 'exit_code"]=7' in body:
         assert report.results[0].exit_code == 7
+    if 'sys.exit(42)' in body:
+        result = report.results[0]
+        assert result.exit_code == 42 and result.duration_s > 0
+        assert result.tail == 'Stage runner failed: process exit 42\n' + ('x' * 3000 + 'worker socket unavailable')[-2000:]
     if tails is not None:
         assert [r.tail for r in report.results] == tails
     if not verdict:
@@ -70,8 +75,12 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         assert 'Worktree changed after stage' in report.results[0].tail
     elif not verdict:
         assert calls == ['echo one']
-    _save_report(git_repo, report)
-    assert _load_report(git_repo) == report
+    current_head = _save_report(git_repo, report)
+    if 'drift' in body:
+        assert current_head == git(git_repo, 'rev-parse', 'HEAD').strip() and current_head != report.head
+        assert _load_report(git_repo) != report
+        return
+    assert current_head is None and _load_report(git_repo) == report
     receipt = json.loads((git_repo / '.loopzero/checks.json').read_text())
     assert receipt.keys() == {'head', 'dirty', 'results', 'settings_sha256'}
 
@@ -158,7 +167,8 @@ def test_runner_reuse_binds_execution_context(git_repo, bwrap_log, change):  # n
     from dataclasses import replace
 
     (git_repo / '.git/info/exclude').write_text('.loopzero/\n')
-    git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+    base = git(git_repo, 'rev-parse', 'HEAD').strip()
+    git(git_repo, 'update-ref', 'refs/remotes/origin/main', base)
     command = 'echo stage-ran; exit 7' if change == 'fallback' else 'echo one'
     cfg = make_config(checks=(command,), inputs={command: ('README.md',)})
     body = ('import json,sys;r=json.load(sys.stdin);r.pop("env");'
@@ -167,7 +177,7 @@ def test_runner_reuse_binds_execution_context(git_repo, bwrap_log, change):  # n
     if change == 'fallback':
         passing = sandbox.run_checks(replace(cfg, checks=('echo seed',)), git_repo)
         result = replace(passing.results[0], command=command,
-                         input_key=sandbox._input_key(cfg, git_repo, command))
+                         input_key=sandbox._input_key(cfg, git_repo, command, base))
         _save_report(git_repo, replace(passing, results=(result,)))
     else:
         cfg = replace(cfg, check_runner=runner)

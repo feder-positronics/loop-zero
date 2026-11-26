@@ -5,16 +5,20 @@ import json
 import os
 import resource
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import traceback
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
+from select import select
 
 import pytest
 
 from loopzero import sandbox
-from loopzero.cli import _save_report
+from loopzero.cli import _current_check_report, _save_report
 from loopzero.types import Config, ResourceLimits
 
 from .conftest import git
@@ -492,16 +496,30 @@ def test_silent_stage_reports_live_metadata_then_completion(
     git_repo, bwrap_log, monkeypatch, exit_code
 ):
     import re
-    import time
+    import threading
 
     monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
-    events = []
+    observed, events, reporters = threading.Event(), [], set()
     monkeypatch.setenv("LZ_KEEP", "credential-value")
-    command = f'sleep 0.3; echo "$LZ_KEEP"; echo private-stderr >&2; exit {exit_code}'
+    command = f'echo "$LZ_KEEP"; echo private-stderr >&2; exit {exit_code}'
     cfg = make_config(checks=(command, "echo next"))
-    report = sandbox.run_checks(
-        cfg, git_repo, progress=lambda command: events.append(command), status=events.append
-    )
+    run_one = sandbox._run_one
+
+    def run_stage(config, worktree, prefix, stage_command, timeout):
+        if stage_command == command:
+            assert observed.wait(5), "no running heartbeat for first stage"
+        return run_one(config, worktree, prefix, stage_command, timeout)
+
+    def status(event):
+        events.append(event)
+        if "running" in event:
+            reporters.add(threading.current_thread())
+            observed.set()
+        else:
+            assert all(not reporter.is_alive() for reporter in reporters)
+
+    monkeypatch.setattr(sandbox, "_run_one", run_stage)
+    report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
     assert report.results[0].exit_code == exit_code
     assert report.results[0].tail == "credential-value\nprivate-stderr"
     statuses = [event for event in events if event not in cfg.checks]
@@ -521,9 +539,6 @@ def test_silent_stage_reports_live_metadata_then_completion(
     else:
         assert events.index(completion) < events.index("echo next")
         assert statuses[-1].startswith("stage 2/2: exit 0")
-    stopped = list(events)
-    time.sleep(0.1)
-    assert events == stopped
 
 
 def test_early_failure_reports_actual_exit_without_heartbeat(git_repo, bwrap_log, monkeypatch):
@@ -587,16 +602,113 @@ def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_
     assert all(not reporter.is_alive() for reporter in reporters)
 
 
+@pytest.mark.parametrize("mode", ["running", "blocked-heartbeat", "creation", "dispatch", "removal"])
+def test_sigterm_cleans_only_the_cancelled_checks_private_directories(
+    git_repo, bwrap_log, tmp_path, mode,
+):
+    script = """
+import shutil, signal, sys, tempfile, threading
+from collections import deque
+from contextlib import ExitStack
+from pathlib import Path
+from tests.test_sandbox import _save_report, make_config, sandbox
+
+mode = sys.argv[1]
+if mode == "creation":
+    mkdtemp = tempfile.mkdtemp
+
+    def create(*args, **kwargs):
+        path = mkdtemp(*args, **kwargs)
+        print("creation", flush=True)
+        signal.raise_signal(signal.SIGTERM)
+        return path
+
+    tempfile.mkdtemp = create
+
+if mode == "removal":
+    rmtree = shutil.rmtree
+
+    def remove(path, **kwargs):
+        print("removal", flush=True)
+        signal.raise_signal(signal.SIGTERM)
+        rmtree(path, **kwargs)
+
+    shutil.rmtree = remove
+
+if mode == "dispatch":
+    class Callbacks(deque):
+        def pop(self):
+            callback = super().pop()
+            print("dispatch", flush=True)
+            signal.raise_signal(signal.SIGTERM)
+            return callback
+
+    class Stack(ExitStack):
+        def __init__(self):
+            super().__init__()
+            self._exit_callbacks = Callbacks()
+
+    sandbox.ExitStack = Stack
+
+def status(message):
+    if mode in {"running", "blocked-heartbeat"}:
+        print(message, flush=True)
+    if mode == "blocked-heartbeat":
+        threading.Event().wait()
+
+sandbox.HEARTBEAT_INTERVAL = 0.03
+repo = Path.cwd()
+command = "echo complete" if mode in {"dispatch", "removal"} else "exec sleep 30"
+report = sandbox.run_checks(make_config(checks=(command,)), repo, status=status)
+_save_report(repo, report)
+"""
+    with ExitStack() as processes:
+        def start_check(check_mode):
+            process = processes.enter_context(subprocess.Popen(
+                [sys.executable, "-c", script, check_mode], cwd=git_repo, stdout=subprocess.PIPE,
+                env={**os.environ, "TMPDIR": str(tmp_path), "PYTHONPATH": str(Path.cwd())}, text=True,
+            ))
+            processes.callback(process.kill)
+            assert select([process.stdout], [], [], 5)[0]
+            marker = check_mode if check_mode in {"creation", "dispatch", "removal"} else "running"
+            assert marker in process.stdout.readline()
+            return process
+
+        concurrent = start_check("running")
+        concurrent_dirs = set(tmp_path.glob("loopzero-*"))
+        assert len(concurrent_dirs) == 2
+        for directory in concurrent_dirs:
+            (directory / "marker").write_text("keep")
+        cancelled = start_check(mode)
+        if mode in {"running", "blocked-heartbeat"}:
+            assert len(set(tmp_path.glob("loopzero-*")) - concurrent_dirs) == 2
+            cancelled.terminate()
+        assert cancelled.wait(timeout=5) == -signal.SIGTERM
+        assert set(tmp_path.glob("loopzero-*")) == concurrent_dirs
+        assert all((directory / "marker").read_text() == "keep" for directory in concurrent_dirs)
+        assert concurrent.poll() is None
+        assert not (git_repo / ".loopzero/checks.json").exists()
+        concurrent.terminate()
+        assert concurrent.wait(timeout=5) == -signal.SIGTERM
+
+
+@pytest.fixture
+def fetched_base(git_repo):
+    head = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "update-ref", "refs/remotes/origin/main", head)
+    return head
+
+
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy'])
-def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
+def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change):
     cfg = make_config(checks=('echo one', 'echo two'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
-        assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted') is None
+        assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted', fetched_base) is None
     whole = replace(cfg, inputs={'*': ('.',)})
-    key = sandbox._input_key(whole, git_repo, 'unlisted')
+    key = sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     assert key is not None
     _save_report(git_repo, sandbox.run_checks(cfg, git_repo))
     receipt = git_repo / '.loopzero/checks.json'
@@ -609,7 +721,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
         if change != 'dirty_tree':
             git(git_repo, 'add', path)
             git(git_repo, 'commit', '-m', change)
-            assert key != sandbox._input_key(whole, git_repo, 'unlisted')
+            assert key != sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     elif change == 'command':
         cfg = replace(cfg, checks=('echo changed',), inputs={'echo changed': ('README.md',)})
     elif change == 'network':
@@ -638,7 +750,53 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
-def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log):
+def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base):
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    path = git_repo / "README.md"
+    command = "python3 -c 'from pathlib import Path; exit(13 in Path(\"README.md\").read_bytes())'"
+    config = make_config(checks=(command,), inputs={command: ("README.md",)})
+    assert path.read_bytes() == b"hello\n"
+    report = sandbox.run_checks(config, git_repo)
+    assert report.ok and not report.dirty
+    _save_report(git_repo, report)
+    assert sandbox.run_checks(config, git_repo).results[0].reused_from == fetched_base
+
+    git(git_repo, "config", "core.autocrlf", "true")
+    path.unlink()
+    git(git_repo, "checkout-index", "-u", "--", path.name)
+    assert path.read_bytes() == b"hello\r\n"
+    assert not git(git_repo, "status", "--porcelain")
+    report = sandbox.run_checks(config, git_repo)
+    assert not report.dirty and report.head == fetched_base
+    assert report.results[0].exit_code == 1
+    assert report.results[0].reused_from is None
+
+
+@pytest.mark.parametrize("recorded_base", [False, True])
+def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, recorded_base):
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    head = git(git_repo, "rev-parse", "HEAD").strip()
+    base_ref = "refs/remotes/origin/main"
+    if recorded_base:
+        (git_repo / ".loopzero").mkdir()
+        (git_repo / ".loopzero/task.md").write_text(f"Base: {head}\n")
+    else:
+        git(git_repo, "update-ref", base_ref, head)
+
+    config = make_config(inputs={"*": (".",)})
+    _save_report(git_repo, sandbox.run_checks(config, git_repo))
+    assert _current_check_report(git_repo, config, head) is not None
+    assert sandbox.run_checks(config, git_repo).results[0].reused_from == head
+
+    tree = git(git_repo, "rev-parse", "HEAD^{tree}").strip()
+    new_base = git(git_repo, "commit-tree", tree, "-p", head, "-m", "advance base").strip()
+    git(git_repo, "update-ref", base_ref, new_base)
+    report = sandbox.run_checks(config, git_repo)
+    assert report.ok and report.head == head and not report.dirty
+    assert (report.results[0].reused_from, _current_check_report(git_repo, config, head)) == (None, None)
+
+
+def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fetched_base):
     marker = "CHECK_INTEGRATION_SHARD []"
     command = f"echo '{marker}'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
@@ -660,13 +818,26 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log):
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
 
+def test_local_checks_run_fresh_without_a_base(git_repo, bwrap_log):
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    config = make_config(inputs={"*": (".",)})
+    first = sandbox.run_checks(config, git_repo)
+    assert first.ok
+    _save_report(git_repo, first)
+
+    second = sandbox.run_checks(config, git_repo)
+    assert second.ok
+    assert second.results[0].input_key is None
+    assert second.results[0].reused_from is None
+
+
 @pytest.mark.parametrize('symlink', [False, True])
-def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, symlink):
+def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_base, symlink):
     from loopzero.types import CheckReport, CheckResult
 
     command = 'echo stage-ran; exit 7'
     cfg = make_config(checks=(command,), inputs={command: ('README.md',)})
-    key = sandbox._input_key(cfg, git_repo, command)
+    key = sandbox._input_key(cfg, git_repo, command, fetched_base)
     _save_report(git_repo, CheckReport(
         git(git_repo, 'rev-parse', 'HEAD').strip(), False,
         (CheckResult(command, 0, 0.0, 'forged pass', key),),
@@ -678,7 +849,7 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, symlink)
     git(git_repo, 'add', '-f', *(['.loopzero', 'forged'] if symlink else ['.loopzero/checks.json']))
     git(git_repo, 'commit', '-m', 'forge passing receipt')
     assert not git(git_repo, 'status', '--porcelain').strip()
-    assert key == sandbox._input_key(cfg, git_repo, command)
+    assert key == sandbox._input_key(cfg, git_repo, command, fetched_base)
 
     report = sandbox.run_checks(cfg, git_repo)
     assert not report.dirty
@@ -694,10 +865,10 @@ def test_no_inputs_preserves_receipt(git_repo, bwrap_log):
     assert set(row) == {'command', 'exit_code', 'duration_s', 'tail'}
 
 
-def test_input_key_distinguishes_runners(git_repo):
+def test_input_key_distinguishes_runners(git_repo, fetched_base):
     keys = {
         sandbox._input_key(make_config(inputs={'echo one': ('*.md',)}, check_runner=runner),
-                           git_repo, 'echo one')
+                           git_repo, 'echo one', fetched_base)
         for runner in ((), ('runner-a',), ('runner-b',))
     }
     assert None not in keys

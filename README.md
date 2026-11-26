@@ -46,9 +46,7 @@ GitHub; keep acceptance changes in both task.md and the PR by rerunning `pr`.
 
 Review publication records duration and distinguishes requested model/effort from
 CLI-reported claims, which are not backend attestation; saved artifacts preserve
-them for `--repost`. GitHub reviews include at most the last 30,000 UTF-8 bytes of
-raw reviewer output, with a truncation notice. Verdicts and findings remain
-complete. The full transcript stays in `.loopzero/review-<head>-<kind>.json`;
+them for `--repost`. The full transcript stays in `.loopzero/review-<head>-<kind>.json`;
 `loopzero review --repost` uses it without rerunning the model.
 
 Waits observe immediately, then use 30/60/120-second intervals with up to 10%
@@ -68,13 +66,15 @@ from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.
 
 ## Adopt it in six steps
 
-1. Install from a pinned SHA: `uv tool install git+https://github.com/feder-positronics/loop-zero@<sha>`.
+1. Set `sha` to the pinned commit SHA and run
+   `uv tool install "git+https://github.com/feder-positronics/loop-zero@$sha"`.
 2. Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` at
    your repo root and set `repo.name`, `checks.commands` and `required_ci`.
    Commit and push `workflow.toml` to the configured remote base
    (`origin/main` by default) before starting your first task.
-3. Make sure `git`, `gh auth status`, `bwrap` and `claude` or `codex` work in
-   your shell (details in [SETUP.md](SETUP.md)).
+3. Verify `git`, `gh auth status`, and your `claude` or `codex` CLI. Run
+   fresh local reviews and default checks on Linux with `bwrap` on `PATH`.
+   See [SETUP.md](SETUP.md).
 4. Install the [core/skills](core/skills) once per machine from a source
    checkout at the same pinned revision as the CLI
    ([agent setup](SETUP.md#connect-your-agent)). Entry skills are `plan`,
@@ -86,7 +86,8 @@ from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.
    [credential setup](SETUP.md#api-keys-for-local-agents). TypeSafe uses
    `TYPESAFE_API_KEY` or `~/.config/typesafe/api-key`; no key is needed for
    loop-zero's ordinary checks.
-6. Run `loopzero start first-task`, make a change, and walk the six commands.
+6. Run `loopzero start first-task` and `cd` into the worktree path it prints.
+   Edit, commit, and run the remaining delivery commands from that worktree.
 
 ## Configuration
 
@@ -102,7 +103,7 @@ Settings and semantics the example does not spell out:
 | --- | --- |
 | `checks.required_ci` | Names may be check runs or commit statuses; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
 | `checks.writable` | The forbidden-path rules from `checks.ro_paths` apply. |
-| `checks.limits` | Per-check resource limits applied with `prlimit`, capped at the inherited hard limits: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size); overrides must be positive integers. |
+| `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers and require local execution without `checks.runner`. |
 | `checks.env_allowlist` | Host environment variables passed into the sandbox. To forward a launcher-provided variable, append its name to `[checks].env_allowlist` in the base branch’s `workflow.toml`. An explicit list replaces the defaults (`PATH HOME LANG LC_ALL TERM`). |
 | `delivery.review_chunk_bytes` | Diff chunk budget in UTF-8 bytes, at least `4096`; default `200000`. Oversized file patches split by lines; large deleted files are summarized. |
 

@@ -27,6 +27,11 @@ for _role in ("AUTHOR", "COMMITTER"):
 def git(repo: Path, *args: str) -> str:
     """Run git in `repo` with a deterministic identity; return stdout."""
     env = {**os.environ, **GIT_ENV}
+    for key in os.environ:
+        if key in {"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} or key.startswith(
+            ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+        ):
+            env.pop(key)
     return subprocess.run(
         ["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True
     ).stdout

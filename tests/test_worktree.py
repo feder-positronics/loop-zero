@@ -115,12 +115,16 @@ def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
     exclude = repo / ".git" / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text("*.log")  # no trailing newline on purpose
+    old_inode = exclude.stat().st_ino
     wt = worktree.start(repo, "t1", "main")
+    assert exclude.stat().st_ino != old_inode
     lines = exclude.read_text().splitlines()
     assert lines == ["*.log", ".worktrees/", ".loopzero/"]
     assert not worktree.is_dirty(wt), "fresh worktree with task.md is clean"
     assert git(repo, "status", "--porcelain") == ""
+    installed = exclude.stat()
     worktree.start(repo, "t2", "main")
+    assert (exclude.stat().st_ino, exclude.stat().st_mtime_ns) == (installed.st_ino, installed.st_mtime_ns)
     assert exclude.read_text().count(".worktrees/") == 1
 
 
@@ -228,8 +232,12 @@ def test_cleanup_missing_worktree(repo: Path) -> None:
 
 
 @pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])
-def test_abandoned_worktree_guide(repo: Path, state: str) -> None:
-    wt = worktree.start(repo, "abandoned", "main")
+def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> None:
+    original = worktree.start(repo, "abandoned", "main")
+    wt = tmp_path / "linked task checkout"
+    git(repo, "worktree", "move", str(original), str(wt))
+    caller = tmp_path / "caller"
+    caller.mkdir()
     git(wt, "commit", "--allow-empty", "-m", "published task")
     head = worktree.head(wt)
     if state != "unpublished":
@@ -250,10 +258,14 @@ def test_abandoned_worktree_guide(repo: Path, state: str) -> None:
     assert heading, "the guide must cover closed, unmerged tasks outside retention"
     commands = section.split("```sh\n", 1)[1].split("```", 1)[0]
     result = subprocess.run(
-        ["sh", "-c", commands, "cleanup-guide", "abandoned", head],
-        cwd=repo, capture_output=True, text=True, check=False,
+        ["sh", "-c", commands, "cleanup-guide", str(wt), "abandoned", head],
+        cwd=caller, capture_output=True, text=True, check=False,
     )
 
     assert (result.returncode == 0) == (state == "clean"), result.stderr
     assert wt.exists() == (state != "clean")
     assert git(repo, "show-ref", "--verify", "refs/heads/lz/abandoned")
+    if state == "clean":
+        assert git(repo, "ls-remote", "origin", "refs/heads/lz/abandoned").split() == [
+            head, "refs/heads/lz/abandoned"
+        ]

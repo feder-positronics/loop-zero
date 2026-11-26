@@ -11,7 +11,7 @@ When the head moves:
 4. Classify: reproducible, fixed by named commit, or unsupported by current code.
 5. Make the fix or reason visible in the thread with
    `loopzero resolve <id> "<fix commit or evidence-backed reason>"`: now for a
-   factual rejection, after the fix lands for a repair.
+   factual rejection, or once verified on the pushed PR head for a repair, before readiness and merge.
 
 ## Response handoff
 

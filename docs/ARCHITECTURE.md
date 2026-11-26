@@ -55,7 +55,7 @@ verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
 
-Merged native review receipts and their sidecars are handed off to `~/.local/state/loopzero/receipts/<owner>-<repo>/<pr>-<head>/`, append-only: existing directories are accepted only when all files are byte-identical, never overwritten.
+Private review receipts and sidecars live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
 
 Private agent transcripts and metrics ledgers do not belong in this guide or in
 a new persistent store.
@@ -80,12 +80,16 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
-3. Before pushing or writing, `pr` reads the branch's closed PR history through
-   GitHub REST. A confirmed merged PR completes that branch, even when a newer
-   duplicate exists; the caller must start a new task. Absence requires complete
-   typed pages, bounded to 100; failed, malformed, repeated or truncated history
-   blocks publication. Other commands use open-first, newest-closed lookup. An
-   unfinished branch creates or refreshes a draft PR.
+3. Branch PR lookup starts with the remote head and GitHub's commit-to-PR
+   endpoint. It matches the source branch and repository, then re-reads PR
+   detail. Other commands prefer open PRs, then the newest closed PR, with
+   pull-list fallback when the branch or a matching open PR is absent. Before pushing
+   or writing, `pr` requires a confirmed merge or a complete closed-history read
+   through GitHub REST. A confirmed merge completes that branch even when a
+   newer duplicate exists. If the head commit cannot prove completion, the
+   pull-list fallback also checks earlier commits of the branch. Failed,
+   malformed, repeated or truncated history blocks publication, with a limit of
+   100 pages. An unfinished branch creates or refreshes a draft PR.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
    the PR-wide cap of one primary and one delta across head rewrites, and the
@@ -99,13 +103,12 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    digest covers execution and stage reuse settings, including the effective
    allowlisted environment, without recording raw environment values. Waiters
    check for policy changes on every poll.
-   Ancestor coverage includes outdated unresolved threads
-   when checking for blocking findings and requires GitHub to report the current head as ahead.
-   This comparison establishes ancestry for both merge commits and ordinary commits.
-   An approved primary or eligible delta can carry forward on that ancestry check. A
-   primary that requested changes also requires resolved blocking findings at the reviewed
-   head and a first-parent chain of verified merges from the PR base. Readiness
-   reconstructs each merge in an isolated Git repository and checks its tree.
+   Local readiness and hosted eligibility carry a review forward only across
+   a first-parent chain of verified merges from the configured PR base. They
+   reconstruct each merge in an isolated Git repository and compare its tree
+   with the actual merge tree. Unavailable history blocks inherited coverage.
+   Ancestor coverage includes outdated unresolved blocking threads. A primary
+   that requested changes also requires resolved findings at the reviewed head.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
    This is best-effort observation: an immediate green read may precede
@@ -215,10 +218,10 @@ cannot backfill a missing launch record.
 Chunk merge pads missing request entries and preserves their native-call order.
 Legacy model/effort fields retain their historical adapter meanings for loading;
 qualified summaries never use them as execution evidence. Eligibility still checks
-core native provenance, independently of optional reporting. Recovery considers the
-exact historical renderer only when the saved artifact lacks requested_settings;
-present malformed metadata cannot activate it. New publication/repost uses qualified
-wording, while publisher/head/findings/session/publication checks remain unchanged.
+core native provenance. Exact read-back tries legacy summaries when requested settings
+are absent and the pre-#344 Claude requested/reported layout when requested settings
+exist without configured settings. It still verifies exact published evidence.
+New publication and reposting use the current layout.
 
 <a id="codex-review-runner-evidence"></a>
 
@@ -247,6 +250,8 @@ Historical transcript rendering is available only for exact read-back matching.
 Local publication, saved-result replay and exact confirmation regenerate these
 facts from complete raw, never the public transcript tail or a saved summary.
 The restricted receipt stays in the task worktree until completion.
+The review command locks the worktree’s Git directory from round selection
+through publication to reserve the round across overlapping local invocations.
 
 After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that
@@ -461,14 +466,21 @@ unpushed local commits, with the supplied environment and network policy under
 equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
 every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
-the authoritative `checks.json` receipt. It flushes and syncs a sibling temporary
-file before replacing the receipt atomically. Runners cannot select stages or
+the authoritative `checks.json` receipt. Writers lock the task state directory
+while rechecking HEAD and atomically replacing the receipt from a synced sibling
+temporary file. Runners cannot select stages or
 mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
-Keys bind committed paths/blob IDs, command, version and sandbox configuration.
+Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
+command, version, sandbox configuration and the resolved base SHA. A stage runs
+fresh when a matched path cannot be identified as a readable regular file.
+The receipt fingerprint also binds the base SHA when reuse
+is configured, so advancing the base invalidates a pass at the same task head.
+If the remote ref is absent, checks use the task's recorded base. Without
+either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.

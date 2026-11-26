@@ -15,7 +15,8 @@
   that accepts the new version. Tools that shape the build (`uv`,
   Python, a consumer's Node and package manager) change only with their pin in
   the repository, for example `uv` in `.github/workflows/checks.yml`.
-- `bwrap` on `PATH` (`loopzero check` refuses to run without it).
+- Linux with `bwrap` on `PATH` for default `loopzero check` and fresh local
+  `loopzero review` runs. Bubblewrap uses Linux kernel namespaces.
 - `claude` or `codex` CLI logged in; both if the reviewer must differ from
   the author.
 - On CI or any unattended host give Claude a non-rotating API key or setup
@@ -181,10 +182,17 @@ Verify file presence and permissions without displaying the key (replace
 ```bash
 test -r "$HOME/.config/typesafe/api-key" &&
   test -s "$HOME/.config/typesafe/api-key" &&
-  stat -c '%a %n' "$HOME/.config/typesafe" "$HOME/.config/typesafe/api-key"
+  python3 - "$HOME/.config/typesafe" "$HOME/.config/typesafe/api-key" <<'PYTHON'
+import os
+import stat
+import sys
+
+for path in sys.argv[1:]:
+    print(f"{stat.S_IMODE(os.stat(path).st_mode):o} {path}")
+PYTHON
 ```
 
-On Linux, this should show `700` for the directory and `600` for the file.
+This should show `700` for the directory and `600` for the file.
 It confirms the local setup, not whether the provider accepts the key. To test
 authentication, ask the agent to use the integration skill for one live call
 with synthetic input and report the result without credentials. For TypeSafe:
@@ -304,7 +312,8 @@ resolve review findings.
 
 ## Removing an abandoned task worktree
 
-For a merged PR, run `loopzero merge` from its task worktree to retry cleanup.
+For a merged PR, retry cleanup from a durable directory with
+`(cd "/absolute/path/to/task-worktree" && loopzero merge)`.
 For a closed, unmerged PR outside the host retention job's scope, the task owner
 can remove the worktree manually after confirming it is abandoned and no session
 or job still uses it. In GitHub, verify the closed PR belongs to this repository
@@ -312,27 +321,25 @@ and task branch, and copy its full head SHA. Preserve any delivery evidence
 required by the contract and inspect ignored files for local work or evidence
 before removing the tree. Resolve any shared stash or uncertain ownership first.
 
-Save the following as a shell script outside the task worktree. Run it from
-the primary checkout with `sh /path/to/script <task-slug> <pr-head-sha>`.
-It checks the worktree's branch, local head, live origin head and cleanliness
-before removal.
+Save this script outside the task worktree. From a durable directory, run
+`sh /path/to/script /absolute/path/to/task-worktree <task-slug> <pr-head-sha>`.
 
 ```sh
 (
     set -eu
-    slug=$1
-    pr_head=$2
-    branch="refs/heads/lz/$slug"
-    tree=".worktrees/$slug"
+    tree=$1
+    branch="refs/heads/lz/$2"
+    pr_head=$3
+    git_dir=$(git -C "$tree" rev-parse --path-format=absolute --git-common-dir)
     test "$(git -C "$tree" symbolic-ref --quiet HEAD)" = "$branch"
     test "$(git -C "$tree" rev-parse HEAD)" = "$pr_head"
-    published=$(git ls-remote --exit-code origin "$branch")
+    published=$(git -C "$tree" ls-remote --exit-code origin "$branch")
     test "$published" = "$(printf '%s\t%s' "$pr_head" "$branch")"
-    stash=$(git stash list)
+    stash=$(git --git-dir="$git_dir" stash list)
     test -z "$stash"
     changes=$(git -C "$tree" status --porcelain --untracked-files=all --ignore-submodules=none)
     test -z "$changes"
-    git worktree remove -- "$tree"
+    git --git-dir="$git_dir" worktree remove -- "$tree"
 )
 ```
 
@@ -420,6 +427,15 @@ Set `[delivery].review_publishers` to the GitHub logins that publish model revie
 Local readiness reads that list from the base configuration (legacy installations
 without it use the local GitHub login). Hosted evaluation requires an explicit list;
 its CI token's login is never a reviewer identity.
+
+Codex evidence v1 can include configured settings. For that shape the hosted
+reader needs [07ad5643 (#344)](https://github.com/feder-positronics/loop-zero/commit/07ad5643b3fc32541eee3c9f88ff5f4e917b7de7)
+or a newer compatible revision. An older reader can report `no review recorded
+for the current head` even when the publisher recorded a valid approval. Advance
+the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
+(the loop-zero checkout ref or installed package revision). Dispatch the
+eligibility workflow for the existing PR, or run the command below with its
+unchanged source SHA. The refreshed reader can use the approval already on GitHub.
 
 From a trusted base checkout, run:
 

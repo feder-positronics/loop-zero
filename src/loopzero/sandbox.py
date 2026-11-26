@@ -10,6 +10,8 @@ import os
 import re
 import resource
 import shutil
+import signal
+import stat
 import tempfile
 import threading
 import time
@@ -22,6 +24,7 @@ from pathlib import Path
 from . import __version__, _proc
 from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
+from .worktree import WorktreeError
 
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
@@ -47,6 +50,80 @@ class SandboxUnavailable(LoopZeroError):
     """bubblewrap is missing or cannot create a sandbox on this host."""
 
 
+class _Terminated(BaseException):
+    """Unwind the active operation before exiting from SIGTERM."""
+
+
+def _request_unwind(_signum, _frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise _Terminated
+
+
+@contextmanager
+def _unwind_on_sigterm():
+    if (threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) != signal.SIG_DFL):
+        yield
+        return
+    try:
+        try:
+            signal.signal(signal.SIGTERM, _request_unwind)
+            yield
+        finally:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    except _Terminated:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.raise_signal(signal.SIGTERM)
+        raise
+
+
+@contextmanager
+def _defer_sigterm():
+    """Finish a private directory operation before unwinding."""
+    if (threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) is not _request_unwind):
+        yield
+        return
+    pending = False
+
+    def remember_signal(_signum, _frame):
+        nonlocal pending
+        pending = True
+
+    signal.signal(signal.SIGTERM, remember_signal)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, _request_unwind)
+        if pending:
+            _request_unwind(signal.SIGTERM, None)
+
+
+@contextmanager
+def _private_directories():
+    with ExitStack() as stack:
+        try:
+            yield stack
+        finally:
+            # Keep the stack's own exit as a fallback if SIGTERM arrives before deferral.
+            with _defer_sigterm():
+                stack.close()
+
+
+def _enter_private_directory(stack: ExitStack, prefix: str) -> Path:
+    with _defer_sigterm():
+        directory = tempfile.TemporaryDirectory(prefix=prefix)
+        stack.callback(directory.cleanup)
+    return Path(directory.name)
+
+
+@contextmanager
+def private_directory(prefix: str):
+    """Keep a private directory scoped to an operation, including on SIGTERM."""
+    with _unwind_on_sigterm(), _private_directories() as stack:
+        yield _enter_private_directory(stack, prefix)
+
+
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
@@ -67,20 +144,18 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     if config.check_runner and dirty:
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
                                                    "Runner requires a clean worktree"),))
-    base = config_mod.base_revision(worktree, config.base_branch) if config.check_runner else ""
+    base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config, worktree, base=base)
-    previous = _previous(config, worktree, settings_sha256) if config.inputs and not dirty else {}
+    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
-    with ExitStack() as stack:
+    with _unwind_on_sigterm(), _private_directories() as stack:
         prefix = []
         if not config.check_runner:
-            home = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-home-")))
-            scratch_root = Path(
-                stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-scratch-"))
-            )
+            home = _enter_private_directory(stack, "loopzero-home-")
+            scratch_root = _enter_private_directory(stack, "loopzero-scratch-")
             private_parent = Path(commonpath((home, scratch_root)))
             for exposed in (*config.sandbox_ro, *config.writable):
                 if private_parent.is_relative_to(Path(exposed).resolve()):
@@ -146,11 +221,22 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
         return {}
 
 
+def _check_base(config: Config, worktree: Path) -> str:
+    if config.check_runner or config.inputs:
+        try:
+            return config_mod.base_revision(worktree, config.base_branch)
+        except (config_mod.ConfigError, WorktreeError):
+            if config.check_runner:
+                raise
+    return ""
+
+
 def _execution_settings(config: Config, base: str) -> dict:
     settings = {k: v for k, v in asdict(config).items() if k in {
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
-    if config.check_runner:
+    if config.check_runner or config.inputs:
         settings["base"] = base
+    if config.check_runner:
         settings["runner_executable"] = _runner_executable(config)
         settings["environment"] = _proc.build_env(config.env_allowlist)
     else:
@@ -160,21 +246,39 @@ def _execution_settings(config: Config, base: str) -> dict:
 
 def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = None) -> str:
     """Bind a receipt to its check execution and stage reuse settings."""
-    if base is None and config.check_runner:
-        base = config_mod.base_revision(worktree, config.base_branch)
-    payload = [_execution_settings(config, base or ""), config.inputs]
+    if base is None:
+        base = _check_base(config, worktree)
+    payload = [_execution_settings(config, base), config.inputs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> str | None:
-    if command not in config.inputs and "." not in config.inputs.get("*", ()):
+def _input_key(config: Config, worktree: Path, command: str, base: str) -> str | None:
+    if not base or (command not in config.inputs and "." not in config.inputs.get("*", ())):
         return None
     paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
     # Empty pathspecs must not accidentally mean the whole tree.
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
-    blobs = _git(config, worktree, "diff-tree", "--no-commit-id", "--raw", "-r", "-z",
-                 "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
-    payload = [command, __version__, _execution_settings(config, base), blobs]
+    blobs = _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
+                 "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
+    contents = []
+    root = worktree.resolve()
+    try:
+        for entry in blobs.split("\n"):
+            if not entry:
+                continue
+            metadata, name = entry.split("\t", 1)
+            if name.startswith('"'):
+                name = os.fsdecode(ast.literal_eval("b" + name))
+            path = root / name
+            if (metadata.split()[1] not in {"100644", "100755"}
+                    or path.resolve(strict=True) != path
+                    or not stat.S_ISREG(path.lstat().st_mode)):
+                return None
+            with path.open("rb") as stream:
+                contents.append(hashlib.file_digest(stream, "sha256").hexdigest())
+    except (OSError, ValueError, SyntaxError, RuntimeError):
+        return None
+    payload = [command, __version__, _execution_settings(config, base), blobs, contents]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -191,11 +295,15 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
     reporter = threading.Thread(target=heartbeat, daemon=True) if status else None
     if reporter:
         reporter.start()
+    join_reporter = True
     try:
         yield
+    except _Terminated:
+        join_reporter = False
+        raise
     finally:
         stopped.set()
-        if reporter:
+        if reporter and join_reporter:
             reporter.join()
 
 
@@ -428,6 +536,21 @@ def _runner_executable(config: Config) -> str | None:
     return executable if Path(executable).is_absolute() else shutil.which(executable)
 
 
+def _stage_frame(stdout: str, binding: dict) -> dict:
+    frame = json.loads(stdout, object_pairs_hook=_unique_fields)
+    if (not isinstance(frame, dict)
+            or set(frame) != {*binding, "exit_code", "duration_s", "not_started", "tail"}
+            or any(frame[key] != value for key, value in binding.items())
+            or type(frame["network"]) is not bool
+            or type(frame["exit_code"]) is not int
+            or type(frame["duration_s"]) not in (int, float)
+            or not math.isfinite(frame["duration_s"]) or frame["duration_s"] < 0
+            or type(frame["not_started"]) is not bool
+            or not isinstance(frame["tail"], str)):
+        raise ValueError("invalid or mismatched stage result")
+    return frame
+
+
 def _dispatch_one(
     config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
 ) -> CheckResult:
@@ -442,11 +565,12 @@ def _dispatch_one(
         if not executable:
             raise ValueError("Stage runner executable missing")
         argv = (executable, *config.check_runner[1:])
-        with tempfile.TemporaryDirectory(prefix="loopzero-runner-") as cwd:
-            if any((Path(cwd) / path).resolve().is_relative_to(worktree.resolve())
+        with _private_directories() as stack:
+            cwd = _enter_private_directory(stack, "loopzero-runner-")
+            if any((cwd / path).resolve().is_relative_to(worktree.resolve())
                    or (not Path(path).is_absolute() and ".." in Path(path).parts
-                       and not (Path(cwd) / path).resolve().is_relative_to(Path(cwd)))
-                   for arg in (*argv, cwd)
+                       and not (cwd / path).resolve().is_relative_to(cwd))
+                   for arg in (*argv, str(cwd))
                    for value in (arg, arg.partition("=")[2],
                                  arg[2:] if arg.startswith("-") and not arg.startswith("--") else "")
                    for path in {value, *value.split(":")}
@@ -454,17 +578,12 @@ def _dispatch_one(
                 raise ValueError("Stage runner references task worktree")
             done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
                              input=json.dumps({**binding, "env": env}), encoding="utf-8")
-        frame = json.loads(done.stdout, object_pairs_hook=_unique_fields)
-        if (done.exit_code != 0 or not isinstance(frame, dict)
-                or set(frame) != {*binding, "exit_code", "duration_s", "not_started", "tail"}
-                or any(frame[key] != value for key, value in binding.items())
-                or type(frame["network"]) is not bool
-                or type(frame["exit_code"]) is not int
-                or type(frame["duration_s"]) not in (int, float)
-                or not math.isfinite(frame["duration_s"]) or frame["duration_s"] < 0
-                or type(frame["not_started"]) is not bool
-                or not isinstance(frame["tail"], str)):
-            raise ValueError("invalid or mismatched stage result")
+        if done.exit_code:
+            stderr = _proc.tail(done.stderr)[-2000:]
+            detail = f"Stage runner failed: process exit {done.exit_code}"
+            return CheckResult(command, done.exit_code, done.duration_s,
+                               f"{detail}\n{stderr}".rstrip())
+        frame = _stage_frame(done.stdout, binding)
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed after stage")
         if frame["not_started"]:

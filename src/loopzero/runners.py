@@ -14,7 +14,7 @@ import re
 import shlex
 import shutil
 import stat
-import tempfile
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -270,7 +270,9 @@ def _run(
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
     except _proc.ProcTimeout as exc:
-        raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", _tail(exc.stdout)) from exc
+        stderr_line = _tail(exc.stderr.rstrip()).rpartition("\n")[2]
+        tail = f"{stderr_line}\n{_tail(exc.stdout)}".strip()
+        raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", tail) from exc
     if done.exit_code != 0:
         combined = f"{done.stdout}\n{done.stderr}"
         envelope = None
@@ -341,6 +343,15 @@ def _review_binary(family: str) -> Path:
     raise RunnerMissing(f"{family}: no executable {family!r} on PATH outside ai-accounts shims")
 
 
+def _require_review_sandbox() -> None:
+    if sys.platform != "linux":
+        raise sandbox.SandboxUnavailable(
+            "fresh local reviews use Bubblewrap and require Linux. Run loopzero review on a Linux host"
+        )
+    if shutil.which("bwrap") is None:
+        raise sandbox.SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
+
+
 def _sandbox_prefix(
     family: str,
     cwd: Path,
@@ -364,8 +375,7 @@ def _sandbox_prefix(
         helper = binary.with_name("codex-code-mode-host")
         files = (binary, helper) if family == "codex" and helper.is_file() else (binary,)
         config = replace(config, sandbox_ro=tuple(str(path) for path in files))
-    if shutil.which("bwrap") is None:
-        raise sandbox.SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
+    _require_review_sandbox()
     common_dir, git_dir = _git_dirs(cwd, config.env_allowlist)
     prefix = sandbox.bwrap_argv(
         config,
@@ -1120,8 +1130,7 @@ def _review_claude(
         "--disallowedTools",
         "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
-    with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
-        home = Path(tmp)
+    with sandbox.private_directory("loopzero-review-home-") as home:
         auth_binds = _auth_binds("claude", home)
         prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths, auth_binds)
         argv[0] = str(binary)
@@ -1205,8 +1214,7 @@ def _review_codex(
     prompt: str, *, policy: str, cwd: Path, head: str, kind: str, timeout: int,
     ro_paths: tuple[str, ...], model: str | None, effort: str | None, review_context: dict | None = None,
 ) -> ReviewResult:
-    with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
-        home = Path(tmp)
+    with sandbox.private_directory("loopzero-review-home-") as home:
         schema_file = home / "schema.json"
         last_file = home / "last.json"
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
