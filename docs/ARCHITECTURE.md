@@ -326,7 +326,8 @@ verdict before publication. Standalone evaluation performs its own PR reads.
 When delivery uses the existing size checker, local readiness and new Mergify
 requests evaluate a temporary integration with the freshly fetched target. The
 target supplies the checker and baseline. Existing requests continue to the
-queue wait path.
+queue wait path. Readiness and new queue requests without an admission deadline can project an
+advisory budget after a single known chain of queued predecessors.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
 backoff capped at 30 seconds and a shared 90-second retry-admission deadline across
 both reads and all attestation attempts. Each wait revalidates the candidate before

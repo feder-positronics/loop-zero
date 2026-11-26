@@ -90,7 +90,7 @@ def _object(value: JsonValue, message: str) -> JsonObject:
     return value
 
 
-def _flatten_batches(status: object) -> dict[str, JsonObject]:
+def flatten_batches(status: object) -> dict[str, JsonObject]:
     _require(isinstance(status, dict), "Mergify status is not an object")
     batches = status.get("batches")
     _require(isinstance(batches, list), "Mergify status has no batches list")
@@ -116,7 +116,7 @@ def _flatten_batches(status: object) -> dict[str, JsonObject]:
 
 
 def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, list[int], list[str]]:
-    indexed = _flatten_batches(status)
+    indexed = flatten_batches(status)
     matches = [
         batch
         for batch in indexed.values()
