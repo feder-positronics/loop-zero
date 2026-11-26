@@ -31,7 +31,7 @@ ownership and the contributor routine that keeps documentation current.
 
 For a picture of the whole flow, see the [workflow diagrams](docs/WORKFLOW.md).
 
-`loopzero status` reports the branch stage and can exit 0 with `ready: no`.
+`loopzero status` reports where the branch is in the six steps and can exit 0 with `ready: no`.
 It requires authenticated GitHub access even before a PR exists.
 `loopzero resolve` lists the open blocking findings with their ids;
 `loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
