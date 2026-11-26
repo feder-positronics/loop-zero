@@ -1671,10 +1671,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"branch:   {branch}")
     print(f"head:     {head}")
     print(f"base:     {config.base_branch}")
-    print(f"dirty:    {'yes' if worktree.is_dirty(wt) else 'no'}")
+    dirty = worktree.is_dirty(wt)
+    print(f"dirty:    {'yes' if dirty else 'no'}")
+    checked = not dirty and _current_check_report(wt, config, head) is not None
+    print(f"local checks: {'passed' if checked else 'no reusable pass'}", flush=True)
     pr = github.pr_for_branch(config.repo, branch)
     if pr is None:
-        print("pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)")
+        hint = "run `loopzero pr`" if checked else "commit changes and pass `loopzero check` before `loopzero pr`"
+        print(f"pr:       none ({hint})")
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     reviews = _pr_reviews(config.repo, pr.number)
