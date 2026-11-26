@@ -4694,23 +4694,35 @@ def test_wait_rechecks_closed_unmerged_pr(monkeypatch, final) -> None:
         assert _closed_unmerged_wait(monkeypatch, reads, steps=1) == final
 
 
-def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
+@pytest.mark.parametrize("redirected", [False, True])
+def test_checks_report_survives_failed_publication(tmp_path, monkeypatch, redirected):
     path = tmp_path / cli.CHECKS_FILE
     monkeypatch.setattr(cli.worktree, "head", lambda _: next(heads))
     heads = iter(("a" * 40, "b" * 40))
     cli._save_report(tmp_path, CheckReport("a" * 40, False, ()))
 
-    def interrupt(staged, dest):
-        assert Path(staged).parent == dest.parent
-        assert json.loads(Path(staged).read_text())["head"] == "b" * 40
-        assert json.loads(dest.read_text())["head"] == "a" * 40
+    def interrupt(staged, dest, *, src_dir_fd, dst_dir_fd):
+        assert src_dir_fd == dst_dir_fd and dest == path.name
+        assert json.loads(path.with_name(staged).read_text())["head"] == "b" * 40
+        assert json.loads(path.read_text())["head"] == "a" * 40
         raise OSError("publication interrupted")
 
+    if redirected:
+        external = path.parent.rename(tmp_path / "external")
+        path.parent.symlink_to(external, target_is_directory=True)
     monkeypatch.setattr(cli.os, "replace", interrupt)
-    with pytest.raises(OSError, match="publication interrupted"):
+    with pytest.raises(OSError, match="Not a directory" if redirected else "publication interrupted"):
         cli._save_report(tmp_path, CheckReport("b" * 40, False, ()))
     assert json.loads(path.read_text())["head"] == "a" * 40
     assert list(path.parent.iterdir()) == [path]
+    if redirected:
+        external.chmod(0o755)
+        review = ReviewResult("claude", "a" * 40, "primary", "approve", (), "")
+        receipt = cli._review_file(tmp_path, review.head, review.kind)
+        receipt.write_text("user file")
+        with pytest.raises(OSError, match="Not a directory"):
+            cli._save_review(tmp_path, review)
+        assert receipt.read_text() == "user file" and external.stat().st_mode & 0o777 == 0o755
 
 
 def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head):
