@@ -8,7 +8,7 @@ version = "2.0.0a0"
 dependencies = ["PyYAML==6.0.3"]
 
 [project.scripts]
-loopzero = "loopzero.cli:main"
+loopzero = "loopzero._cli_entry:main"
 
 [build-system]
 requires = ["hatchling==1.33.0"]

@@ -10,7 +10,7 @@ and [setup guidance](../../SETUP.md#api-keys-for-local-agents).
 
 | Name | Use when |
 | --- | --- |
-| `plan` | Plan PR-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or planned blueprints. |
+| `plan` | Plan outcome-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or planned blueprints. |
 | `implement` | Deliver a bounded task or PR slice with behavior proof. Use work-issue for full GitHub issue delivery. |
 | `work-issue` | Own full delivery of a live GitHub issue through verified merge and closure or an explicit partial handoff. |
 | `write-design-doc` | Create or refine a durable design contract: exploration, ADR, initiative, blueprint or guide. |
