@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import datetime as dt
 import errno
 from email.utils import parsedate_to_datetime
@@ -201,9 +202,20 @@ def sync_codex_home(home: Path, *, create: bool = False) -> None:
         _sync_codex_home(home)
 
 
-def _copy_across_devices(entry: Path, target: Path) -> None:
-    import ctypes
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """Publish a shared entry atomically, including directories."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "atomic no-replace promotion requires renameat2")
+    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    at_fdcwd, rename_noreplace = -100, 1
+    if renameat2(at_fdcwd, os.fsencode(source), at_fdcwd, os.fsencode(target), rename_noreplace):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), source, None, target)
 
+
+def _copy_across_devices(entry: Path, target: Path) -> None:
     # The private staging directory is also excluded from future mirroring
     # by shared() if the process is interrupted before cleanup.
     with tempfile.TemporaryDirectory(dir=target.parent, prefix=".codex-sync-", suffix=".lock") as directory:
@@ -214,16 +226,7 @@ def _copy_across_devices(entry: Path, target: Path) -> None:
         else:
             shutil.copy2(entry, staged, follow_symlinks=False)
 
-        # Linux/WSL renameat2 with RENAME_NOREPLACE publishes the complete
-        # entry in one operation without replacing a competing destination.
-        rename = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
-        if rename is None:
-            raise OSError(errno.ENOSYS, "Atomic cross-device publication is unavailable", target)
-        if rename(-100, os.fsencode(staged), -100, os.fsencode(target), 1):
-            error = ctypes.get_errno()
-            if error == errno.EEXIST:
-                return
-            raise OSError(error, os.strerror(error), target)
+        _rename_noreplace(staged, target)
         if is_directory:
             shutil.rmtree(entry)
         else:
@@ -237,13 +240,16 @@ def _sync_codex_home(home: Path) -> None:
         if shared(entry) and not entry.is_symlink() and not target.exists() \
                 and not target.is_symlink():
             try:
-                os.rename(entry, target)
-            except FileNotFoundError:
-                pass
+                try:
+                    _rename_noreplace(entry, target)
+                except OSError as exc:
+                    if exc.errno != errno.EXDEV:
+                        raise
+                    _copy_across_devices(entry, target)
             except OSError as exc:
-                if exc.errno != errno.EXDEV:
+                if exc.errno not in {errno.EEXIST, errno.ENOENT, errno.ENOSYS, errno.EINVAL,
+                                     errno.EOPNOTSUPP}:
                     raise
-                _copy_across_devices(entry, target)
     for src in CODEX_MAIN.iterdir():
         dst = home / src.name
         if shared(src) and not dst.exists() and not dst.is_symlink():
@@ -607,10 +613,13 @@ def refresh_codex(auth_file: Path, auth: dict) -> tuple[str, dict]:
     fresh = json.loads(raw)
     tokens.update({k: fresh[k] for k in ("id_token", "access_token", "refresh_token") if fresh.get(k)})
     auth["last_refresh"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-    # Rewrite in place like Codex: reviewers bind-mount this inode, so os.replace would detach them.
-    with open(auth_file, "r+", encoding="utf-8") as fh:
-        fh.write(json.dumps(auth, indent=2) + "\n")
-        fh.truncate()
+    # Reviewers bind-mount this inode. Pad shorter JSON with whitespace so
+    # the completed write is readable without a second, interruptible truncate.
+    payload = (json.dumps(auth, indent=2) + "\n").encode("utf-8")
+    with auth_file.open("r+b", buffering=0) as fh:
+        payload = payload.ljust(os.fstat(fh.fileno()).st_size, b" ")
+        if os.pwrite(fh.fileno(), payload, 0) != len(payload):
+            raise OSError("incomplete Codex auth write")
     log(f"codex: refreshed {auth_file}")
     return tokens["access_token"], tokens
 
