@@ -551,6 +551,15 @@ def _stage_frame(stdout: str, binding: dict) -> dict:
     return frame
 
 
+def _runner_stdout(done: _proc.Completed) -> str:
+    if done.exit_code == 0:
+        return done.stdout
+    stderr = _proc.tail(done.stderr)[-2000:]
+    detail = (f"Stage runner failed: process exit {done.exit_code} "
+              f"({done.duration_s:.2f}s elapsed). Retry the check.")
+    raise SandboxUnavailable(f"{detail}\n{stderr}".rstrip())
+
+
 def _dispatch_one(
     config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
 ) -> CheckResult:
@@ -578,12 +587,7 @@ def _dispatch_one(
                 raise ValueError("Stage runner references task worktree")
             done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
                              input=json.dumps({**binding, "env": env}), encoding="utf-8")
-        if done.exit_code:
-            stderr = _proc.tail(done.stderr)[-2000:]
-            detail = (f"Stage runner failed: process exit {done.exit_code} "
-                      f"({done.duration_s:.2f}s elapsed). Retry the check.")
-            raise SandboxUnavailable(f"{detail}\n{stderr}".rstrip())
-        frame = _stage_frame(done.stdout, binding)
+        frame = _stage_frame(_runner_stdout(done), binding)
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed after stage")
         if frame["not_started"]:
