@@ -763,9 +763,7 @@ def finding_id(head_sha: str, path: str | None, line: int | None, title: str) ->
 
 def finding_marker(severity: str, head_sha: str, finding: Finding) -> str:
     stable_id = finding_id(head_sha, finding.path, finding.line, finding.title)
-    return (
-        f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
-    )
+    return f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
 
 
 def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
