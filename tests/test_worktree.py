@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
-from tests.conftest import git
+from tests.conftest import commit_file, git
 
 
 @pytest.fixture
@@ -29,9 +29,7 @@ def commit_on_origin(repo: Path, name: str) -> str:
     """Advance origin/main from a scratch clone so `start` has to fetch to see it."""
     clone = repo.parent / f"clone-{name}"
     git(repo, "clone", "-q", str(repo.parent / "origin.git"), str(clone))
-    (clone / name).write_text(name)
-    git(clone, "add", name)
-    git(clone, "commit", "-q", "-m", name)
+    commit_file(clone, name, name, name)
     git(clone, "push", "-q", "origin", "main")
     return git(clone, "rev-parse", "HEAD").strip()
 
@@ -51,9 +49,9 @@ def test_branch_refuses_detached_head(repo: Path) -> None:
 
 
 @pytest.mark.parametrize("branch", [None, "feature/ci+release"])
-def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None) -> None:
-    if branch:
-        git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None, monkeypatch) -> None:
+    side = branch or "side"
+    git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{side}")
     upstream = commit_on_origin(repo, "feature.txt")
     if branch:
         checkout = repo.parent / "single-branch"
@@ -61,6 +59,14 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
         assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
         repo = checkout
+    invoke = worktree._git
+    def interleave(path, *args, **kwargs):
+        result = invoke(path, *args, **kwargs)
+        if args[0] == "fetch":
+            git(path, "fetch", "-q", "origin", f"refs/heads/{side}")
+        return result
+
+    monkeypatch.setattr(worktree, "_git", interleave)
     wt = worktree.start(repo, "my-task", "main")
     assert wt == repo / ".worktrees" / "my-task"
     assert (wt / "feature.txt").exists(), "fetched origin/main before branching"

@@ -64,7 +64,8 @@ a new persistent store.
 
 ## Delivery and feedback
 
-The [CLI](../src/loopzero/cli.py) implements the contract's
+The [console entry point](../src/loopzero/_cli_entry.py) parses arguments before
+loading the delivery [commands](../src/loopzero/cli.py), which implement the contract's
 [six steps](../core/CONTRACT.md#the-six-steps):
 
 1. `start` creates an isolated worktree and task branch from the configured base.
@@ -72,7 +73,8 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    worktree is clean, still at the remote base, and missing its task file.
 2. Implementation proves the owning behavior at the narrowest public seam;
    focused tests start early. `check` runs deterministic checks in a read-only
-   source sandbox. Its simple-command preflight catches missing local scripts,
+   source sandbox. It inventories Git object stores only when alternates may be
+   present. Its simple-command preflight catches missing local scripts,
    prepares recognized uv dependency groups offline in that sandbox and prints
    progress before each command, metadata-only stage heartbeats every 30 seconds
    (including silent children), and exit code/duration immediately after each stage.
@@ -114,6 +116,8 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    that requested changes also requires resolved findings at the reviewed head.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
+   Each poll resolves the trusted workflow ref, reusing parsed policy when the
+   branch and immutable revision match the preceding observation.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge
    admission checks readiness again. Missing-run diagnosis keeps its two-minute
@@ -191,10 +195,16 @@ stdout in runner provenance and the saved review receipt. A failed probe uses
 RunnerBadOutput and existing family fallback before model input. Successful
 probe output is accepted across CLI releases. Unsupported Claude options follow
 existing native failure handling.
-Native defaults, repository AGENTS.md/CLAUDE.md processing and read-only tools
-remain enabled. Repository instructions remain a native authority surface, so
-structural transport tests do not prove injection immunity, reviewer quality or
-backend identity.
+Native defaults and read-only tools remain enabled. Neither reviewer loads
+instructions from the reviewed head, which the PR controls: Claude runs with
+`--setting-sources ""`, and Codex runs with `project_doc_max_bytes=0` (no
+AGENTS.md or AGENTS.override.md) and a `skills.config` entry disabling every
+skill under the checkout's `.agents/skills` and `.codex/skills`; a skill
+directory linking outside the checkout, or more skills than one argument can
+disable, fails the attempt before launch. Repository
+conventions reach reviewers only as evidence or through
+`delivery.reviewer_ro_paths` from the pinned base. Structural transport tests do
+not prove injection immunity, reviewer quality or backend identity.
 The [dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
 owns the implementation history, native comparison results and their limits.
 
@@ -286,6 +296,9 @@ review publication; the existing reviewer selector and delivery gates still appl
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
+Local readiness and hosted source and candidate eligibility reject PRs with
+merge-authority holds. Adding or removing a hold refreshes source eligibility
+even when the head stays the same. Merge admission rechecks the live hold.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
@@ -504,4 +517,11 @@ Receipts that use saved stage results bind the current head and check settings.
 For delegated checks, both the receipt and the stage key bind the runner's launch
 path, resolved executable path and executable bytes. Unavailable runner identity
 prevents receipt reuse.
+
+A worker running the entire check is itself the coordinator and writes a
+receipt with its own effective settings. Transferring it preserves the
+fingerprint, if present. Local readiness applies the same receipt predicate
+as for any other coordinator. See [check receipts with remote execution](../SETUP.md#check-receipts-with-remote-execution)
+for the operator route.
+
 CI and merge-queue candidates run fresh without a local worktree receipt.
