@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from loopzero._cli_args import build_parser, parse_args
+
+# Module execution parses help and version before loading delivery code.
+if __name__ == "__main__":
+    _module_args = parse_args(build_parser(), None)
+
 import argparse
 import dataclasses
 import fcntl
 import hashlib
-import importlib.metadata
-import io
 import json
-import math
 import os
 import shlex
 import random
@@ -37,7 +40,7 @@ PAGE = 100
 # --wait: poll interval, default timeout, and how long a required check may stay
 # missing before GitHub is assumed to have dropped the event for this head.
 # Each poll costs several GitHub API calls from a quota shared by every session.
-WAIT_INTERVAL, WAIT_TIMEOUT, MISSING_RUN_GRACE = 30.0, 1800.0, 120.0
+WAIT_INTERVAL, MISSING_RUN_GRACE = 30.0, 120.0
 STALE_VERDICT_GRACE, MAX_REVIEW_CLOCK_SKEW = 900.0, 30.0
 PUSH_TIMEOUT = 600.0  # consumer pre-push hooks (lint, tests) routinely exceed GIT_TIMEOUT
 NEXT_WAIT = "next: loopzero ready --wait"  # named at the moment of need; agents hand-roll polls otherwise
@@ -292,19 +295,22 @@ def _readiness(
     elif announce_receipt:
         _print_receipt(wt, report, "accepted")
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
-        behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+        behind = github.behind_reason(pr, head if review else None)
         reasons = result.reasons
         if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
             reasons = tuple(reason for reason in reasons if reason != behind)
         else:
             reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
         result = dataclasses.replace(result, ready=not reasons, reasons=reasons)
-    if result.reasons == (github.MISSING_REVIEW_REASON,):
+    if github.MISSING_REVIEW_REASON in result.reasons:
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
         if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
-            result = dataclasses.replace(result, reasons=(
-                f"review cap spent (primary + delta) and {head[:12]} has no eligible review. "
-                "Open a new PR for the changes that need review",
+            exhausted = (
+                f"Both review rounds are spent (primary + delta) and {head[:12]} has no eligible review. "
+                "Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused."
+            )
+            result = dataclasses.replace(result, reasons=tuple(
+                exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
             ))
     if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
         result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
@@ -1455,10 +1461,14 @@ MERGIFY_DEQUEUE_HINT = (
 )
 
 
-def _mergify_departure_hint(report: mergify.Departure | None) -> str:
+def _mergify_departure_hint(report: mergify.Departure | None, base: str) -> str:
     if report is None:
         return f"{MERGIFY_DEQUEUE_HINT} {MERGIFY_REQUEUE}"
     detail = f"Mergify report: {report.url}."
+    if report.attribution == "base_conflict":
+        return (f"The PR conflicts with {base}. Run `git fetch origin {base}` and resolve the base "
+                f"integration according to the PR's review state. Requeue only after resolving the "
+                f"conflict. {detail} {MERGIFY_REQUEUE}")
     if report.checks:
         detail += " Failing checks: " + ", ".join(repr(check) for check in report.checks) + "."
     guidance = {
@@ -1477,7 +1487,7 @@ def _mergify_departure(
     sha = _landed(config, pr, closed)
     if not sha and not closed:
         raise CliError(
-            f"PR #{pr.number} left Mergify queue {queue} unmerged. {_mergify_departure_hint(report)}"
+            f"PR #{pr.number} left Mergify queue {queue} unmerged. {_mergify_departure_hint(report, pr.base_ref)}"
         )
     return sha
 
@@ -1739,92 +1749,14 @@ def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readi
 # --------------------------------------------------------------------------- entry point
 
 
-def _wait_seconds(value: str) -> float:
-    try:
-        seconds = float(value)
-        if math.isfinite(seconds) and seconds >= 0:
-            return seconds
-    except ValueError:
-        pass
-    raise argparse.ArgumentTypeError("expected a finite, nonnegative number of seconds")
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="loopzero", description="One task, one branch, one draft PR, one review, one merge."
-    )
-    parser.add_argument(
-        "--config", type=Path, default=None, help="path to workflow.toml (default: repo root)"
-    )
-    parser.add_argument("--version", action="version", version=_version())
-    sub = parser.add_subparsers(dest="command", required=True)
-    start = sub.add_parser("start", help="create an owned worktree and branch for <slug>")
-    start.add_argument("slug")
-    start.set_defaults(func=cmd_start)
-    sub.add_parser("check", help="run the configured checks in the sandbox").set_defaults(
-        func=cmd_check
-    )
-    sub.add_parser("pr", help="push and open or refresh the draft PR").set_defaults(func=cmd_pr)
-    review = sub.add_parser("review", help="run native review and post one canonical review")
-    review.add_argument(
-        "--repost", action="store_true", help="post the saved review for HEAD without a model"
-    )
-    review.add_argument("--model", help="reviewer model override for a fresh review")
-    review.add_argument("--effort", help="reviewer effort override for a fresh review")
-    review.set_defaults(func=cmd_review)
-    ready = sub.add_parser(
-        "ready", help="compute readiness and mark the PR ready; --wait polls required checks"
-    )
-    merge = sub.add_parser(
-        "merge", help="recheck readiness, merge and clean up; --wait waits for checks and landing"
-    )
-    for waiter, what in ((ready, "required checks on this head"), (merge, "required checks and the landed merge")):
-        waiter.add_argument(
-            "--wait", nargs="?", const=WAIT_TIMEOUT, type=_wait_seconds, metavar="SECONDS",
-            help=f"wait for {what} (default {WAIT_TIMEOUT:.0f}s); exit 3 on timeout",
-        )
-    merge.add_argument(
-        "--cancel", action="store_true", help="request removal from the configured Mergify queue"
-    )
-    ready.set_defaults(func=cmd_ready)
-    merge.set_defaults(func=cmd_merge)
-    resolve = sub.add_parser(
-        "resolve", usage='%(prog)s [<finding-id> "<reply>"]',
-        help="list open findings, or reply to one and resolve it",
-    )
-    resolve.add_argument("finding", nargs="?", help="finding id from the list (8 hex digits)")
-    resolve.add_argument("reply", nargs="?", default="", help="what changed, e.g. the fix commit")
-    resolve.set_defaults(func=cmd_resolve)
-    status = sub.add_parser("status", help="show where this branch is in the sequence")
-    status.set_defaults(func=cmd_status)
-    return parser
-
-
-def _version() -> str:
-    """Package version plus the pinned source revision when installed from Git."""
-    dist = importlib.metadata.distribution("loopzero")
-    try:
-        commit = json.loads(dist.read_text("direct_url.json") or "{}")["vcs_info"]["commit_id"]
-    except (KeyError, TypeError, json.JSONDecodeError):
-        commit = "unknown revision (not installed from a Git URL)"
-    return f"loopzero {dist.version} {commit}"
-
-
 def main(argv: list[str] | None = None) -> int:
-    # Progress lines must precede the stderr verdict when both go to one file.
-    if isinstance(sys.stdout, io.TextIOWrapper):
-        sys.stdout.reconfigure(line_buffering=True)
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.command == "resolve" and args.finding is not None and not args.reply.strip():
-        parser.error('expected resolve [<finding-id> "<reply>"] with a nonblank reply for a finding')
-    if args.command == "review" and args.repost:
-        conflicts = [f"--{name}" for name in ("model", "effort") if getattr(args, name) is not None]
-        if conflicts:
-            parser.error(f"review --repost cannot be combined with {' or '.join(conflicts)}")
+    return _run(parse_args(build_parser(), argv))
+
+
+def _run(args: argparse.Namespace) -> int:
     try:
         with _proc.unwind_on_sigterm():
-            return args.func(args)
+            return globals()[f"cmd_{args.command}"](args)
     except IndependentReviewerUnavailable as exc:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
         return 4
@@ -1845,4 +1777,4 @@ def _one_line(exc: BaseException) -> str:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run(_module_args))

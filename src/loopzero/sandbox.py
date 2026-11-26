@@ -122,7 +122,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 (worktree / entry).mkdir(parents=True, exist_ok=True)
             prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
             probe(config, worktree, prefix)
-            _preflight_alternates(config, worktree, prefix)
+            _preflight_alternates(config, worktree, prefix, common_dir)
         missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
@@ -338,8 +338,16 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
             reporter.join()
 
 
-def _preflight_alternates(config: Config, worktree: Path, prefix: list[str]) -> None:
-    # Git resolves relative/transitive paths; probe actual mounts without broadening visibility.
+def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], common_dir: Path) -> None:
+    env = _proc.build_env(config.env_allowlist)
+    if not {"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"} & env.keys():
+        try:
+            (common_dir / "objects/info/alternates").lstat()
+        except FileNotFoundError:
+            return
+        except OSError:
+            pass
+    # Git resolves relative and transitive paths; probe actual mounts without broadening visibility.
     output = _git(config, worktree, "-c", "core.quotepath=true", "count-objects", "-v")
     for alternate in re.findall(r"^alternate: (.*)$", output, re.MULTILINE):
         if alternate.startswith('"'):

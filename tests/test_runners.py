@@ -1248,14 +1248,14 @@ def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) 
         _review("codex", tmp_path)
 
 
-def test_timeout_becomes_bad_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bin: Path, fake_bwrap: Path
-) -> None:
-    from loopzero import _proc, runners
+@pytest.mark.parametrize(("has_stderr", "size"), [(True, 0), (True, 3000), (False, 3000)])
+def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap, has_stderr, size):
     from loopzero.cli import _review_failure
 
     def timeout(*args, **kwargs):
-        raise _proc.ProcTimeout("timed out", "partial reviewer output", stderr="x" * 3000 + "waiting for proxy")
+        diagnostic = "connecting\r" + "界" * size + "waiting for proxy"
+        stdout, stderr = ("partial reviewer output", diagnostic) if has_stderr else (diagnostic, "")
+        raise runners._proc.ProcTimeout("timed out", stdout, stderr=stderr)
 
     _fake_claude(fake_bin, {})
     monkeypatch.setattr(runners, "_git_dirs", lambda cwd, env: (cwd, cwd))
@@ -1263,10 +1263,10 @@ def test_timeout_becomes_bad_output(
     monkeypatch.setattr(runners._proc, "run", timeout)
     with pytest.raises(RunnerBadOutput, match="timed out") as info:
         _review("claude", tmp_path)
-    assert "partial reviewer output" in info.value.tail
     reason, detail, fallback = _review_failure("claude", info.value)
     assert reason.startswith("claude: timed out after ") and detail.endswith("waiting for proxy")
-    assert len(detail.splitlines()[-1]) <= runners.TAIL_CHARS and "waiting for proxy" not in fallback
+    assert "partial reviewer output" not in info.value.tail and "waiting for proxy" not in fallback
+    assert len(detail.encode()) < 450 and ("…" in detail) == bool(size)
 
 
 def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
