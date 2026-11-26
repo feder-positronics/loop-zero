@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -96,19 +97,20 @@ def _has_replacement_refs(common_dir: Path) -> bool:
         return True
 
 
-def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *, refresh: bool) -> tuple[Config, str]:
+def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
+                     refresh: bool, read_timeout: Callable[[float], float]) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
     ref = f"refs/remotes/origin/{branch}"
     if refresh:
         fetched = run_git(worktree, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
-                          "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:{ref}")
+                          "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:{ref}", timeout=read_timeout(60))
         if fetched.exit_code != 0:
             raise ConfigError(f"could not refresh origin/{branch}. {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
     resolved = _proc.run_git_paths(
         ["git", "rev-parse", *directory_args, "--verify", f"{ref}^{{commit}}"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60),
     )
     if resolved.exit_code != 0:
         raise ConfigError(f"{source} has no remote-tracking base commit. {hint}")
@@ -118,7 +120,7 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *, re
         return previous, revision
     shown = _proc.run(
         ["git", "show", f"{revision}:workflow.toml"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60, preserve_newlines=True, encoding="utf-8",
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), preserve_newlines=True, encoding="utf-8",
     )
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
@@ -133,10 +135,11 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *, re
         raise ConfigError(f"{source}: {exc}. {hint}") from None
 
 
-def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: bool = False) -> Config:
+def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: bool = False,
+                 read_timeout: Callable[[float], float] = float) -> Config:
     """Select delivery policy using Git's origin default and its trusted workflow."""
     prefix = "refs/remotes/origin/"
-    default = run_git(worktree, "symbolic-ref", "--quiet", f"{prefix}HEAD")
+    default = run_git(worktree, "symbolic-ref", "--quiet", f"{prefix}HEAD", timeout=read_timeout(60))
     ref = default.stdout.strip()
     if default.exit_code != 0 or not ref.startswith(prefix):
         raise ConfigError(
@@ -144,10 +147,10 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
             "or supply --config for bootstrap or an override."
         )
     branch = ref.removeprefix(prefix)
-    policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh)
+    policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh, read_timeout=read_timeout)
     if policy.base_branch != branch:
         branch = policy.base_branch
-        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh)
+        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh, read_timeout=read_timeout)
         if policy.base_branch != branch:
             raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
     return replace(policy, trusted_base_revision=revision)
@@ -310,7 +313,7 @@ def _env_table(table: dict[str, Any]) -> tuple[tuple[str, str], ...]:
             raise ConfigError(f"checks.env must not override {name}")
         if not isinstance(value, str):
             raise ConfigError(f"checks.env.{name} must be a str")
-    return tuple(table.items())
+    return tuple(sorted(table.items()))
 
 
 def _limits(table: dict[str, Any]) -> ResourceLimits:

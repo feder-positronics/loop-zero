@@ -272,6 +272,13 @@ path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Copy
 `~/.config/systemd/user/`, then run
 `systemctl --user enable --now ai-accounts.timer`.
 
+To review with a pinned CLI and managed credentials, set `PINNED_BIN` to the
+directory containing the pinned `loopzero` executable:
+
+```sh
+PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
+```
+
 - Claude accounts are long-lived tokens: run `claude setup-token` per account and
   pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
   `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
