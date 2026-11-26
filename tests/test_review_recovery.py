@@ -42,14 +42,16 @@ def record_claude_runs(fake_bin):
 
 
 def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=False,
-               mutate=None, timeout=False):
+               mutate=None, timeout=False, findings=None):
     history = []
     if kind == "delta":
         history = [rev(head_of(wt), "primary")]
         (wt / "feature.py").write_text("print('fixed')\n")
         git(wt, "commit", "-qam", "repair")
-    head = support.prepare_review(wt, gh, fake_bin, history=history, post_id=17,
-                                  payload=APPROVE if verdict == 0 else CHANGES)
+    payload = APPROVE if verdict == 0 else CHANGES
+    if findings is not None:
+        payload = {**payload, "findings": findings}
+    head = support.prepare_review(wt, gh, fake_bin, history=history, post_id=17, payload=payload)
     record_claude_runs(fake_bin)
     original = github._api
 
@@ -247,6 +249,28 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
     out, _ = expect_cli(capsys, 1, "review", stderr_contains=("read-back blocked",))
     assert out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
     assert len([c for c in gh.calls if "--input" in c]) == 1
+
+
+def test_repost_recovers_review_with_redacted_findings(wt, gh, fake_bin, monkeypatch, capsys):
+    title = "Rotate sk-ant-FAKE0123"
+    findings = [
+        {"severity": "important", "path": "feature.py", "line": 1,
+         "title": title, "body": "Remove sk-proj-Fake_only-0123 from settings."},
+        {"severity": "suggestion", "path": None, "line": None,
+         "title": "Replace ghp_FAKE0123456789", "body": "See sk-FakeToken0123 in the log."},
+    ]
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=5,
+                      interrupted=True, findings=findings)
+    assert run(capsys, "review")[0] == 130
+    payload = support.posted_review(gh)
+    assert "**suggestion**: Replace [REDACTED] — See [REDACTED] in the log." in payload["body"]
+    comment, = payload["comments"]
+    assert (comment["path"], comment["line"], comment["side"]) == ("feature.py", 1, "RIGHT")
+    stable_id = github.finding_id(head, "feature.py", 1, title)
+    assert comment["body"].splitlines()[0].endswith(f"severity=important head={head} id={stable_id} -->")
+    assert "**important: Rotate [REDACTED]**\n\nRemove [REDACTED] from settings." in comment["body"]
+    assert run(capsys, "review", "--repost")[0] == 5
+    assert_single_publication(gh, fake_bin)
 
 
 def test_interrupted_explicit_repost_recovers_repost_body(wt, gh, fake_bin, monkeypatch, capsys):
