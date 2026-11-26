@@ -171,6 +171,16 @@ def _tail(text: str) -> str:
     return text[-TAIL_CHARS:]
 
 
+def _auth_failure(family: str, diagnostic: str) -> RunnerAuthFailed:
+    names = CLAUDE_AUTH_ENV if family == "claude" else CODEX_AUTH_ENV
+    env = _proc.build_env(names)
+    values = {variant for value in env.values() if value for variant in (value, json.dumps(value)[1:-1])}
+    patterns = [*map(re.escape, sorted(values, key=len, reverse=True)), r"\bsk-[A-Za-z0-9_-]{8,}",
+                r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"]
+    diagnostic = re.sub("|".join(patterns), "[REDACTED]", diagnostic)
+    return RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(diagnostic)}")
+
+
 def _looks_like_auth_failure(text: str) -> bool:
     return _AUTH_FAILURE.search(text) is not None
 
@@ -270,7 +280,7 @@ def _run(
             with contextlib.suppress(json.JSONDecodeError, ValueError):
                 envelope = _extract_json_object(done.stdout)
         if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(combined):
-            raise RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(combined)}")
+            raise _auth_failure(family, combined)
         if _subscription_exhausted(combined, envelope):
             raise RunnerUsageLimit(f"{family}: usage limit reached", _tail(combined))
         if _looks_too_long(combined):
@@ -1050,13 +1060,13 @@ def _review_claude(
     if not isinstance(envelope, dict):
         raise RunnerMalformedOutput("claude: result envelope is not an object", _tail(raw))
     if _claude_envelope_auth_failure(envelope):
-        raise RunnerAuthFailed(f"claude: CLI is not authenticated\n{_tail(raw)}")
+        raise _auth_failure("claude", raw)
     if envelope.get("is_error") and _subscription_exhausted(raw, envelope):
         raise RunnerUsageLimit("claude: usage limit reached", _tail(raw))
     if envelope.get("is_error") or envelope.get("subtype", "success") != "success":
         text = str(envelope.get("result", ""))
         if _looks_like_auth_failure(text):
-            raise RunnerAuthFailed(f"claude: CLI is not authenticated\n{_tail(text)}")
+            raise _auth_failure("claude", text)
         if _looks_too_long(text) or _looks_too_long(raw):
             raise RunnerPromptTooLong("claude: prompt is too long", _tail(raw))
         raise RunnerBadOutput(f"claude: {envelope.get('subtype', 'error')}", _tail(raw))

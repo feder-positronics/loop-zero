@@ -2247,6 +2247,21 @@ def test_review_observes_new_codex_version_in_saved_receipt(
     assert result.provenance["cli_version"] == version
 
 
+def test_review_redacts_native_authentication_diagnostics(wt, gh, fake_tool, capsys, monkeypatch, head):
+    arm_empty_primary_review_history(gh, head)
+    for family, env in (("claude", "ANTHROPIC_API_KEY"), ("codex", "OPENAI_API_KEY")):
+        monkeypatch.setenv(env, f"opaque-fake-{family}-credential")
+        fake_tool(family, "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
+                  f'printf "Not logged in with %s (server echoed sk-FakeToken0123)\\n" "${env}" >&2\nexit 1\n')
+    code, _, err = run(capsys, "review")
+    assert code == 4
+    assert err.count("Not logged in with [REDACTED] (server echoed [REDACTED])") == 2
+    assert "opaque-fake-" not in err and "sk-FakeToken0123" not in err
+    for family, remedy in (("claude", "claude auth login"), ("codex", "codex login")):
+        assert f"{family}: CLI is not authenticated" in err
+        assert f"Fix: run `{remedy}`." in err
+
+
 @pytest.mark.parametrize("save", [True, False])
 def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monkeypatch, capsys, save):
     prepare_review(wt, gh, fake_bin)
