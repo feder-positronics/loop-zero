@@ -497,17 +497,15 @@ def bwrap_argv(
     instead of cleared, so secrets never appear as ``--setenv`` arguments.
     ``writable_binds`` overlays specific paths inside the otherwise private HOME.
     """
-    argv = [
-        "bwrap", "--die-with-parent", "--new-session", "--unshare-all",
-        *(["--share-net"] if config.network else []),
-        "--cap-drop", "ALL",
-    ]
+    argv = ["bwrap", "--die-with-parent", "--new-session", "--unshare-all"]
+    if config.network:
+        argv.append("--share-net")
+    argv += ["--cap-drop", "ALL"]
     for path in SYSTEM_RO:
         if Path(path).exists():
             argv += ["--ro-bind", path, path]
     argv += ["--dev", "/dev", "--proc", "/proc"]
-    for path in ("/tmp", "/run", "/var/run"):
-        argv += ["--tmpfs", path]
+    argv += ["--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/var/run"]
     # Restore resolv.conf (or its parent for masked symlinks) over the private tmpfs.
     if config.network:
         resolv_conf = Path("/etc/resolv.conf")
@@ -518,12 +516,10 @@ def bwrap_argv(
         else:
             source, destination = resolved, resolv_conf
         argv += ["--ro-bind", str(source), str(destination)]
-    for path in config.sandbox_ro:
-        argv += ["--ro-bind-try", path, path]
-    for path in config.writable:
-        argv += ["--bind-try", path, path]
-    argv += ["--bind", str(home), SANDBOX_HOME]
-    for source, destination in writable_binds:
+    for flag, paths in (("--ro-bind-try", config.sandbox_ro), ("--bind-try", config.writable)):
+        for path in paths:
+            argv += [flag, path, path]
+    for source, destination in ((home, SANDBOX_HOME), *writable_binds):
         argv += ["--bind", str(source), str(destination)]
     # Read-only tree/Git binds follow tmpfs so paths under /tmp stay visible.
     binds = [worktree]
