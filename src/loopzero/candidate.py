@@ -18,7 +18,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 MERGIFY_APP_ID = 10562
 MERGIFY_APP_OWNER = "Mergifyio"
@@ -289,18 +289,18 @@ def _attest_source(
     return source_sha
 
 
-def _require_git_exit(operation: str, returncode: int) -> None:
+def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None:
     if operation == "fetch" and returncode:
         from loopzero import github
 
-        raise github.GhUnavailable(("git", "fetch"), "GitHub objects unavailable")
+        output.seek(0)
+        if github._transient_error(output.read(_TREE_OUTPUT).decode(errors="replace"), False):
+            raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
     _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
              "resource bound hit, or integration conflict")
 
 
-@contextlib.contextmanager
-def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
-    """Run bounded Git commands on fetched objects in an isolated bare repository."""
+def _fetch_token() -> str:
     from loopzero import github
 
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -312,6 +312,13 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         except github.GhError:
             raise CandidateError("GitHub fetch authentication unavailable") from None
     _require(bool(token), "GitHub fetch authentication unavailable")
+    return token
+
+
+@contextlib.contextmanager
+def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
+    """Run bounded Git commands on fetched objects in an isolated bare repository."""
+    token = _fetch_token()
     with tempfile.TemporaryDirectory(prefix="loopzero-candidate-") as directory:
         root = Path(directory)
         env = {
@@ -335,7 +342,8 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                     [sys.executable, "-I", "-S", "-c", _LIMITED_GIT, str(_TREE_BYTES),
                      "git", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
                      "-c", "maintenance.auto=false", *args], cwd=root, env=command_env,
-                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL, stdout=output,
+                    stderr=output if args[0] == "fetch" else subprocess.DEVNULL,
                     start_new_session=True,
                 )
                 def store_size() -> int:  # Git renames temporaries: skip files that vanish
@@ -352,7 +360,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                         _require(time.monotonic() < deadline, "Git time bound exceeded")
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             process.wait(timeout=0.02)
-                    _require_git_exit(args[0], process.returncode)
+                    _require_git_exit(args[0], process.returncode, output)
                     _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
                     output.seek(0)
                     result = output.read(_TREE_OUTPUT + 1)
