@@ -754,7 +754,11 @@ def test_api_get_and_login_helpers(gh: FakeGh) -> None:
 
 def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatch, app_token_helper) -> None:
     counter = tmp_path / "helper-calls"
-    app_token_helper(f"echo called >> {counter}\necho synthetic-app-token\n")
+    app_token_helper(
+        'test -z "${GH_TOKEN+x}${GITHUB_TOKEN+x}" || exit 1\n'
+        f"echo called >> {counter}\necho synthetic-app-token\n"
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "secondary-operator-token")
     wall_time = boot_time = 10_000.0
     monkeypatch.setattr(github.time, "time", lambda: wall_time)
     monkeypatch.setattr(github.time, "CLOCK_BOOTTIME", 7, raising=False)
@@ -1251,6 +1255,21 @@ def test_delete_remote_branch_checks_encoded_ref(gh: FakeGh, remote_head: str | 
     assert github.delete_remote_branch(REPO, "lz/fix#516?x%", HEAD) is (remote_head is None)
     assert gh.argv(0) == [*get.split(), "--include"]
     assert len(gh.calls) == 1
+
+
+def test_delete_remote_branch_scopes_operator_tokens(gh: FakeGh, fake_tool, monkeypatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "operator-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "secondary-operator-token")
+    gh.respond(f"api repos/{REPO}/git/ref/heads/probe", {"object": {"sha": HEAD}})
+    fake_tool("git", f'''case "$1" in
+        init) test -z "${{GH_TOKEN+x}}${{GITHUB_TOKEN+x}}" ;;
+        -c) test "$GH_TOKEN:$GITHUB_TOKEN" = "operator-token:secondary-operator-token" &&
+            test "$2" = 'credential.helper=!gh auth git-credential' &&
+            test "$3" = push &&
+            test "$4" = '--force-with-lease=refs/heads/probe:{HEAD}' ;;
+        *) exit 1 ;;
+    esac''')
+    assert github.delete_remote_branch(REPO, "probe", HEAD)
 
 
 def _queue_json(queued: bool) -> dict:
