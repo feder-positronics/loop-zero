@@ -166,8 +166,9 @@ A schedule firing or a relayed go-ahead grants no new authority.
 One bounded delivery under a brief (see
 [Briefs and ownership](#briefs-and-ownership)); returns acceptance evidence
 or one named blocker. An unattended worker never uses an ask-the-user or
-request-input tool: it ends its turn with the blocker or question as its final
-message. A delegate that asks directly is treated as blocked.
+request-input tool and sends no mid-task messages to its parent: it ends its
+turn at once with the blocker or question as its final message. A delegate
+that asks directly is treated as blocked.
 
 ### Dispatch authority
 
@@ -426,7 +427,7 @@ Integration executor: <named executor for returned heads and one owner of any re
 Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
 Follow-ups: <ordered list of 1–2 already commissioned, bounded items, or none; assign only to delegates that can both write Git and post to GitHub themselves>
 Return: <authorized finish: evidence, readiness, or merge; deployment needs its own commission>. Continue until that boundary or a named blocker needs the parent; then follow only the preassigned list, otherwise return. Delegates that cannot do both: write Git and post to GitHub themselves (including sandboxed delegates, delegates without GitHub access, or delegates unable to write the shared Git directory) get no preassigned follow-ups and return after one item via their final Report. A progress summary is not completion.
-Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Report a blocker in this final message (see Worker).
+Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Send no mid-task messages; report a blocker at once in this final message (see Worker).
 ```
 
 Follow the [Worker role](#worker) for blockers. An owner continues the
