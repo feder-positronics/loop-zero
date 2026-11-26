@@ -1085,6 +1085,15 @@ def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str, budg
     assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
 
 
+@pytest.mark.parametrize("extra,count", [(0, 1), (1, 2)])
+def test_split_diff_default_budget_is_200000_bytes(extra: int, count: int) -> None:
+    first = "diff --git a/a b/a\n+" + "x" * 99_000 + "\n"
+    second = "diff --git a/b b/b\n+"
+    second += "y" * (200_000 - len(first) - len(second) - 1 + extra) + "\n"
+    assert len((first + second).encode()) == 200_000 + extra
+    assert len(split_diff(first + second)) == count
+
+
 def test_split_diff_encodes_long_utf8_line_in_linear_work() -> None:
     diff = "diff --git a/new.txt b/new.txt\n+" + "aé€😀" * 1500 + "\n"
     budget = 511

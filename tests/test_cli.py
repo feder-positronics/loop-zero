@@ -546,8 +546,7 @@ def test_refresh_preserves_live_pr_evidence(
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     live = (
         "# Owner-edited title\n\n## Acceptance\n- Updated acceptance on GitHub.\n\n"
-        "## Validation\nRecorded for `aaaaaaaaaaaa`\n"
-        "- `old check`: exit 0 (1.0s)\n\n"
+        "## Validation\n"
         "Browser: original failure reproduced; corrected image returns 200.\n\n"
         "## Review\n- primary, claude, aaaaaaaaaaaa, request_changes\n"
         "- delta, claude, bbbbbbbbbbbb, approve\n\n"
@@ -566,7 +565,6 @@ def test_refresh_preserves_live_pr_evidence(
     assert "- primary, claude, aaaaaaaaaaaa, request_changes" in body
     assert "- delta, claude, bbbbbbbbbbbb, approve" in body
     assert "## Evidence\nProduction probe returned 100 records." in body
-    assert "old check" not in body and "Recorded for `aaaaaaaaaaaa`" not in body
 
 
 def test_initial_pr_keeps_human_validation(wt: Path, gh: FakeGh, capsys) -> None:
@@ -606,8 +604,6 @@ def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, ca
 @pytest.mark.parametrize("body", [
     "# PR\n\n## Evidence\nRetained browser proof.\n",
     "# PR\n\n## Validation\nHuman evidence.\n\n## Review\nApproved.\n",
-    ("# PR\n\n## Checks\nRecorded for `aaaaaaaaaaaa`\n"
-     "- `old check`: exit 1 (1.0s)\n\nHuman evidence.\n\n## Review\nApproved.\n"),
 ])
 def test_check_refresh_replaces_previous_head_without_losing_evidence(
     wt: Path, gh: FakeGh, capsys, body: str,

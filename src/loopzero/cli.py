@@ -451,12 +451,6 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
 
 _CHECKS_START = "<!-- loopzero:checks:start -->"
 _CHECKS_END = "<!-- loopzero:checks:end -->"
-_LEGACY_CHECKS = re.compile(
-    r"^Recorded for `[0-9a-f]+`(?: \(not current head\))?\n"
-    r"(?:- `[^\n]+`: exit -?\d+ \(\d+\.\d+s\)\n|"
-    r"- \(no check commands configured\)\n)*",
-    re.MULTILINE,
-)
 
 
 def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -> str:
@@ -474,8 +468,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -
             raise CliError("malformed loopzero checks block in PR Validation; repair its markers")
         content = before + block + suffix
     else:
-        # Migrate our old report/placeholder only, retaining behavioral evidence.
-        content = _LEGACY_CHECKS.sub("", content)
+        # Replace only our placeholder, retaining behavioral evidence.
         content = re.sub(
             r"^\((?:filled by `loopzero check`|no `loopzero check` run recorded)\)\n?",
             "", content, flags=re.MULTILINE,
@@ -962,14 +955,10 @@ def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettin
     codex = runners.codex_evidence(result)
     if codex is None:
         formats.append(("current", True))
-        if old_settings:
-            formats.append(("summary", True))
     if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
         formats.append(("requested-reported", True))
     if codex is not None and all("configured" not in call for call in codex["calls"]):
         formats.append(("requested-reported", False))
-    if result.family == "codex" and old_settings:
-        formats.append(("summary", False))
     return [(prefix, settings, display)
             for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
             for settings, display in formats]
