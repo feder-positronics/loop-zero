@@ -4016,25 +4016,25 @@ THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": Tru
 
 @pytest.mark.parametrize("outcome", ["refreshed", "remaining", "dispatch failed"])
 def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, outcome) -> None:
-    listing = threads_json(finding_pr)
-    remaining = listing if outcome == "remaining" else threads_json()
-    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED, remaining)
+    sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
+    finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
+    listing = threads_json({**finding_pr, "path": "src/Łódź.py"})
+    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
+               listing if outcome == "remaining" else threads_json())
     gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
-
+    title = r"\u0141\xf3d\u017a" if outcome == "refreshed" else "Łódź"
     code, out, err = run(capsys, "resolve")
-    assert (code, err) == (0, "") and out == "0b9b59e7  important  src/a.py:3  Off by one\n"
+    assert (code, err) == (0, "") and out == f"0b9b59e7  important  src/{title}.py:3  {title}\n"
     assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
-
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
-    assert out.splitlines()[0] == "resolved 0b9b59e7: Off by one"
+    assert out.splitlines()[0] == f"resolved 0b9b59e7: {title}"
     calls = [c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"]][2:]
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
     endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
     dispatches = [c["argv"] for c in gh.calls if endpoint in c["argv"]]
     if outcome == "remaining":
-        assert (code, err, dispatches) == (0, "", [])
-        assert len(out.splitlines()) == 1
+        assert (code, err, dispatches, len(out.splitlines())) == (0, "", [], 1)
     else:
         assert dispatches == [["api", "-X", "POST", endpoint, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]]
         if outcome == "refreshed":

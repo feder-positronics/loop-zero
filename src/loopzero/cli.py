@@ -1818,11 +1818,11 @@ def _version() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Progress lines must precede the stderr verdict when both go to one file.
-    if isinstance(sys.stdout, io.TextIOWrapper):
-        sys.stdout.reconfigure(line_buffering=True)
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Preserve output order and escape characters a legacy stream cannot write during resolve.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True, errors="backslashreplace" if args.command == "resolve" else None)
     if args.command == "resolve" and args.finding is not None and not args.reply.strip():
         parser.error('expected resolve [<finding-id> "<reply>"] with a nonblank reply for a finding')
     if args.command == "review" and args.repost:
