@@ -596,7 +596,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),
             status=lambda message: print(message, flush=True),
-            checkpoint=lambda partial: _save_report(wt, partial))
+            checkpoint=lambda partial: _save_report(wt, partial),
+            workflow=args.config or f"origin/{config.base_branch}:workflow.toml")
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
