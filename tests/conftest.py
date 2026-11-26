@@ -14,10 +14,16 @@ from loopzero import github
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 
 
-@pytest.fixture(autouse=True)
-def no_real_app_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def isolate_github_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token", raising=False)
     monkeypatch.setattr(github, "_app_token_cache", ("", 0.0), raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_host_github_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    isolate_github_auth(tmp_path, monkeypatch)
 
 
 for _role in ("AUTHOR", "COMMITTER"):
