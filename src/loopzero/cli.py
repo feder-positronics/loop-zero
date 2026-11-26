@@ -1709,31 +1709,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=_version())
     sub = parser.add_subparsers(dest="command", required=True)
-    def command(name: str, handler: Callable, help_text: str, **options) -> argparse.ArgumentParser:
-        subparser = sub.add_parser(name, help=help_text, **options)
-        subparser.set_defaults(func=handler)
-        return subparser
-
-    command("start", cmd_start, "create an owned worktree and branch for <slug>").add_argument("slug")
-    command("check", cmd_check, "run the configured checks in the sandbox")
-    command("pr", cmd_pr, "push and open or refresh the draft PR")
-    review = command("review", cmd_review, "run native review and post one canonical review")
-    review.add_argument("--repost", action="store_true", help="post the saved review for HEAD without a model")
+    start = sub.add_parser("start", help="create an owned worktree and branch for <slug>")
+    start.add_argument("slug")
+    start.set_defaults(func=cmd_start)
+    sub.add_parser("check", help="run the configured checks in the sandbox").set_defaults(
+        func=cmd_check
+    )
+    sub.add_parser("pr", help="push and open or refresh the draft PR").set_defaults(func=cmd_pr)
+    review = sub.add_parser("review", help="run native review and post one canonical review")
+    review.add_argument(
+        "--repost", action="store_true", help="post the saved review for HEAD without a model"
+    )
     review.add_argument("--model", help="reviewer model override for a fresh review")
     review.add_argument("--effort", help="reviewer effort override for a fresh review")
-    ready = command("ready", cmd_ready, "compute readiness and mark the PR ready; --wait polls required checks")
-    merge = command("merge", cmd_merge, "recheck readiness, merge and clean up; --wait waits for checks and landing")
+    review.set_defaults(func=cmd_review)
+    ready = sub.add_parser(
+        "ready", help="compute readiness and mark the PR ready; --wait polls required checks"
+    )
+    merge = sub.add_parser(
+        "merge", help="recheck readiness, merge and clean up; --wait waits for checks and landing"
+    )
     for waiter, what in ((ready, "required checks on this head"), (merge, "required checks and the landed merge")):
         waiter.add_argument(
             "--wait", nargs="?", const=WAIT_TIMEOUT, type=_wait_seconds, metavar="SECONDS",
             help=f"wait for {what} (default {WAIT_TIMEOUT:.0f}s); exit 3 on timeout",
         )
-    merge.add_argument("--cancel", action="store_true", help="request removal from the configured Mergify queue")
-    resolve = command("resolve", cmd_resolve, "list open findings, or reply to one and resolve it",
-                      usage='%(prog)s [<finding-id> "<reply>"]')
+    merge.add_argument(
+        "--cancel", action="store_true", help="request removal from the configured Mergify queue"
+    )
+    ready.set_defaults(func=cmd_ready)
+    merge.set_defaults(func=cmd_merge)
+    resolve = sub.add_parser(
+        "resolve", usage='%(prog)s [<finding-id> "<reply>"]',
+        help="list open findings, or reply to one and resolve it",
+    )
     resolve.add_argument("finding", nargs="?", help="finding id from the list (8 hex digits)")
     resolve.add_argument("reply", nargs="?", default="", help="what changed, e.g. the fix commit")
-    command("status", cmd_status, "show where this branch is in the sequence")
+    resolve.set_defaults(func=cmd_resolve)
+    status = sub.add_parser("status", help="show where this branch is in the sequence")
+    status.set_defaults(func=cmd_status)
     return parser
 
 
