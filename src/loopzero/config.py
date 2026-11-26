@@ -89,24 +89,58 @@ def base_revision(worktree: Path, base_branch: str) -> str:
     raise ConfigError(f"git rev-parse origin/{base_branch} failed: {message}")
 
 
-def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
+def _has_replacement_refs(common_dir: Path) -> bool:
+    # A replacement can change what Git reads at a fixed object name.
+    for entry in ("refs/replace", "reftable"):
+        try:
+            (common_dir / entry).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        return True
+    try:
+        packed = (common_dir / "packed-refs").read_bytes()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return b" refs/replace/" in packed
+
+
+def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *, refresh: bool) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
+    ref = f"refs/remotes/origin/{branch}"
+    if refresh:
+        fetched = _proc.run(
+            ["git", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+             "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:{ref}"],
+            cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+        )
+        if fetched.exit_code != 0:
+            raise ConfigError(f"could not refresh origin/{branch}. {hint}")
+    directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
     resolved = _proc.run(
-        ["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+        ["git", "rev-parse", *directory_args, "--verify", f"{ref}^{{commit}}"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
     )
     if resolved.exit_code != 0:
         raise ConfigError(f"{source} has no remote-tracking base commit. {hint}")
-    revision = resolved.stdout.strip()
+    common_dir, _, revision = resolved.stdout.rstrip("\n").rpartition("\n")
+    if (previous is not None and previous.base_branch == branch and previous.trusted_base_revision == revision
+            and common_dir and not _has_replacement_refs(Path(common_dir))):
+        return previous, revision
     shown = _proc.run(
         ["git", "show", f"{revision}:workflow.toml"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60, preserve_newlines=True, encoding="utf-8",
     )
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
     try:
-        data = tomllib.loads(shown.stdout)
+        data = tomllib.loads(shown.stdout.encode("utf-8", errors="surrogateescape").decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{source}: {exc}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{source}: invalid TOML: {exc}. {hint}") from None
     try:
@@ -115,7 +149,7 @@ def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
         raise ConfigError(f"{source}: {exc}. {hint}") from None
 
 
-def load_trusted(worktree: Path) -> Config:
+def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: bool = False) -> Config:
     """Select delivery policy using Git's origin default and its trusted workflow."""
     prefix = "refs/remotes/origin/"
     default = _proc.run(
@@ -129,10 +163,10 @@ def load_trusted(worktree: Path) -> Config:
             "or supply --config for bootstrap or an override."
         )
     branch = ref.removeprefix(prefix)
-    policy, revision = _remote_workflow(worktree, branch)
+    policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh)
     if policy.base_branch == branch:
         return replace(policy, trusted_base_revision=revision)
-    base, revision = _remote_workflow(worktree, policy.base_branch)
+    base, revision = _remote_workflow(worktree, policy.base_branch, previous, refresh=refresh)
     if base.base_branch != policy.base_branch:
         raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
     return replace(base, trusted_base_revision=revision)
@@ -193,7 +227,7 @@ def _build(data: dict[str, Any]) -> Config:
         )
         review[family] = ReviewConfig(table.get("model"), table.get("effort"), allowed)
 
-    commands = _strings("checks.commands", checks.get("commands", []))
+    commands = _commands(checks.get("commands", []))
     kwargs: dict[str, Any] = {}
     if "runner" in checks:
         runner = _strings("checks.runner", checks["runner"])
@@ -270,6 +304,13 @@ def _reject_unknown(where: str, table: dict[str, Any], allowed: Any) -> None:
     unknown = sorted(set(table) - set(allowed))
     if unknown:
         raise ConfigError(f"unknown key(s) in {where}: {', '.join(unknown)}")
+
+
+def _commands(value: list[Any]) -> tuple[str, ...]:
+    commands = _strings("checks.commands", value)
+    if any(not command.strip() for command in commands):
+        raise ConfigError("checks.commands entries must each be a nonblank command")
+    return commands
 
 
 def _strings(label: str, value: list[Any]) -> tuple[str, ...]:

@@ -13,6 +13,10 @@ from loopzero import config, eligibility, github, mergify
 from loopzero.types import Config, LoopZeroError
 
 
+class _SourcePolicyRejection(candidate_mod.CandidateError, LoopZeroError):
+    """An expected hosted policy rejection, eligible for the landing-race check."""
+
+
 def event_number(event: dict) -> int:
     """Use only GitHub event association or an explicit refresh input, never PR text."""
     if "pull_request" in event:
@@ -36,8 +40,26 @@ def main() -> int:
     except config.ConfigError as exc:
         print(exc, file=sys.stderr)
         return 1
-    with github.api_error_diagnostics():
-        return _run(cfg)
+    try:
+        with github.api_error_diagnostics():
+            return _run(cfg)
+    except (github.GhUnavailable, github.ProcTimeout) as exc:
+        print(f"Eligibility unconfirmed before pending status publication: {exc}", file=sys.stderr)
+        return 1
+
+
+def _candidate_event(event: dict, head: str) -> bool:
+    event_pr = event.get("pull_request")
+    if not isinstance(event_pr, dict):
+        raise LoopZeroError("candidate eligibility requires a pull_request_target "
+                            "creation or head-update event")
+    if event.get("action") not in {"opened", "synchronize"}:
+        print("ignored candidate metadata event")
+        return False
+    event_head = event_pr.get("head")
+    if not isinstance(event_head, dict) or event_head.get("sha") != head:
+        raise LoopZeroError("candidate event head is no longer current")
+    return True
 
 
 def _run(cfg: Config) -> int:
@@ -51,27 +73,20 @@ def _run(cfg: Config) -> int:
                  or pr["user"]["login"] == "mergify[bot]")
     if not candidate and pr.get("merged") is True:
         return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
-    if candidate:
-        event_pr = event.get("pull_request")
-        if not isinstance(event_pr, dict):
-            raise LoopZeroError("candidate eligibility requires a pull_request_target "
-                                "creation or head-update event")
-        if event.get("action") not in {"opened", "synchronize"}:
-            print("ignored candidate metadata event")
-            return 0
-        event_head = event_pr.get("head")
-        if not isinstance(event_head, dict) or event_head.get("sha") != head:
-            raise LoopZeroError("candidate event head is no longer current")
+    if candidate and not _candidate_event(event, head):
+        return 0
     def publish(state: str, message: str) -> None:
         github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
     publish("pending", "Refreshing live source review evidence")
+    snapshot = None
     try:
         if candidate:
             def policy(source_number: int, source: dict) -> None:
                 result = eligibility.evaluate(cfg.repo, source_number, source["head"]["sha"],
-                                              cfg.base_branch, cfg.review_publishers)
+                                              cfg.base_branch, cfg.review_publishers,
+                                              snapshot=github.pr_from_rest(source))
                 if not result.ready:
-                    raise LoopZeroError(f"source #{source_number}: " + "; ".join(result.reasons))
+                    raise _SourcePolicyRejection(f"source #{source_number}: " + "; ".join(result.reasons))
             candidate_mod.attest_candidate(
                 event,
                 github_get=lambda path: github.api_get(path.lstrip("/")),
@@ -81,20 +96,50 @@ def _run(cfg: Config) -> int:
             )
             ready, message = True, "All attested candidate sources are reviewed"
         else:
-            result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers)
+            snapshot = github.pr_from_rest(pr)
+            result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers,
+                                          snapshot=snapshot)
             ready, message = result.ready, "; ".join(result.reasons) or "Reviewed source head"
-        if github.pr_view(cfg.repo, number).head_sha != head:
-            raise LoopZeroError("head changed before publication; refresh eligibility")
+        if _landed_before_publication(cfg.repo, number, head, snapshot):
+            return 0
         state = "success" if ready else "failure"
         if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
             message = "Awaiting trusted review of current source head"
             state = "pending"
-        publish(state, message)
-        print(message)
-        return 0 if ready or state == "pending" else 1
+    except (github.GhUnavailable, github.ProcTimeout) as exc:
+        print(f"Eligibility pending: evidence unavailable ({exc})", file=sys.stderr)
+        return 0
     except Exception as exc:
         _mark_refresh_failed(publish, exc)
         raise
+    _publish_verdict(cfg.repo, head, state, message[:140])
+    print(message)
+    return 0 if ready or state == "pending" else 1
+
+
+def _landed_before_publication(repo: str, number: int, head: str, snapshot: github.PR | None) -> bool:
+    current = github.pr_view(repo, number)
+    if current.head_sha != head:
+        raise LoopZeroError("head changed before publication; refresh eligibility")
+    if snapshot is not None:
+        if current.state == "MERGED":
+            return True
+        if eligibility.source_fingerprint(current) != eligibility.source_fingerprint(snapshot):
+            raise LoopZeroError("source metadata changed before publication; refresh eligibility")
+    return False
+
+
+def _publish_verdict(repo: str, head: str, state: str, description: str) -> None:
+    context = eligibility.CONTEXT
+    try:
+        github.commit_status(repo, head, context, state, description)
+    except github.StatusLimitReached:
+        raise
+    except (github.GhError, github.ProcTimeout, OSError) as exc:
+        with suppress(github.GhError, github.ProcTimeout, OSError):
+            if github.status_matches(repo, head, context, state, description):
+                return
+        raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
 
 
 def _mark_refresh_failed(publish: Callable[[str, str], None], exc: Exception) -> None:
