@@ -11,15 +11,18 @@ from __future__ import annotations
 import base64
 import subprocess
 from copy import deepcopy
+from functools import partial
 from importlib import import_module
 from itertools import cycle
 from os import environ
+from shutil import copytree
 
 import pytest
 
 from loopzero import candidate
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
 from loopzero.types import LoopZeroError
+from tests.conftest import commit_file, git as isolated_git
 
 
 @pytest.fixture(autouse=True)
@@ -205,38 +208,36 @@ def test_same_head_still_obeys_source_policy() -> None:
         run_attestation(github_payloads=values, source_policy=block)
 
 
+@pytest.fixture(scope="session")
+def candidate_seed(tmp_path_factory):
+    remote = tmp_path_factory.mktemp("candidate-seed")
+    git = partial(isolated_git, remote)
+    git("init", "-b", "main")
+    commit_file(remote, "base", "base\n", "base")
+    for branch, content in (("parent", "H1\n"), ("source", "reviewed\n")):
+        git("checkout", "-b", branch, "main")
+        commit_file(remote, branch, content, branch)
+    git("checkout", "-b", "candidate", "main")
+    git("merge", "--no-ff", "parent", "-m", "parent integration")
+    git("merge", "--no-ff", "source", "-m", "source integration")
+    git("checkout", "main")
+    git("merge", "--squash", "parent")
+    git("commit", "-m", "squashed parent")
+    return remote, *git("rev-parse", "source^", "parent", "source", "candidate", "main").split()
+
+
 @pytest.fixture
-def tree_candidate(tmp_path, monkeypatch):
-    remote = tmp_path / "remote"
-    remote.mkdir()
+def tree_candidate(candidate_seed, tmp_path, monkeypatch):
+    seed, base, parent, source, candidate_sha, main = candidate_seed
+    remote = copytree(seed, tmp_path / "remote")
 
     def git(*args):
-        return subprocess.run(["git", *args], cwd=remote, check=True, capture_output=True,
-                              text=True).stdout.strip()
-
-    git("init", "-b", "main")
-    git("config", "user.name", "Test")
-    git("config", "user.email", "test@example.org")
+        return isolated_git(remote, *args).strip()
 
     def commit(name, content):
-        (remote / name).write_text(content)
-        git("add", ".")
-        git("commit", "-m", name)
+        commit_file(remote, name, content, name)
         return git("rev-parse", "HEAD")
 
-    base = commit("base", "base\n")
-    git("checkout", "-b", "parent")
-    parent = commit("parent", "H1\n")
-    git("checkout", "-b", "source", base)
-    source = commit("source", "reviewed\n")
-    git("checkout", "-b", "candidate", base)
-    git("merge", "--no-ff", parent, "-m", "parent integration")
-    git("merge", "--no-ff", source, "-m", "source integration")
-    candidate_sha = git("rev-parse", "HEAD")
-    git("checkout", "main")
-    git("merge", "--squash", parent)
-    git("commit", "-m", "squashed parent")
-    main = git("rev-parse", "HEAD")
     popen = subprocess.Popen
 
     def isolated_fetch(argv, **kwargs):
@@ -281,10 +282,9 @@ def tree_candidate(tmp_path, monkeypatch):
         reads = cycle([main_head, main_after or main_head])
 
         def get(path):
-            if path.endswith("/git/ref/heads/main"):
-                sha = next(reads)
-                return {"object": {"sha": sha}} if sha else {}
-            return deepcopy(values[path])
+            if not path.endswith("/git/ref/heads/main"):
+                return deepcopy(values[path])
+            return {"object": {"sha": sha}} if (sha := next(reads)) else {}
 
         return run(candidate_event, github_get=get, mergify_status=lambda *_: deepcopy(queue),
                    source_policy=policy)
