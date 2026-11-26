@@ -13,7 +13,7 @@ import urllib.request
 
 import pytest
 
-from loopzero import mergify
+from loopzero import github, mergify
 
 
 def response(payload: object) -> io.BytesIO:
@@ -250,3 +250,16 @@ def test_api_get_classifies_terminal_transport_failure(monkeypatch, reason, expe
     with pytest.raises(mergify.MergifyError, match="transport failed") as info:
         mergify.api_get("acme/widgets", "/merge-queue/status")
     assert str(reason) in str(info.value) and sleeps == expected_sleeps
+
+
+def test_rate_limited_queue_post_does_not_reconcile(monkeypatch):
+    rejected = github.GhUnavailable(("GitHub API request",), "HTTP 429")
+
+    def submit(*args):
+        raise rejected
+
+    monkeypatch.setattr(github, "_api", submit)
+    monkeypatch.setattr(mergify, "markers", lambda *_: pytest.fail("read markers after rate-limited POST"))
+    with pytest.raises(github.GhUnavailable) as exc:
+        mergify.request("acme/widgets", 7, "a" * 40, "main")
+    assert exc.value is rejected
