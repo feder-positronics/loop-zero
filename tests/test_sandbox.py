@@ -68,9 +68,9 @@ os.execvpe(command[0], command, env)
 
 
 def make_config(**overrides) -> Config:
-    values = {"repo": "o/n", "base_branch": "main", "checks": ("echo hello",), "required_ci": ()}
-    values |= {"merge_strategy": "squash", "reviewers": ("claude",)}
-    return Config(**{**values, "env_allowlist": ("PATH", "HOME", "LZ_KEEP"), **overrides})
+    defaults = {"repo": "o/n", "base_branch": "main", "checks": ("echo hello",), "required_ci": (),
+                "merge_strategy": "squash", "reviewers": ("claude",), "env_allowlist": ("PATH", "HOME", "LZ_KEEP")}
+    return Config(**(defaults | overrides))
 
 
 @pytest.fixture
@@ -86,9 +86,8 @@ def argv_of(log: Path) -> list[str]:
 
 
 def test_report_head_and_results(git_repo, bwrap_log):
-    report = sandbox.run_checks(
-        make_config(checks=("echo one", "echo two; exit 4", "echo never")), git_repo
-    )
+    checks = ("echo one", "echo two; exit 4", "echo never")
+    report = sandbox.run_checks(make_config(checks=checks), git_repo)
     assert report.head == git(git_repo, "rev-parse", "HEAD").strip()
     assert report.dirty is False
     assert [(r.command, r.exit_code, r.tail) for r in report.results] == [
@@ -269,9 +268,7 @@ sys.exit(7)
 
 def test_timeout_is_recorded_with_drained_output(git_repo, bwrap_log):
     command = "printf '%20000s\\n' ''; echo last diagnostic >&2; exec sleep 30"
-    report = sandbox.run_checks(
-        make_config(checks=(command, "echo after")), git_repo, timeout=1
-    )
+    report = sandbox.run_checks(make_config(checks=(command, "echo after")), git_repo, timeout=1)
     (result,) = report.results
     assert result.exit_code == sandbox.TIMEOUT_EXIT and not report.ok
     assert result.tail.endswith("\nlast diagnostic\n\n[loopzero] timed out after 1s")
@@ -434,22 +431,21 @@ class TestRealSandbox:
         assert result.command == command and result.exit_code != 0
         assert not report.ok
 
-    def test_real_network_sandbox_resolves_localhost(self, git_repo):
-        config = make_config(checks=("test -r /etc/resolv.conf && getent hosts localhost",), network=True)
-        assert sandbox.run_checks(config, git_repo).ok
-
-    def test_real_sandbox_hides_host_sockets_and_homes(self, git_repo):
-        uid = os.getuid()
-        checks = (
-            f"test ! -e /run/user/{uid}",
+    @pytest.mark.parametrize("network", [False, True], ids=["isolated", "localhost"])
+    def test_real_sandbox_system_visibility(self, git_repo, network):
+        checks = ("test -r /etc/resolv.conf && getent hosts localhost",) if network else (
+            f"test ! -e /run/user/{os.getuid()}",
             "test ! -e /var/run/docker.sock && test ! -e /run/docker.sock",
             "test ! -e /home && test ! -e /root",
             "test -z \"$(ls -A /run 2>/dev/null)\"",
             "test -d /usr && test -d /etc && test -w /tmp",
             'test "$(cat /proc/1/comm)" = bwrap',  # private pid namespace: pid 1 is not host init
         )
-        report = sandbox.run_checks(make_config(checks=checks), git_repo)
-        assert [r.exit_code for r in report.results] == [0] * len(checks), report
+        report = sandbox.run_checks(make_config(checks=checks, network=network), git_repo)
+        if network:
+            assert report.ok
+        else:
+            assert [r.exit_code for r in report.results] == [0] * len(checks), report
 
     def test_real_sandbox_scratch_cannot_rebind_git_between_checks(self, git_repo):
         sentinel = git_repo / ".git" / "external-sentinel"
@@ -569,29 +565,26 @@ def test_silent_stage_reports_live_metadata_then_completion(
         assert statuses[-1].startswith("stage 2/2: exit 0")
 
 
-def test_early_failure_reports_actual_exit_without_heartbeat(git_repo, bwrap_log, monkeypatch):
-    events = []
-    report = sandbox.run_checks(
-        make_config(checks=("echo secret; exit 17", "echo never")), git_repo,
-        status=events.append,
-    )
-    assert len(events) == 1 and events[0].startswith("stage 1/2: exit 17 (")
-    assert report.results[0].tail == "secret" and len(report.results) == 1
-    assert not report.ok
-
-
-def test_timeout_stops_heartbeat_and_retains_failure_tail(git_repo, bwrap_log, monkeypatch, heartbeat_log):
-    events, _, status, wait_for_heartbeat = heartbeat_log
-    inject_check_timeout(monkeypatch, b"private\n", wait_for_heartbeat)
-    report = sandbox.run_checks(
-        make_config(checks=("echo private", "echo never")), git_repo,
-        timeout=0.2, status=status,
-    )
-    assert any("running" in event for event in events)
-    assert events[-1].startswith("stage 1/2: exit 124 (")
-    assert all("private" not in event for event in events)
+@pytest.mark.parametrize("timed_out", [False, True], ids=["early-failure", "timeout"])
+def test_failed_stage_status_and_tail(git_repo, bwrap_log, monkeypatch, request, timed_out):
+    if timed_out:
+        events, _, status, wait = request.getfixturevalue("heartbeat_log")
+        inject_check_timeout(monkeypatch, b"private\n", wait)
+        command, exit_code, tail = "echo private", 124, "private\n\n[loopzero] timed out after 0.2s"
+    else:
+        events = []
+        status = events.append
+        command, exit_code, tail = "echo secret; exit 17", 17, "secret"
+    report = sandbox.run_checks(make_config(checks=(command, "echo never")), git_repo,
+                                status=status, **({"timeout": 0.2} if timed_out else {}))
     assert len(report.results) == 1 and not report.ok
-    assert report.results[0].tail == "private\n\n[loopzero] timed out after 0.2s"
+    assert report.results[0].tail == tail
+    assert events[-1].startswith(f"stage 1/2: exit {exit_code} (")
+    if timed_out:
+        assert any("running" in event for event in events)
+        assert all("private" not in event for event in events)
+    else:
+        assert len(events) == 1
 
 
 def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_log, monkeypatch, heartbeat_log):

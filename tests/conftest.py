@@ -6,6 +6,7 @@ import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from shutil import copytree
 
 import pytest
 
@@ -52,15 +53,18 @@ def init_git_repo(repo: Path) -> Path:
     """Initialize branch `main` with a single commit of README.md."""
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
-    (repo / "README.md").write_text("hello\n")
-    git(repo, "add", "README.md")
-    git(repo, "commit", "-q", "-m", "init")
+    commit_file(repo, "README.md", "hello\n", "init")
     return repo
 
 
+@pytest.fixture(scope="session")
+def git_repo_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return init_git_repo(tmp_path_factory.mktemp("git-repo-seed") / "repo")
+
+
 @pytest.fixture
-def git_repo(tmp_path: Path) -> Path:
-    return init_git_repo(tmp_path / "repo")
+def git_repo(tmp_path: Path, git_repo_seed: Path) -> Path:
+    return copytree(git_repo_seed, tmp_path / "repo")
 
 
 @pytest.fixture
