@@ -1144,7 +1144,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
         waiting or _pending_checks(config, pr, readiness, allow_skipped=not pr.is_draft)
     ):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
-                                     shown=readiness.reasons if kicked else (), args=args, allow_skipped=True)
+                                     shown=readiness.reasons if kicked else (), args=args,
+                                     allow_skipped=True, initial=None if kicked else readiness)
         if waited is None:
             return 3
         pr, readiness, kicked = waited
@@ -1230,12 +1231,13 @@ def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Ite
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
-    allow_merged: bool = False, allow_skipped: bool = False,
+    allow_merged: bool = False, allow_skipped: bool = False, initial: github.Readiness | None = None,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     started = time.monotonic() if started is None else started
     if timeout == 0:
         return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                shown=shown, args=args, allow_merged=allow_merged, allow_skipped=allow_skipped)
+                                shown=shown, args=args, allow_merged=allow_merged,
+                                allow_skipped=allow_skipped, initial=initial)
     deadline = started + timeout
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr)
@@ -1244,7 +1246,8 @@ def _wait_with_deadline(
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
             waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged, allow_skipped=allow_skipped)
+                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged,
+                                      allow_skipped=allow_skipped, initial=initial)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1276,7 +1279,7 @@ def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
     args: argparse.Namespace | None = None, bounded: bool = False, allow_merged: bool = False,
-    allow_skipped: bool = False,
+    allow_skipped: bool = False, initial: github.Readiness | None = None,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     """Poll the same head until it settles, omitting readiness for an allowed merge."""
     grace_started = time.monotonic()
@@ -1284,11 +1287,15 @@ def _wait_for_checks(
     current = pr
     stale_notice = False
     for _ in _poll_until(started, timeout, bounded=bounded):
-        current = github.pr_view(config.repo, pr.number)
-        _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
-        if allow_merged and current.state == "MERGED":
-            return current, None, kicked
-        readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
+        if initial is not None:
+            readiness = initial
+            initial = None
+        else:
+            current = github.pr_view(config.repo, pr.number)
+            _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
+            if allow_merged and current.state == "MERGED":
+                return current, None, kicked
+            readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
             print("marked ready; " + "; ".join(readiness.reasons))
@@ -1509,7 +1516,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
-                                     args=args, allow_merged=True)
+                                     args=args, allow_merged=True, initial=readiness)
         if waited is None:
             return 3
         pr, readiness, _ = waited
