@@ -1076,17 +1076,17 @@ def test_bwrap_unavailable_fails_closed(fake_bin, tmp_path, monkeypatch, fake_to
 # ----------------------------------------------------------------- codex
 
 
-def test_codex_ignores_repository_instructions_and_skills(
-    repo, fake_bin: Path, tmp_path: Path, fake_bwrap: Path,
-) -> None:
-    outside = tmp_path / "outside"
-    for skill in (repo / ".agents/skills/a/b", repo / ".codex/skills/c", repo / "docs/d", outside):
+def _plant_skills(repo: Path) -> None:
+    for skill in (repo / ".agents/skills/a/b", repo / ".codex/skills/c", repo / "docs/d"):
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\nname: planted\ndescription: planted\n---\n")
-    (repo / "AGENTS.md").write_text("planted")
     (repo / ".agents/skills/linked").symlink_to(repo / "docs/d")
     (repo / ".agents/skills/loop").symlink_to(repo / ".agents/skills")
-    (repo / ".codex/skills/host").symlink_to(outside)
+
+
+def test_codex_ignores_repository_instructions_and_skills(repo, fake_bin: Path, fake_bwrap: Path) -> None:
+    _plant_skills(repo)
+    (repo / "AGENTS.md").write_text("planted")
     _fake_review(fake_bin, "codex")
     _review("codex", repo)
     argv = _argv(fake_bin, "codex")
@@ -1098,6 +1098,40 @@ def test_codex_ignores_repository_instructions_and_skills(
         real / ".agents/skills/a/b/SKILL.md", real / ".codex/skills/c/SKILL.md",
         real / "docs/d/SKILL.md",
     )]
+
+
+@pytest.mark.parametrize("link", [".codex/skills/host", ".agents/skills"])
+def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
+    repo, fake_bin: Path, fake_bwrap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link: str,
+) -> None:
+    outside = tmp_path / "outside"
+    (outside / "skill").mkdir(parents=True)
+    (outside / "skill/SKILL.md").write_text("---\nname: host\ndescription: host\n---\n")
+    (repo / link).parent.mkdir(parents=True, exist_ok=True)
+    (repo / link).symlink_to(outside)
+    scanned = []
+    real_scandir = os.scandir
+    def spy(path=".", *rest):
+        if not isinstance(path, int):
+            scanned.append(Path(path))
+        return real_scandir(path, *rest)
+    monkeypatch.setattr("loopzero.runners.os.scandir", spy)
+    _fake_review(fake_bin, "codex")
+    with pytest.raises(RunnerBadOutput, match="links outside the checkout"):
+        _review("codex", repo)
+    assert not any(p.resolve().is_relative_to(outside.resolve()) for p in scanned)
+    assert not (fake_bin / "codex.stdin").exists()
+
+
+def test_codex_too_many_skills_to_disable_fails_before_launch(
+    repo, fake_bin: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _plant_skills(repo)
+    monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
+    _fake_review(fake_bin, "codex")
+    with pytest.raises(RunnerBadOutput, match="3 repository skills are too many to disable"):
+        _review("codex", repo)
+    assert not (fake_bin / "codex.stdin").exists()
 
 
 def test_codex_approve(repo,

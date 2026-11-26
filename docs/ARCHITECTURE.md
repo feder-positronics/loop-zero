@@ -185,7 +185,9 @@ Native defaults and read-only tools remain enabled. Neither reviewer loads
 instructions from the reviewed head, which the PR controls: Claude runs with
 `--setting-sources ""`, and Codex runs with `project_doc_max_bytes=0` (no
 AGENTS.md or AGENTS.override.md) and a `skills.config` entry disabling every
-skill under the checkout's `.agents/skills` and `.codex/skills`. Repository
+skill under the checkout's `.agents/skills` and `.codex/skills`; a skill
+directory linking outside the checkout, or more skills than one argument can
+disable, fails the attempt before launch. Repository
 conventions reach reviewers only as evidence or through
 `delivery.reviewer_ro_paths` from the pinned base. Structural transport tests do
 not prove injection immunity, reviewer quality or backend identity.
