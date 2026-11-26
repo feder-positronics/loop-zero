@@ -1123,10 +1123,9 @@ def test_pr_accepts_angle_brackets_and_sublists_as_filled_text(wt: Path) -> None
 
 
 def test_progress_output_precedes_the_stderr_verdict_in_one_file(tmp_path: Path) -> None:
-    script = ("import argparse, sys\nfrom loopzero import cli\np = argparse.ArgumentParser()\n"
-              "def wait(args):\n    print('waiting')\n    raise cli.CliError('dequeued')\n"
-              "p.set_defaults(func=wait, command='merge')\ncli.build_parser = lambda: p\n"
-              "sys.exit(cli.main([]))\n")
+    script = ("import sys\nfrom loopzero import cli\ndef wait(args):\n"
+              "    print('waiting')\n    raise cli.CliError('dequeued')\n"
+              "cli.cmd_merge = wait\nsys.exit(cli.main(['merge']))\n")
     with (tmp_path / "log").open("w") as log:
         subprocess.run([sys.executable, "-c", script], stdout=log, stderr=subprocess.STDOUT, check=False)
     assert (tmp_path / "log").read_text().splitlines() == ["waiting", "loopzero merge: dequeued"]
@@ -1259,11 +1258,12 @@ def test_pr_refuses_to_overwrite_a_pr_head_it_has_never_seen(
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == pushed
 
 
-def test_version_names_the_installed_revision(capsys) -> None:
-    with pytest.raises(SystemExit) as stop:
-        cli.main(["--version"])
-    out = capsys.readouterr().out
-    assert stop.value.code == 0 and re.fullmatch(r"loopzero \S+ .+\n", out), out
+@pytest.mark.parametrize("flag, pattern", [("--version", r"loopzero \S+ .+\n\Z"), ("--help", r"usage: loopzero ")])
+def test_cli_info_leaves_delivery_backends_unloaded(flag, pattern):
+    for entry in (("-m", "loopzero.cli"), ("-c", "from loopzero._cli_entry import main; main()")):
+        done = subprocess.run([sys.executable, "-X", "importtime", *entry, flag], capture_output=True, text=True)
+        assert done.returncode == 0 and re.match(pattern, done.stdout), done
+        assert not re.search(r"loopzero\.(github|mergify|runners|sandbox)\b", done.stderr)
 
 
 def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
