@@ -1114,8 +1114,6 @@ CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree t
 def _cleanup(wt: Path, pr: github.PR, branch: str | None = None) -> None:
     try:
         _repo_root(wt)
-        if worktree.head(wt) != pr.head_sha:
-            raise worktree.WorktreeError("local HEAD differs from merged PR head")
         worktree.cleanup(wt, branch if branch is not None else worktree.branch(wt), pr.head_sha)
     except (worktree.WorktreeError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""

@@ -283,7 +283,7 @@ def cleanup(wt: Path, name: str, expected_head: str) -> None:
         if row != f"{ref}\0{expected_head}\0\0":
             raise WorktreeError(
                 f"local branch {name!r} moved or is checked out; "
-                "delete it manually if it still points at the merged head"
+                "preserve its current tip and remove the detached worktree manually if needed"
             )
         _git(gd, f"--git-dir={gd}", "update-ref", "--no-deref", "-d", ref, expected_head)
     _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout

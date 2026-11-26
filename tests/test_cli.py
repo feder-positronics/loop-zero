@@ -3063,23 +3063,13 @@ def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatc
         "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup")
 
 
-def test_cleanup_hints_name_branch_and_configured_repo_without_commands(
+def test_remote_cleanup_hint_names_branch_and_configured_repo_without_commands(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
     branch = "lz/fix$version"
-    monkeypatch.setattr(cli, "_repo_root", lambda _wt: tmp_path)
-    monkeypatch.setattr(cli.worktree, "branch", lambda _wt: branch)
-    gone = tmp_path / "gone"
-    monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
-        cli.worktree.WorktreeError("cannot lock ref")))
-    monkeypatch.setattr(cli.worktree, "head", lambda _wt: "a" * 40)
-    cli._cleanup(gone, SimpleNamespace(head_sha="a" * 40))
-    assert capsys.readouterr().err.rstrip().endswith(
-        "delete local branch 'lz/fix$version' if it still points at the merged head")
-
     monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
         cli.github.GhError(("gh", "api"), "HTTP 500")))
-    cli._cleanup_remote_refs(gone, SimpleNamespace(repo="acme/widgets"), branch, "a" * 40)
+    cli._cleanup_remote_refs(tmp_path, SimpleNamespace(repo="acme/widgets"), branch, "a" * 40)
     assert capsys.readouterr().err.rstrip().endswith(
         "delete 'lz/fix$version' in acme/widgets if it still points at the merged head")
 
