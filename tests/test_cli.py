@@ -4755,7 +4755,7 @@ def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
 
 
 def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head):
-    (wt / ".loopzero" / "review-existing.json").write_text("{broken")
+    cli._review_file(wt, head, "primary").write_text("{broken")
     arm_pr(gh, head, isDraft=False, state="MERGED")
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="c" * 40))
     ref = f"api repos/{REPO}/git/ref/heads/lz/t1"
