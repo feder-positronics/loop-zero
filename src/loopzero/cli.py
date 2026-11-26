@@ -1277,7 +1277,7 @@ _SIZE_BUDGET = "scripts/size_budget.sh"
 
 
 def _prequeue_size_budget(
-    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness,
+    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness, *, project: bool = True,
 ) -> None:
     if not readiness.ready or config.merge_strategy != "mergify" or _SIZE_BUDGET not in config.checks:
         return
@@ -1299,14 +1299,47 @@ def _prequeue_size_budget(
             raise CliError(f"could not fetch {config.base_branch} from origin for the size budget check")
         base = git("rev-parse", "FETCH_HEAD^{commit}")
         script = git("show", f"{base}:{_SIZE_BUDGET}")
-        tree = git("merge-tree", "--write-tree", base, pr.head_sha)
-        # A candidate symlink must not read files outside the temporary checkout.
-        git("-c", "core.symlinks=false", "read-tree", "--reset", "-u", tree)
-        result = _proc.run(["bash", "-s", "--", base], input=script + "\n", cwd=root,
-                           env_allowlist=("PATH",), extra_env=env, timeout=GIT_TIMEOUT,
-                           merge_output=True)
+
+        def evaluate(target: str) -> _proc.Completed:
+            tree = git("merge-tree", "--write-tree", target, pr.head_sha)
+            # A candidate symlink must not read files outside the temporary checkout.
+            git("-c", "core.symlinks=false", "read-tree", "--reset", "-u", tree)
+            return _proc.run(["bash", "-s", "--", base], input=script + "\n", cwd=root,
+                             env_allowlist=("PATH",), extra_env=env, timeout=GIT_TIMEOUT,
+                             merge_output=True)
+
+        result = evaluate(base)
         if result.exit_code:
             raise CliError("current target size budget failed:\n" + result.stdout.rstrip())
+        if project:
+            _warn_queue_size(config, pr, root, origin, base, git, evaluate)
+
+
+def _warn_queue_size(
+    config: Config, pr: github.PR, root: Path, origin: str, base: str,
+    git: Callable[..., str], evaluate: Callable[[str], _proc.Completed],
+) -> None:
+    assert config.mergify_queue is not None
+    try:
+        numbers = mergify.queue_predecessors(config.repo, config.base_branch, config.mergify_queue, pr.number)
+        if not numbers:
+            return
+        refs = [f"refs/pull/{number}/head:refs/loopzero/{number}" for number in numbers]
+        _git(root, "fetch", "--no-tags", "--no-recurse-submodules", "--", origin, *refs)
+        integrated = base
+        for number in numbers:
+            source = git("rev-parse", f"refs/loopzero/{number}^{{commit}}")
+            if git("merge-base", integrated, source) == source:
+                return  # A queued PR may already have landed or be represented by another head.
+            tree = git("merge-tree", "--write-tree", integrated, source)
+            integrated = git("-c", "user.name=loopzero", "-c", "user.email=loopzero@localhost",
+                             "commit-tree", tree, "-p", integrated, "-p", source, "-m", "Queue size projection")
+        result = evaluate(integrated)
+    except (LoopZeroError, OSError):
+        return
+    if result.exit_code and "size budget: FAIL" in result.stdout:
+        predecessors = ", ".join(f"#{number}" for number in numbers)
+        print(f"warning: projected size budget after {predecessors}:\n{result.stdout.rstrip()}")
 
 
 def cmd_ready(args: argparse.Namespace) -> int:
@@ -1723,7 +1756,7 @@ def _merge_with_mergify(
             return sha
         raise closed[0]
     if not confirmed and not requested:
-        _prequeue_size_budget(wt, config, pr, readiness)
+        _prequeue_size_budget(wt, config, pr, readiness, project=admit_by is None)
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
