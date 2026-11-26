@@ -11,6 +11,7 @@ import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from time import sleep
 
 from loopzero import candidate, config, github, runners
 from loopzero.types import LoopZeroError
@@ -197,12 +198,22 @@ def source_fingerprint(pr: github.PR) -> tuple[object, ...]:
             github.merge_hold(pr.number, pr.labels))
 
 
+def source_snapshot(repo: str, number: int, head: str, pr: github.PR | None = None) -> github.PR:
+    pr = pr if pr is not None else github.pr_view(repo, number)
+    for delay in (2, 4, 8):
+        if pr.head_sha != head or github.mergeability_blocker(pr) != github.MERGEABILITY_PENDING:
+            break
+        sleep(delay)
+        pr = github.pr_view(repo, number)
+    return pr
+
+
 def evaluate(repo: str, number: int, head: str, base: str,
              publishers: tuple[str, ...], *, snapshot: github.PR | None = None) -> github.Readiness:
     """Evaluate live review evidence. Callers supplying a snapshot own the final source check."""
     if not publishers or not re.fullmatch(r"[0-9a-f]{40}", head):
         raise LoopZeroError("eligibility requires trusted publishers and a full source SHA")
-    pr = snapshot if snapshot is not None else github.pr_view(repo, number)
+    pr = snapshot if snapshot is not None else source_snapshot(repo, number, head)
     if pr.number != number or pr.head_sha != head:
         return github.Readiness(False, ("source head changed; refresh eligibility",))
     if hold := github.merge_hold(pr.number, pr.labels):
@@ -224,8 +235,11 @@ def evaluate(repo: str, number: int, head: str, base: str,
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head,
                               publishers=publishers)
-    if snapshot is None and source_fingerprint(github.pr_view(repo, number)) != source_fingerprint(pr):
+    current = github.pr_view(repo, number) if snapshot is None else pr
+    if snapshot is None and source_fingerprint(current) != source_fingerprint(pr):
         return github.Readiness(False, ("source changed during eligibility refresh",))
+    if snapshot is None and result.ready and (blocker := github.mergeability_blocker(current)):
+        return github.Readiness(False, (blocker,))
     return result
 
 

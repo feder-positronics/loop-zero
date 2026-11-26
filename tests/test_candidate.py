@@ -630,9 +630,8 @@ def test_rebuild_wait(monkeypatch, no_retry_delay, matches, second, stop):
             or (stop == "changed" and len(reads) >= 6)
         ) else ambiguous
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
-    def run():
-        return run_attestation(github_payloads=values, mergify_status=read_status,
-                               source_policy=lambda n, _: seen.append(n))
+    run = partial(run_attestation, github_payloads=values, mergify_status=read_status,
+                  source_policy=lambda n, _: seen.append(n))
     if stop in {"settled", "changed"}:
         assert run() == expected_sources((101, "1" * 40), (102, "2" * 40))
         assert seen == [101, 102] * (2 if stop == "changed" and second else 1)
@@ -674,10 +673,8 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome)
 
     error = pytest.raises(github.GhUnavailable, match="temporarily unavailable") if outcome == "fetch" else nullcontext()
     with error, candidate.fetched_git("owner/repo", []) as git:
-        if outcome == "bound":
-            with pytest.raises(CandidateError, match="Git object/size bound exceeded"):
-                git("test-command")
-        else:
+        bound = pytest.raises(CandidateError, match="Git object/size bound exceeded")
+        with bound if outcome == "bound" else nullcontext():
             assert git("test-command") == ""
 
     assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": []}[outcome]

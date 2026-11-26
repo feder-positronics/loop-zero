@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -28,8 +29,10 @@ from loopzero.types import BLOCKING, Finding, ReviewResult
 GH_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_HOST")
 GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
+PR_LOCK_DIR = Path.home() / ".cache/loopzero/pr-locks"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
+MERGEABILITY_PENDING = "GitHub is computing mergeability"
 MARKER_RE = re.compile(
     r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
     r"head=(?P<head>[0-9a-f]{40}) id=(?P<id>[0-9a-f]{8}) -->"
@@ -287,6 +290,16 @@ def _cached_app_token() -> str:
     token, minted = _app_token_cache
     now = _app_token_clock() if token else None
     return token if now is not None and 0 <= now - minted < 3000 else ""
+
+
+@contextmanager
+def pr_lock(repo: str, number: int) -> Iterator[None]:
+    """Serialize a GitHub write across local checkouts for this PR."""
+    key = hashlib.sha256(f"{repo.casefold()}#{number}".encode()).hexdigest()
+    PR_LOCK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (PR_LOCK_DIR / key).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def app_token() -> str:
@@ -556,13 +569,13 @@ def _not_found(number: int, exc: Exception) -> GhError:
 
 
 def _api(endpoint: str, payload: dict, method: str = "POST",
-         token: str | None = None) -> object:
+         token: str | None = None, *, timeout: float = 120) -> object:
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".loopzero", encoding="utf-8", delete_on_close=False
     ) as handle:
         handle.write(json.dumps(payload))
         handle.close()
-        return _gh_json("api", endpoint, "--method", method, "--input", handle.name, token=token)
+        return _gh_json("api", endpoint, "--method", method, "--input", handle.name, token=token, timeout=timeout)
 
 
 def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
@@ -1126,13 +1139,44 @@ def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, .
             "-f", f"ref={base}", "-f", f"inputs[pr]={number}")
 
 
-def refresh_eligibility(repo: str, number: int, base: str) -> None:
-    args = eligibility_dispatch_args(repo, number, base)
+def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bool:
+    query = f"event=workflow_dispatch&branch={quote(base, safe='')}&created={quote('>=' + since, safe='')}&per_page=100"
+    data = api_get(f"repos/{repo}/actions/workflows/eligibility.yml/runs?{query}")
+    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+    complete = isinstance(runs, list) and data.get("total_count") == len(runs)
+    identified = [run.get("display_title") if isinstance(run, dict) else None for run in runs] if complete else []
+    if f"Refresh eligibility for PR #{number}" in identified:
+        return True
+    if not complete or any(not isinstance(name, str) or not re.fullmatch(r"Refresh eligibility for PR #[0-9]+", name) for name in identified):
+        raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
+    return False
+
+
+def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...]) -> None:
+    args = eligibility_dispatch_args(repo, pr.number, base)
+    since = datetime.fromtimestamp(time.time(), UTC).isoformat(timespec="seconds")
     try:
-        _gh(*args)
+        try:
+            _gh(*args)
+        except (GhUnavailable, ProcTimeout) as exc:
+            if isinstance(exc, GhUnavailable) and not _transient_error(exc.tail, False):
+                raise
+            _retry_sleep(RETRY_DELAY)
+            current = pr_for_branch(repo, branch, open_only=True)
+            if current is None or (current.number, current.head_sha, current.base_ref) != (
+                pr.number, pr.head_sha, pr.base_ref,
+            ):
+                raise GhError(("refresh Loop-zero Eligibility",), "the PR or head changed after resolution") from exc
+            if _eligibility_dispatched(repo, pr.number, base, since):
+                return
+            if open_blocking_findings(repo, pr.number, None, publishers):
+                raise GhError(("refresh Loop-zero Eligibility",), "blocking findings appeared after resolution") from exc
+            _gh(*args)
     except (GhError, ProcTimeout, OSError) as exc:
         retry = shlex.join(("gh", *args))
-        raise GhError(("refresh Loop-zero Eligibility",), f"{exc}\nRun manually: {retry}") from exc
+        raise GhError(("refresh Loop-zero Eligibility",),
+                      f"Finding on PR #{pr.number} is resolved. {exc}\n"
+                      f"Verify the PR head, remaining findings and recent runs before retrying: {retry}") from exc
 
 
 def open_blocking_findings(
@@ -1311,6 +1355,14 @@ def behind_reason(pr: PR, reviewed_head: str | None) -> str:
     )
 
 
+def mergeability_blocker(pr: PR) -> str | None:
+    if pr.mergeable == "CONFLICTING":
+        return f"PR #{pr.number} has merge conflicts with {pr.base_ref}"
+    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
+        return MERGEABILITY_PENDING
+    return None
+
+
 def readiness(
     repo: str,
     pr: PR,
@@ -1330,8 +1382,8 @@ def readiness(
         reasons.append(f"PR #{pr.number} is {pr.state}, not open")
     if pr.base_ref != base_branch:
         reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}")
-    if pr.mergeable == "CONFLICTING":
-        reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
+    if blocker := mergeability_blocker(pr):
+        reasons.append(blocker)
     if pr.merge_state == "BEHIND" and not allow_behind:
         reasons.append(behind_reason(pr, reviewed_head))
     if not reviewed_head:
@@ -1483,11 +1535,13 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     return True
 
 
-def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:
+def commit_status(
+    repo: str, head: str, context: str, state: str, description: str, *, timeout: float = 120,
+) -> None:
     """Publish a SHA-scoped status using the caller's narrowly scoped credential."""
     endpoint = f"repos/{repo}/statuses/{head}"
     try:
-        _api(endpoint, {"state": state, "context": context, "description": description})
+        _api(endpoint, {"state": state, "context": context, "description": description}, timeout=timeout)
     except GhError as exc:
         validation_error = re.search(r"\bHTTP 422\b|^method=POST endpoint=\S+ status=422\b", exc.tail)
         if validation_error and _status_limit_reached(repo, head, context):

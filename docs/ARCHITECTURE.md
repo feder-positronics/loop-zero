@@ -35,6 +35,8 @@ reserved classes.
 Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
 reviews, finding threads, check statuses and merge state. Within a task worktree,
 PR body writers lock the state directory from the live read through the update.
+Review publication rechecks the round while holding a same-host lock keyed by
+repository and PR. The lock covers POST and lost-response read-back.
 CI and branch protection
 provide the hosted enforcement. Readiness is a checklist over these sources,
 not a tamper-proof security boundary: repository writers can edit PR evidence,
@@ -137,6 +139,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    delegated or input-keyed checks binds the configured base branch. Only the
    stage reuse key binds the exact base revision. Source-check waiters check for policy
    changes on every poll.
+   Local readiness and hosted eligibility share the mergeability verdict.
+   Hosted source refresh retries an unknown result on the same head before
+   leaving it pending.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree
@@ -373,6 +378,9 @@ the last race error unchanged, and hosted eligibility publishes terminal failure
 success requires one complete successful attestation. Source-PR eligibility uses
 its existing path without these retries; a merged source PR publishes nothing, so a
 late refresh cannot turn its landed head red.
+After GitHub acknowledges a pending status, SIGTERM during evaluation triggers a
+bounded failure write for that SHA. Once the final write starts, publication
+recovery owns its verdict.
 
 
 Agent sessions and T3 runs own interaction, execution and workspace management.
@@ -539,9 +547,11 @@ unpushed local commits, with the supplied environment and network policy under
 equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
 every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
-the authoritative `checks.json` receipt. Writers lock the task state directory
-while rechecking HEAD and atomically replacing the receipt from a synced sibling
-temporary file. Successful keyed stages are checkpointed in the same receipt
+the authoritative `checks.json` receipt. Checks lock the task state directory
+through execution and receipt publication. A waiter can reuse a newly published
+passing receipt when HEAD, settings and declared inputs match. Writers recheck
+HEAD and atomically replace the receipt from a synced sibling temporary file.
+Successful keyed stages are checkpointed in the same receipt
 for reuse. A checkpoint cannot replace a clean pass for the same head and
 settings or satisfy readiness before final worktree validation. Completed
 failures still replace passes. Runners cannot select stages or mint receipts. Stage admission

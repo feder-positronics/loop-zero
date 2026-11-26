@@ -47,6 +47,14 @@ SANDBOX_ENV = {
     "PYTEST_ADDOPTS": "-p no:cacheprovider",
 }
 
+_CHECK_CONTEXT_ENV = {*Config.env_allowlist, "TMP", "TEMP", "TMPDIR", "UV_PYTHON_INSTALL_DIR",
+                      *(name for name in SANDBOX_ENV if name.endswith("_CACHE_DIR"))}
+_CHECK_MODES = {"development", "production", "staging", "testing"}
+_CREDENTIAL_ENV = re.compile(
+    r"PASSWORD|PASSWD|PASSPHRASE|(?:^|_)(?:PWD|PIN|PAT|AUTH|TOKEN|SECRET|CREDENTIALS?|COOKIE|"
+    r"(?:API|ACCESS|PRIVATE)_KEY)(?:_|$)", re.IGNORECASE,
+)
+
 
 class SandboxUnavailable(LoopZeroError):
     """bubblewrap is missing or cannot create a sandbox on this host."""
@@ -96,7 +104,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                                                    "Runner requires a clean worktree"),))
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config)
-    previous = _previous(worktree, settings_sha256) if config.inputs and base and settings_sha256 and not dirty else {}
+    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and settings_sha256 and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -169,7 +177,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
 INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
 
 
-def _previous(worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
+def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
     try:
         data = json.loads(read_local_state(worktree, "checks.json"))
         if (data["dirty"] is not False or not isinstance(data["head"], str)
@@ -183,7 +191,7 @@ def _previous(worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
                     and is_check_exit_code(code) and code == 0 and isinstance(tail, str)):
                 source = result.get("reused_from")
                 reused_from = source if isinstance(source, str) else data["head"]
-                previous[command] = CheckResult(command, 0, 0.0, _check_tail(tail), key, reused_from)
+                previous[command] = CheckResult(command, 0, 0.0, _check_tail(tail, config), key, reused_from)
         return previous
     except (OSError, WorktreeError, ValueError, KeyError, TypeError, AttributeError):
         return {}
@@ -255,10 +263,20 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
         raise
 
 
+def check_inputs_match(config: Config, worktree: Path, report: CheckReport) -> bool:
+    base = _check_base(config, worktree) if config.inputs else ""
+    return all(r.input_key and r.input_key == _input_key(config, worktree, r.command, base)
+               for r in report.results if _has_inputs(config, r.command))
+
+
+def _has_inputs(config: Config, command: str) -> bool:
+    return command in config.inputs or "." in config.inputs.get("*", ())
+
+
 def _input_key(config: Config, worktree: Path, command: str, base: str, *,
                status: Callable[[str], None] | None = None,
                workflow: str | Path = "workflow.toml") -> str | None:
-    if command not in config.inputs and "." not in config.inputs.get("*", ()):
+    if not _has_inputs(config, command):
         return None
     if not base and status is None:
         return None
@@ -408,9 +426,32 @@ def _cap_limit(requested: int, resource_limit: int) -> int:
     return requested if hard == resource.RLIM_INFINITY else min(requested, hard)
 
 
-def _check_tail(text: str) -> str:
-    suffix = text.rstrip("\n")[-CHECK_TAIL_BYTES:]
-    encoded = suffix.encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
+def _private_check_value(name: str, value: str) -> bool:
+    if name in _CHECK_CONTEXT_ENV or value == SANDBOX_ENV.get(name):
+        return False
+    normalized = value.strip()
+    if not normalized:
+        return False
+    if _CREDENTIAL_ENV.search(name):
+        return True
+    mode = name == "ENV" or name.endswith(("_ENV", "_ENVIRONMENT", "_MODE"))
+    return len(normalized) >= 6 and not (mode and normalized.casefold() in _CHECK_MODES)
+
+
+def _redact_check_output(config: Config, text: str) -> str:
+    stage_env = _runner_environment(config) if config.check_runner else check_environment(config)
+    wrapper_env = _proc.build_env(config.env_allowlist)
+    secrets = {value for env in (stage_env, wrapper_env) for name, value in env.items()
+               if _private_check_value(name, value)}
+    pattern = "|".join(map(re.escape, sorted(secrets, key=len, reverse=True)))
+    return re.sub(pattern, "[REDACTED]", text) if pattern else text
+
+
+def _check_tail(text: str, config: Config | None = None, *, suffix: str = "") -> str:
+    if config is not None:
+        text = _redact_check_output(config, text)
+    bounded = (text + suffix).rstrip("\n")[-CHECK_TAIL_BYTES:]
+    encoded = bounded.encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
     # A byte cut can start inside a multibyte character.
     return _proc.tail(encoded.decode("utf-8", errors="ignore"))
 
@@ -428,8 +469,8 @@ def _run_one(
         done = _run_bwrap(config, worktree, prefix, argv, timeout=timeout, tail_chars=CHECK_TAIL_BYTES)
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,
-                           _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
-    return CheckResult(command, done.exit_code, done.duration_s, _check_tail(done.stdout))
+                           _check_tail(exc.stdout, config, suffix=f"\n[loopzero] timed out after {timeout:g}s"))
+    return CheckResult(command, done.exit_code, done.duration_s, _check_tail(done.stdout, config))
 
 
 def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
@@ -449,6 +490,11 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         if any(word in probe_error for word in ("permission", "user namespace", "userns")):
             remedy = "\nsudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
         raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}{remedy}")
+
+
+def _runner_environment(config: Config) -> dict[str, str]:
+    return {**SANDBOX_ENV, **dict(config.env)}
+
 
 
 def check_environment(config: Config) -> dict[str, str]:
@@ -582,7 +628,7 @@ def _stage_frame(stdout: str, binding: dict) -> dict:
 def _dispatch_one(
     config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
 ) -> CheckResult:
-    env = {**SANDBOX_ENV, **dict(config.env)}
+    env = _runner_environment(config)
     binding = {"worktree": str(worktree.resolve()), "head": head, "base": base, "command": command, "network": config.network,
                "env_sha256": hashlib.sha256(json.dumps(
                    env, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()}
@@ -607,7 +653,7 @@ def _dispatch_one(
             done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
                              input=json.dumps({**binding, "env": env}), encoding="utf-8")
         if done.exit_code:
-            stderr = _proc.tail(done.stderr)[-2000:]
+            stderr = _proc.tail(_redact_check_output(config, done.stderr))[-2000:]
             detail = f"Stage runner failed: process exit {done.exit_code}"
             return CheckResult(command, done.exit_code, done.duration_s,
                                f"{detail}\n{stderr}".rstrip())
@@ -625,10 +671,11 @@ def _dispatch_one(
                 raise ValueError("Local fallback failed")
             return local.results[-1]
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
-                           _check_tail(frame["tail"]))
+                           _check_tail(frame["tail"], config))
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT,
                            exc.duration_s if exc.duration_s is not None else timeout,
-                           _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
+                           _check_tail(exc.stdout, config, suffix=f"\n[loopzero] timed out after {timeout:g}s"))
     except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
-        return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {exc}"))
+        detail = _redact_check_output(config, str(exc))
+        return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {detail}"))
