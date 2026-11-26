@@ -3,6 +3,7 @@ import json
 import signal
 import subprocess
 import sys
+import urllib.error
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
@@ -300,7 +301,8 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
-    ("interrupt", KeyboardInterrupt, ""), ("api", None, ""),
+    ("interrupt", KeyboardInterrupt, ""), ("api", None, ""), ("mergify", None, ""),
+    ("mergify_auth", hosted.mergify.MergifyError, "HTTP 401"),
     ("manual", hosted.LoopZeroError, "pull_request_target creation"), ("metadata", None, ""),
     ("stale", hosted.LoopZeroError, "head is no longer current"),
     ("untrusted", CandidateError, "head event was not sent"),
@@ -358,12 +360,21 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     if case not in {"valid", "trunk", "hold"}:
         monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
-    monkeypatch.setattr("loopzero.mergify.api_get", lambda repo, suffix: candidate_status()
-                        if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
+    http_codes = {"mergify": 503, "mergify_auth": 401}
+    if case in http_codes:
+        def fail_request(request):
+            raise urllib.error.HTTPError(request.full_url, http_codes[case], "", {}, None)
+
+        monkeypatch.setenv("MERGIFY_API_KEY", "synthetic-key")
+        monkeypatch.setattr(hosted.mergify, "_open", fail_request)
+        monkeypatch.setattr(hosted.mergify, "_retry_sleep", lambda _: None)
+    else:
+        monkeypatch.setattr(hosted.mergify, "api_get", lambda repo, suffix: candidate_status()
+                            if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     with pytest.raises(error, match=message or None) if error else nullcontext():
         assert hosted.main() == 0
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
-              "manual": [], "metadata": [], "stale": []}
+              "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":

@@ -1212,7 +1212,7 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         _repo_root(wt)
         name = worktree.branch(wt)
         worktree.cleanup(wt, pr.head_sha)
-    except (worktree.WorktreeError, OSError) as exc:
+    except (worktree.WorktreeError, CliError, OSError, _proc.ProcTimeout) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
             retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"

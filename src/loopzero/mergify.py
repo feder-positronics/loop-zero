@@ -30,6 +30,10 @@ class MergifyError(LoopZeroError):
     """Authentication, transport, or response failure from Mergify."""
 
 
+class MergifyUnavailable(MergifyError):
+    """Transient Mergify lookup failure after retry or budget exhaustion."""
+
+
 @dataclass(frozen=True)
 class Membership:
     candidate_number: int | None = None
@@ -140,10 +144,12 @@ def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | N
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
             detail = f"Mergify queue transport failed: {reason}"
             transient = not isinstance(reason, ssl.SSLCertVerificationError)
-        if not retry or not transient:
+        if not transient:
             raise MergifyError(detail)
+        if not retry:
+            raise MergifyUnavailable(detail)
         if not _wait_to_retry(max(2.0, wait or 0.0), deadline):
-            raise MergifyError(f"{detail}; retry delay exceeds the wait budget")
+            raise MergifyUnavailable(f"{detail}; retry delay exceeds the wait budget")
         retry = False
 
 
