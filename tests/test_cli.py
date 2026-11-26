@@ -4376,15 +4376,21 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert json.loads(writes[0]["--input"])["body"] == prose + suffix
 
 
-@pytest.mark.parametrize("wait, latency, expected", [(1, 3.0, 3), (1, 0.25, 0), (0, 0.0, 0)])
-def test_merge_queue_landing_within_budget(wt, gh, capsys, monkeypatch, head, replay_gh, wait, latency, expected):
+@pytest.mark.parametrize("wait, latency, state, expected", [
+    (1, 3.0, "MERGED", 3), (1, 0.25, "MERGED", 0), (0, 0.0, "MERGED", 0), (1, 0.0, "CLOSED", 3),
+])
+def test_merge_queue_landing_within_budget(
+    wt, gh, capsys, monkeypatch, head, replay_gh, wait, latency, state, expected,
+):
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     clock = [1000.0]
     budgets = []
     cleaned = []
+    write_timeouts = []
     in_queue = False
     run_gh = github.run
     monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli, "_sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     gh.respond("pr merge", "")
     gh.respond("api graphql", threads_json(),
                {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}})
@@ -4393,12 +4399,14 @@ def test_merge_queue_landing_within_budget(wt, gh, capsys, monkeypatch, head, re
         nonlocal in_queue
         if argv[1:3] == ["pr", "merge"]:
             in_queue = True
+            write_timeouts.append(timeout)
         if in_queue and argv[1:3] == ["api", f"repos/{REPO}/pulls/7"]:
             budgets.append(timeout)
             if len(budgets) == 1:
                 return Completed(0, json.dumps(merge_json(state="OPEN", head=head)), "", 0.0)
             clock[0] += latency
-            return Completed(0, json.dumps(merge_json(state="MERGED", head=head, sha="e" * 40)), "", latency)
+            sha = "e" * 40 if state == "MERGED" else None
+            return Completed(0, json.dumps(merge_json(state=state, head=head, sha=sha)), "", latency)
         return run_gh(argv, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(github, "run", landing)
@@ -4408,7 +4416,9 @@ def test_merge_queue_landing_within_budget(wt, gh, capsys, monkeypatch, head, re
     code, out, err = run(capsys, "merge", f"--wait={wait}")
 
     assert (code, err, bool(cleaned)) == (expected, "", expected == 0)
-    assert budgets == [1.0 if wait else 120.0] * 2
+    assert write_timeouts == [300]
+    assert budgets == ([1.0, 1.0, 0.5] if state == "CLOSED" else [1.0 if wait else 120.0] * 2)
+    assert ("closed without a verified merge" in out) is (state == "CLOSED")
     assert ("timed out waiting for the merge queue" in out) is (expected == 3)
 
 

@@ -9,7 +9,7 @@ import re
 import shlex
 import tempfile
 import time
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1329,6 +1329,8 @@ def merge_pending(repo: str, number: int) -> bool:
         auto = pr.get("autoMergeRequest")
         if type(queued) is not bool or (auto is not None and not isinstance(auto, dict)):
             raise ValueError("invalid queue fields")
+    except ReadDeadline:
+        raise
     except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
         raise MergeFailed(("gh", "api", "graphql"),
                           f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
@@ -1336,7 +1338,9 @@ def merge_pending(repo: str, number: int) -> bool:
     return queued or bool(auto)
 
 
-def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
+def merge(
+    repo: str, number: int, strategy: str, head_sha: str, *, observation_deadline: float | None = None,
+) -> str | None:
     """Merge PR `number` at exactly `head_sha` and return the verified merge SHA.
 
     Returns None when the base branch uses a merge queue and GitHub accepted the PR
@@ -1350,9 +1354,16 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         "pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha,
     )
     try:
-        _gh(*argv, timeout=read_timeout(300))
+        _gh(*argv, timeout=300)
     except GhError as exc:
         raise MergeFailed(exc.command, exc.tail) from exc
+    budget = (bounded_reads(observation_deadline, token=None, retry=True)
+              if observation_deadline is not None else nullcontext())
+    with budget:
+        return _verify_merge_request(repo, number, head_sha, argv)
+
+
+def _verify_merge_request(repo: str, number: int, head_sha: str, argv: tuple[str, ...]) -> str | None:
     sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
