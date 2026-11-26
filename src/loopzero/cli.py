@@ -251,7 +251,7 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     """Return (kind, reviewed_head) or raise when the PR's review budget is spent."""
     if _review_cap_spent(markers):
         raise CliError(
-            "review cap reached (2 rounds per PR): fix or reject the findings "
+            "review cap reached: fix or reject the findings "
             "(resolve-findings) and run `loopzero ready`, or split the PR"
         )
     primary = next((m for m in markers if m.kind == "primary"), None)
@@ -261,6 +261,44 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     if head.startswith(reviewed) or reviewed.startswith(head):
         raise CliError(f"head {head[:12]} already has a primary review; run `loopzero ready`, or push fixes for the delta")
     return "delta", reviewed
+
+
+def _conflict_delta_base(config: Config, pr: github.PR, head: str, reviews: list[dict],
+                         markers: list[Marker], publishers: tuple[str, ...]) -> str | None:
+    rounds = list(dict.fromkeys((marker.kind, marker.head) for marker in markers))
+    if [kind for kind, _ in rounds] != ["primary", "delta"]:
+        return None
+    (_, primary), (_, reviewed) = rounds
+    if len({primary, reviewed, head}) != 3:
+        return None
+    publishers = publishers or (github.login(),)
+    if not eligibility.approved_delta(reviews, reviewed, publishers, repo=config.repo, number=pr.number):
+        return None
+    if eligibility.base_merge_material(
+        config.repo, pr.number, reviewed, head, config.base_branch, clean=False, conflict_only=True,
+    ) is None:
+        return None
+    if github.open_blocking_findings(config.repo, pr.number, None, publishers):
+        return None
+    return reviewed
+
+
+def _select_review_round(config: Config, pr: github.PR, head: str, reviews: list[dict]) -> tuple[str, str | None]:
+    publishers = config.review_publishers
+    markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
+    if reviewed := _conflict_delta_base(config, pr, head, reviews, markers, publishers):
+        return "delta", reviewed
+    return _decide_kind(markers, head)
+
+
+def _review_cap_reason(config: Config, pr: github.PR, head: str, reviews: list[dict],
+                       markers: list[Marker], publishers: tuple[str, ...]) -> str:
+    if _conflict_delta_base(config, pr, head, reviews, markers, publishers):
+        return f"Run `loopzero review` for the available conflict-resolution delta on {head[:12]}."
+    return (
+        f"The review budget is exhausted and {head[:12]} has no eligible review. "
+        "Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused."
+    )
 
 
 MERGEABILITY_PENDING = "GitHub is computing mergeability"
@@ -312,10 +350,7 @@ def _readiness(
     if github.MISSING_REVIEW_REASON in result.reasons:
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
         if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
-            exhausted = (
-                f"Both review rounds are spent (primary + delta) and {head[:12]} has no eligible review. "
-                "Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused."
-            )
+            exhausted = _review_cap_reason(config, pr, head, reviews, markers, publishers)
             result = dataclasses.replace(result, reasons=tuple(
                 exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
             ))
@@ -780,9 +815,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     if saved:
         kind = saved[0]
     else:
-        kind, reviewed = _decide_kind(
-            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
-        )
+        kind, reviewed = _select_review_round(config, pr, head, reviews)
     publication_context = {"repo": config.repo, "number": pr.number, "publisher": publisher}
     if args.repost:
         result, publication = _load_review(wt, head, kind)
@@ -802,9 +835,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         # Exact read-back above may confirm an older published note; a new post needs the current form.
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             raise CliError("saved fallback note is not in the published form; run without --repost")
-        allowed, reviewed = _decide_kind(
-            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
-        )
+        allowed, reviewed = _select_review_round(config, pr, head, reviews)
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget")
         _delta_patch(wt, config, reviewed, head, pr.number)
