@@ -197,6 +197,15 @@ def _api_path(args: tuple[str, ...]) -> str:
     return "/" + path.lstrip("/")
 
 
+def redact_credentials(value: str) -> str:
+    value = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@", value)
+    value = re.sub(r"""(?i)(\bauthorization(?:\\?['"])?[ \t]*:[ \t]*)(\\?['"])(?:(?!\2)(?:\\.|[^\\\r\n]))+\2""",
+                   r"\1\2[REDACTED]\2", value)
+    return re.sub(r"""(?i)((?P<quote>['"])?\bauthorization[ \t]*:[ \t]*)"""
+                  r"""(?(quote)(?:\\.|(?!(?P=quote))[^\\\r\n])+|(?:[a-z][\w-]*[ \t]+)?(?:\\.|[^\\\s'"`])+)""",
+                  r"\1[REDACTED]", value)
+
+
 def _redact_tokens(value: str, token: str = "") -> str:
     for secret in (token, os.environ.get("GH_TOKEN", ""),
                    os.environ.get("GITHUB_TOKEN", "")):
@@ -513,7 +522,10 @@ def _api(endpoint: str, payload: dict, method: str = "POST",
         path.unlink(missing_ok=True)
 
 
-MERGE_HOLD_MESSAGE = "has a merge-authority hold; ask the decisions owner to release it"
+def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
+    if "hold" in labels:
+        return f"PR #{number} has a merge-authority hold; ask the decisions owner to release it"
+    return None
 
 
 def _pr_labels(data: dict) -> tuple[str, ...]:
@@ -1343,8 +1355,8 @@ def merged_sha(
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
             return sha
     elif not view["merged"] and view.get("state") == "open":
-        if check_hold and "hold" in _pr_labels(view):
-            raise GhError(argv, f"PR #{number} {MERGE_HOLD_MESSAGE}")
+        if check_hold and (hold := merge_hold(number, _pr_labels(view))):
+            raise GhError(argv, hold)
         return None  # An open PR's merge_commit_sha is only a test merge.
     if not view["merged"] and view.get("state") == "closed":
         raise ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")
@@ -1460,6 +1472,14 @@ def commit_status(repo: str, head: str, context: str, state: str, description: s
                 "Push a fresh head and obtain review evidence for it before refreshing eligibility."
             ) from exc
         raise
+
+
+def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
+    statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
+    latest = next((row for row in statuses if row.get("context") == context), {})
+    creator = latest.get("creator")
+    return (isinstance(creator, dict) and creator.get("login") == "github-actions[bot]"
+            and (latest.get("state"), latest.get("description")) == (state, description))
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:

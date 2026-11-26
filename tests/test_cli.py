@@ -21,7 +21,7 @@ from urllib.parse import quote
 
 import pytest
 
-from loopzero import cli, config, github, mergify
+from loopzero import cli, config, github, hosted, mergify
 from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
 from tests.conftest import git, init_git_repo
@@ -988,6 +988,50 @@ def test_pr_pushes_and_creates_draft(
     assert "(filled by `loopzero check`)" not in body, "placeholder replaced in place"
     assert body.index("## Notes") < body.index("## Validation") < body.index("## Review"), "evidence trails the narrative"
     assert "- `echo ok`: exit 0" in body and "- `test -f README.md`: exit 0" in body
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, refresh):
+    command = (
+        "git ls-remote 'https://x-access-token:ghs_FAKE0123@example.invalid/repo.git' "
+        "&& curl -H 'Authorization: Bearer opaque-fake-header' https://example.invalid/ "
+        r"&& curl -H Authorization:\ Bot\ opaque-fake-header https://example.invalid/ "
+        """&& curl -d '{"Authorization": "Bearer opaque-fake-header"}' https://example.invalid/ """
+        r'''&& curl -d "{\"Authorization\": \"Bearer opaque-fake-header\"}" https://example.invalid/ '''
+        """&& python -c "request(headers={'Authorization': 'Basic opaque-fake-header'})" """
+        """&& curl -H 'Authorization: Digest username="fake-user", response="opaque-fake-header"' """
+        "https://example.invalid/"
+    )
+    private = tmp_path / "private.toml"
+    private.write_text(WORKFLOW.replace(json.dumps("echo ok"), json.dumps(command)))
+    cfg = config.load(private)
+    head = head_of(wt)
+    results = (CheckResult(command, 7, 0.1, ""), CheckResult("test -f README.md", 0, 0.1, ""))
+    cli._save_report(wt, CheckReport(head, False, results, cli.sandbox.settings_fingerprint(cfg, wt)))
+
+    if refresh:
+        git(wt, "push", "-q", "-u", "origin", "lz/t1")
+        gh.respond_pr_list([pr_json(headRefOid=head)])
+        gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+        cli._refresh_pr_checks(wt, cfg)
+    else:
+        gh.respond(branch_history_key(), [])
+        gh.respond_pr_list([])
+        gh.respond_pr_create(pr_json(headRefOid=head))
+        assert run(capsys, "--config", str(private), "pr")[0] == 0
+
+    body = json.loads(gh.calls[-1]["--input"])["body"]
+    assert "ghs_FAKE0123" not in body and "opaque-fake-header" not in body
+    assert "git ls-remote 'https://[REDACTED]@example.invalid/repo.git'" in body
+    assert "curl -H 'Authorization: [REDACTED]' https://example.invalid/" in body
+    assert "curl -H Authorization:[REDACTED] https://example.invalid/" in body
+    assert """curl -d '{"Authorization": "[REDACTED]"}' https://example.invalid/""" in body
+    assert r'''curl -d "{\"Authorization\": \"[REDACTED]\"}" https://example.invalid/''' in body
+    assert """python -c "request(headers={'Authorization': '[REDACTED]'})" """ in body
+    assert "'Authorization: [REDACTED]' https://example.invalid/`: exit 7" in body
+    assert f"Recorded for `{head[:12]}`" in body and "(unverified" not in body
+    assert "- `test -f README.md`: exit 0" in body
+    assert cli._load_report(wt).results == results
 
 
 @pytest.mark.parametrize("duplicate", [None, "CLOSED", "OPEN"])
@@ -2621,6 +2665,34 @@ def test_hold_blocks_ready_and_merge(wt, gh, capsys, monkeypatch, command, check
     assert any(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == (command == "ready")
 
 
+def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monkeypatch, capsys):
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    (trusted / "workflow.toml").write_text(WORKFLOW + f'review_publishers = ["{LOGIN}"]\n')
+    event = trusted / "event.json"
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+
+    for action, labels, expected in (
+        ("labeled", [{"name": "hold"}], 1), ("unlabeled", [], 0),
+    ):
+        arm_approved_ready_pr(gh, head, wt, isDraft=False, labels=labels)
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(
+            pr_json(headRefOid=head, isDraft=False, labels=labels)))
+        event.write_text(json.dumps({"action": action, "pull_request": {"number": 7}}))
+        code, out, _ = run(capsys, "ready")
+        assert code == expected
+        assert ("merge-authority hold" in out) == bool(labels)
+        with monkeypatch.context() as hosted_env:
+            hosted_env.chdir(trusted)
+            assert hosted.main() == expected
+        capsys.readouterr()
+        payload = json.loads(gh.calls[-1]["--input"])
+        assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{head}"
+        assert payload["state"] == ("failure" if labels else "success")
+
+
 @pytest.mark.parametrize("wait,elapsed,conclusion,expected", [
     (0, 0, None, 3), (1, 0, "failure", 1), (1, 0.25, "success", 0), (1, 6, "success", 3),
 ])
@@ -3096,6 +3168,43 @@ def test_ready_requires_receipt_from_current_check_environment(
     assert run(capsys, *args, "check")[0] == 1
 
 
+def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, head, tmp_path):
+    runner = tmp_path / "runner"
+    original = tmp_path / "runner-a"
+    replacement = tmp_path / "runner-b"
+    stage = (
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "frame = json.load(sys.stdin)\n"
+        "del frame['env']\n"
+        "frame.update(exit_code=0, duration_s=0, not_started=False, tail='')\n"
+    )
+    for target, extra in (
+        (original, f"from pathlib import Path\np = Path({str(runner)!r})\n"
+                   f"p.unlink()\np.symlink_to({str(replacement)!r})\n"),
+        (replacement, ""),
+    ):
+        target.write_text(stage + extra + "print(json.dumps(frame))\n")
+        target.chmod(0o755)
+    runner.symlink_to(original)
+    publish_workflow(wt, WORKFLOW.replace("[checks]", f"[checks]\nrunner = {json.dumps([str(runner)])}"))
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+
+    code, out, err = run(capsys, "check")
+    assert code == 1
+    assert "receipt produced:" not in out and "PASS" not in out
+    assert "stages passed but the receipt is unverified" in err
+    assert "rerun loopzero check from the task worktree with a stable, readable configured runner" in err
+    report = cli._load_report(wt)
+    assert report.head == head and not report.dirty and report.ok
+    assert report.settings_sha256 is None
+    assert run(capsys, "ready")[0] == 1
+
+    code, out, _ = run(capsys, "check")
+    assert code == 0 and "receipt produced:" in out
+    assert run(capsys, "ready")[0] == 0
+
+
 @pytest.mark.parametrize("base_sensitive", [False, True])
 def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     if base_sensitive:
@@ -3135,6 +3244,28 @@ def test_ready_matches_effective_inherited_check_environment(
         assert code == 0
     else:
         assert code == 1 and "not ready: check receipt has an incompatible settings fingerprint." in out
+
+
+@pytest.mark.parametrize("worker", ["legacy", "different-path", "matching"])
+def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    with monkeypatch.context() as worker_env:
+        if worker == "different-path":
+            worker_env.setenv("PATH", str(tmp_path / "worker-bin"), prepend=":")
+        assert run(capsys, "check")[0] == 0
+
+    receipt = wt / ".loopzero/checks.json"
+    payload = json.loads(receipt.read_bytes())
+    if worker == "legacy":
+        # Older producers serialize these results without a settings fingerprint.
+        del payload["settings_sha256"]
+    # Whole-job transport preserves the producer's fields.
+    receipt.write_text(json.dumps(payload))
+    assert run(capsys, "ready")[0] == (0 if worker == "matching" else 1)
+
+    if worker != "matching":
+        assert run(capsys, "check")[0] == 0
+        assert run(capsys, "ready")[0] == 0
 
 
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -4828,19 +4959,28 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert json.loads(writes[0]["--input"])["body"] == prose + suffix
 
 
-def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
+@pytest.mark.parametrize("refresh", ["resync", "automatic"])
+def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys, refresh):
     head = head_of(wt)
-    live = "# PR\n\n## Validation\nManual validation evidence.\n"
+    config = cli._load_config(SimpleNamespace(command="check", config=None), wt, pin_checks=True)
+    live = ("# PR\n\n## Validation\nManual validation evidence.\n\n"
+            "<!-- loopzero:checks:start -->\n"
+            f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0\n"
+            "<!-- loopzero:checks:end -->\n")
     gh.respond_pr_list([pr_json(headRefOid=head, body=live)])
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
-    cli._save_report(wt, CheckReport(head, False, (CheckResult("echo ok", 0, 0.0, ""),)))
+    stages = tuple(CheckResult(command, 0, 0.0, "") for command in config.checks)
+    cli._save_report(wt, CheckReport(head, False, stages))
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
 
-    assert run(capsys, "pr")[0] == 0
+    if refresh == "resync":
+        assert run(capsys, "pr")[0] == 0
+    else:
+        cli._refresh_pr_checks(wt, config)
     draft = json.loads(gh.calls[-1]["--input"])["body"]
     assert "unverified" in draft and "run `loopzero check`" in draft
     assert "Manual validation evidence." in draft
 
-    git(wt, "push", "-q", "-u", "origin", "lz/t1")
     gh.respond_pr_list([pr_json(headRefOid=head, body=draft)])
     assert run(capsys, "check")[0] == 0
     draft = json.loads(gh.calls[-1]["--input"])["body"]
