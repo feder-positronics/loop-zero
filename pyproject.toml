@@ -37,3 +37,5 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ARG", "C901"]
 "scripts/**" = ["C901"]
+# Standalone tool run by the host `python3`, which may predate datetime.UTC (3.11).
+"scripts/ai-accounts/ai-accounts" = ["UP017"]

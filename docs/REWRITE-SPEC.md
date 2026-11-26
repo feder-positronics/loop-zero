@@ -24,7 +24,7 @@ the system boundaries; the [contract](../core/CONTRACT.md) owns delivery behavio
 
 - [Mergify operations](MERGIFY.md): candidate constraints, protection and recovery.
 - [Module boundaries](../tach.toml): exact layered dependency rules enforced by
-  `uv run --group dev tach check` in CI and `loopzero check`.
+  `uv run --python 3.14 --locked --group dev tach check` in CI and `loopzero check`.
 - [Size budget script](../scripts/size_budget.sh): authoritative source, test
   and core/delegation Markdown caps against base; over-cap budgets pass only
   when they do not grow. Function complexity is Ruff `C901` in `src/`.

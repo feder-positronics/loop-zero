@@ -7,16 +7,17 @@ base = "main"
 [checks]
 # Omit scratch to use the built-in default directories.
 commands = [
-  "uv run --python 3.14 --locked --group dev ruff check src tests scripts scripts/ai-accounts/ai-accounts",
-  "uv run --python 3.14 --locked --group dev tach check",
+  "uv run --group dev ruff check src tests scripts scripts/ai-accounts/ai-accounts",
+  "uv run --group dev tach check",
   "uv run --python 3.14 python scripts/check_architecture_docs.py",
   "scripts/size_budget.sh", # Same script and caps as CI; base is the merge-base with origin/main.
-  "uv run --python 3.14 --locked --group dev pytest",
+  "uv run --group dev pytest",
 ]
 required_ci = ["checks", "Loop-zero Eligibility"]
 ro_paths = ["/home/marcin/.local/bin", "/home/marcin/.local/share/uv"]
 writable = ["/home/marcin/.cache/uv"]
-env = { UV_CACHE_DIR = "/home/marcin/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/marcin/.local/share/uv/python" }
+# UV_PYTHON/UV_LOCKED match CI's --python 3.14 --locked and keep the offline sync stage.
+env = { UV_PYTHON = "3.14", UV_LOCKED = "1", UV_CACHE_DIR = "/home/marcin/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/marcin/.local/share/uv/python" }
 network = false
 
 [delivery]

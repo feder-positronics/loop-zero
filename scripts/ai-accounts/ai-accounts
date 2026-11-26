@@ -492,7 +492,7 @@ def check_claude(name: str) -> dict:
         next_allowed = 0
     try:
         if now() < next_allowed:
-            raise ValueError(f"usage API backoff until {dt.datetime.fromtimestamp(next_allowed, dt.UTC).isoformat()}")
+            raise ValueError(f"usage API backoff until {dt.datetime.fromtimestamp(next_allowed, dt.timezone.utc).isoformat()}")
         token = claude_token(name)
         req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
             "Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
@@ -511,14 +511,14 @@ def check_claude(name: str) -> dict:
                 try:
                     retry_date = parsedate_to_datetime(retry_after)
                     if retry_date.tzinfo is None:
-                        retry_date = retry_date.replace(tzinfo=dt.UTC)
+                        retry_date = retry_date.replace(tzinfo=dt.timezone.utc)
                     retry_at = retry_date.timestamp()
                 except (TypeError, ValueError, OverflowError):
                     retry_at = 0
             next_allowed = max(next_allowed, min(retry_at, now() + MAX_BACKOFF))
             write_private(next_file, str(next_allowed) + "\n")
         if code != 200:
-            log(f"claude {name}: usage API HTTP {code}; backoff until {dt.datetime.fromtimestamp(next_allowed, dt.UTC).isoformat()}")
+            log(f"claude {name}: usage API HTTP {code}; backoff until {dt.datetime.fromtimestamp(next_allowed, dt.timezone.utc).isoformat()}")
             raise ValueError(f"usage API HTTP {code}")
         data = json.loads(raw)
         if not isinstance(data, dict):
@@ -611,7 +611,7 @@ def refresh_codex(auth_file: Path, auth: dict) -> tuple[str, dict]:
         raise ValueError(f"HTTP {code}; run `CODEX_HOME={auth_file.parent} codex login`")
     fresh = json.loads(raw)
     tokens.update({k: fresh[k] for k in ("id_token", "access_token", "refresh_token") if fresh.get(k)})
-    auth["last_refresh"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+    auth["last_refresh"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
     # Reviewers bind-mount this inode. Pad shorter JSON with whitespace so
     # the completed write is readable without a second, interruptible truncate.
     payload = (json.dumps(auth, indent=2) + "\n").encode("utf-8")
@@ -802,7 +802,7 @@ def snapshot_fields(result: dict, instance: str, checked_at: float) -> None:
     for window in windows:
         reset = reset_timestamp(window.get("resets_at"))
         window.update(instance=instance, used_pct=window.pop("used_percent", window.get("used_pct")),
-                      resets_at=dt.datetime.fromtimestamp(reset, dt.UTC).isoformat().replace("+00:00", "Z") if reset is not None else None,
+                      resets_at=dt.datetime.fromtimestamp(reset, dt.timezone.utc).isoformat().replace("+00:00", "Z") if reset is not None else None,
                       resets_local=iso(reset) if reset is not None else None,
                       snapshot_age_s=max(0, int(now() - window.get("fetched_at", checked_at))),
                       unknown_reason=None)
