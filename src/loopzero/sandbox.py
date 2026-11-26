@@ -125,7 +125,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         missing, preparations = _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
-        current = commands if _resolved else _current_commands(config, worktree, commands, settings_sha256)
+        current = _current_commands(config, worktree, commands, settings_sha256)
         for ordinal, command in enumerate(current, 1):
             if progress:
                 progress(command)
