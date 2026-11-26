@@ -24,14 +24,13 @@ FORBIDDEN_RO_TREES = ("/run", "/var/run", "/proc", "/dev", "/sys", "/root")
 _SECTIONS: dict[str, dict[str, type]] = {
     "repo": {"name": str, "base": str},
     "checks": {
-        "commands": list, "runner": list, "inputs": dict, "required_ci": list, "network": bool,
+        "commands": list, "inputs": dict, "required_ci": list, "network": bool,
         "env_allowlist": list, "ro_paths": list, "writable": list, "scratch": list,
         "env": dict, "limits": dict,
     },
     "delivery": {
         "merge": str, "mergify_queue": str,
-        "reviewers": list, "review_publishers": list, "reviewer_ro_paths": list,
-        "review_chunk_bytes": int, "review": dict,
+        "reviewers": list, "review_publishers": list, "reviewer_ro_paths": list, "review": dict,
     },
 }
 _REVIEW_SETTINGS = {"model": str, "effort": str, "allowed_efforts": list}
@@ -188,9 +187,6 @@ def _build(data: dict[str, Any]) -> Config:
         raise ConfigError("delivery.reviewers must list at least one reviewer")
     if unknown := next((family for family in reviewers if family not in REVIEWER_FAMILIES), None):
         raise ConfigError(f"delivery.reviewers entries must be in {REVIEWER_FAMILIES}, got {unknown!r}")
-    review_chunk_bytes = delivery.get("review_chunk_bytes", Config.review_chunk_bytes)
-    if isinstance(review_chunk_bytes, bool) or review_chunk_bytes < 4096:
-        raise ConfigError("delivery.review_chunk_bytes must be an int >= 4096")
     review: dict[str, ReviewConfig] = {}
     for family, table in delivery.get("review", {}).items():
         if family not in REVIEWER_FAMILIES:
@@ -205,12 +201,6 @@ def _build(data: dict[str, Any]) -> Config:
     if any(not command.strip() for command in commands):
         raise ConfigError("checks.commands entries must each be a nonblank command")
     kwargs: dict[str, Any] = {}
-    if "runner" in checks:
-        if not (runner := _strings("checks.runner", checks["runner"])) or any("\0" in arg for arg in runner):
-            raise ConfigError("checks.runner must be a nonempty argv prefix")
-        if "/" in runner[0] and not Path(runner[0]).is_absolute():
-            raise ConfigError("checks.runner executable paths must be absolute")
-        kwargs["check_runner"] = runner
     inputs = {}
     for key, value in checks.get("inputs", {}).items():
         label = f'checks.inputs."{key}"'
@@ -231,9 +221,6 @@ def _build(data: dict[str, Any]) -> Config:
                 raise ConfigError(f"checks.scratch entries must be relative, got {entry!r}")
     if "limits" in checks:
         kwargs["limits"] = _limits(checks["limits"])
-        if "runner" in checks and checks["limits"]:
-            keys = ", ".join(f"checks.limits.{key}" for key in sorted(checks["limits"]))
-            raise ConfigError(f"{keys} apply only to local checks and cannot be set with checks.runner")
     return Config(
         reviewer_ro_paths=_host_paths("delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])),
         repo=name,
@@ -246,7 +233,6 @@ def _build(data: dict[str, Any]) -> Config:
         review_publishers=_strings("delivery.review_publishers",
                                    delivery.get("review_publishers", [])),
         review=review,
-        review_chunk_bytes=review_chunk_bytes,
         network=checks.get("network", False),
         inputs=inputs, env=env, **kwargs,
     )

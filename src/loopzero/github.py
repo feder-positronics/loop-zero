@@ -639,26 +639,39 @@ def _branch_head(repo: str, branch: str) -> str | None:
     return _branch_sha(endpoint, "commit", "invalid remote branch SHA", full_sha=True)
 
 
-def _commit_branch_prs(repo: str, branch: str) -> tuple[str, list[dict]]:
-    sha = _branch_head(repo, branch)
+def _matches_commit_pr(row: dict, repo: str, branch: str, endpoint: str) -> bool:
+    if not isinstance(row, dict) or not isinstance(row.get("head"), dict):
+        raise GhError(("gh", "api", endpoint), "invalid commit PR head")
+    if not _matches_branch(row["head"], repo, branch):
+        return False
+    if (row.get("state") not in ("open", "closed")
+            or type(row.get("number")) is not int or row["number"] < 1
+            or not isinstance(row.get("created_at"), str)):
+        raise GhError(("gh", "api", endpoint), "invalid commit PR")
+    return True
+
+
+def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> tuple[str, list[dict]]:
+    sha = head_sha if head_sha is not None else _branch_head(repo, branch)
     if sha is None:
         return "", []
 
     matches: list[dict] = []
     for page in range(1, 101):
         endpoint = f"repos/{repo}/commits/{sha}/pulls?per_page={PAGE}&page={page}"
-        rows = api_get(endpoint)
+        try:
+            rows = api_get(endpoint)
+        except GhError as exc:
+            # A local head can be unpushed. Let the branch fallback find its actual PR.
+            missing_commit = re.search(r"\bHTTP 404\b", exc.tail) or (
+                f"No commit found for SHA: {sha}" in exc.tail and re.search(r"\bHTTP 422\b", exc.tail)
+            )
+            if head_sha is not None and page == 1 and missing_commit:
+                return endpoint, []
+            raise
         if not isinstance(rows, list) or len(rows) > PAGE:
             raise GhError(("gh", "api", endpoint), "invalid commit PR page")
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("head"), dict):
-                raise GhError(("gh", "api", endpoint), "invalid commit PR head")
-            if _matches_branch(row["head"], repo, branch):
-                if (row.get("state") not in ("open", "closed")
-                        or type(row.get("number")) is not int or row["number"] < 1
-                        or not isinstance(row.get("created_at"), str)):
-                    raise GhError(("gh", "api", endpoint), "invalid commit PR")
-                matches.append(row)
+        matches.extend(row for row in rows if _matches_commit_pr(row, repo, branch, endpoint))
         if len(rows) < PAGE:
             return endpoint, matches
     raise GhError(("gh", "api", endpoint), "commit PRs exceed 100 pages")
@@ -673,14 +686,13 @@ def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state
     return pr
 
 
-def pr_for_branch(repo: str, branch: str, *, open_only: bool = False, list_only: bool = False) -> PR | None:
+def pr_for_branch(repo: str, branch: str, *, open_only: bool = False, head_sha: str | None = None) -> PR | None:
     """Return the open PR, falling back to the most recent closed PR unless open_only."""
-    if not list_only:
-        endpoint, matches = _commit_branch_prs(repo, branch)
-        newest = max((row for row in matches if row["state"] == "open"),
-                     key=lambda row: (row["created_at"], row["number"]), default=None)
-        if newest is not None:
-            return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
+    endpoint, matches = _commit_branch_prs(repo, branch, head_sha)
+    newest = max((row for row in matches if row["state"] == "open"),
+                 key=lambda row: (row["created_at"], row["number"]), default=None)
+    if newest is not None:
+        return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
 
     # A closed association cannot rule out an open PR or newer closed history.
     owner = repo.split("/", 1)[0]

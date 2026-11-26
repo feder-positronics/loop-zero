@@ -23,7 +23,7 @@ ownership and the contributor routine that keeps documentation current.
 | Command | What it does |
 | --- | --- |
 | `loopzero start <slug>` | Create a worktree and branch from base; write the Context/Problem/Goal task template. |
-| `loopzero check` | Run trusted-base checks with local bwrap or the configured runner. |
+| `loopzero check` | Run trusted-base checks with local bwrap. |
 | `loopzero pr` | Push and open a draft PR from the task file, with its Validation section rendered. |
 | `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. Exits 0 on approval, 5 on changes requested. |
 | `loopzero ready [--wait[=SECONDS]]` | Verify head, findings and CI; optionally wait for required checks on that head. |
@@ -31,7 +31,9 @@ ownership and the contributor routine that keeps documentation current.
 
 For a picture of the whole flow, see the [workflow diagrams](docs/WORKFLOW.md).
 
-`loopzero status` reports the branch stage and can exit 0 with `ready: no`.
+`loopzero status` shows GitHub's draft state on its `pr:` line and the
+delivery readiness verdict on its `ready:` line; only `ready: yes` permits
+merging, and the command can exit 0 with `ready: no`.
 It requires authenticated GitHub access even before a PR exists.
 `loopzero resolve` lists the open blocking findings with their ids;
 `loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
@@ -104,9 +106,8 @@ Settings and semantics the example does not spell out:
 | --- | --- |
 | `checks.required_ci` | Names may be check runs or commit statuses; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
 | `checks.writable` | The forbidden-path rules from `checks.ro_paths` apply. |
-| `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers and require local execution without `checks.runner`. |
+| `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers. |
 | `checks.env_allowlist` | Host variables allowed for checks. An explicit list replaces the configured default (`PATH HOME LANG LC_ALL TERM`). The sandbox forwards `PATH LANG LC_ALL TERM` by default and sets `HOME` to `/tmp/home`. To forward another launcher variable, append its name to `[checks].env_allowlist` in the base branch’s `workflow.toml`. |
-| `delivery.review_chunk_bytes` | Diff chunk budget in UTF-8 bytes, at least `4096`; default `200000`. Oversized file patches split by lines; large deleted files are summarized. |
 
 ## What it deliberately does not do
 
