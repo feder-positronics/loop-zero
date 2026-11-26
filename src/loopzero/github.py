@@ -1301,6 +1301,16 @@ def _aggregate_signal(states: list[str]) -> str:
     return failures[0] if failures else "pending"
 
 
+def behind_reason(pr: PR, reviewed_head: str | None) -> str:
+    if reviewed_head != pr.head_sha:
+        return f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+    return (
+        f"PR #{pr.number} is behind {pr.base_ref}. Finish any pending delta review, then run "
+        f"`git fetch origin {shlex.quote(pr.base_ref)}`, "
+        f"`git merge {shlex.quote(f'origin/{pr.base_ref}')}`, `loopzero check` and `loopzero pr` before retrying readiness."
+    )
+
+
 def readiness(
     repo: str,
     pr: PR,
@@ -1322,7 +1332,7 @@ def readiness(
     if pr.mergeable == "CONFLICTING":
         reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
     if pr.merge_state == "BEHIND" and not allow_behind:
-        reasons.append(f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks")
+        reasons.append(behind_reason(pr, reviewed_head))
     if not reviewed_head:
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
