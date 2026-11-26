@@ -282,11 +282,12 @@ def _readiness(
             and -MAX_REVIEW_CLOCK_SKEW <= review_age < STALE_VERDICT_GRACE
         ),
     )
-    report = _current_check_report(wt, config, head)
-    if report is None:
+    report = _load_report(wt)
+    receipt_problem = _check_report_problem(report, wt, config, head)
+    if receipt_problem:
         result = github.Readiness(
             ready=False,
-            reasons=(*result.reasons, "run loopzero check at this head"),
+            reasons=(*result.reasons, receipt_problem),
         )
     elif announce_receipt:
         _print_receipt(wt, report, "accepted")
@@ -313,18 +314,24 @@ def _readiness(
 # --------------------------------------------------------------------------- checks report
 
 
-def _check_report_matches(report: CheckReport, wt: Path, config: Config, head: str) -> bool:
-    return (report.head == head and not report.dirty
-            and tuple(result.command for result in report.results) == config.checks
-            and report.settings_sha256 is not None
-            and report.settings_sha256 == sandbox.settings_fingerprint(config, wt))
+def _check_report_problem(
+    report: CheckReport | None, wt: Path, config: Config, head: str, *, require_pass: bool = True,
+) -> str | None:
+    if (report is None or report.head != head or report.dirty or (require_pass and not report.ok)
+            or tuple(result.command for result in report.results) != config.checks):
+        return "run loopzero check at this head"
+    recovery = ("Run loopzero check in this worktree at this head with the same current CLI and effective "
+                "settings as ready, using a local coordinator for delegated stages.")
+    if report.settings_sha256 is None:
+        return f"check receipt is missing its settings fingerprint. {recovery}"
+    if report.settings_sha256 != sandbox.settings_fingerprint(config, wt):
+        return f"check receipt has an incompatible settings fingerprint. {recovery}"
+    return None
 
 
 def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
     report = _load_report(wt)
-    if report is not None and report.ok and _check_report_matches(report, wt, config, head):
-        return report
-    return None
+    return None if _check_report_problem(report, wt, config, head) else report
 
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
@@ -411,7 +418,7 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
         return "(no `loopzero check` run recorded)"
     recorded, results = loaded.head, loaded.results
     lines = [f"Recorded for `{recorded[:12]}`" + ("" if recorded == head else " (not current head)")]
-    if not _check_report_matches(loaded, wt, config, head):
+    if _check_report_problem(loaded, wt, config, head, require_pass=False):
         lines[0] += " (unverified, run `loopzero check`)"
     lines += [
         f"- `{r.command}`: exit {r.exit_code}" for r in results
@@ -532,6 +539,14 @@ def _append_review(body: str, result: ReviewResult) -> str:
 
 
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
+    try:
+        with _lock_task_state(wt):
+            _refresh_existing_pr_checks(wt, config)
+    except OSError as exc:
+        print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
+
+
+def _refresh_existing_pr_checks(wt: Path, config: Config) -> None:
     """Best-effort refresh only when local HEAD is the existing PR head."""
     argv = ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
     try:
@@ -651,8 +666,13 @@ def cmd_pr(args: argparse.Namespace) -> int:
     push.append(branch)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
-        if body != (pr.body or "").replace("\r\n", "\n"):
-            github.update_body(config.repo, pr.number, body)
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            if live.state != "OPEN":
+                raise CliError(f"PR #{pr.number} closed during publication")
+            body = _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))
+            if body != live.body.replace("\r\n", "\n"):
+                github.update_body(config.repo, pr.number, body)
     else:
         pr = github.create_draft_pr(
             config.repo, branch, config.base_branch, _pr_title(wt, branch), body
@@ -831,8 +851,9 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
-        live = github.pr_view(config.repo, pr.number)
-        github.update_body(config.repo, pr.number, _append_review(live.body, result))
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            github.update_body(config.repo, pr.number, _append_review(live.body, result))
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
