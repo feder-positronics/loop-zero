@@ -109,30 +109,45 @@ def _api_request(repo: str, suffix: str, method: str | None = None) -> urllib.re
     )
 
 
-def api_get(repo: str, suffix: str) -> object | None:
+def _wait_to_retry(delay: float, deadline: float | None) -> bool:
+    remaining = 5.0 if deadline is None else deadline - time.monotonic()
+    if delay >= remaining:
+        return False
+    _retry_sleep(delay)
+    return deadline is None or time.monotonic() < deadline
+
+
+def _queue_read_failure(exc: Exception) -> tuple[str, bool]:
+    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
+        return "Mergify queue lookup returned no valid JSON", True
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return f"Mergify queue transport failed: {reason}", not isinstance(reason, ssl.SSLCertVerificationError)
+
+
+def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | None:
     """GET one documented endpoint below this repository's fixed Mergify API path."""
     if not suffix.startswith("/") or "://" in suffix or ".." in suffix:
         raise ValueError("Mergify API suffix must be a repository-relative absolute path")
     request = _api_request(repo, suffix)
-    for delay in (2.0, 5.0, None):  # reads retry server errors, throttling and dropped reads
+    for retry in (True, False):
+        delay = 2.0
         try:
             with _open(request) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None
-            if delay is None or not (exc.code >= 500 or exc.code == 429):
-                raise MergifyError(f"Mergify queue lookup failed with HTTP {exc.code}") from exc
-        except (OSError, http.client.IncompleteRead) as exc:
-            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-            if delay is None or isinstance(reason, ssl.SSLCertVerificationError):
-                raise MergifyError(f"Mergify queue transport failed: {reason}") from exc
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            if delay is None:
-                raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
-        _retry_sleep(delay)
+            wait = github.retry_after(exc.headers.get("Retry-After", "")) if exc.headers else None
+            delay = max(delay, wait or 0.0)
+            detail = f"Mergify queue lookup failed with HTTP {exc.code}" + (f"; Retry-After: {wait:g}s" if wait is not None else "")
+            transient = exc.code >= 500 or exc.code == 429 or (exc.code == 403 and wait is not None)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, http.client.IncompleteRead) as exc:
+            detail, transient = _queue_read_failure(exc)
+        if not retry or not transient:
+            raise MergifyError(detail)
+        if not _wait_to_retry(delay, deadline):
+            raise MergifyError(f"{detail}; retry delay exceeds the wait budget")
     return None
-
 
 def _unmet_conditions(node: object) -> tuple[str, ...]:
     if not isinstance(node, dict) or node.get("match") is not False:
@@ -144,8 +159,8 @@ def _unmet_conditions(node: object) -> tuple[str, ...]:
     return (label,) if isinstance(label, str) and label.isprintable() else ()
 
 
-def membership(repo: str, number: int, queue: str) -> Membership | None:
-    data = api_get(repo, f"/merge-queue/pull/{number}")
+def membership(repo: str, number: int, queue: str, deadline: float | None = None) -> Membership | None:
+    data = api_get(repo, f"/merge-queue/pull/{number}", deadline)
     if data is None:
         return None
     try:
@@ -251,12 +266,12 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
             and isinstance(metadata, dict) and metadata.get("default_branch") == branch)
 
 
-def configured(repo: str, branch: str, queue: str) -> bool:
+def configured(repo: str, branch: str, queue: str, deadline: float | None = None) -> bool:
     """Require live queue identity and stable canonical speculative configuration."""
-    status_data = api_get(repo, f"/merge-queue/status?branch={quote(branch, safe='')}")
+    status_data = api_get(repo, f"/merge-queue/status?branch={quote(branch, safe='')}", deadline)
     if status_data is None:
         return False
-    rules_data = api_get(repo, "/queues/configuration")
+    rules_data = api_get(repo, "/queues/configuration", deadline)
     if not isinstance(status_data, dict) or not isinstance(rules_data, dict):
         return False
     if not isinstance(status_data.get("batches"), list):
