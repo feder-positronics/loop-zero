@@ -706,6 +706,19 @@ def test_provider_errors_are_typed(fake_bin: Path, tmp_path: Path, family, phras
         assert ("not json" if family == "claude" else "looks fine") in raised.value.tail.lower()
 
 
+@pytest.mark.parametrize("provider_error", [False, True])
+def test_codex_classifies_errors_without_reading_command_output(monkeypatch, tmp_path, provider_error):
+    phrase = "Error: Not logged in. Run codex login first."
+    event = {"type": "error", "message": phrase} if provider_error else {
+        "type": "item.completed", "item": {"type": "command_execution", "aggregated_output": phrase},
+    }
+    result = runners._proc.Completed(1, json.dumps(event), "", 0)
+    monkeypatch.setattr(runners._proc, "run", lambda *_args, **_kwargs: result)
+    expected = RunnerAuthFailed if provider_error else RunnerBadOutput
+    with pytest.raises(expected, match="not authenticated" if provider_error else "exited 1"):
+        runners._run(["codex"], cwd=tmp_path, prompt="", env_allowlist=(), timeout=60, family="codex")
+
+
 @pytest.mark.parametrize("family", ["claude", "codex"])
 @pytest.mark.parametrize("mode", ["missing", "nonexecutable", "shim-only", "shim-first", "ordinary"])
 def test_reviewer_binary_selection(fake_bin: Path, git_repo: Path, monkeypatch, family, mode) -> None:

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from loopzero import config
+from loopzero import _proc, config
 from loopzero.types import Config, ResourceLimits, ReviewConfig
 
 MINIMAL = '[repo]\nname = "o/n"\n'
@@ -72,12 +72,12 @@ FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc
     ("[repo\n", "invalid TOML"),
     ("[checks]\ncommands = []\n", "missing required key repo.name"),
     ('[repo]\nname = "noslash"\n', 'must look like "owner/name"'),
-    ('[repo]\nname = 3\n', "repo.name must be a str"),
-    (MINIMAL + '[checks]\ncommands = "pytest"\n', "checks.commands must be a list"),
+    ('[repo]\nname = 3\n', "repo.name must be a string"),
+    (MINIMAL + '[checks]\ncommands = "pytest"\n', "checks.commands must be an array"),
     (MINIMAL + '[checks]\ncommands = ["ok", 1]\n', "non-empty strings"),
     (MINIMAL + '[checks]\ncommands = ["true", "   "]\n',
      r"workflow\.toml: checks\.commands.*nonblank command"),
-    (MINIMAL + '[checks]\nnetwork = "yes"\n', "checks.network must be a bool"),
+    (MINIMAL + '[checks]\nnetwork = "yes"\n', "checks.network must be a boolean"),
     (MINIMAL + '[delivery]\nmerge = "ff"\n', "delivery.merge must be one of"),
     (MINIMAL + '[delivery]\nmerge = "mergify"\n', "mergify_queue is required"),
     *((MINIMAL + f'[delivery]\n{strategy}mergify_queue = "main"\n',
@@ -96,7 +96,7 @@ FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc
     (MINIMAL + '[delivery.review.codex]\nallowed_efforts = [1]\n',
      "allowed_efforts must be a list of non-empty strings"),
     (MINIMAL + '[delivery.review.codex]\nallowed_efforts = "medium"\n',
-     "allowed_efforts must be a list"),
+     "allowed_efforts must be an array"),
     (MINIMAL + '[checks]\nro_paths = ["rel/path"]\n', "must be absolute"),
     *((MINIMAL + table("checks", ro_paths=[path]), "must not expose") for path in FORBIDDEN),
     (MINIMAL + '[checks]\nwritable = ["/run/x"]\n', "writable must not expose"),
@@ -106,8 +106,8 @@ FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc
     *((MINIMAL + f'[checks.env]\n{key} = "/x"\n', f"must not override {key}")
       for key in ("PATH", "HOME")),
     (MINIMAL + '[checks.env]\nX = 1\n', "checks.env.X must be a str"),
-    (MINIMAL + '[checks]\nenv = ["X=1"]\n', "checks.env must be a dict"),
-    (MINIMAL + '[checks]\nlimits = 1\n', "checks.limits must be a dict"),
+    (MINIMAL + '[checks]\nenv = ["X=1"]\n', "checks.env must be a table"),
+    (MINIMAL + '[checks]\nlimits = 1\n', "checks.limits must be a table"),
     (MINIMAL + '[checks]\nlimits = { memory_mb = 0 }\n',
      "checks.limits.memory_mb must be a positive int"),
     (MINIMAL + '[checks]\nlimits = { cpu = 1 }\n',
@@ -125,3 +125,12 @@ def test_invalid_content(tmp_path, text, message):
 @pytest.mark.parametrize("path", ["/home/me/.local/bin", "/opt/tool", "/tmp/x"])
 def test_ro_path_boundary(tmp_path, path):
     assert config.load(write(tmp_path, MINIMAL + table("checks", ro_paths=[path]))).sandbox_ro == (path,)
+
+
+def test_base_fetch_failure_retains_redacted_git_diagnostic(tmp_path, monkeypatch):
+    error = "fatal: Authentication failed for 'https://example-token@example.com/repo'\n"
+    monkeypatch.setattr(config, "run_git", lambda *_args, **_kwargs: _proc.Completed(128, "", error, 0))
+    with pytest.raises(config.ConfigError, match="could not refresh origin/main: fatal: Authentication failed") as exc:
+        config._remote_workflow(tmp_path, "main", None, refresh=True, require_ci=False, read_timeout=lambda budget: budget)
+    assert "[REDACTED]@example.com" in str(exc.value)
+    assert "example-token" not in str(exc.value)
