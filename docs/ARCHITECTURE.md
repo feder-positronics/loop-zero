@@ -289,6 +289,9 @@ PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 Local readiness and hosted source and candidate eligibility reject PRs with
 merge-authority holds. Adding or removing a hold refreshes source eligibility
 even when the head stays the same. Merge admission rechecks the live hold.
+Hosted evaluation uses the source snapshot already fetched by dispatch or
+candidate attestation. The caller rechecks the source fields that affect the
+verdict before publication. Standalone evaluation performs its own PR reads.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential

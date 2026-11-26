@@ -161,13 +161,17 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     return latest
 
 
+def source_fingerprint(pr: github.PR) -> tuple[object, ...]:
+    return pr.number, pr.head_sha, pr.base_ref, pr.state, pr.mergeable, github.merge_hold(pr.number, pr.labels)
+
+
 def evaluate(repo: str, number: int, head: str, base: str,
-             publishers: tuple[str, ...]) -> github.Readiness:
-    """Re-fetch reviews and threads; no local receipts, CI identity or source execution."""
+             publishers: tuple[str, ...], *, snapshot: github.PR | None = None) -> github.Readiness:
+    """Evaluate live review evidence. Callers supplying a snapshot own the final source check."""
     if not publishers or not re.fullmatch(r"[0-9a-f]{40}", head):
         raise LoopZeroError("eligibility requires trusted publishers and a full source SHA")
-    pr = github.pr_view(repo, number)
-    if pr.head_sha != head:
+    pr = snapshot if snapshot is not None else github.pr_view(repo, number)
+    if pr.number != number or pr.head_sha != head:
         return github.Readiness(False, ("source head changed; refresh eligibility",))
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
@@ -183,8 +187,8 @@ def evaluate(repo: str, number: int, head: str, base: str,
     review = readiness_review(reviews, head, publishers, repo=repo, number=number, base_branch=base)
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head)
-    if github.pr_view(repo, number).head_sha != head:
-        return github.Readiness(False, ("source head changed during eligibility refresh",))
+    if snapshot is None and source_fingerprint(github.pr_view(repo, number)) != source_fingerprint(pr):
+        return github.Readiness(False, ("source changed during eligibility refresh",))
     return result
 
 

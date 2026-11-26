@@ -646,7 +646,7 @@ def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str)
 
 def test_post_review_uses_given_pr_without_lookup(gh: FakeGh) -> None:
     arm_review(gh)
-    pr = github._pr_from_rest(rest_pr_json(pr_json(author={"login": "bot-user"})))
+    pr = github.pr_from_rest(rest_pr_json(pr_json(author={"login": "bot-user"})))
     github.post_review(REPO, 7, HEAD, review(verdict="approve"), pr=pr)
     assert calls_for(gh, "pr view") == []
     assert review_payloads(gh)[0]["event"] == "COMMENT"
@@ -965,7 +965,7 @@ def arm_workflow_check(gh: FakeGh, check: dict, statuses: list[dict] | None = No
 
 
 def readiness(*, reviewed=HEAD, workflow_wait=False):
-    pr = github._pr_from_rest(rest_pr_json(pr_json()))
+    pr = github.pr_from_rest(rest_pr_json(pr_json()))
     return github.readiness(REPO, pr, "main", ("checks",), reviewed, workflow_wait=workflow_wait)
 
 
@@ -1049,7 +1049,7 @@ def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
 def test_readiness_missing_and_failed_checks(gh: FakeGh, failure, wait, grace) -> None:
     arm_readiness(gh, runs={"checks": failure})
     r = github.readiness(
-        REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks", "e2e"), HEAD, workflow_wait=wait, review_grace=grace
+        REPO, github.pr_from_rest(rest_pr_json(pr_json())), "main", ("checks", "e2e"), HEAD, workflow_wait=wait, review_grace=grace
     )
     assert r.reasons == (
         f"required check 'checks' is {failure}",
@@ -1184,14 +1184,14 @@ def test_readiness_rerun_attempt_requires_start_after_old_failure(
 ], ids=["behind-base", "merge-conflict", "merged-pr"])
 def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> None:
     arm_readiness(gh)
-    pr = github._pr_from_rest(rest_pr_json(pr_json(**metadata)))
+    pr = github.pr_from_rest(rest_pr_json(pr_json(**metadata)))
     r = github.readiness(REPO, pr, "main", ("checks",), HEAD)
     assert r.reasons == (reason,)
 
 
 def test_readiness_without_required_ci_skips_check_lookup(gh: FakeGh) -> None:
     gh.respond("api graphql", threads_json())
-    assert github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", (), HEAD).ready
+    assert github.readiness(REPO, github.pr_from_rest(rest_pr_json(pr_json())), "main", (), HEAD).ready
     assert [c["argv"][:2] for c in gh.calls] == [["api", "graphql"]]
 
 
@@ -1508,7 +1508,7 @@ def test_readiness_distinguishes_capped_check_suites_from_missing_check(gh: Fake
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
                *({"check_runs": visible[i:i + 100]} for i in range(0, len(visible) + 1, 100)))
 
-    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
+    result = github.readiness(REPO, github.pr_from_rest(rest_pr_json(pr_json())),
                               "main", ("required-ci",), HEAD)
 
     assert not result.ready
@@ -1538,7 +1538,7 @@ def test_readiness_requires_check_run_evidence_for_status_success_at_suite_cap(
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
                *({"check_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
 
-    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
+    result = github.readiness(REPO, github.pr_from_rest(rest_pr_json(pr_json())),
                               "main", ("required-ci",), HEAD)
 
     assert result.ready == (reason is None)

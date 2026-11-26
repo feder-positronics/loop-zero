@@ -532,7 +532,7 @@ def _pr_labels(data: dict) -> tuple[str, ...]:
     return tuple(label["name"] for label in data.get("labels", []))
 
 
-def _pr_from_rest(data: object) -> PR:
+def pr_from_rest(data: object) -> PR:
     """Normalize one REST pull detail without treating absent merge evidence as clean."""
     try:
         if not isinstance(data, dict):
@@ -571,7 +571,7 @@ def _pr_from_rest(data: object) -> PR:
 
 def _pr_detail(repo: str, number: int) -> tuple[PR, dict]:
     data = api_get(f"repos/{repo}/pulls/{number}")
-    pr = _pr_from_rest(data)
+    pr = pr_from_rest(data)
     if pr.number != number:
         raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}"),
                       f"PR detail number {pr.number} differs from requested {number}")
@@ -715,7 +715,7 @@ def create_draft_pr(repo: str, branch: str, base: str, title: str, body: str) ->
     detail = _api(
         f"repos/{repo}/pulls", {"head": branch, "base": base, "title": title,
                                "body": body, "draft": True})
-    pr = _pr_from_rest(detail)
+    pr = pr_from_rest(detail)
     source_repo = detail["head"].get("repo") or {}
     if (pr.state != "OPEN" or not pr.is_draft or pr.base_ref != base
             or detail["head"].get("ref") != branch
