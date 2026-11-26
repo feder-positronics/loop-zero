@@ -1440,7 +1440,7 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     current = _remote_branch_head(endpoint)
     if current != expected_head:
         return current is None
-    ref = f"refs/heads/{branch}"
+    ref = os.fsdecode(f"refs/heads/{branch}".encode("utf-8", "surrogateescape"))
     argv = ("git", "-c", "credential.helper=!gh auth git-credential",
             "push", f"--force-with-lease={ref}:{expected_head}",
             f"https://github.com/{repo}.git", f":{ref}")
