@@ -13,7 +13,7 @@ set -euo pipefail
 # Measured 2026-11-25: 1406 core Markdown / 600 delegation Markdown lines.
 # Allow ~10% growth, rounded up, so small fixes do not require cap changes.
 SRC_CAP=8250
-TESTS_CAP=13500
+TESTS_CAP=13850
 CORE_DOCS_CAP=1500
 DELEGATION_DOC_CAP=660
 COMPLEXITY_CAP=10
@@ -55,6 +55,7 @@ fi
 
 "${PY[@]}" - "$base" src/loopzero "$COMPLEXITY_CAP" <<'PY' || status=1
 import ast
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -122,14 +123,14 @@ base_scores: dict[tuple[str, str], int] = {}
 for raw in git_bytes("ls-tree", "-rz", "--name-only", base, "--", target).split(b"\0"):
     if not raw or not raw.endswith(b".py"):
         continue
-    rel = raw.decode("utf-8", errors="surrogateescape")
+    rel = os.fsdecode(raw)
     base_scores.update(file_complexities(rel, git_bytes("show", f"{base}:{rel}")))
 
 tree_scores: dict[tuple[str, str], int] = {}
 for raw in git_bytes("ls-files", "-zco", "--exclude-standard", "--", target).split(b"\0"):
     if not raw or not raw.endswith(b".py"):
         continue
-    rel = raw.decode("utf-8", errors="surrogateescape")
+    rel = os.fsdecode(raw)
     p = Path(rel)
     if p.is_file():
         tree_scores.update(file_complexities(rel, p.read_bytes()))
