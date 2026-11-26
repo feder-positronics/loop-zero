@@ -173,8 +173,7 @@ def _tail(text: str) -> str:
 
 def _redact_keys(family: str, text: str) -> str:
     env = _proc.build_env(CLAUDE_AUTH_ENV if family == "claude" else CODEX_AUTH_ENV)
-    return _proc.redact(text, _proc.secret_forms(env.values()), r"\bsk-[A-Za-z0-9_-]{8,}",
-                        r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+    return _proc.redact(text, _proc.secret_forms(env.values()), *_proc.SECRET_PATTERNS)
 
 
 def _auth_failure(family: str, diagnostic: str) -> RunnerAuthFailed:

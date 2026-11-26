@@ -1253,6 +1253,23 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining
         [[*branch_head_key("lz/x").split(), "--include"]] + [[*pr_list_key("lz/x").split(), "--include"]] * (1 + len(sleeps)))
 
 
+@pytest.mark.parametrize("secret,hidden", [
+    ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJlLWZha2U", "eyJzdWIi"),
+    ("rt_FAKE0123456789abcdefghijkl", "rt_FAKE"),
+    ("AKIAFAKE0123456789AB", "AKIAFAKE"),
+    ("-----BEGIN RSA PRIVATE KEY-----\nMIIEFAKEKEYBODY\n-----END RSA PRIVATE KEY-----", "MIIEFAKEKEYBODY"),
+    ("postgresql://app:hunter2-FAKE@db/app", "hunter2-FAKE"),
+    ("forwarded gw_FAKE_reviewer_key", "gw_FAKE_reviewer_key"),
+])
+def test_published_findings_redact_secret_classes(monkeypatch, secret, hidden):
+    monkeypatch.setenv("OPENAI_API_KEY", "gw_FAKE_reviewer_key\n")
+    finding = Finding("important", None, None, f"leak {secret}", f"quoted {secret}")
+    result = ReviewResult("codex", "a" * 40, "primary", "request_changes", (finding,), "")
+    body = (github._comment_body(finding, "a" * 40, prefix=f"Anchored at {secret}\n")
+            + github._review_body(result, [finding]))
+    assert hidden not in body and body.count("[REDACTED]") >= 3
+
+
 @pytest.mark.parametrize("diagnostic", [
     {"data": {"rateLimit": {"remaining": 0, "resetAt": "2099-01-01T00:00:00Z"}}},
     "null", "[]", {"data": {"rateLimit": {"remaining": 0, "resetAt": 42}}},

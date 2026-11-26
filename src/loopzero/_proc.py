@@ -102,6 +102,15 @@ def tail(text: str, lines: int = TAIL_LINES) -> str:
     return "\n".join(text.rstrip("\n").splitlines()[-lines:])
 
 
+# Credential shapes hidden wherever loopzero prints or publishes text it did not write.
+SECRET_PATTERNS = (
+    r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})",
+    r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", r"\brt_[A-Za-z0-9_.-]{20,}", r"\bAKIA[0-9A-Z]{16}\b",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+    r"(?<=://)[^\s/:@]+:[^\s/@]+(?=@)",  # URL userinfo with a password
+)
+
+
 def secret_forms(values: Iterable[str]) -> list[str]:
     """Stripped values with their JSON-escaped and URL-quoted forms, longest first."""
     stripped = filter(None, (value.strip() for value in values))
