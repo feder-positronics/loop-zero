@@ -98,6 +98,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
 
 @pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base"])
 def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
+    repo = repo.rename(repo.with_name("repo\rreturn"))
     base = commit_on_origin(repo, "base-change")
     wt = repo / ".worktrees" / "my-task"
     run_git = worktree._git
@@ -127,8 +128,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
             worktree.start(repo, "my-task", "main")
         for detail in (base, "origin/main", current_base, "new slug"):
             assert detail in str(error.value)
-        assert worktree.branch(wt) == "lz/my-task"
-        assert worktree.head(wt) == base
+        assert (worktree.branch(wt), worktree.head(wt)) == ("lz/my-task", base)
         assert not task.exists()
         return
 
