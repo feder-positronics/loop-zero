@@ -20,7 +20,7 @@ from dataclasses import asdict, replace
 from os.path import commonpath
 from pathlib import Path
 
-from . import __version__, _proc
+from . import _proc, installed_version
 from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
 from .worktree import GitError, WorktreeError, git, read_local_state
@@ -314,7 +314,7 @@ def _hash_inputs(config: Config, worktree: Path, command: str, base: str, blobs:
                 contents.append(hashlib.file_digest(stream, "sha256").hexdigest())
     except (OSError, ValueError, SyntaxError, RuntimeError):
         return None
-    payload = [command, __version__, _execution_settings(config, base), blobs, contents]
+    payload = [command, installed_version(), _execution_settings(config, base), blobs, contents]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -488,7 +488,8 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         remedy = ""
         probe_error = probe.stderr.lower()
         if any(word in probe_error for word in ("permission", "user namespace", "userns")):
-            remedy = "\nsudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+            remedy = ("\nRun outside the enclosing agent sandbox or ask the host operator "
+                      "to allow user namespaces for bwrap.")
         raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}{remedy}")
 
 

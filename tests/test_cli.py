@@ -14,6 +14,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from functools import partial
 from dataclasses import asdict, replace
 from email.utils import formatdate
 from pathlib import Path
@@ -852,14 +853,14 @@ def test_check_offline_cache_preflight(wt, repo, fake_tool, capsys, uv, failed):
     if failed:
         assert "effective UV_CACHE_DIR inside the sandbox is /tmp/uv-cache" in err and "uv sync --group dev" in err
         assert "`[checks] network = false`" in err
-        assert "`[checks] writable` is warm" in err and "network = true" not in err
+        assert "list it in `[checks] writable`" in err and "network = true" not in err
 
 
 def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> None:
     fake_tool("bwrap", "echo 'bwrap: No permissions' >&2\nexit 1\n")
     code, out, err = run(capsys, "check")
     assert code == 2 and out.startswith("checks pinned to origin/main@")
-    assert_contains(err, "namespace creation failed: exit 1", "kernel.apparmor_restrict_unprivileged_userns=0")
+    assert_contains(err, "namespace creation failed: exit 1", "ask the host operator to allow user namespaces for bwrap")
     assert not (wt / ".loopzero" / "checks.json").exists()
 
 
@@ -939,7 +940,8 @@ def test_check_selects_and_reports_workflow(wt, repo, tmp_path, capsys, policy):
         alt.write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"echo alt"'))
         options = ("--config", str(alt))
         expected, absent = ("checks are unpinned because --config was provided", "running: echo alt"), "README"
-    out, _ = expect_cli(capsys, 0, *options, "check", stderr="")
+    stderr = "note: dirty worktree; this check cannot satisfy loopzero ready\n" if policy == "task" else ""
+    out, _ = expect_cli(capsys, 0, *options, "check", stderr=stderr)
     assert_contains(out.splitlines(), *expected)
     assert absent is None or absent not in out
     assert not options or out.startswith("checks are unpinned because --config was provided\n")
@@ -1406,6 +1408,13 @@ def test_cli_info_leaves_delivery_backends_unloaded(flag, pattern):
         done = subprocess.run([sys.executable, "-X", "importtime", *entry, flag], capture_output=True, text=True)
         assert done.returncode == 0 and re.match(pattern, done.stdout), done
         assert not re.search(r"loopzero\.(github|mergify|runners|sandbox)\b", done.stderr)
+
+
+def test_merge_cancel_and_wait_conflict_is_a_usage_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["merge", "--cancel", "--wait"])
+    assert exc.value.code == 2
+    assert "merge --cancel cannot be combined with --wait" in capsys.readouterr().err
 
 
 # --- review ---------------------------------------------------------------------------
@@ -3767,7 +3776,7 @@ def test_status_names_base_workflow_for_invalid_pinned_checks(git_repo, monkeypa
     contents = contents.replace("false", '["true"]')
     for active in (contents, contents.replace('"example/repo"', "false")):
         workflow.write_text(active)
-        expect_cli(capsys, 1, "status", stderr_contains=("origin/main:workflow.toml: checks.commands must be a list",))
+        expect_cli(capsys, 1, "status", stderr_contains=("origin/main:workflow.toml: checks.commands must be an array",))
 
 
 def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch, capsys):
@@ -4199,6 +4208,7 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
             }
             return threads_json(node)
         if "comments(first: 100" in query:
+            assert kwargs.get("token") == ""
             if "after=ROOT" in args:
                 return {"data": {"node": {"comments": {
                     "nodes": [{"body": reply, "viewerDidAuthor": False},
@@ -4430,6 +4440,50 @@ def test_ready_pins_review_publishers_to_base(wt, repo, gh, capsys, monkeypatch,
     gh.respond(f"api repos/{REPO}/statuses/{head}", {})
     assert hosted.main() == 0
     assert json.loads(gh.calls[-1]["--input"])["state"] == ("success" if publisher == LOGIN else "pending")
+
+
+@pytest.mark.parametrize("kind", ["checks", "mergify"])
+@pytest.mark.parametrize("reset", [None, -1, 20, 100])
+def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
+    head = commit_mergify_configuration(wt)
+    config = cli.config_mod.load_trusted(wt)
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    clock = poll_clock(monkeypatch, jitter=1.0)
+    monkeypatch.setattr(cli.time, "time", lambda: clock.now)
+    polls = []
+    error = github.GhUnavailable(("gh",), "quota exhausted", rate_reset=reset)
+
+    def next_poll(*_args):
+        polls.append(clock.now)
+        return pr if kind == "checks" else ("e" * 40 if len(polls) == 2 else None)
+
+    def gated(*_args, **_kwargs):
+        if len(polls) == 1:
+            raise error
+        return github.Readiness(True, ())
+
+    if kind == "checks":
+        monkeypatch.setattr(github, "pr_view", next_poll)
+        monkeypatch.setattr(cli, "_verify_wait_snapshot", lambda *_: config)
+        monkeypatch.setattr(cli, "_readiness", gated)
+        wait = partial(cli._wait_for_checks, wt, config, pr, 90, kicked=True, started=0,
+                       args=SimpleNamespace(command="ready", config=None))
+        expected = (pr, github.Readiness(True, ()), True)
+    else:
+        monkeypatch.setattr(cli, "_landed", next_poll)
+        monkeypatch.setattr(mergify, "configured", gated)
+        wait = partial(cli._wait_for_mergify, config, pr, 90, confirmed=True)
+        expected = "e" * 40
+
+    if reset == 20:
+        assert wait() == expected
+        assert polls == [0, 20]
+        assert clock.sleeps == [20]
+    else:
+        with pytest.raises(github.GhUnavailable, match="quota exhausted"):
+            wait()
+        assert polls == [0]
+        assert not clock.sleeps
 
 
 @pytest.mark.parametrize("confirmed", [True, False])

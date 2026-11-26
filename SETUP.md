@@ -22,7 +22,8 @@
 
 ## Install
 
-Pin to a full commit SHA; upgrade by re-running with a new SHA.
+Pin to a full commit SHA from `main` and upgrade by re-running with a new SHA.
+The `v0.4.x` tags refer to the retired tool.
 `loopzero --version` prints the installed revision. Never edit the installed
 package: a hotfix is a branch, a PR, and a reinstall from the merged SHA.
 User-wide:
@@ -87,6 +88,10 @@ CLI predating #732 expects a transcript where the newer publication has a
 retention notice. Keep the original local receipt and confirm the existing
 publication before resuming the rollback.
 
+If the checkout is already at `~/.local/share/loopzero/source`, move it to a
+separate path and use that path as `CHECKOUT`. If a skill destination is a real
+directory, move it aside before linking that skill.
+
 ```sh
 CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
 SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
@@ -103,19 +108,23 @@ with TemporaryDirectory(dir=source.parent) as staging:
     link.symlink_to(checkout.resolve(strict=True), target_is_directory=True)
     os.replace(link, source)
 PYTHON
-for d in "$SRC"/core/skills/*/; do
-  n=$(basename "$d")
-  ln -sfn "$SRC/core/skills/$n" ~/.agents/skills/"$n"
-  ln -sfn "$SRC/core/skills/$n" ~/.claude/skills/"$n"
-done
+(
+  for d in "$SRC"/core/skills/*/; do
+    n=$(basename "$d")
+    ln -sfnT "$SRC/core/skills/$n" ~/.agents/skills/"$n" || exit
+    ln -sfnT "$SRC/core/skills/$n" ~/.claude/skills/"$n" || exit
+  done
+)
 ```
 
 Repositories customise through documentation only: `AGENTS.md`, including
 folder-level `AGENTS.md` files, and the docs it links ("when X, read Y"). Project
 docs add project detail; they never relax the contract. Point your agent's
-repository instructions at the checkout's `core/skills/README.md` and
-`core/CREDENTIALS.md`. Keep those instructions in `AGENTS.md`: Codex and Claude Code (v2.1.277 or
-later) both read it directly. Do not add a `CLAUDE.md`, `.claude/CLAUDE.md` or
+repository's `AGENTS.md` at the shared [skill guide](https://github.com/feder-positronics/loop-zero/blob/main/core/skills/README.md)
+and [credential guidance](https://github.com/feder-positronics/loop-zero/blob/main/core/CREDENTIALS.md).
+These links follow `main`. For guidance that matches a pinned CLI, open the
+same GitHub pages at the installed commit SHA. Codex and Claude Code (v2.1.277
+or later) both read `AGENTS.md` directly. Do not add a `CLAUDE.md`, `.claude/CLAUDE.md` or
 `CLAUDE.local.md` on the same path; Claude reads any of them instead of
 `AGENTS.md`. Claude cannot read `AGENTS.md` directly with third-party providers
 such as Bedrock, with telemetry or the `agents-md` plugin disabled, or in the
@@ -152,6 +161,8 @@ to the base branch before starting your first task. If the base has a
 - Configure hosted check names, mounts, scratch and environment in the
   [commented workflow example](workflow.example.toml). See the contract's
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
+- Host paths in the trusted workflow must work on every delivery machine. Use a
+  machine-specific workflow with `--config` on check, ready and merge when paths differ.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
 - Check, review, ready, merge, and status load the workflow from the
@@ -513,10 +524,12 @@ The updated reader accepts an ancestor approval only across verified clean merge
 from the configured base. After deploying both pins, refresh eligibility for open
 sources judged by the older reader so their statuses reflect the updated policy.
 
-From a trusted base checkout, run:
+From a trusted base checkout, replace the placeholders with the trusted
+Loop-zero pin and the source PR head SHA:
 
 ```sh
-python -m loopzero.eligibility --config workflow.toml --pr 123 --head <full-source-sha> --publish
+uv run --no-project --with "git+https://github.com/feder-positronics/loop-zero@<sha>" \
+  python -m loopzero.eligibility --config workflow.toml --pr 123 --head "<full-source-sha>" --publish
 ```
 
 Give that process pull-request read and commit-status write access.

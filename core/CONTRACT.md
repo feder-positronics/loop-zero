@@ -23,7 +23,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
    passes. A PR whose only blockers are missing or skipped required checks
    (with or without pending mergeability) also leaves draft but is not ready
-   yet; without a wait that exits 3. Both waiters use `--wait[=SECONDS]` (default 1800) on the same
+   yet; without a wait that exits 3. Both waiters use `--wait[=SECONDS]` (default 5400) on the same
    head. Zero can take a PR out of draft or enqueue. Mergeability can time out (exit 3)
    with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`.
    Green can precede CI scheduling. After two minutes of missing checks with
@@ -257,8 +257,10 @@ Outside that confirmed scope, retain all-writer trailers.
 
 Local checks run with read-only source/Git, scratch writes, isolated HOME, only
 configured `[checks].ro_paths`/`[checks].writable` home paths, no network unless
-`[checks].network = true`, and allowlisted environment (default
-`PATH HOME LANG LC_ALL TERM`) plus `[checks].env`.
+`[checks].network = true`, and allowlisted environment plus `[checks].env`.
+The configured default allowlist is `PATH HOME LANG LC_ALL TERM`. Within the
+sandbox, the default forwarded host variables are `PATH LANG LC_ALL TERM` and
+`HOME` is set to `/tmp/home`.
 
 Local checks and native reviews require working `bwrap` and fail without it.
 Checks and reviews recheck HEAD and dirtiness after running. Changes during the
@@ -278,11 +280,11 @@ meta-directives; reviewers load no instruction files or skills from the reviewed
 ## Failure
 
 Fail closed on missing tools or command errors. Preserve the command and output
-tail, name the cause or stage safely, and stop on terminal failures or quota errors.
+tail, name the cause or stage safely, and stop on terminal failures.
 `check` exits 0 when stages pass, including local dirty runs that cannot satisfy
 readiness. Exit 1 can mean a failed stage, a discarded or unverified result, or
 a command error. Read the diagnostic and verify the receipt before classifying
-the failure. Exit 2 covers invalid arguments and sandbox unavailability in
+the failure. Exit 2 covers usage errors and sandbox unavailability in
 `check` or fresh `review`.
 
 Exit 3 means waiting or timeout. Review exits 4 when no configured
@@ -300,4 +302,5 @@ Other polling needs a deadline, visible progress, preserved stderr and a stop on
 Never poll GraphQL-backed `gh pr view`, `gh pr checks` or `gh pr list` (shared quota).
 Use REST `gh api` for one-off PR reads and comments. After a quota error, wait for
 a verified reset or `Retry-After` before GitHub-backed commands, including
-`loopzero` waiters. REST `/rate_limit` does not prove GraphQL capacity.
+`loopzero` waiters. An active waiter can resume a fresh poll after a verified
+hourly reset within its original deadline. REST `/rate_limit` does not prove GraphQL capacity.

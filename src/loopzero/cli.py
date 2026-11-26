@@ -299,7 +299,7 @@ def _readiness(
         publishers=publishers,
     )
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
-        behind = github.behind_reason(pr, head if review else None)
+        behind = github.behind_reason(pr)
         reasons = result.reasons
         if mergify.configured(config.repo, config.base_branch, config.mergify_queue or "", mergify_deadline):
             reasons = tuple(reason for reason in reasons if reason != behind)
@@ -637,18 +637,20 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
                 print(
                     "\nThe sandbox has no network because `[checks] network = false`; "
                     f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
-                    "Run UV_CACHE_DIR=<effective-cache> uv sync --group dev on the host "
-                    "(use the required groups) so the cache under `[checks] writable` is warm, "
-                    "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
+                    f"On origin/{config.base_branch}, set `[checks] env` UV_CACHE_DIR to a host cache "
+                    "and list it in `[checks] writable`. Warm that same cache with "
+                    "UV_CACHE_DIR=<path> uv sync --group dev on the host (use the required groups).", file=sys.stderr,
                 )
     if (current_head := _save_report(wt, report, locked_fd=locked_fd)) is not None:
-        print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
+        print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}; rerun loopzero check",
               file=sys.stderr)
         return 1
     fcntl.flock(locked_fd, fcntl.LOCK_UN)
     if shortened:
         print(f"Full diagnostic tail: {CHECKS_FILE} (head {report.head})", file=sys.stderr)
-    if report.ok and not report.dirty:
+    if report.ok and report.dirty:
+        print("note: dirty worktree; this check cannot satisfy loopzero ready", file=sys.stderr)
+    elif report.ok:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
     print("PASS" if report.ok else "FAIL")
@@ -665,7 +667,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     if pr is not None:
         raise CliError(
             f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
-            "run `loopzero start <new-task-slug>` for a new task"
+            "run `loopzero start <new-task-slug>` from the main checkout"
         )
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
@@ -694,7 +696,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
         with github.pr_lock(config.repo, pr.number):
             live = github.pr_view(config.repo, pr.number)
             if live.state != "OPEN":
-                raise CliError(f"PR #{pr.number} closed during publication")
+                raise CliError(f"PR #{pr.number} closed during publication; reopen it before retrying loopzero pr")
             body = _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))
             if body != live.body.replace("\r\n", "\n"):
                 github.update_body(config.repo, pr.number, body)
@@ -819,7 +821,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         if final_head != head or final_dirty:
             raise CliError(
                 f"worktree changed during review: HEAD before {head}, HEAD after {final_head}; "
-                f"dirty before False, dirty after {final_dirty}"
+                f"dirty after {final_dirty}; finish the changes, then run loopzero check and review again"
             )
     try:
         if not _matches_publication(result, publication_context):
@@ -1127,7 +1129,10 @@ def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
         return lines[0], detail + "\nFix: wait for the limit to reset or switch this reviewer's account.", _FALLBACK_REASONS[1]
     if isinstance(exc, runners.RunnerMissing):
         package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
-        return lines[0], detail + f"\nFix: install it with `npm install -g {package}`.", _FALLBACK_REASONS[2]
+        fix = f"install it with `npm install -g {package}`"
+        if family == "codex":
+            fix += " and list the npm prefix in `[delivery] reviewer_ro_paths` on the delivery branch"
+        return lines[0], detail + f"\nFix: {fix}.", _FALLBACK_REASONS[2]
     return lines[0], detail, _FALLBACK_REASONS[3]
 
 
@@ -1453,7 +1458,7 @@ def _verify_wait_snapshot(
     previous: Config,
 ) -> Config:
     if current_head != head:
-        raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}")
+        raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}; sync the branch and run loopzero ready")
     latest = _load_config(args, wt, pin_checks=True, previous=previous, refresh=True)
     if latest == config:
         return latest
@@ -1469,6 +1474,33 @@ def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> Non
         print("waiting: " + "; ".join(changed))
     if cleared := [key.removeprefix("required check '") for key in previous if key not in current]:
         print("cleared: " + "; ".join(cleared))
+
+
+def _read_wait_poll[T](read: Callable[[], T], deadline: float) -> T:
+    """Retry the whole read-only snapshot without extending the waiter deadline."""
+    while True:
+        try:
+            return read()
+        except github.GhUnavailable as exc:
+            delay = (exc.rate_reset or 0) - time.time()
+            if not 0 < delay < deadline - time.monotonic():
+                raise
+            print(f"GitHub quota exhausted. Waiting {delay:.0f}s for the verified reset.", flush=True)
+            _sleep(delay)
+            if time.monotonic() >= deadline:
+                raise
+
+
+def _check_wait_poll(
+    wt: Path, config: Config, pr: github.PR, previous: Config, args: argparse.Namespace,
+    allow_merged: bool, deadline: float,
+) -> tuple[github.PR, Config, github.Readiness | None]:
+    current = github.pr_view(config.repo, pr.number)
+    previous = _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha, previous)
+    if allow_merged and current.state == "MERGED":
+        return current, previous, None
+    return current, previous, _readiness(wt, config, current, pr.head_sha, workflow_wait=True,
+                                         mergify_deadline=deadline)
 
 
 def _wait_for_checks(
@@ -1488,12 +1520,11 @@ def _wait_for_checks(
             readiness = initial
             initial = None
         else:
-            current = github.pr_view(config.repo, pr.number)
-            previous = _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha, previous)
-            if allow_merged and current.state == "MERGED":
+            deadline = started + timeout
+            poll = partial(_check_wait_poll, wt, config, pr, previous, args, allow_merged, deadline)
+            current, previous, readiness = _read_wait_poll(poll, deadline)
+            if readiness is None:
                 return current, None, kicked
-            readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True,
-                                   mergify_deadline=started + timeout)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             _mark_ready(wt, config, pr.number, current.head_sha)
             print("marked ready; " + "; ".join(readiness.reasons))
@@ -1627,6 +1658,21 @@ def _mergify_departure(
     raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {MERGIFY_REQUEUE}")
 
 
+def _mergify_wait_poll(
+    config: Config, pr: github.PR, queue: str, deadline: float, closed: list[github.GhError], confirmed: bool,
+) -> tuple[str | None, mergify.Membership | None, bool]:
+    if sha := _landed(config, pr, closed):
+        return sha, None, False
+    if not mergify.configured(config.repo, config.base_branch, queue, deadline):
+        raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
+    state = mergify.membership(config.repo, pr.number, queue, deadline)
+    deferred = confirmed and state is not None and not closed
+    sha = None if deferred else _landed(config, pr, closed)
+    if state is None and sha is None:
+        sha = _mergify_departure(config, pr, queue, closed, confirmed)
+    return sha, state, deferred
+
+
 def _wait_for_mergify(
     config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
@@ -1640,22 +1686,15 @@ def _wait_for_mergify(
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     polls = _poll_until(started, timeout, admitted=lambda: confirmed)
     for _ in polls:
-        sha = _landed(config, pr, closed)
+        deadline = started + timeout
+        poll = partial(_mergify_wait_poll, config, pr, queue, deadline, closed, confirmed)
+        sha, state, deferred_landing_read = _read_wait_poll(poll, deadline)
         if sha:
-            return sha
-        if not mergify.configured(config.repo, config.base_branch, queue, started + timeout):
-            raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
-        state = mergify.membership(config.repo, pr.number, queue, started + timeout)
-        deferred_landing_read = confirmed and state is not None and not closed
-        if not deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
         if state is not None and not confirmed:
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
-        elif state is None:
-            if sha := _mergify_departure(config, pr, queue, closed, confirmed):
-                return sha
     # A queued, open PR normally gets its next landing read on the next tick.
     if deferred_landing_read and (sha := _landed(config, pr, closed)):
         return sha
@@ -1729,8 +1768,6 @@ def _merge_with_mergify(
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
-    if args.cancel and args.wait is not None:
-        raise CliError("merge --cancel cannot be combined with --wait")
     wt, config = _context(args)
     branch = worktree.branch(wt)
     if args.cancel:
