@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import quote
@@ -72,10 +71,9 @@ def _run(cfg: Config) -> int:
     head = pr["head"]["sha"]
     candidate = (pr["head"]["ref"].startswith("mergify/merge-queue/")
                  or pr["user"]["login"] == "mergify[bot]")
-    if not candidate and pr.get("merged") is True:
+    active = _candidate_event(event, head) if candidate else pr.get("merged") is not True
+    if not active:
         return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
-    if candidate and not _candidate_event(event, head):
-        return 0
     def publish(state: str, message: str) -> None:
         github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
     publish("pending", "Refreshing live source review evidence")
@@ -111,7 +109,9 @@ def _run(cfg: Config) -> int:
         print(f"Eligibility pending: evidence unavailable ({exc})", file=sys.stderr)
         return 0
     except Exception as exc:
-        _mark_refresh_failed(publish, exc)
+        if not isinstance(exc, github.StatusLimitReached):
+            with suppress(Exception):
+                publish("failure", "Eligibility refresh failed; inspect workflow logs")
         raise
     _publish_verdict(cfg.repo, head, state, message[:140])
     print(message)
@@ -141,12 +141,6 @@ def _publish_verdict(repo: str, head: str, state: str, description: str) -> None
             if github.status_matches(repo, head, context, state, description):
                 return
         raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
-
-
-def _mark_refresh_failed(publish: Callable[[str, str], None], exc: Exception) -> None:
-    if not isinstance(exc, github.StatusLimitReached):
-        with suppress(Exception):
-            publish("failure", "Eligibility refresh failed; inspect workflow logs")
 
 
 if __name__ == "__main__":
