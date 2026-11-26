@@ -1172,6 +1172,7 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
 
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
+    read_started = time.monotonic()
     pr, readiness = _pr_readiness(wt, config, workflow_wait=args.wait is not None)
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
@@ -1189,7 +1190,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
     ):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
                                      shown=readiness.reasons if kicked else (), args=args,
-                                     allow_skipped=True, initial=None if kicked else readiness)
+                                     allow_skipped=True, initial=None if kicked else readiness,
+                                     initial_read_time=started - read_started)
         if waited is None:
             return 3
         pr, readiness, kicked = waited
@@ -1254,9 +1256,10 @@ def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness
 
 def _poll_until(
     started: float, timeout: float, *, bounded: bool = False, admitted: Callable[[], bool] | None = None,
+    initial_read_time: float = 0.0,
 ) -> Iterator[None]:
     delay = WAIT_INTERVAL
-    longest_read = 0.0
+    longest_read = initial_read_time
     while True:
         was_admitted = admitted is not None and admitted()
         read_started = time.monotonic()
@@ -1287,6 +1290,7 @@ def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
     allow_merged: bool = False, allow_skipped: bool = False, initial: github.Readiness | None = None,
+    initial_read_time: float = 0.0,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     started = time.monotonic() if started is None else started
     if timeout == 0:
@@ -1302,7 +1306,8 @@ def _wait_with_deadline(
         with github.bounded_reads(deadline, token=None, retry=True):
             waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
                                       shown=shown, args=args, bounded=True, allow_merged=allow_merged,
-                                      allow_skipped=allow_skipped, initial=initial)
+                                      allow_skipped=allow_skipped, initial=initial,
+                                      initial_read_time=initial_read_time)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1342,13 +1347,14 @@ def _wait_for_checks(
     started: float | None = None, shown: tuple[str, ...] = (),
     args: argparse.Namespace | None = None, bounded: bool = False, allow_merged: bool = False,
     allow_skipped: bool = False, initial: github.Readiness | None = None,
+    initial_read_time: float = 0.0,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     """Poll the same head until it settles, omitting readiness for an allowed merge."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
     current = pr
     stale_notice = False
-    for _ in _poll_until(started, timeout, bounded=bounded):
+    for _ in _poll_until(started, timeout, bounded=bounded, initial_read_time=initial_read_time):
         if initial is not None:
             readiness = initial
             initial = None
@@ -1363,7 +1369,7 @@ def _wait_for_checks(
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
                                     shown=readiness.reasons, args=args, bounded=bounded,
-                                    allow_merged=allow_merged)
+                                    allow_merged=allow_merged, initial_read_time=initial_read_time)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(
@@ -1566,6 +1572,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         mergify.dequeue(config.repo, pr.number)
         print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
+    read_started = time.monotonic()
     pr, readiness = _pr_readiness(
         wt, config, allow_merged=True, workflow_wait=args.wait is not None
     )
@@ -1577,7 +1584,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
-                                     args=args, allow_merged=True, initial=readiness)
+                                     args=args, allow_merged=True, initial=readiness,
+                                     initial_read_time=started - read_started)
         if waited is None:
             return 3
         pr, readiness, _ = waited
