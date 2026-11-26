@@ -31,9 +31,9 @@ criterion or verified defect. Own review, CI and post-merge acceptance waits.
 Use the [acceptance evidence](reference.md#acceptance-evidence) and
 [re-entry](reference.md#re-entry) safeguards when applicable.
 
-Partial delivery uses `Refs #N` and never closes the issue, including work needing
-post-merge observation. Closing keywords belong only to complete acceptance;
-inspect rendered descriptions and commit messages, since even negated closing
+For complete acceptance, change the task template's `Refs #N` line to `Closes #N`.
+Partial delivery keeps `Refs #N` and never closes the issue, including work needing
+post-merge observation. Inspect rendered descriptions and commit messages, since even negated closing
 prose can close issues. Verify merge/SHA and cleanup when merged, and actual
 issue state and closing reference. Unobservable required conditions remain open.
 Follow the linked safeguards when [partial delivery auto-closes the issue](reference.md#premature-closure),
