@@ -147,12 +147,12 @@ def test_start_reports_handoff_publication_failure(repo, monkeypatch, capsys, li
     monkeypatch.chdir(repo)
     task = repo / ".worktrees" / "t1" / ".loopzero" / "task.md"
 
-    def fail_link(path, source):
+    def fail_link(*_args, **_kwargs):
         if link_error == errno.EEXIST:
-            path.write_text("existing handoff")
+            task.write_text("existing handoff")
         raise OSError(link_error, "link failed")
 
-    monkeypatch.setattr(Path, "hardlink_to", fail_link)
+    monkeypatch.setattr(cli.worktree.os, "link", fail_link)
     assert cli.main(["start", "t1"]) == 1
     error = capsys.readouterr().err
     assert str(task) in error
@@ -835,6 +835,43 @@ def test_invalid_workflow_utf8_names_file(wt, capsys, trusted):
     assert "Traceback" not in err
 
 
+@pytest.mark.parametrize("command,state_file", [
+    ("check", None), ("review", None), ("repost", None), ("ready", None),
+    ("check", "checks.json"), ("review", "task.md"), ("ready", "checks.json"), ("check", "tracked"),
+    ("review", "review-{head}-primary.json"), ("repost", "review-{head}-primary.json"),
+])
+def test_commands_refuse_linked_local_state(wt, gh, fake_bin, capsys, tmp_path, command, state_file):
+    head = head_of(wt)
+    if command == "ready":
+        arm_approved_ready_pr(gh, head, wt)
+    else:
+        prepare_review(wt, gh, fake_bin)
+    state = wt / ".loopzero"
+    target = state / state_file.format(head=head[:12]) if state_file else state
+    tracked = state_file == "tracked"
+    sentinel = state / "task.md" if tracked else tmp_path / "external"
+    excludes = tmp_path / "excludes"
+    excludes.write_text(".loopzero\n")
+    git(wt, "config", "core.excludesfile", str(excludes))
+    if tracked:
+        git(wt, "add", "-f", str(sentinel))
+    else:
+        target.touch()
+        target.rename(sentinel)
+        target.symlink_to(sentinel, target_is_directory=state_file is None)
+    directory = sentinel if state_file is None else state
+    directory.chmod(0o755)
+
+    def snapshot():
+        return {f.name: f.read_bytes() for f in (directory.iterdir() if tracked or state_file is None else (sentinel,))}
+
+    original = snapshot()
+    code, _, err = run(capsys, *(["review", "--repost"] if command == "repost" else [command]))
+    assert snapshot() == original and (tracked or target.is_symlink())
+    assert directory.stat().st_mode & 0o777 == 0o755
+    assert code == 1 and ("repository-tracked local state" if tracked else "symbolic link") in err
+
+
 def test_check_uses_base_commands_when_worktree_weakens_them(wt: Path, capsys) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"'))
     out, _ = expect_cli(capsys, 0, "check", stderr="")
@@ -1439,7 +1476,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
-    assert_git_cost(git_calls, 14, 1)
+    assert_git_cost(git_calls, 18, 1)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -2166,7 +2203,7 @@ def test_review_observes_new_codex_version_in_saved_receipt(
     _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
     _, err = expect_cli(capsys, 0, "review", stdout_contains=("review by codex",))
     assert "reviewer codex unavailable:" not in err
-    result = cli._load_review(wt, git(wt, "rev-parse", "HEAD").strip(), "primary")
+    result, _ = cli._load_review(wt, git(wt, "rev-parse", "HEAD").strip(), "primary")
     assert result.provenance["cli_version"] == version
 
 
@@ -2181,9 +2218,9 @@ def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monke
 
     monkeypatch.setattr(cli.runners, "review_with", malformed)
     if not save:
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise PermissionError("diagnostic write denied")
-        monkeypatch.setattr(cli, "_write_json_atomically", fail)
+        monkeypatch.setattr(cli.worktree, "write_local_state", fail)
     code, out, err = run(capsys, "review")
     size = len((out + err).encode())
     assert size < 650, size
@@ -2367,7 +2404,8 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch, git
     gh.respond("pr ready", "")
     git_calls.clear()
     code, out, err = run(capsys, "ready")
-    assert_git_cost(git_calls, 8, 1)
+    assert_git_cost(git_calls, 9, 1)
+    assert ["ls-files", "-z", "--", ".loopzero"] in git_calls
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
@@ -3719,7 +3757,7 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     (wt / "scratch").write_text("x")
     git_calls.clear()
     code, out, _ = run(capsys, "status")
-    assert_git_cost(git_calls, 7, 1)
+    assert_git_cost(git_calls, 8, 1)
     assert code == 0 and "dirty:    yes" in out
     assert f"pr:       #7 {URL} (draft, OPEN)" in out
     assert f"review:   primary on {head[:12]} (approved)" in out
@@ -4597,7 +4635,7 @@ def test_review_discloses_fallback_for_all_contributing_families(wt, gh, fake_bi
     assert not (fake_bin / "codex.stdin").exists()
     assert f"Same-family fallback: {reason}. Cross-family review is preferred." in posted_review(gh)["body"]
     kind = "delta" if lineage == "delta" else "primary"
-    assert cli._load_review(wt, head, kind).fallback == reason
+    assert cli._load_review(wt, head, kind)[0].fallback == reason
 
 
 def test_repost_rejects_saved_contributor_review(
@@ -4738,11 +4776,11 @@ def test_wait_rechecks_closed_unmerged_pr(monkeypatch, final) -> None:
 
 
 @pytest.mark.parametrize("redirected", [False, True])
-def test_checks_report_survives_failed_publication(tmp_path, monkeypatch, redirected):
-    path = tmp_path / cli.CHECKS_FILE
+def test_checks_report_survives_failed_publication(git_repo, tmp_path, monkeypatch, redirected):
+    path = git_repo / cli.CHECKS_FILE
     monkeypatch.setattr(cli.worktree, "head", lambda _: next(heads))
     heads = iter(("a" * 40, "b" * 40))
-    cli._save_report(tmp_path, CheckReport("a" * 40, False, ()))
+    cli._save_report(git_repo, CheckReport("a" * 40, False, ()))
 
     def interrupt(staged, dest, *, src_dir_fd, dst_dir_fd):
         assert src_dir_fd == dst_dir_fd and dest == path.name
@@ -4754,17 +4792,18 @@ def test_checks_report_survives_failed_publication(tmp_path, monkeypatch, redire
         external = path.parent.rename(tmp_path / "external")
         path.parent.symlink_to(external, target_is_directory=True)
     monkeypatch.setattr(cli.os, "replace", interrupt)
-    with pytest.raises(OSError, match="Not a directory" if redirected else "publication interrupted"):
-        cli._save_report(tmp_path, CheckReport("b" * 40, False, ()))
+    error = cli.worktree.WorktreeError if redirected else OSError
+    with pytest.raises(error, match="symbolic link" if redirected else "publication interrupted"):
+        cli._save_report(git_repo, CheckReport("b" * 40, False, ()))
     assert json.loads(path.read_text())["head"] == "a" * 40
     assert list(path.parent.iterdir()) == [path]
     if redirected:
         external.chmod(0o755)
         review = ReviewResult("claude", "a" * 40, "primary", "approve", (), "")
-        receipt = cli._review_file(tmp_path, review.head, review.kind)
+        receipt = cli._review_file(git_repo, review.head, review.kind)
         receipt.write_text("user file")
-        with pytest.raises(OSError, match="Not a directory"):
-            cli._save_review(tmp_path, review)
+        with pytest.raises(cli.worktree.WorktreeError, match="symbolic link"):
+            cli._save_review(git_repo, review)
         assert receipt.read_text() == "user file" and external.stat().st_mode & 0o777 == 0o755
 
 
