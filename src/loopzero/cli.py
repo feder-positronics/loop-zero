@@ -1497,9 +1497,9 @@ def _wait_for_mergify(
         sha = _landed(config, pr, closed)
         if sha:
             return sha
-        if not mergify.configured(config.repo, config.base_branch, queue):
+        if not mergify.configured(config.repo, config.base_branch, queue, started + timeout):
             raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
-        state = mergify.membership(config.repo, pr.number, queue)
+        state = mergify.membership(config.repo, pr.number, queue, started + timeout)
         deferred_landing_read = confirmed and state is not None and not closed
         if not deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
@@ -1537,7 +1537,7 @@ def _merge_with_mergify(
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )
-    state = mergify.membership(config.repo, pr.number, queue)
+    state = mergify.membership(config.repo, pr.number, queue, deadline)
     if sha := github.merged_sha(
         config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
     ):

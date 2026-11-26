@@ -2484,7 +2484,7 @@ def source_queue_api(gh, monkeypatch):
     })
     vendor_calls = []
 
-    def get(_repo, path):
+    def get(_repo, path, *_):
         vendor_calls.append(path)
         return {
             "/merge-queue/status?branch=main": {"batches": [], "mode": "serial"},

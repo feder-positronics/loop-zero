@@ -333,8 +333,8 @@ one state transition should not become repeated writes that trigger policy CI.
 GitHub reads and the idempotent thread resolution mutation retry transient
 failures once after five seconds. They stop on exhausted quota and honor a
 secondary limit’s Retry-After when the delay fits the read budget. Mergify
-reads retry server errors, throttling and failed
-reads up to twice (2/5 seconds). Waits use bounded backoff. See the
+queue reads retry once after two seconds, subject to Retry-After and the
+remaining queue wait budget. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).
 The optional host ai-accounts helper owns managed credential selection and exact-model
 eligibility under its existing lock. Its Claude exec reserve guard (including pinned

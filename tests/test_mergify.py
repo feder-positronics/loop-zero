@@ -82,7 +82,7 @@ def test_dequeue_posts_to_documented_endpoint(monkeypatch):
 
 @pytest.fixture
 def queue_api(monkeypatch):
-    monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix: (
+    monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix, *_: (
         {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status") else
         {"configuration": [{"name": "main", "config": {"allow_inplace_checks": True}}]}
     ))
@@ -154,7 +154,7 @@ def test_configured_rejects_malformed_github_file(queue_api, monkeypatch, field,
 
 def test_legacy_false_does_not_license_single_check_source_updates(queue_api, monkeypatch):
     queue_api(SAFE_CONFIG.replace("checks: 3", "checks: 1"))
-    monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix: (
+    monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix, *_: (
         {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status") else
         {"configuration": [{"name": "main", "config": {"allow_inplace_checks": False}}]}
     ))
@@ -229,24 +229,24 @@ def test_hosted_import_does_not_load_yaml():
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("failure", ["http503", "dropped_read", "truncated"])
-def test_api_get_retries_transient_reads(monkeypatch, failure):
-    calls = []
-
-    class Body(io.BytesIO):
-        def read(self, *args):
-            if len(calls) == 1 and failure != "http503":  # body read fails once
-                raise {"dropped_read": ConnectionResetError(), "truncated": mergify.http.client.IncompleteRead(b"{")}[failure]
-            return super().read(*args)
-
+@pytest.mark.parametrize("failure,status,budget,wait", [
+    ("http", 503, None, 2), ("reset", None, None, 2), ("truncated", None, None, 2),
+    ("http", 429, None, 40), ("http", 403, 20, None), ("http", 429, 20, None)])
+def test_api_get_retries_transient_reads(monkeypatch, failure, status, budget, wait):
+    calls, sleeps = [], []
     def fake_open(request):
-        calls.append(request.get_method())
-        if failure == "http503" and len(calls) == 1:
-            raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
-        return Body(b"{}")
-
+        calls.append((request.get_method(), sum(sleeps)))
+        if status in {403, 429} or len(calls) == 1:
+            if status:
+                raise urllib.error.HTTPError(request.full_url, status, "x", {"Retry-After": "40"} if status < 500 else {}, None)
+            raise ConnectionResetError() if failure == "reset" else mergify.http.client.IncompleteRead(b"{")
+        return io.BytesIO(b"{}")
     monkeypatch.setattr(mergify, "_open", fake_open)
-    monkeypatch.setattr(mergify, "_retry_sleep", lambda _: None)
+    monkeypatch.setattr(mergify, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(mergify, "_credential", lambda: "k")
-    assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
-    assert calls == ["GET", "GET"]
+    if status in {403, 429}:
+        with pytest.raises(mergify.MergifyError, match="Retry-After: 40s" + ("; retry delay exceeds" if budget else "")):
+            mergify.api_get("acme/widgets", "/merge-queue/status", None if budget is None else mergify.time.monotonic() + budget)
+    else:
+        assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
+    assert calls == ([("GET", 0)] if wait is None else [("GET", 0), ("GET", wait)])
