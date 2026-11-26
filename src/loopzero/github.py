@@ -128,6 +128,9 @@ _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str | None, bool] | None] = ContextVar("github_reads", default=None)
 _api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
+_READINESS_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.([0-9]+))?"
+                                  r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
+_HTTP_DATE = re.compile(r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT")
 _CREDENTIAL_TOKEN_RE = re.compile(
     r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})"
 )
@@ -354,7 +357,8 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
 
 
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
-        token: str | None = None, retry_idempotent: bool = False) -> str:
+        token: str | None = None, retry_idempotent: bool = False, dates: list[str] | None = None) -> str:
+    dates = [] if dates is None else dates
     api = args[:1] == ("api",)
     diagnostic_api = api and _api_error_diagnostics.get()
     rest_api = api and args[:2] != ("api", "graphql")
@@ -387,6 +391,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         status, headers, body = response
         tail = "\n".join(part for part in (done.stderr, body) if part)
         if done.exit_code == 0:
+            dates[:] = [headers.get("date", "")]
             return body
         rate_limited = _rate_limited(status, headers, tail)
         transient = rate_limited or _transient_error(tail, retry_idempotent, status)
@@ -416,9 +421,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     remaining = int(remaining_value) if re.fullmatch(r"[0-9]{1,18}", remaining_value) else None
     retry_after = headers.get("retry-after", "")
     retry_seconds = re.fullmatch(r"[0-9]{1,18}", retry_after)
-    retry_date = re.fullmatch(
-        r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT", retry_after,
-    )
+    retry_date = _HTTP_DATE.fullmatch(retry_after)
     reset = ""
     try:
         if epoch := headers.get("x-ratelimit-reset"):
@@ -479,8 +482,8 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
     return ""
 
 
-def _gh_json(*args: str, token: str | None = None) -> object:
-    out = _gh(*args, token=token)
+def _gh_json(*args: str, token: str | None = None, **kwargs) -> object:
+    out = _gh(*args, token=token, **kwargs)
     try:
         return json.loads(out) if out.strip() else None
     except json.JSONDecodeError as exc:
@@ -518,9 +521,16 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
     return list(_iter_paged(endpoint, key))
 
 
-def api_get(endpoint: str) -> object:
+def api_get(endpoint: str, **kwargs) -> object:
     """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
-    return _gh_json("api", endpoint)
+    return _gh_json("api", endpoint, **kwargs)
+
+
+def response_date(value: str) -> datetime | None:
+    if _HTTP_DATE.fullmatch(value):
+        with suppress(OverflowError, ValueError):
+            return parsedate_to_datetime(value)
+    return None
 
 
 def auth_token() -> str:
@@ -1179,34 +1189,41 @@ _NONFAILING_CHECKS = _PENDING_CHECKS | {"success"}
 _FAILED_VERDICTS = {"failure", "error", "cancelled", "timed_out"}
 
 
+ReadinessTimestamp = tuple[datetime, str]
+
+
+def readiness_timestamp(value: object) -> ReadinessTimestamp | None:
+    if isinstance(value, str) and (match := _READINESS_TIMESTAMP.fullmatch(value)):
+        with suppress(OverflowError, ValueError):
+            return datetime.fromisoformat(value).astimezone(UTC), (match[1] or "")[6:].rstrip("0")
+    return None
+
+
 def _check_signals(
     repo: str,
     head_sha: str,
-    review_at: str | None = None,
+    review_at: ReadinessTimestamp | None = None,
     review_grace: bool = False,
     required_ci: tuple[str, ...] = (),
     stale_verdict_grace: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
+    signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
     latest_runs: dict[str, dict] = {}
     runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
     for cr in runs:
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
             latest_runs[cr["name"]] = cr
-    signals = {
-        name: [(cr.get("conclusion") or cr.get("status") or "unknown",
-                cr.get("completed_at") or cr.get("started_at"))]
-        for name, cr in latest_runs.items()
-    }
+    for name, cr in latest_runs.items():
+        state = cr.get("conclusion") or cr.get("status") or "unknown"
+        timestamp = cr.get("started_at" if state in _PENDING_CHECKS else "completed_at")
+        signals[name] = [(state, readiness_timestamp(timestamp))]
     latest_status: dict[str, dict] = {}
     for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status)
     for name, status in latest_status.items():
-        signals.setdefault(name, []).append((status.get("state") or "unknown", status.get("created_at")))
-    states = {
-        name: _aggregate_signal([state for state, _ in values])
-        for name, values in signals.items()
-    }
+        signals.setdefault(name, []).append((status.get("state") or "unknown", readiness_timestamp(status.get("created_at"))))
+    states = {name: _aggregate_signal([state for state, _ in values]) for name, values in signals.items()}
     stale = tuple(name for name, values in signals.items() if review_at
                   and states[name] not in _NONFAILING_CHECKS
                   and all(at and at < review_at for state, at in values if state not in _NONFAILING_CHECKS)
@@ -1310,7 +1327,7 @@ def readiness(
     required_ci: tuple[str, ...],
     reviewed_head: str | None,
     *, allow_behind: bool = False, ancestor_review: bool = False,
-    review_at: str | None = None,
+    review_at: ReadinessTimestamp | None = None,
     review_grace: bool = False,
     workflow_wait: bool = False,
     stale_verdict_grace: bool = False,
