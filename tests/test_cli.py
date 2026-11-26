@@ -2997,6 +2997,30 @@ def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, 
     assert run(capsys, "ready")[0] == 0
 
 
+def test_ready_and_merge_reject_receipt_after_clean_checkout_rewrites_input(wt, gh, capsys, tmp_path):
+    path, head = wt / "feature.py", head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    command = """python3 -c 'from pathlib import Path; exit(13 in Path("feature.py").read_bytes())'"""
+    settings = tmp_path / "workflow.toml"
+    settings.write_text(WORKFLOW.replace('"echo ok"', json.dumps(command)).replace(
+        "[delivery]", f'[checks.inputs]\n{json.dumps(command)} = ["feature.py"]\n\n[delivery]',
+    ))
+    args = ("--config", str(settings))
+    expect_cli(capsys, 0, *args, "check")
+    expect_cli(capsys, 0, *args, "ready")
+
+    git(wt, "config", "core.autocrlf", "true")
+    path.unlink()
+    git(wt, "checkout-index", "-u", "--", path.name)
+    assert b"\r\n" in path.read_bytes()
+    assert head_of(wt) == head and not git(wt, "status", "--porcelain")
+    for action in ("ready", "merge"):
+        code, out, err = run(capsys, *args, action)
+        assert code == 1 and "declared check inputs" in out + err
+        assert "Run loopzero check" in out + err
+    expect_cli(capsys, 1, *args, "check")
+
+
 @pytest.mark.parametrize("base_sensitive", [False, True])
 def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     if base_sensitive:

@@ -364,6 +364,8 @@ def _check_report_problem(
         return f"check receipt is missing its settings fingerprint. {recovery}"
     if report.settings_sha256 != sandbox.settings_fingerprint(config, wt):
         return f"check receipt has an incompatible settings fingerprint. {recovery}"
+    if not sandbox.receipt_inputs_match(config, wt, report):
+        return f"declared check inputs changed or are unavailable. {recovery}"
     return None
 
 

@@ -114,6 +114,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    for local sandbox receipts. Explicit settings, delegated runner environments
    and stage reuse keys still bind the grant. Waiters check for policy changes
    on every poll.
+   Local readiness recomputes input keys recorded in the passing receipt from
+   the checkout bytes. Missing or changed comparisons require a fresh check.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree

@@ -274,6 +274,17 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
         raise
 
 
+def receipt_inputs_match(config: Config, worktree: Path, report: CheckReport) -> bool:
+    keyed = [stage for stage in report.results if stage.input_key is not None]
+    if not keyed:
+        return True
+    try:
+        base = _check_base(config, worktree)
+        return all(stage.input_key == _input_key(config, worktree, stage.command, base) for stage in keyed)
+    except (SandboxUnavailable, OSError, _proc.ProcTimeout, _proc.ToolMissing):
+        return False
+
+
 def _input_key(config: Config, worktree: Path, command: str, base: str, *,
                status: Callable[[str], None] | None = None,
                workflow: str | Path = "workflow.toml") -> str | None:
