@@ -168,6 +168,10 @@ def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
         ["git", "merge-base", "--is-ancestor", sha, head],
         cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
     )
+    if done.exit_code not in (0, 1):
+        detail = _proc.tail(done.stderr or done.stdout, 1)
+        raise CliError(f"git merge-base --is-ancestor failed (exit {done.exit_code}): "
+                       f"{detail or 'retry the ancestry check'}")
     return done.exit_code == 0
 
 
@@ -667,9 +671,9 @@ def cmd_pr(args: argparse.Namespace) -> int:
         )
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
     body = _pr_body(wt, head, config, existing)
-    force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
+    force_lease = False
     push = ["push", "-u", "origin"]
-    if force_lease:
+    if pr is not None and pr.state == "OPEN":
         # Only rewrite history this worktree has seen; an unknown remote head is someone else's.
         known = _proc.run(["git", "cat-file", "-e", f"{pr.head_sha}^{{commit}}"], cwd=wt,
                           env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
@@ -677,7 +681,9 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(
                 f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
             )
-        push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
+        force_lease = not _is_ancestor(wt, pr.head_sha, head)
+        if force_lease:
+            push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
     push.append(branch)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
