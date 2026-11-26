@@ -36,8 +36,12 @@ def main() -> int:
     except config.ConfigError as exc:
         print(exc, file=sys.stderr)
         return 1
-    with github.api_error_diagnostics():
-        return _run(cfg)
+    try:
+        with github.api_error_diagnostics():
+            return _run(cfg)
+    except (github.GhUnavailable, github.ProcTimeout) as exc:
+        print(f"Eligibility unconfirmed: GitHub evidence unavailable ({exc})", file=sys.stderr)
+        return 0
 
 
 def _run(cfg: Config) -> int:
@@ -111,7 +115,7 @@ def _publish_verdict(repo: str, head: str, state: str, description: str) -> None
 
 
 def _mark_refresh_failed(publish: Callable[[str, str], None], exc: Exception) -> None:
-    if not isinstance(exc, github.StatusLimitReached):
+    if not isinstance(exc, (github.GhUnavailable, github.ProcTimeout, github.StatusLimitReached)):
         with suppress(Exception):
             publish("failure", "Eligibility refresh failed; inspect workflow logs")
 
