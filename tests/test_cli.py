@@ -4207,7 +4207,7 @@ def test_resolve_reports_recovery_when_followup_read_fails(finding_pr, gh, capsy
 @pytest.mark.parametrize("recovers", [True, False])
 def test_resolve_retries_only_thread_resolution(finding_pr, gh: FakeGh, capsys, monkeypatch, recovers) -> None:
     failure = {"stdout": "", "stderr": "gh: Something went wrong while executing your query", "exit_code": 1}
-    outcomes = [failure, THREAD_RESOLVED] if recovers else [failure] * 4
+    outcomes = [failure, THREAD_RESOLVED] if recovers else [failure] * 2
     gh.respond("api graphql", threads_json(finding_pr), REPLY_ACCEPTED, *outcomes)
     if recovers:
         gh.append("api graphql", threads_json())
