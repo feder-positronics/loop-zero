@@ -303,8 +303,22 @@ def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = N
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+def _keyed_stage(config: Config, command: str) -> bool:
+    return command in config.inputs or "." in config.inputs.get("*", ())
+
+
+def receipt_inputs_match(config: Config, worktree: Path, report: CheckReport) -> bool:
+    try:
+        base = _check_base(config, worktree)
+        return all(result.input_key == _input_key(config, worktree, result.command, base)
+                   and result.input_key is not None
+                   for result in report.results if _keyed_stage(config, result.command))
+    except (SandboxUnavailable, OSError):
+        return False
+
+
 def _input_key(config: Config, worktree: Path, command: str, base: str) -> str | None:
-    if not base or (command not in config.inputs and "." not in config.inputs.get("*", ())):
+    if not base or not _keyed_stage(config, command):
         return None
     paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
     # Empty pathspecs must not accidentally mean the whole tree.

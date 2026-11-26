@@ -2991,6 +2991,35 @@ def test_ready_requires_receipt_from_current_check_environment(
     assert run(capsys, *args, "check")[0] == 1
 
 
+def test_ready_and_merge_reject_receipt_after_clean_checkout_rewrites_input(
+    wt, gh, capsys, head, tmp_path,
+):
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    path = wt / "feature.py"
+    command = """python3 -c 'from pathlib import Path; exit(13 in Path("feature.py").read_bytes())'"""
+    settings = tmp_path / "workflow.toml"
+    settings.write_text(WORKFLOW.replace('"echo ok"', json.dumps(command)).replace(
+        "[delivery]", f'[checks.inputs]\n{json.dumps(command)} = ["feature.py"]\n\n[delivery]',
+    ))
+    args = ("--config", str(settings))
+
+    assert b"\r" not in path.read_bytes()
+    assert run(capsys, *args, "check")[0] == 0
+    assert run(capsys, *args, "ready")[0] == 0
+
+    git(wt, "config", "core.autocrlf", "true")
+    path.unlink()
+    git(wt, "checkout-index", "-u", "--", path.name)
+    assert b"\r\n" in path.read_bytes()
+    assert head_of(wt) == head and not git(wt, "status", "--porcelain")
+
+    for action in ("ready", "merge"):
+        code, out, err = run(capsys, *args, action)
+        assert code == 1
+        assert "run loopzero check at this head" in out + err
+    assert run(capsys, *args, "check")[0] == 1
+
+
 @pytest.mark.parametrize("base_sensitive", [False, True])
 def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     if base_sensitive:

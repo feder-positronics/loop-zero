@@ -318,7 +318,8 @@ def _check_report_matches(report: CheckReport, wt: Path, config: Config, head: s
     return (report.head == head and not report.dirty
             and tuple(result.command for result in report.results) == config.checks
             and report.settings_sha256 is not None
-            and report.settings_sha256 == sandbox.settings_fingerprint(config, wt))
+            and report.settings_sha256 == sandbox.settings_fingerprint(config, wt)
+            and sandbox.receipt_inputs_match(config, wt, report))
 
 
 def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
