@@ -833,7 +833,7 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     lines: set[int] = set()
     first_added: int | None = None
     current = None
-    for raw in patch.splitlines():
+    for raw in patch.removesuffix("\n").split("\n"):
         hunk = _HUNK_RE.match(raw)
         if hunk:
             current = int(hunk.group(1))
@@ -1202,7 +1202,17 @@ def _check_signals(
             workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
         if _has_active_replacement(cr, workflows, head_sha):
             superseded.append(name)
-    return states, (*stale, *superseded), stale_verdicts, _check_suites_at_limit(runs)
+    capped = _check_suites_at_limit(runs)
+    _discard_unverified_successes(states, latest_status.keys() - latest_runs.keys(), capped)
+    return states, (*stale, *superseded), stale_verdicts, capped
+
+
+def _discard_unverified_successes(states: dict[str, str], status_only: set[str], capped: bool) -> None:
+    # A status-only success may hide a failed run outside the returned suites.
+    if capped:
+        for name in status_only:
+            if states[name] == "success":
+                del states[name]
 
 
 def _check_suites_at_limit(runs: list[dict]) -> bool:
@@ -1412,32 +1422,43 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
-def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
-    """Return False if the remote ref moved, or True if deleted or absent."""
-    ref = f"heads/{quote(branch, safe='/')}"
-    endpoint = f"repos/{repo}/git/ref/{ref}"
+def _remote_branch_head(endpoint: str) -> str | None:
     try:
         current = api_get(endpoint)
     except GhError as exc:
         if re.search(r"\bHTTP 404\b", exc.tail):
-            return True
+            return None
         raise
     obj = current.get("object") if isinstance(current, dict) else None
     sha = obj.get("sha") if isinstance(obj, dict) else None
     if not isinstance(sha, str) or not sha:
         raise GhError(("gh", "api", endpoint), "missing remote ref SHA")
-    if sha != expected_head:
-        return False
-    try:
-        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/{ref}")
-    except GhError as exc:
-        absent = re.search(r"\bHTTP 404\b", exc.tail) or (
-            re.search(r"\bHTTP 422\b", exc.tail)
-            and re.search(r"reference does not exist", exc.tail, re.IGNORECASE)
-        )
-        if not absent:
-            raise
-    return True
+    return sha
+
+
+def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
+    """Return False if the remote ref moved, or True if deleted or absent."""
+    endpoint = f"repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
+    current = _remote_branch_head(endpoint)
+    if current != expected_head:
+        return current is None
+    ref = f"refs/heads/{branch}"
+    argv = ("git", "-c", "credential.helper=!gh auth git-credential",
+            "push", f"--force-with-lease={ref}:{expected_head}",
+            f"https://github.com/{repo}.git", f":{ref}")
+    env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
+    with tempfile.TemporaryDirectory(prefix="loopzero-cleanup-") as scratch:
+        init = ("git", "init", "--bare", "--template=")
+        done = run(init, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
+        if done.exit_code != 0:
+            raise GhError(init, done.stderr or done.stdout)
+        done = run(argv, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
+    if done.exit_code == 0:
+        return True
+    current = _remote_branch_head(endpoint)
+    if current != expected_head:
+        return current is None
+    raise GhError(argv, done.stderr or done.stdout)
 
 
 def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:
