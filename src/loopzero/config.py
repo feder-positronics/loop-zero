@@ -89,12 +89,11 @@ def _has_replacement_refs(common_dir: Path) -> bool:
             return True
         return True
     try:
-        packed = (common_dir / "packed-refs").read_bytes()
+        return b" refs/replace/" in (common_dir / "packed-refs").read_bytes()
     except FileNotFoundError:
         return False
     except OSError:
         return True
-    return b" refs/replace/" in packed
 
 
 def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *, refresh: bool) -> tuple[Config, str]:
@@ -102,11 +101,8 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *, re
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
     ref = f"refs/remotes/origin/{branch}"
     if refresh:
-        fetched = _proc.run(
-            ["git", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
-             "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:{ref}"],
-            cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
-        )
+        fetched = run_git(worktree, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+                          "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:{ref}")
         if fetched.exit_code != 0:
             raise ConfigError(f"could not refresh origin/{branch}. {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
@@ -127,13 +123,12 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *, re
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
     try:
-        data = tomllib.loads(shown.stdout.encode("utf-8", errors="surrogateescape").decode("utf-8"))
+        text = shown.stdout.encode("utf-8", errors="surrogateescape").decode("utf-8")
+        return _build(tomllib.loads(text)), revision
     except UnicodeDecodeError as exc:
         raise ConfigError(f"{source}: {exc}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{source}: invalid TOML: {exc}. {hint}") from None
-    try:
-        return _build(data), revision
     except ConfigError as exc:
         raise ConfigError(f"{source}: {exc}. {hint}") from None
 
@@ -150,12 +145,12 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
         )
     branch = ref.removeprefix(prefix)
     policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh)
-    if policy.base_branch == branch:
-        return replace(policy, trusted_base_revision=revision)
-    base, revision = _remote_workflow(worktree, policy.base_branch, previous, refresh=refresh)
-    if base.base_branch != policy.base_branch:
-        raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
-    return replace(base, trusted_base_revision=revision)
+    if policy.base_branch != branch:
+        branch = policy.base_branch
+        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh)
+        if policy.base_branch != branch:
+            raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
+    return replace(policy, trusted_base_revision=revision)
 
 
 def _build(data: dict[str, Any]) -> Config:
@@ -222,21 +217,18 @@ def _build(data: dict[str, Any]) -> Config:
         if "/" in runner[0] and not Path(runner[0]).is_absolute():
             raise ConfigError("checks.runner executable paths must be absolute")
         kwargs["check_runner"] = runner
-    if "inputs" in checks:
-        inputs = {}
-        for key, value in checks["inputs"].items():
-            label = f'checks.inputs."{key}"'
-            if key != "*" and key not in commands:
-                raise ConfigError(f"{label} must exactly match a checks.commands entry")
-            inputs[key] = _strings(label, value)
-        kwargs["inputs"] = inputs
+    inputs = {}
+    for key, value in checks.get("inputs", {}).items():
+        label = f'checks.inputs."{key}"'
+        if key != "*" and key not in commands:
+            raise ConfigError(f"{label} must exactly match a checks.commands entry")
+        inputs[key] = _strings(label, value)
     for key, field, read in (("env_allowlist", "env_allowlist", _strings),
                              ("ro_paths", "sandbox_ro", _host_paths),
                              ("writable", "writable", _host_paths)):
         if key in checks:
             kwargs[field] = read(f"checks.{key}", checks[key])
-    if "env" in checks:
-        kwargs["env"] = _env_table(checks["env"])
+    env = _env_table(checks.get("env", {}))
     if "scratch" in checks:
         kwargs["scratch"] = _strings("checks.scratch", checks["scratch"])
         for entry in kwargs["scratch"]:
@@ -265,7 +257,7 @@ def _build(data: dict[str, Any]) -> Config:
         reviewer_ro_paths=reviewer_ro_paths,
         review_chunk_bytes=review_chunk_bytes,
         network=checks.get("network", False),
-        **kwargs,
+        inputs=inputs, env=env, **kwargs,
     )
 
 
@@ -323,8 +315,7 @@ def _env_table(table: dict[str, Any]) -> tuple[tuple[str, str], ...]:
 
 def _limits(table: dict[str, Any]) -> ResourceLimits:
     defaults = ResourceLimits()
-    allowed = tuple(defaults.__dict__)
-    _reject_unknown("checks.limits", table, allowed)
+    _reject_unknown("checks.limits", table, defaults.__dict__)
     values = defaults.__dict__ | table
     for name, value in values.items():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
