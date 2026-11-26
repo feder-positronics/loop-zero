@@ -148,11 +148,10 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 result = replace(result, input_key=key)
             if ordinal > len(preparations) or result.exit_code:
                 results.append(result)
-                if checkpoint is not None and result.input_key and result.exit_code == 0:
-                    # The receipt stays nonpassing until final validation.
-                    incomplete = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
-                    unvisited = (previous[stage] for stage in commands[ordinal:] if stage in previous)
-                    checkpoint(CheckReport(head, dirty, (*results, *unvisited, incomplete), settings_sha256))
+                _checkpoint_stage(
+                    checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
+                    previous, commands[ordinal:],
+                )
             if status:
                 status(f"stage {ordinal}/{len(commands)}: exit {result.exit_code} "
                        f"({result.duration_s:.1f}s)")
@@ -175,6 +174,21 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
 
 
 INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
+INCOMPLETE_CHECK = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
+
+
+def _checkpoint_stage(checkpoint: Callable[[CheckReport], None] | None,
+                      report: CheckReport, previous: dict[str, CheckResult],
+                      remaining: tuple[str, ...]) -> None:
+    if checkpoint is None:
+        return
+    stage = report.results[-1]
+    if stage.exit_code:
+        checkpoint(report)
+    elif stage.input_key:
+        # Even the last stage leaves a nonpassing receipt until final validation.
+        unvisited = tuple(previous[command] for command in remaining if command in previous)
+        checkpoint(replace(report, results=(*report.results, *unvisited, INCOMPLETE_CHECK)))
 
 
 def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
