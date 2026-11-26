@@ -7,8 +7,8 @@ description: Inspect live GitHub issues and PRs read-only for next work, backlog
 
 Answer the requested live-state question from current GitHub and repository
 evidence. Default to read-only: a pickup recommendation does not start work or
-create a branch/worktree. Use REST `gh api --method GET`; confirm repository and
-access. Inspect relevant issues, acceptance, comments, designs, linked PRs,
+create a branch/worktree. Confirm the repository and access, then read GitHub
+through REST. Inspect relevant issues, acceptance, comments, designs, linked PRs,
 checks and threads, plus local branches/worktrees for collisions.
 
 Separate observations from recommendations. If live access fails, label the

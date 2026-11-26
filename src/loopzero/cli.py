@@ -73,11 +73,14 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 # --------------------------------------------------------------------------- git / context
 
 
-def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
-    done = _proc.run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout)
+def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False) -> str:
+    done = _proc.run(
+        ["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout,
+        preserve_newlines=paths, encoding=sys.getfilesystemencoding() if paths else None,
+    )
     if done.exit_code != 0:
         raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
-    return done.stdout.strip()
+    return done.stdout if paths else done.stdout.strip()
 
 
 def _require_push_target(wt: Path, repo: str) -> None:
@@ -104,16 +107,17 @@ def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
 
 
 def _toplevel() -> Path:
-    return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel", paths=True).removesuffix("\n"))
 
 
 def _repo_root(wt: Path) -> Path:
     """The verified primary checkout or bare repository owning this linked worktree."""
-    first = _git(wt, "worktree", "list", "--porcelain", "-z").split("\0", 1)[0]
+    first = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0]
     if not first.startswith("worktree "):
         raise CliError("Git did not identify the primary worktree; refusing cleanup")
     root = Path(first.removeprefix("worktree "))
-    common = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    common = _git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)
+    common = Path(common.removesuffix("\n")).resolve()
     if root.resolve() == wt.resolve() or common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
     return root
@@ -928,7 +932,7 @@ def _repost_prefix(result: ReviewResult) -> str:
 
 def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
                     publisher: str, token: str) -> tuple[bool, list[dict]]:
-    with github.bounded_reads(time.monotonic() + 30, token=token):
+    with github.bounded_reads(time.monotonic() + 30, token=token, retry=True):
         reviews = _pr_reviews(config.repo, pr.number)
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
@@ -1334,7 +1338,7 @@ def _wait_with_deadline(
                                 allow_skipped=allow_skipped, initial=initial)
     deadline = started + timeout
     if time.monotonic() >= deadline:
-        _print_check_wait_timeout(pr)
+        _print_check_wait_timeout(pr, args)
         return None
     reported_timeout = False
     try:
@@ -1345,17 +1349,20 @@ def _wait_with_deadline(
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
-            _print_check_wait_timeout(pr)
+            _print_check_wait_timeout(pr, args)
         return None
     return waited
 
 
-def _print_check_wait_timeout(pr: github.PR) -> None:
-    if pr.mergeable == "UNKNOWN":
-        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
-    else:
-        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
-
+def _print_check_wait_timeout(pr: github.PR, args: argparse.Namespace | None) -> None:
+    waiting_for = "GitHub to compute mergeability" if pr.mergeable == "UNKNOWN" else "required checks"
+    command = ["loopzero", args.command if args else "ready", "--wait"]
+    if args and args.config:
+        command.insert(1, f"--config={args.config}")
+    print(
+        f"timed out waiting for {waiting_for} on {pr.head_sha[:12]}. "
+        f"Run `{shlex.join(command)}` to resume on this head."
+    )
 
 def _verify_wait_snapshot(
     args: argparse.Namespace | None, wt: Path, config: Config, head: str, current_head: str,
@@ -1434,7 +1441,7 @@ def _wait_for_checks(
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "rerun the same `--wait` command"
             )
-    _print_check_wait_timeout(current)
+    _print_check_wait_timeout(current, args)
     return None
 
 

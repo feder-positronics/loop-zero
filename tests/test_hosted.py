@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loopzero import github, hosted
+from loopzero import eligibility, github, hosted
 from loopzero.candidate import CandidateError, CandidateRaceError
 from tests import test_github as fixtures
 from tests.test_candidate import event as candidate_event
@@ -67,6 +67,14 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     return gh
 
 
+def written_statuses(publisher):
+    return [json.loads(call["--input"]) for call in publisher.calls if "--input" in call]
+
+
+def written_states(publisher):
+    return [status["state"] for status in written_statuses(publisher)]
+
+
 @pytest.mark.parametrize("case,blocker,status", [
     ("COMMENTED", "", "success"), ("APPROVED", "", "success"),
     ("DISMISSED", "", "pending"), ("PENDING", "", "pending"),
@@ -92,10 +100,20 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
         publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding",
                                                                          author="trusted-publisher")))
     assert hosted.main() == (1 if status == "failure" else 0)
-    statuses = [json.loads(c["--input"]) for c in publisher.calls if "--input" in c]
+    statuses = written_statuses(publisher)
     assert ([s["state"] for s in statuses] == ["pending", status]
             and all(s["context"] == "Loop-zero Eligibility" for s in statuses))
     assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
+
+
+def test_hosted_reviews_reject_a_repeated_full_page(publisher):
+    publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json()))
+    endpoint = f"api repos/{REPO}/pulls/7/reviews?per_page={github.PAGE}"
+    page = [{"id": i, "state": "COMMENTED"} for i in range(github.PAGE)]
+    for number in (1, 2):
+        publisher.respond(f"{endpoint}&page={number}", page)
+    with pytest.raises(github.GhError, match="GitHub repeated a full page"):
+        eligibility.evaluate(REPO, 7, HEAD, "main", ("trusted-publisher",))
 
 
 def test_merged_source_refresh_publishes_nothing(publisher):
@@ -141,7 +159,7 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
     else:
         with pytest.raises(hosted.LoopZeroError, match="confirm eligibility status publication"):
             hosted.main()
-    assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == ["pending", state]
+    assert written_states(publisher) == ["pending", state]
 
 
 @pytest.mark.parametrize("error", ["api", "recover", "head", "publication", "config", "before"])
@@ -160,13 +178,13 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
     if error in {"api", "recover", "before"}:
-        assert hosted.main() == (1 if error == "before" else 0) and sleeps == ([5] if error == "recover" else list(github.RETRY_DELAYS))
+        assert hosted.main() == (1 if error == "before" else 0) and sleeps == [5]
         assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error != "recover")
     else:
         with pytest.raises(hosted.LoopZeroError, match="invalid description" if error == "publication" else None):
             hosted.main()
     states = {"before": [], "config": [], "head": ["pending", "failure"], "api": ["pending"], "recover": ["pending", "success"]}
-    assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == states.get(error, ["pending", "pending"])
+    assert written_states(publisher) == states.get(error, ["pending", "pending"])
 
 
 @pytest.mark.parametrize("case,error,message", [
@@ -307,9 +325,9 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
     successful = max(0, 1000 - prior)
     publisher.respond(endpoint, *([{}] * successful), refused, refused)
     if prior >= 999:
-        statuses = [{"context": context, "state": "success"} for _ in range(prior)]
+        statuses = [{"id": i, "context": context, "state": "success"} for i in range(prior)]
         if prior == 999:
-            statuses.insert(0, {"context": context, "state": "pending"})
+            statuses.insert(0, {"id": prior, "context": context, "state": "pending"})
         pages = [statuses[i:i + 100] for i in range(0, 1001, 100)]
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *pages, *pages)
 
@@ -317,12 +335,9 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
         ready=True, reasons=(),
     ))
 
-    def written_states():
-        return [json.loads(call["--input"])["state"] for call in publisher.calls if "--input" in call]
-
     if prior == 998:
         assert hosted.main() == 0
-        assert written_states() == ["pending", "success"]
+        assert written_states(publisher) == ["pending", "success"]
         assert not any("/commits/" in " ".join(call["argv"]) for call in publisher.calls)
         return
 
@@ -330,9 +345,9 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
     expected = ["pending", "success"] if prior == 999 else ["pending"]
     with pytest.raises(github.GhError, match=message):
         hosted.main()
-    assert written_states() == expected
+    assert written_states(publisher) == expected
 
     with pytest.raises(github.GhError, match=message):
         hosted.main()
-    assert written_states() == [*expected, "pending"]
+    assert written_states(publisher) == [*expected, "pending"]
     assert capsys.readouterr().out == ""
