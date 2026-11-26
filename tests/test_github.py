@@ -690,7 +690,7 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     clock = [0.0]
-    monkeypatch.setattr(github.time, "time", lambda: clock[0])
+    monkeypatch.setattr(github, "_app_token_clock", lambda: clock[0])
     monkeypatch.setattr(github.time, "monotonic", lambda: 100.0)  # stopped during host suspend
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.respond("api repos/acme/widgets", {})
@@ -721,10 +721,10 @@ def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path
     helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    wall, real_run = [1_000_000.0], github.run
-    suspend = lambda: wall.append(wall.pop() + 3601)  # noqa: E731
-    monkeypatch.setattr(github.time, "time", lambda: wall[0])
-    monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), wall[0] == 1e6 and suspend())[0])
+    boot, real_run = [1_000_000.0], github.run
+    suspend = lambda: boot.append(boot.pop() + 3601)  # noqa: E731
+    monkeypatch.setattr(github, "_app_token_clock", lambda: boot[0])
+    monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), boot[0] == 1e6 and suspend())[0])
     monkeypatch.setattr(github, "_retry_sleep", lambda delay: suspend())
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.expect(["api", "repos/acme/widgets", "--include"], {})
