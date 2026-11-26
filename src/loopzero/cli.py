@@ -916,17 +916,23 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
                     if expected is None else "")
             raise CliError(f"conflicting or ambiguous review publication{hint}")
         comments = _rest_rows(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
-        if (any(c.get("start_line") is not None or c.get("start_side") is not None
-                or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
-                or (c.get("user") or {}).get("login", "").casefold() != publisher.casefold()
-                for c in comments)
-                or sorted((c.get("path"), c.get("body")) for c in comments)
-                != sorted((c.get("path"), c.get("body")) for c in expected["comments"])
-                or any((c.get("line") is not None or c.get("side") is not None)
-                       and not any((c.get("path"), c.get("body")) == (s.get("path"), s.get("body"))
-                                   and all(c.get(k) is None or c.get(k) == s.get(k) for k in ("line", "side"))
-                                   for s in expected["comments"]) for c in comments)):
-            raise CliError("review finding contents or locations differ from saved publication")
+        same_comments = (
+            not any(c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
+                    or (c.get("user") or {}).get("login", "").casefold() != publisher.casefold()
+                    for c in comments)
+            and sorted((c.get("path"), c.get("body")) for c in comments)
+            == sorted((c.get("path"), c.get("body")) for c in expected["comments"])
+        )
+        if not same_comments or any(
+            c.get("start_line") is not None or c.get("start_side") is not None
+            or ((c.get("line") is not None or c.get("side") is not None)
+                and not any((c.get("path"), c.get("body")) == (s.get("path"), s.get("body"))
+                            and all(c.get(k) is None or c.get(k) == s.get(k) for k in ("line", "side"))
+                            for s in expected["comments"])) for c in comments
+        ):
+            hint = ("; inline placement rules can differ across CLI revisions; "
+                    "use the publishing CLI revision to confirm the existing review" if same_comments else "")
+            raise CliError(f"review finding contents or locations differ from saved publication{hint}")
     if _pr_reviews(config.repo, pr.number) != reviews:
         raise CliError("review evidence changed during publication recovery")
     fresh = github.pr_view(config.repo, pr.number)
