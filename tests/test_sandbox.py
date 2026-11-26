@@ -313,7 +313,7 @@ def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypat
     diagnosis = str(caught.value)
     if denied:
         assert "namespace creation failed" in diagnosis and "exit 1" in diagnosis
-        assert "No permissions to create new namespace" not in diagnosis
+        assert "No permissions to create new namespace" in diagnosis
         assert "ask the host operator to allow user namespaces for bwrap" in diagnosis
     else:
         assert "bwrap binary missing" in diagnosis and "sudo apt install bubblewrap" in diagnosis
