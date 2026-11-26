@@ -13,7 +13,7 @@ import ssl
 import time
 import urllib.error
 import urllib.request
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -117,20 +117,14 @@ def _wait_to_retry(delay: float, deadline: float | None) -> bool:
     return deadline is None or time.monotonic() < deadline
 
 
-def _queue_read_failure(exc: Exception) -> tuple[str, bool]:
-    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
-        return "Mergify queue lookup returned no valid JSON", True
-    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-    return f"Mergify queue transport failed: {reason}", not isinstance(reason, ssl.SSLCertVerificationError)
-
-
 def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | None:
     """GET one documented endpoint below this repository's fixed Mergify API path."""
     if not suffix.startswith("/") or "://" in suffix or ".." in suffix:
         raise ValueError("Mergify API suffix must be a repository-relative absolute path")
     request = _api_request(repo, suffix)
-    for retry in (True, False):
-        delay = 2.0
+    retry = True
+    while True:
+        wait = None
         try:
             with _open(request) as response:
                 return json.load(response)
@@ -138,16 +132,20 @@ def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | N
             if exc.code == 404:
                 return None
             wait = github.retry_after(exc.headers.get("Retry-After", "")) if exc.headers else None
-            delay = max(delay, wait or 0.0)
             detail = f"Mergify queue lookup failed with HTTP {exc.code}" + (f"; Retry-After: {wait:g}s" if wait is not None else "")
             transient = exc.code >= 500 or exc.code == 429 or (exc.code == 403 and wait is not None)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError, http.client.IncompleteRead) as exc:
-            detail, transient = _queue_read_failure(exc)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            detail, transient = "Mergify queue lookup returned no valid JSON", True
+        except (OSError, http.client.IncompleteRead) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            detail = f"Mergify queue transport failed: {reason}"
+            transient = not isinstance(reason, ssl.SSLCertVerificationError)
         if not retry or not transient:
             raise MergifyError(detail)
-        if not _wait_to_retry(delay, deadline):
+        if not _wait_to_retry(max(2.0, wait or 0.0), deadline):
             raise MergifyError(f"{detail}; retry delay exceeds the wait budget")
-    return None
+        retry = False
+
 
 def _unmet_conditions(node: object) -> tuple[str, ...]:
     if not isinstance(node, dict) or node.get("match") is not False:
@@ -241,8 +239,7 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
     blob = github.api_get(path)
     try:
         if (blob["type"] != "file" or blob["encoding"] != "base64"
-                or not isinstance(blob["sha"], str) or len(blob["sha"]) != 40
-                or any(char not in "0123456789abcdef" for char in blob["sha"])
+                or not isinstance(blob["sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", blob["sha"])
                 or not isinstance(blob["content"], str) or len(blob["content"]) > 90000):
             return False
         document = yaml.load(base64.b64decode("".join(blob["content"].split()), validate=True),
@@ -334,13 +331,11 @@ class Departure:
 
 def _departure_payload(body: str, queue: str) -> dict:
     _, _, text = body.partition("-*- Mergify Payload -*-\n")
-    try:
+    with suppress(json.JSONDecodeError):
         payload = json.loads(text.partition("\n-*- Mergify Payload End -*-")[0])
-    except json.JSONDecodeError:
-        return {}
-    if (isinstance(payload, dict) and payload.get("version") == 1
-            and payload.get("state") == "dequeued" and payload.get("queue_rule_name") == queue):
-        return payload
+        if (isinstance(payload, dict) and payload.get("version") == 1
+                and payload.get("state") == "dequeued" and payload.get("queue_rule_name") == queue):
+            return payload
     return {}
 
 
