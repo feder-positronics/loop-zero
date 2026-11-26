@@ -37,11 +37,25 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 1
     try:
-        with github.api_error_diagnostics():
+        with github.api_error_diagnostics(), github.bounded_reads(float("inf"), token=None, retry=True):
             return _run(cfg)
     except (github.GhUnavailable, github.ProcTimeout) as exc:
-        print(f"Eligibility unconfirmed: GitHub evidence unavailable ({exc})", file=sys.stderr)
-        return 0
+        print(f"Eligibility unconfirmed before pending status publication: {exc}", file=sys.stderr)
+        return 1
+
+
+def _candidate_event(event: dict, head: str) -> bool:
+    event_pr = event.get("pull_request")
+    if not isinstance(event_pr, dict):
+        raise LoopZeroError("candidate eligibility requires a pull_request_target "
+                            "creation or head-update event")
+    if event.get("action") not in {"opened", "synchronize"}:
+        print("ignored candidate metadata event")
+        return False
+    event_head = event_pr.get("head")
+    if not isinstance(event_head, dict) or event_head.get("sha") != head:
+        raise LoopZeroError("candidate event head is no longer current")
+    return True
 
 
 def _run(cfg: Config) -> int:
@@ -55,17 +69,8 @@ def _run(cfg: Config) -> int:
                  or pr["user"]["login"] == "mergify[bot]")
     if not candidate and pr.get("merged") is True:
         return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
-    if candidate:
-        event_pr = event.get("pull_request")
-        if not isinstance(event_pr, dict):
-            raise LoopZeroError("candidate eligibility requires a pull_request_target "
-                                "creation or head-update event")
-        if event.get("action") not in {"opened", "synchronize"}:
-            print("ignored candidate metadata event")
-            return 0
-        event_head = event_pr.get("head")
-        if not isinstance(event_head, dict) or event_head.get("sha") != head:
-            raise LoopZeroError("candidate event head is no longer current")
+    if candidate and not _candidate_event(event, head):
+        return 0
     def publish(state: str, message: str) -> None:
         github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
     publish("pending", "Refreshing live source review evidence")
@@ -93,6 +98,9 @@ def _run(cfg: Config) -> int:
         if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
             message = "Awaiting trusted review of current source head"
             state = "pending"
+    except (github.GhUnavailable, github.ProcTimeout) as exc:
+        print(f"Eligibility pending: evidence unavailable ({exc})", file=sys.stderr)
+        return 0
     except Exception as exc:
         _mark_refresh_failed(publish, exc)
         raise
@@ -115,7 +123,7 @@ def _publish_verdict(repo: str, head: str, state: str, description: str) -> None
 
 
 def _mark_refresh_failed(publish: Callable[[str, str], None], exc: Exception) -> None:
-    if not isinstance(exc, (github.GhUnavailable, github.ProcTimeout, github.StatusLimitReached)):
+    if not isinstance(exc, github.StatusLimitReached):
         with suppress(Exception):
             publish("failure", "Eligibility refresh failed; inspect workflow logs")
 
