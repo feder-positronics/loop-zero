@@ -3102,15 +3102,19 @@ def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, co
                 "settings as ready, using a local coordinator for delegated stages." in out)
 
 
-@pytest.mark.parametrize("associations", [0, 100])
-def test_merge_missing_receipt_skips_remote_gates(wt, gh, capsys, head, associations):
+@pytest.mark.parametrize("failed_read", [None, 0, 1], ids=["no-receipt", "list-503", "detail-503"])
+def test_merge_missing_receipt_bounds_discovery(wt, gh, capsys, head, monkeypatch, failed_read):
     commit_mergify_configuration(wt)
     arm_pr(gh, head, isDraft=False)
     gh.respond(branch_head_key(), {"commit": {"sha": head}})
-    gh.respond(f"api repos/{REPO}/commits/{head}/pulls?per_page=100&page=1",
-               [{"head": {"ref": "lz/other"}}] * associations)
-    expect_cli(capsys, 1, "merge", "--wait", stderr_contains=("run loopzero check at this head",))
-    assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS[1:]
+    gh.respond(f"api repos/{REPO}/commits/{head}/pulls?per_page=100&page=1", [{"head": {"ref": "lz/other"}}] * 100)
+    requests, diagnostic = LOOKUP_CALLS[1:], "run loopzero check at this head"
+    if failed_read is not None:
+        gh.respond(" ".join(requests[failed_read]), {}, exit=1, stderr="HTTP 503")
+        monkeypatch.setattr(github, "_retry_sleep", lambda *_: pytest.fail("unexpected discovery retry"))
+        requests, diagnostic = requests[:failed_read + 1], "HTTP 503"
+    expect_cli(capsys, 1, "merge", "--wait", stderr_contains=(diagnostic,))
+    assert [call["argv"][:2] for call in gh.calls] == requests
     assert all("--method" not in call["argv"] and "--input" not in call["argv"] for call in gh.calls)
 
 
@@ -3136,17 +3140,6 @@ def test_readiness_wait_stops_before_next_read_when_receipt_fails(wt, gh, head, 
     code, out, err = run(capsys, command, "--wait=60")
     assert code == 1 and "run loopzero check at this head" in out + err
     assert calls_at_invalidation == [len(gh.calls)]
-
-
-@pytest.mark.parametrize("request_index", [0, 1])
-def test_invalid_receipt_discovery_does_not_retry(wt, gh, capsys, head, monkeypatch, request_index):
-    arm_pr(gh, head, isDraft=False)
-    requests = LOOKUP_CALLS[1:]
-    gh.respond(" ".join(requests[request_index]), {}, exit=1, stderr="HTTP 503")
-    monkeypatch.setattr(github, "_retry_sleep", lambda *_: pytest.fail("unexpected discovery retry"))
-    code, out, err = run(capsys, "merge", "--wait")
-    assert code == 1 and "HTTP 503" in out + err
-    assert [call["argv"][:2] for call in gh.calls] == requests[:request_index + 1]
 
 
 @pytest.fixture
