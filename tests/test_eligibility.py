@@ -38,6 +38,11 @@ def test_codex_evidence_projection_binds_marker_kind_evidence_and_commit(binding
     assert eligibility.review_projection(codex_review(**binding), HEAD, REPO, NUMBER) == (True, None)
 
 
+def test_lone_codex_evidence_line_is_present_but_never_evidence():
+    lone = {**codex_review(), "body": codex_review()["body"].splitlines()[1]}
+    assert eligibility.review_projection(lone, HEAD, REPO, NUMBER) == (True, None)
+
+
 def legacy_review(commit_id, reviewed=HEAD):
     return {"id": 2, "commit_id": commit_id, "user": {"login": "bot"}, "state": "APPROVED",
             "body": f"{cli.review_marker(reviewed, 'primary')}\n{SUMMARY}"}
