@@ -3172,10 +3172,11 @@ def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, 
     assert run(capsys, "ready")[0] == 0
 
 
-@pytest.mark.parametrize("change,exit_code", [("unrelated", 0), ("policy", 1), ("slow", 3)])
+@pytest.mark.parametrize("change,exit_code", [("plain", 0), ("unrelated", 0), ("policy", 1), ("slow", 3)])
 def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatch, tmp_path, change, exit_code):
     policy = WORKFLOW.replace("[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]')
-    publish_workflow(wt, policy)
+    if change != "plain":
+        publish_workflow(wt, policy)
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     external = tmp_path / "external"
     git(tmp_path, "clone", "-q", "--branch", "main", str(repo.parent / "origin.git"), str(external))
