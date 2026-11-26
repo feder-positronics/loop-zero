@@ -474,8 +474,10 @@ every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
 the authoritative `checks.json` receipt. Writers lock the task state directory
 while rechecking HEAD and atomically replacing the receipt from a synced sibling
-temporary file. Runners cannot select stages or
-mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
+temporary file. Successful keyed stages are checkpointed in the same receipt
+for reuse. The checkpoint cannot satisfy readiness before final worktree
+validation. Runners cannot select stages or mint receipts. Stage admission
+belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 
