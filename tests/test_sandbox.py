@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import itertools
 import json
 import os
@@ -816,6 +817,42 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     assert result["reused_from"] == original.head
     assert marker in result["tail"].splitlines()
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
+
+
+@pytest.mark.parametrize("error", [errno.E2BIG, errno.ENOENT])
+def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkeypatch, error):
+    command = "echo stage ran"
+    config = make_config(checks=(command,), inputs={command: ("README.md",)})
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    original = sandbox.run_checks(config, git_repo)
+    assert original.ok and not original.dirty
+    assert original.results[0].input_key
+    _save_report(git_repo, original)
+    assert sandbox.run_checks(config, git_repo).results[0].reused_from == fetched_base
+
+    run = sandbox._proc.run
+
+    def fail_fingerprint(argv, **kwargs):
+        if argv[0] == "git" and "diff-tree" in argv:
+            raise OSError(error, os.strerror(error))
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(sandbox._proc, "run", fail_fingerprint)
+    if error != errno.E2BIG:
+        with pytest.raises(OSError) as exc:
+            sandbox.run_checks(config, git_repo)
+        assert exc.value.errno == error
+        return
+
+    report = sandbox.run_checks(config, git_repo)
+    assert report.ok and not report.dirty
+    [result] = report.results
+    assert result.tail.strip() == "stage ran"
+    assert result.input_key is None and result.reused_from is None
+    assert _save_report(git_repo, report) is None
+    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
+    [saved] = receipt["results"]
+    assert saved.get("input_key") is None and saved.get("reused_from") is None
 
 
 def test_local_checks_run_fresh_without_a_base(git_repo, bwrap_log):
