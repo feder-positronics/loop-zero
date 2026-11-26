@@ -175,6 +175,36 @@ def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def conditional_replay(replay_gh, monkeypatch):
+    def install(*, etags=True):
+        monkeypatch.setenv("GH_TOKEN", "synthetic-token")
+        monkeypatch.setenv("GH_HOST", "github.com")
+        replay_run = github.run
+        observations = []
+
+        def run(argv, **kwargs):
+            result = replay_run(argv, **kwargs)
+            if argv[:2] != ["gh", "api"] or result.exit_code:
+                return result
+            endpoint = argv[2]
+            if endpoint != f"repos/{REPO}/pulls/7" and not (
+                endpoint.split("?")[0].endswith(("/reviews", "/check-runs", "/statuses"))
+            ):
+                return result
+            etag = f'"{hash(result.stdout)}"'
+            unchanged = etags and f"If-None-Match: {etag}" in argv
+            status = 304 if unchanged else 200
+            observations.append((endpoint, status))
+            header = f"ETag: {etag}\r\n" if etags else ""
+            body = "" if unchanged else result.stdout
+            return Completed(int(unchanged), f"HTTP/2 {status}\r\n{header}\r\n{body}", "", 0)
+
+        monkeypatch.setattr(github, "run", run)
+        return observations
+    return install
+
+
+@pytest.fixture
 def wt(repo: Path, git_seed: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path = cli.worktree.worktree_dir(repo, "t1")
     git(repo, "worktree", "add", "-q", str(path), "lz/t1")
@@ -2420,18 +2450,29 @@ def test_skipped_required_check_activates_only_on_ready(wt, gh, capsys, head, dr
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
-def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypatch, head):
+@pytest.mark.parametrize("mode", ["etag", "no-etag", "error"])
+def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypatch, head, conditional_replay, mode):
+    observations = conditional_replay(etags=mode != "no-etag")
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=True)
     skipped = [{"name": "checks", "status": "completed", "conclusion": "skipped"}]
     pending = [{"name": "checks", "status": "in_progress"}]
     success = [{"name": "checks", "status": "completed", "conclusion": "success"}]
-    arm_check_runs(gh, head, skipped, skipped, pending, success)
+    arm_check_runs(gh, head, skipped, pending, pending, pending, success)
+    gh.respond_pr_view(pr_json(headRefOid=head, isDraft=False))
     gh.respond("pr ready", "")
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
+    if mode == "error":
+        gh.fail(f"api repos/{REPO}/commits/{head}/statuses", "gh: Forbidden (HTTP 403)")
 
     code, out, err = run(capsys, "ready", "--wait")
 
+    if mode == "error":
+        assert code == 1 and "HTTP 403" in err
+        return
     assert (code, err) == (0, "")
+    statuses = [status for _, status in observations]
+    assert statuses == ([200] * 20 if mode == "no-etag" else
+                        [200] * 4 + [200, 304, 200, 304] + [304] * 8 + [304, 304, 200, 304])
     assert out.count("receipt accepted:") == 1
     assert without_accepted_receipt(out).splitlines() == [
         "marked ready; required check 'checks' is skipped",
@@ -2978,7 +3019,8 @@ def test_ready_wait_review_failure_freshness(
     )
 
 
-def test_ready_wait_stops_if_pr_head_moves(wt: Path, gh: FakeGh, capsys, monkeypatch, head) -> None:
+def test_ready_wait_stops_if_pr_head_moves(wt, gh, capsys, monkeypatch, head, conditional_replay):
+    observations = conditional_replay()
     body = "# T1\n\n## Review\n"
     gh.respond_pr_list([pr_json(headRefOid=head, body=body, isDraft=False)],
                [pr_json(headRefOid="f" * 40, body=body, isDraft=False)])
@@ -2992,6 +3034,7 @@ def test_ready_wait_stops_if_pr_head_moves(wt: Path, gh: FakeGh, capsys, monkeyp
     out = without_accepted_receipt(out)
     assert code == 1 and "waiting:" in out
     assert f"PR head changed while waiting: {head[:12]} to {'f' * 12}" in err
+    assert observations[-1] == (f"repos/{REPO}/pulls/7", 200)
 
 
 def test_ready_wait_reports_missing_checks_without_lifecycle_recovery(
@@ -4358,12 +4401,19 @@ def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, monkeypatch, c
     assert "lz/nested" not in git(repo, "branch", "--list", "lz/nested")
 
 
-def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev("f" * 40, "primary", login="x")] * 100)
-    gh.respond(reviews_key(2), [rev(head, "primary")])
-    gh.respond("pr ready", "")
-    code, out, _ = run(capsys, "ready")
-    assert code == 0 and out.endswith(f"ready: {URL}\n")
+def test_reviews_are_paginated(wt, gh, capsys, monkeypatch, head, conditional_replay):
+    observations = conditional_replay()
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False,
+                                      reviews=[rev("f" * 40, "primary", login="x")] * 100)
+    gh.respond(reviews_key(2), [rev(head, "primary")], [rev(head, "primary", state="DISMISSED")])
+    arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}],
+                   [{"name": "checks", "conclusion": "success"}])
+    monkeypatch.setattr(cli, "_sleep", lambda _: None)
+    code, out, err = run(capsys, "ready", "--wait")
+    assert code == 1 and "no review recorded" in out and not err
+    assert [(path, code) for path, code in observations if "/reviews?" in path] == [
+        (reviews_key(page).split()[1], status) for page, status in [(1, 200), (2, 200), (1, 304), (2, 200)]
+    ]
 
 
 @pytest.mark.parametrize("state,verdict,expected", [

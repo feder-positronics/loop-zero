@@ -190,7 +190,7 @@ def _rest_rows(endpoint: str, what: str) -> list[dict]:
     """Every row of a REST list, oldest first, following pages until a short one."""
     rows: list[dict] = []
     for page in range(1, 101):
-        batch = github.api_get(f"{endpoint}?per_page={PAGE}&page={page}")
+        batch = github.conditional_get(f"{endpoint}?per_page={PAGE}&page={page}")
         if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
             raise CliError(f"invalid GitHub {what} response")
         rows += batch

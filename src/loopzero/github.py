@@ -119,7 +119,7 @@ RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str | None, bool] | None] = ContextVar("github_reads", default=None)
 _api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
-_conditional_cache: ContextVar[dict[tuple[str, str], tuple[str, object]] | None] = (
+_conditional_cache: ContextVar[dict[tuple[str, str, int | None], tuple[str, object]] | None] = (
     ContextVar("github_conditional_cache", default=None)
 )
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
@@ -478,12 +478,12 @@ def _decode_json(out: str, args: tuple[str, ...], token: str) -> object:
                       token=token) from None
 
 
-def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
+def _iter_paged(endpoint: str, key: str = "check_runs", *, conditional: bool = False) -> Iterator[dict]:
     """Yield validated rows until the last page."""
     page = 1
     while True:
-        chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
-                         "-F", f"page={page}")
+        chunk = (conditional_get(endpoint, page=page) if conditional else
+                 _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}", "-F", f"page={page}"))
         if isinstance(chunk, dict):
             chunk = chunk.get(key)
         if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
@@ -494,8 +494,8 @@ def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
         page += 1
 
 
-def _paged(endpoint: str, key: str = "check_runs") -> list:
-    return list(_iter_paged(endpoint, key))
+def _paged(endpoint: str, key: str = "check_runs", *, conditional: bool = False) -> list:
+    return list(_iter_paged(endpoint, key, conditional=conditional))
 
 
 def _with_file(content: str) -> Path:
@@ -510,9 +510,11 @@ def api_get(endpoint: str) -> object:
     return _gh_json("api", endpoint)
 
 
-def conditional_get(endpoint: str) -> object:
+def conditional_get(endpoint: str, *, page: int | None = None) -> object:
     """Refresh a REST GET, reusing a body only after an authenticated 304."""
-    args = ("api", endpoint)
+    args = ("api", endpoint) if page is None else (
+        "api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}", "-F", f"page={page}",
+    )
     cache = _conditional_cache.get()
     if cache is None or os.environ.get("GH_HOST", "github.com") != "github.com":
         return _gh_json(*args)
@@ -526,7 +528,7 @@ def conditional_get(endpoint: str) -> object:
     if not credential:
         return _gh_json(*args)
 
-    key = (credential, endpoint)
+    key = (credential, endpoint, page)
     cached = cache.pop(key, None)
     headers = ("-H", f"If-None-Match: {cached[0]}") if cached else ()
     status, response_headers, body = _included_response(
@@ -621,7 +623,7 @@ def _pr_from_rest(data: object) -> PR:
 
 
 def _pr_detail(repo: str, number: int) -> tuple[PR, dict]:
-    data = api_get(f"repos/{repo}/pulls/{number}")
+    data = conditional_get(f"repos/{repo}/pulls/{number}")
     pr = _pr_from_rest(data)
     if pr.number != number:
         raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}"),
@@ -1194,7 +1196,7 @@ def _check_signals(
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, str | None]]] = {}
     latest_runs: dict[str, dict] = {}
-    runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
+    runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs", conditional=True)
     for cr in runs:
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
@@ -1207,7 +1209,7 @@ def _check_signals(
             )
         ]
     latest_status: dict[str, dict] = {}
-    for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
+    for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses", conditional=True):
         latest_status.setdefault(status["context"], status)
     for name, status in latest_status.items():
         signals.setdefault(name, []).append(
