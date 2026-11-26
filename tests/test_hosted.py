@@ -106,6 +106,24 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
 
 
+@pytest.mark.parametrize("settles", [True, False])
+def test_hosted_waits_for_same_head_mergeability(publisher, monkeypatch, settles):
+    review = {"state": "APPROVED", "commit_id": HEAD, "user": {"login": "trusted-publisher"},
+              "body": f"<!-- loopzero:review v=1 head={HEAD} kind=primary source=model -->\n**approve**"}
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [review])
+    unknown = fixtures.rest_pr_json(pr_json(mergeable="UNKNOWN"))
+    snapshots = [unknown, unknown, fixtures.rest_pr_json(pr_json())] if settles else [unknown]
+    publisher.respond(f"api repos/{REPO}/pulls/7", *snapshots)
+    delays = []
+    monkeypatch.setattr(eligibility, "sleep", delays.append)
+
+    assert hosted.main() == 0
+    assert delays == ([2] if settles else [2, 4, 8])
+    assert written_states(publisher) == ["pending", "success" if settles else "pending"]
+    if not settles:
+        assert written_statuses(publisher)[-1]["description"] == github.MERGEABILITY_PENDING
+
+
 def test_hosted_reviews_reject_a_repeated_full_page(publisher):
     publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json()))
     endpoint = f"api repos/{REPO}/pulls/7/reviews?per_page={github.PAGE}"

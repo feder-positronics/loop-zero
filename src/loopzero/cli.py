@@ -272,7 +272,7 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     return "delta", reviewed
 
 
-MERGEABILITY_PENDING = "GitHub is computing mergeability"
+MERGEABILITY_PENDING = github.MERGEABILITY_PENDING
 
 
 def _readiness(
@@ -331,8 +331,6 @@ def _readiness(
             result = dataclasses.replace(result, reasons=tuple(
                 exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
             ))
-    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
-        result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
     return result
 
 

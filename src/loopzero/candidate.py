@@ -219,6 +219,7 @@ def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
     return (
         source.get("state"),
         source.get("draft"),
+        source.get("mergeable"),
         source.get("body"),
         head.get("sha") if isinstance(head, dict) else None,
         base.get("ref") if isinstance(base, dict) else None,
