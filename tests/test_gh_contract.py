@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,38 @@ from tests.test_github import (
 )
 
 REAL_GH = shutil.which("gh")
+
+
+def test_api_removes_payload_when_staging_fails(tmp_path):
+    script = """
+import errno
+import resource
+import signal
+import tempfile
+
+from loopzero import github
+
+def unexpected_dispatch(*args, **kwargs):
+    raise AssertionError("failed payload must not be dispatched")
+
+github._gh_json = unexpected_dispatch
+tempfile.gettempdir()
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+_, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+resource.setrlimit(resource.RLIMIT_FSIZE, (0, hard))
+try:
+    github._api("repos/example/project/issues", {"body": "synthetic"})
+except OSError as exc:
+    assert exc.errno == errno.EFBIG
+else:
+    raise AssertionError("payload staging should fail")
+"""
+    done = subprocess.run(
+        [sys.executable, "-c", script], env={**os.environ, "TMPDIR": str(tmp_path)},
+        capture_output=True, text=True, check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert not list(tmp_path.glob("*.loopzero"))
 
 
 @pytest.fixture(scope="module")
