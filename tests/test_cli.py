@@ -24,6 +24,7 @@ from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
 from tests.test_github import (
     FakeGh,
+    branch_head_key,
     branch_history_key,
     closed_history_row,
     merge_json,
@@ -44,8 +45,10 @@ from tests.test_sandbox import FAKE_BWRAP, inject_check_timeout
 
 REPO = "acme/widgets"
 URL = f"https://github.com/{REPO}/pull/7"
-LOOKUP_CALLS = [["api", pr_list_key().split(" ", 1)[1]],
-                ["api", f"repos/{REPO}/pulls/7"]]
+BRANCH_READ = branch_head_key().split()
+PR_LIST_READ = pr_list_key().split()
+LOOKUP_CALLS = [BRANCH_READ, PR_LIST_READ, ["api", f"repos/{REPO}/pulls/7"]]
+HISTORY_CALLS = [BRANCH_READ, branch_history_key().split()]
 LOGIN = "lz-bot"
 WORKFLOW = f"""
 [repo]
@@ -323,7 +326,7 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, push
     if refresh_timeout:
         assert f"note: could not refresh PR checks: PATCH {endpoint} timed out" in err
     if pushed and not refresh_timeout:
-        body = json.loads(gh.calls[2]["--input"])["body"]
+        body = json.loads(gh.calls[len(LOOKUP_CALLS)]["--input"])["body"]
         assert body.count("## Validation") == 1
         assert f"Recorded for `{head_of(wt)[:12]}`" in body
         assert "- `echo ok`: exit 0" in body
@@ -391,7 +394,7 @@ def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, ca
     gh.respond_pr_list([pr_json(headRefOid=head, body=body)])
     before = len(gh.calls)
     assert run(capsys, command)[0] == 0
-    history = [["api", branch_history_key().split(" ", 1)[1]]] if command == "pr" else []
+    history = HISTORY_CALLS if command == "pr" else []
     assert [c["argv"][:2] for c in gh.calls[before:]] == history + LOOKUP_CALLS
 
 
@@ -432,7 +435,7 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
     gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=body)])
     code, out, err = run(capsys, command)
     assert code == exit_code and "malformed loopzero checks block" in err
-    history = [["api", branch_history_key().split(" ", 1)[1]]] if command == "pr" else []
+    history = HISTORY_CALLS if command == "pr" else []
     assert [c["argv"][:2] for c in gh.calls] == history + LOOKUP_CALLS
     if command == "check":
         assert out.endswith("PASS\n")
@@ -676,7 +679,7 @@ def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys,
     assert ("GitHub App installation" in err) == installation_hint
     if installation_hint:
         assert "rerun `loopzero review`" in err
-    assert [call["token"] or "" for call in gh.calls] == [token]
+    assert [call["token"] or "" for call in gh.calls] == [token, token]
     assert not (fake_bin / "claude.stdin").exists()
 
 
@@ -697,8 +700,9 @@ def test_pr_list_404_explains_app_installation(
     assert key.removeprefix("api ") in err and "gh: Not Found (HTTP 404)" in err
     assert '"message": "Not Found"' in err
     assert ("Check that the GitHub App installation includes this repository" in err) == use_app
+    token = "app-token" if use_app else "personal-token"
     assert [(call["argv"], call["token"]) for call in gh.calls] == [
-        ([*key.split(), "--include"], "app-token" if use_app else "personal-token"),
+        ([*BRANCH_READ, "--include"], token), ([*key.split(), "--include"], token),
     ]
     assert git(repo.parent / "origin.git", "branch", "--list", "lz/t1").strip() == ""
 
@@ -717,7 +721,7 @@ def test_review_pr_detail_404(gh, wt, monkeypatch, capsys, options):
     assert "branch" in err and "lz/t1" in err
     assert "rerun `" + " ".join(("loopzero", "review", *options)) + "`" in err
     assert [call["argv"] for call in gh.calls] == [
-        [*pr_list_key().split(), "--include"], ["api", endpoint, "--include"],
+        [*BRANCH_READ, "--include"], [*PR_LIST_READ, "--include"], ["api", endpoint, "--include"],
     ]
 
 
@@ -750,7 +754,8 @@ def test_pr_pushes_and_creates_draft(
     origin = repo.parent / "origin.git"
     assert git(origin, "rev-parse", branch).strip() == head
     assert [c["argv"][:2] for c in gh.calls] == [
-        history_key.split(), pr_list_key(branch).split(), ["api", f"repos/{REPO}/pulls"],
+        branch_head_key(branch).split(), history_key.split(),
+        branch_head_key(branch).split(), pr_list_key(branch).split(), ["api", f"repos/{REPO}/pulls"],
     ]
     create = gh.calls[-1]
     payload = json.loads(create["--input"])
@@ -917,9 +922,8 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     code, out, _ = run(capsys, "pr")
     assert code == 0 and out == URL + "\n"
-    assert [c["argv"][:2] for c in gh.calls] == [
-        ["api", branch_history_key().split(" ", 1)[1]], *LOOKUP_CALLS,
-                                                ["api", f"repos/{REPO}/pulls/7"]]
+    assert [c["argv"][:2] for c in gh.calls] == (
+        HISTORY_CALLS + LOOKUP_CALLS + [["api", f"repos/{REPO}/pulls/7"]])
     assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
@@ -1074,7 +1078,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
-    assert_git_cost(git_calls, 15, 2)
+    assert_git_cost(git_calls, 16, 2)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -1095,6 +1099,25 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert "primary review of the whole change" in policy and policy.encode("utf-8") not in header + diff
     updated = json.loads(gh.calls[-1]["--input"])["body"]
     assert f"- primary, claude, {head[:12]}, request_changes" in updated
+
+
+def test_overlapping_review_dispatches_and_publishes_once(wt, gh, fake_bin, capsys, monkeypatch):
+    prepare_review(wt, gh, fake_bin)
+    review = cli._run_review
+    dispatched, overlapping = [], []
+
+    def overlap(*args, **kwargs):
+        dispatched.append(args[2])
+        if len(dispatched) == 1:
+            overlapping.append(run(capsys, "review"))
+        return review(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_run_review", overlap)
+    assert run(capsys, "review")[0] == 0
+    assert len(dispatched) == 1
+    assert overlapping[0][0] == 1 and "review already running" in overlapping[0][2]
+    assert sum(call["argv"][1] == post_key().split()[1] and "--method" in call["argv"]
+               for call in gh.calls) == 1
 
 
 @pytest.mark.parametrize("refresh_fails", [False, True])
@@ -1686,7 +1709,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": publisher}}})
     assert run(capsys, "review")[0] == 0
-    assert len(gh.calls) == 7  # Includes the body refresh after review publication.
+    assert len(gh.calls) == 8  # Includes the body refresh after review publication.
     assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert not any("/files" in c["argv"][1] for c in gh.calls)
     assert posted_review(gh)["event"] == ("APPROVE" if publisher == LOGIN else "COMMENT")
@@ -2011,7 +2034,8 @@ def test_late_check_keeps_current_passing_receipt(wt, gh, capsys, monkeypatch):
     assert "receipt accepted:" in out
 
 
-def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, monkeypatch):
+@pytest.mark.parametrize("late_save", [False, True])
+def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, monkeypatch, late_save):
     run_checks = cli.sandbox.run_checks
     old_head = head_of(wt)
     receipt = wt / ".loopzero/checks.json"
@@ -2020,19 +2044,32 @@ def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, m
     assert run(capsys, "check")[0] == 0
     original_receipt = receipt.read_bytes()
 
+    save_report = cli._save_report
+
+    def advance_before_save(path, report):
+        nonlocal original_receipt
+        if report.head == old_head:
+            git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
+            assert run(capsys, "check")[0] == 0
+            original_receipt = receipt.read_bytes()
+        return save_report(path, report)
+
     def advance_after_checks(*args, **kwargs):
         report = run_checks(*args, **kwargs)
         assert report.ok
         git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
         return report
 
-    monkeypatch.setattr(cli.sandbox, "run_checks", advance_after_checks)
+    if late_save:
+        monkeypatch.setattr(cli, "_save_report", advance_before_save)
+    else:
+        monkeypatch.setattr(cli.sandbox, "run_checks", advance_after_checks)
     code, out, err = run(capsys, "check")
     assert code == 1
     assert "PASS" not in out
     assert "discarded" in err and old_head in err and head_of(wt) in err
     assert receipt.read_bytes() == original_receipt
-    assert refreshed == [old_head]
+    assert refreshed == ([old_head, head_of(wt)] if late_save else [old_head])
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -2920,7 +2957,7 @@ def test_merge_wait_times_out_on_pending_checks_with_exit_three(
     assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
-def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, head):
+def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, head, replay_gh):
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     clock = [1000.0]
     budgets = []
@@ -3964,7 +4001,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     if outcome == "timeout":
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
-        assert sum(c["argv"][:2] == LOOKUP_CALLS[0] for c in gh.calls) == 1
+        assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
     if outcome in {"merged", "already_merged", "worktree_removed"}:
@@ -4297,6 +4334,8 @@ def test_wait_raises_when_closed_unmerged_persists(monkeypatch) -> None:
 
 def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
     path = tmp_path / cli.CHECKS_FILE
+    monkeypatch.setattr(cli.worktree, "head", lambda _: next(heads))
+    heads = iter(("a" * 40, "b" * 40))
     cli._save_report(tmp_path, CheckReport("a" * 40, False, ()))
 
     def interrupt(staged, dest):
