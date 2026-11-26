@@ -272,6 +272,13 @@ path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Copy
 `~/.config/systemd/user/`, then run
 `systemctl --user enable --now ai-accounts.timer`.
 
+To review with a pinned CLI and managed credentials, set `PINNED_BIN` to the
+directory containing the pinned `loopzero` executable:
+
+```sh
+PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
+```
+
 - Claude accounts are long-lived tokens: run `claude setup-token` per account and
   pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
   `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
@@ -501,6 +508,12 @@ the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
 (the loop-zero checkout ref or installed package revision). Dispatch the
 eligibility workflow for the existing PR, or run the command below with its
 unchanged source SHA. The refreshed reader can use the approval already on GitHub.
+
+For inherited review coverage, advance both source and candidate workflow pins to
+a revision containing [23219dd3 (#1081)](https://github.com/feder-positronics/loop-zero/commit/23219dd39e641549164c346e137f4e09718115f6).
+The updated reader accepts an ancestor approval only across verified clean merges
+from the configured base. After deploying both pins, refresh eligibility for open
+sources judged by the older reader so their statuses reflect the updated policy.
 
 From a trusted base checkout, run:
 

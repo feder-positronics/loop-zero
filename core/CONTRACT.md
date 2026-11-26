@@ -183,7 +183,7 @@ pinned interpreter rather than altering code for an older version.
 Loop-zero serves internal projects only and does not target tamper resistance for outside users.
 Freeze new work on Codex evidence projections. Simplify or delete them when they break or obstruct delivery.
 
-- One primary and at most one delta per PR. After a base merge, the delta covers first-parent topic changes and
+- One primary and one ordinary delta per PR. After a base merge, a delta covers first-parent topic changes and
   edits to each automatic remerge. The reviewed commit must be on the first-parent history, and merged parents
   must come from the verified base. Unresolved primary findings still count under Blockers.
 - Default: one writing model family per PR, including delegates and repairs;
@@ -201,8 +201,8 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
   trailers, use the disclosed same-family fallback.
 - Batch substantive and mechanical repairs into one head for the delta.
   Preserve the approved head; optional suggestions do not justify edits.
-- After round two, the owner merges once every finding is fixed or rejected
-  with reasons and readiness passes, or splits the PR. A head that needs another review goes in a new PR. No escalation is required.
+- After an approved ordinary delta with blocking findings resolved, one more delta can review a suffix of verified
+  base merges containing a conflict. Otherwise, merge with readiness passing or split a head that needs more review.
 - After an approved primary or a delta review, take base changes by merging the
   base into the existing branch. Readiness and hosted eligibility can inherit
   coverage only across proven clean base merges. A request_changes primary
@@ -269,7 +269,8 @@ the failure. Exit 2 covers invalid arguments and sandbox unavailability in
 `check` or fresh `review`.
 
 Exit 3 means waiting or timeout. Review exits 4 when independent review is
-unavailable and 5 when changes are requested. Interruption exits 130.
+unavailable and 5 when changes are requested. SIGINT exits 130. SIGTERM is
+re-raised, yielding shell status 143 and subprocess return code `-15`.
 
 **Never pipe `loopzero`, even with pipefail**, because it can hide the verdict.
 Redirect stdout and stderr (e.g. `loopzero check >check.log 2>&1`) and read the

@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
+from urllib.parse import quote
 
 from loopzero import candidate as candidate_mod
 from loopzero import config, eligibility, github, mergify
@@ -28,9 +28,9 @@ def event_number(event: dict) -> int:
         value = prs[0].get("number")
     else:
         value = event.get("inputs", {}).get("pr", "")
-    if isinstance(value, bool) or not str(value).isdigit() or int(value) < 1:
-        raise LoopZeroError("refresh requires a positive PR number")
-    return int(value)
+    if not isinstance(value, bool) and str(value).isdigit() and (number := int(value)) > 0:
+        return number
+    raise LoopZeroError("refresh requires a positive PR number")
 
 
 def main() -> int:
@@ -71,10 +71,9 @@ def _run(cfg: Config) -> int:
     head = pr["head"]["sha"]
     candidate = (pr["head"]["ref"].startswith("mergify/merge-queue/")
                  or pr["user"]["login"] == "mergify[bot]")
-    if not candidate and pr.get("merged") is True:
+    active = _candidate_event(event, head) if candidate else pr.get("merged") is not True
+    if not active:
         return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
-    if candidate and not _candidate_event(event, head):
-        return 0
     def publish(state: str, message: str) -> None:
         github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
     publish("pending", "Refreshing live source review evidence")
@@ -88,10 +87,10 @@ def _run(cfg: Config) -> int:
                 if not result.ready:
                     raise _SourcePolicyRejection(f"source #{source_number}: " + "; ".join(result.reasons))
             candidate_mod.attest_candidate(
-                event,
+                event, base_branch=cfg.base_branch,
                 github_get=lambda path: github.api_get(path.lstrip("/")),
                 mergify_status=lambda owner, repo, branch: mergify.api_get(
-                    f"{owner}/{repo}", f"/merge-queue/status?branch={branch}"),
+                    f"{owner}/{repo}", f"/merge-queue/status?branch={quote(branch, safe='')}"),
                 source_policy=policy,
             )
             ready, message = True, "All attested candidate sources are reviewed"
@@ -110,7 +109,9 @@ def _run(cfg: Config) -> int:
         print(f"Eligibility pending: evidence unavailable ({exc})", file=sys.stderr)
         return 0
     except Exception as exc:
-        _mark_refresh_failed(publish, exc)
+        if not isinstance(exc, github.StatusLimitReached):
+            with suppress(Exception):
+                publish("failure", "Eligibility refresh failed; inspect workflow logs")
         raise
     _publish_verdict(cfg.repo, head, state, message[:140])
     print(message)
@@ -121,11 +122,10 @@ def _landed_before_publication(repo: str, number: int, head: str, snapshot: gith
     current = github.pr_view(repo, number)
     if current.head_sha != head:
         raise LoopZeroError("head changed before publication; refresh eligibility")
-    if snapshot is not None:
-        if current.state == "MERGED":
-            return True
-        if eligibility.source_fingerprint(current) != eligibility.source_fingerprint(snapshot):
-            raise LoopZeroError("source metadata changed before publication; refresh eligibility")
+    if snapshot is None or current.state == "MERGED":
+        return snapshot is not None
+    if eligibility.source_fingerprint(current) != eligibility.source_fingerprint(snapshot):
+        raise LoopZeroError("source metadata changed before publication; refresh eligibility")
     return False
 
 
@@ -140,12 +140,6 @@ def _publish_verdict(repo: str, head: str, state: str, description: str) -> None
             if github.status_matches(repo, head, context, state, description):
                 return
         raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
-
-
-def _mark_refresh_failed(publish: Callable[[str, str], None], exc: Exception) -> None:
-    if not isinstance(exc, github.StatusLimitReached):
-        with suppress(Exception):
-            publish("failure", "Eligibility refresh failed; inspect workflow logs")
 
 
 if __name__ == "__main__":
