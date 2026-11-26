@@ -165,51 +165,30 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
     return candidate_id, sorted(source_numbers), sorted(missing)
 
 
+def _repo_identity(repo: JsonObject) -> tuple[object, object]:
+    return repo.get("id"), repo.get("full_name")
+
+
 def _candidate_snapshot(
-    candidate: JsonObject,
-    *,
-    event_pr: JsonObject,
-    repository: JsonObject,
+    candidate: JsonObject, number: int, event_head: JsonObject, repository: JsonObject,
     expected_identity: tuple[object, object, object, object],
 ) -> None:
-    _require(
-        candidate.get("number") == event_pr.get("number"),
-        "GitHub returned the wrong candidate PR",
-    )
-    _require(candidate.get("state") != "closed", "Mergify candidate PR is superseded (closed)")
-    _require(candidate.get("state") == "open", "Mergify candidate PR is not open")
+    _require(candidate.get("number") == number, "GitHub returned the wrong candidate PR")
+    state = candidate.get("state")
+    state_error = "Mergify candidate PR is superseded (closed)" if state == "closed" else "Mergify candidate PR is not open"
+    _require(state == "open", state_error)
     _require(candidate.get("draft") is True, "Mergify candidate PR must be a draft")
-    _require(
-        _identity(candidate.get("user")) == expected_identity,
-        "Candidate author is not the verified Mergify GitHub App",
-    )
-    head = candidate.get("head")
-    event_head = event_pr.get("head")
-    base = candidate.get("base")
-    _require(
-        isinstance(head, dict) and isinstance(event_head, dict) and isinstance(base, dict),
-        "Candidate refs are missing",
-    )
-    _require(
-        head.get("sha") == event_head.get("sha"),
-        "Candidate head changed after the workflow event",
-    )
-    _require(
-        head.get("ref") == event_head.get("ref")
-        and isinstance(head.get("ref"), str)
-        and head["ref"].startswith(QUEUE_BRANCH_PREFIX),
-        "Mergify candidate has an unexpected head ref",
-    )
-    _require(
-        base.get("ref") == "main",
-        "Mergify candidate must target the real main branch",
-    )
-    expected_repo = (repository.get("id"), repository.get("full_name"))
+    _require(_identity(candidate.get("user")) == expected_identity,
+             "Candidate author is not the verified Mergify GitHub App")
+    head, base = candidate.get("head"), candidate.get("base")
+    _require(isinstance(head, dict) and isinstance(base, dict), "Candidate refs are missing")
+    _require(head.get("sha") == event_head.get("sha"), "Candidate head changed after the workflow event")
+    _require(head.get("ref") == event_head.get("ref"), "Mergify candidate has an unexpected head ref")
+    _require(base.get("ref") == "main", "Mergify candidate must target the real main branch")
+    expected_repo = _repo_identity(repository)
     for label, repo in (("head", head.get("repo")), ("base", base.get("repo"))):
-        _require(
-            isinstance(repo, dict) and (repo.get("id"), repo.get("full_name")) == expected_repo,
-            f"Mergify candidate {label} repository does not match this repository",
-        )
+        _require(isinstance(repo, dict) and _repo_identity(repo) == expected_repo,
+                 f"Mergify candidate {label} repository does not match this repository")
 
 
 def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
@@ -263,8 +242,7 @@ def _attest_source(
     _require(
         base.get("ref") == "main"
         and isinstance(base_repo, dict)
-        and (base_repo.get("id"), base_repo.get("full_name"))
-        == (repository.get("id"), repository.get("full_name")),
+        and _repo_identity(base_repo) == _repo_identity(repository),
         f"source PR #{number} does not target this repository's main branch",
     )
     source_sha = head.get("sha")
@@ -503,8 +481,7 @@ def _attest_candidate_once(
     candidate_path = f"/repos/{full_name}/pulls/{candidate_number}"
     def recheck_candidate(message: str = "GitHub candidate lookup returned an invalid payload") -> None:
         candidate = _object(github_get(candidate_path), message)
-        _candidate_snapshot(candidate, event_pr=event_pr, repository=repository,
-                            expected_identity=expected_identity)
+        _candidate_snapshot(candidate, candidate_number, event_head, repository, expected_identity)
 
     recheck_candidate()
 
@@ -590,6 +567,4 @@ def _attest_candidate_once(
             f"source PR #{number} metadata changed during attestation",
             CandidateRaceError,
         )
-    return [
-        {"number": number, "head_sha": source_snapshots[number][0]} for number in first_lineage[1]
-    ]
+    return [{"number": number, "head_sha": sha} for number, (sha, _) in source_snapshots.items()]
