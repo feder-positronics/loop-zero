@@ -390,7 +390,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout, scoped=read_only))
+                       timeout=_read_timeout(timeout, scoped=read_only), encoding="utf-8")
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
@@ -1314,29 +1314,30 @@ def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_
         producer = find_producer(_paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
     if producer is None or not producer.get("workflow_id"):
         return False
-    created = producer.get("created_at")
+    created = readiness_timestamp(producer.get("created_at"))
     for workflow in workflows:
         if (workflow.get("head_sha") != head_sha
                 or workflow.get("workflow_id") != producer["workflow_id"]
                 or workflow.get("status") not in _ACTIVE_WORKFLOWS):
             continue
         if workflow.get("id") == producer.get("id"):
-            if (workflow.get("run_attempt", 1) > 1 and check.get("completed_at")
-                    and workflow.get("run_started_at")
-                    and workflow["run_started_at"] > check["completed_at"]):
+            if (workflow.get("run_attempt", 1) > 1
+                    and (completed := readiness_timestamp(check.get("completed_at"))) is not None
+                    and (started := readiness_timestamp(workflow.get("run_started_at"))) is not None
+                    and started > completed):
                 return True
-        elif (created and isinstance(producer.get("id"), int)
-              and workflow.get("created_at") and isinstance(workflow.get("id"), int)
-              and (workflow["created_at"], workflow["id"]) > (created, producer["id"])):
+        elif (created is not None and isinstance(producer.get("id"), int)
+              and (replacement := readiness_timestamp(workflow.get("created_at"))) is not None
+              and isinstance(workflow.get("id"), int)
+              and (replacement, workflow["id"]) > (created, producer["id"])):
             return True
     return False
 
 
-def _check_run_order(run: dict) -> tuple[int, str]:
+def _check_run_order(run: dict) -> tuple[int, bool, ReadinessTimestamp | None]:
     run_id = run.get("id")
-    started_at = run.get("started_at")
-    return (run_id if isinstance(run_id, int) else -1,
-            started_at if isinstance(started_at, str) else "")
+    started_at = readiness_timestamp(run.get("started_at"))
+    return run_id if isinstance(run_id, int) else -1, started_at is not None, started_at
 
 
 def _aggregate_signal(states: list[str]) -> str:
@@ -1522,7 +1523,7 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     current = _remote_branch_head(endpoint)
     if current != expected_head:
         return current is None
-    ref = f"refs/heads/{branch}"
+    ref = os.fsdecode(f"refs/heads/{branch}".encode("utf-8", "surrogateescape"))
     argv = ("git", "-c", "credential.helper=!gh auth git-credential",
             "push", f"--force-with-lease={ref}:{expected_head}",
             f"https://github.com/{repo}.git", f":{ref}")

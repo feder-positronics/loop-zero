@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -28,8 +29,8 @@ def pr_list_key(branch: str = "lz/t1", state: str = "open") -> str:
     return (f"api repos/{REPO}/pulls?state={state}&head={head}"
             "&sort=created&direction=desc&per_page=1")
 
-def branch_history_key(page: int = 1) -> str:
-    head = quote(f"{REPO.split('/')[0]}:lz/t1", safe="")
+def branch_history_key(page: int = 1, *, branch: str = "lz/t1") -> str:
+    head = quote(f"{REPO.split('/')[0]}:{branch}", safe="")
     return (f"api repos/{REPO}/pulls?state=closed&head={head}"
             f"&sort=created&direction=desc&per_page=100&page={page}")
 
@@ -473,6 +474,7 @@ def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: s
     findings = (
         Finding("important", path, 2, "In diff", ""),
         Finding("critical", path, 3, "Outside diff", ""),
+        Finding("suggestion", path, 3, "Off-diff suggestion", ""),
     )
 
     github.post_review(REPO, 7, HEAD, review(findings=findings))
@@ -481,6 +483,7 @@ def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: s
     comments = comments_posted(gh)
     assert [(c["path"], c["line"]) for c in comments] == [(path, 2), (path, 1)]
     assert "Reviewer location src/a.py:3 is not in the diff" in comments[1]["body"]
+    assert "Off-diff suggestion" in review_payloads(gh)[0]["body"]
 
 
 @pytest.mark.parametrize(("files", "severity", "anchor"), [
@@ -692,13 +695,12 @@ def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
         github.pr_for_branch(REPO, "lz/x")
 
 
-def test_api_get_and_login_helpers(gh: FakeGh) -> None:
-    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
-    gh.respond("api repos/acme/widgets", {"default_branch": "main"})
-    assert github.api_get("repos/acme/widgets") == {"default_branch": "main"}
-    assert gh.argv(0) == ["api", "repos/acme/widgets", "--include"]
-    assert github.login() == "bot-user"
-    gh.respond("api graphql viewer", {"data": {"viewer": {}}})
+def test_api_get_and_login_helpers(gh: FakeGh, monkeypatch) -> None:
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "ascii")
+    gh.respond("api graphql viewer", '{"data":{"viewer":{"login":"Łódź"}}}', {"data": {"viewer": {}}})
+    gh.respond("api repos/acme/widgets", '{"default_branch":"Łódź"}')
+    assert (github.api_get("repos/acme/widgets"), gh.argv(0)) == ({"default_branch": "Łódź"}, ["api", "repos/acme/widgets", "--include"])
+    assert github.login() == "Łódź"
     with pytest.raises(github.GhError, match="no login"):
         github.login()
 
@@ -840,15 +842,24 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
     assert pages == ["page=1", "page=2"]
 
 
-@pytest.mark.parametrize(("runs", "expected"), [
-    ([check_run("skipped", id=10), check_run("success", id=11)], {"checks": "success"}),
-    ([check_run(None, id=20, status="in_progress"), check_run("success", id=19)], {"checks": "pending"}),
-    ([check_run("success", id=30), check_run("failure", name="lint", id=31)],
-     {"checks": "success", "lint": "failure"}),
-    ([check_run("failure", id=40, started_at="2026-09-18T01:00:00Z"),
-      check_run("success", id=40, started_at="2026-09-18T02:00:00Z")], {"checks": "success"}),
-], ids=["stale-skipped", "newer-pending", "distinct-names", "timestamp-tie"])
-def test_check_runs_ordering(gh: FakeGh, runs: list[dict], expected: dict) -> None:
+@pytest.mark.parametrize("rows,expected", [
+    ([(10, "checks", None, "skipped"), (11, "checks", None, "success")], {"checks": "success"}),
+    ([(20, "checks", "01:00:00Z", None), (19, "checks", "02:00:00Z", "success")], {"checks": "pending"}),
+    ([(30, "checks", None, "success"), (31, "lint", None, "failure")], {"checks": "success", "lint": "failure"}),
+    ([(40, "checks", "01:00:00Z", "failure"), (40, "checks", "02:00:00Z", "success")], {"checks": "success"}),
+    ([(7, "checks", "12:00:00Z", "success"), (7, "checks", "12:00:00.250Z", "failure")], {"checks": "failure"}),
+    ([(None, "checks", "12:00:00Z", "success"), (None, "checks", "09:00:01-03:00", "failure")], {"checks": "failure"}),
+    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "14:00:00+02:00", "success")], {"checks": "failure"}),
+    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "23:00:00+00:99", "success")], {"checks": "failure"}),
+    ([(None, "checks", None, "failure"), (None, "checks", "23:00:00", "success")], {"checks": "failure"}),
+], ids=[
+    "stale-skipped", "id-before-time", "distinct-names", "timestamp-tie", "same-id-fraction",
+    "missing-ids-offset", "equal-instants", "invalid-loses-to-valid", "unusable-times-tie",
+])
+def test_check_runs_ordering(gh: FakeGh, rows: list[tuple], expected: dict) -> None:
+    runs = [check_run(conclusion, name=name, status="completed" if conclusion else "in_progress",
+                      started_at=stamp and f"2026-09-23T{stamp}", **({"id": number} if number is not None else {}))
+            for number, name, stamp, conclusion in rows]
     arm_check_pages(gh, {"check_runs": runs})
     assert github._check_signals(REPO, HEAD)[0] == expected
 
@@ -980,13 +991,16 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh, failure, wait, grace) -
 @pytest.mark.parametrize("check,producer,replacement,statuses,waitable", [
     *(pytest.param(
         failed_check(failure, id=100, started_at="2026-09-23T21:53:00Z", completed_at="2026-09-23T21:54:41Z"),
-        producing_run(), replacement_run() | changes, [], not changes, id=case,
-    ) for case, failure, changes in (
-        ("failed", "failure", {}), ("cancelled", "cancelled", {}),
-        ("different-workflow", "failure", {"workflow_id": 8}),
-        ("different-head", "failure", {"head_sha": "b" * 40}),
-        ("completed", "failure", {"status": "completed"}),
-        ("older", "failure", {"created_at": "2026-09-23T21:52:00Z"}),
+        producing_run(), replacement_run() | changes, [], waitable, id=case,
+    ) for case, failure, changes, waitable in (
+        ("failed", "failure", {}, True), ("cancelled", "cancelled", {}, True),
+        ("different-workflow", "failure", {"workflow_id": 8}, False),
+        ("different-head", "failure", {"head_sha": "b" * 40}, False),
+        ("completed", "failure", {"status": "completed"}, False),
+        ("older", "failure", {"created_at": "2026-09-23T21:52:00Z"}, False),
+        ("offset-tie", "failure", {"created_at": "2026-09-23T22:53:00+01:00", "id": 0}, False),
+        ("newer-fraction", "failure", {"created_at": "2026-09-23T21:53:00.250Z"}, True),
+        ("invalid-creation", "failure", {"created_at": "invalid"}, False),
     )),
     pytest.param(failed_check(id=100), producing_run(created_at=replacement_run()["created_at"]),
                  replacement_run(), [], True, id="same-second-newer-run"),
@@ -1060,13 +1074,14 @@ def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
 
 
 @pytest.mark.parametrize("started,waitable", [
-    ("2026-09-23T21:55:00Z", True), ("2026-09-23T21:54:00Z", False),
+    ("21:55:00Z", True), ("21:54:00Z", False), ("21:54:41.250Z", True),
+    ("22:54:41+01:00", False), ("23:54:40.999+02:00", False), ("invalid", False), (None, False),
 ])
 def test_readiness_rerun_attempt_requires_start_after_old_failure(
-    gh: FakeGh, started: str, waitable: bool
+    gh: FakeGh, started: str | None, waitable: bool
 ) -> None:
     arm_workflow_check(gh, failed_check(id=100, completed_at="2026-09-23T21:54:41Z"))
-    arm_workflow_runs(gh, producing_run(status="in_progress", run_attempt=2, run_started_at=started))
+    arm_workflow_runs(gh, producing_run(status="in_progress", run_attempt=2, run_started_at=started and f"2026-09-23T{started}"))
     result = readiness(workflow_wait=True)
     assert result.waitable_failures == (result.reasons if waitable else ())
 

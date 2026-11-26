@@ -222,11 +222,8 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
     if set(payload) != {"verdict", "findings"}:
         raise RunnerMalformedOutput(f"{family}: review has unexpected or missing keys", diagnostic)
     verdict, items = payload["verdict"], payload["findings"]
-    if (
-        not isinstance(verdict, str)
-        or verdict not in ("approve", "request_changes")
-        or not isinstance(items, list)
-    ):
+    if (not isinstance(verdict, str) or verdict not in ("approve", "request_changes")
+            or not isinstance(items, list)):
         raise RunnerMalformedOutput(f"{family}: review lacks verdict/findings", diagnostic)
     findings: list[Finding] = []
     for item in items:
@@ -245,9 +242,8 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
         findings.append(Finding(**item))
     if any(f.severity in BLOCKING for f in findings):
         verdict = "request_changes"
-    return ReviewResult(
-        family=family, head=head, kind=kind, verdict=verdict, findings=tuple(findings), raw=raw
-    )
+    return ReviewResult(family=family, head=head, kind=kind, verdict=verdict,
+                        findings=tuple(findings), raw=raw)
 
 
 def _run(
@@ -295,10 +291,6 @@ def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Conf
     )
 
 
-def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
-    return (cwd / _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag, paths=True)).resolve()
-
-
 def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str, paths: bool = False) -> str:
     run = _proc.run_git_paths if paths else _proc.run
     done = run(["git", *args], cwd=cwd, env_allowlist=allowlist, timeout=30)
@@ -308,13 +300,18 @@ def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str, p
 
 
 def _git_dirs(cwd: Path, env_allowlist: tuple[str, ...]) -> tuple[Path, Path]:
-    argv = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir"]
+    flags = ("--git-common-dir", "--git-dir")
+    argv = ["git", "rev-parse", "--path-format=absolute", *flags]
     done = _proc.run_git_paths(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=30)
     paths = [Path(path) for path in done.stdout.split("\n")]
     if done.exit_code == 0 and len(paths) == 2 and all(path.is_absolute() for path in paths):
         return paths[0].resolve(), paths[1].resolve()
     # A path may contain a newline, which makes the combined output ambiguous.
-    return _git_dir(cwd, "--git-common-dir", env_allowlist), _git_dir(cwd, "--git-dir", env_allowlist)
+    common, checkout = (
+        (cwd / _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag, paths=True)).resolve()
+        for flag in flags
+    )
+    return common, checkout
 
 
 def _review_binary(family: str) -> Path:
@@ -539,19 +536,21 @@ def _settings(value: object) -> dict[str, str | None]:
     return {key: _setting(fields.get(key)) for key in ("model", "effort")}
 
 
+def _read_envelopes(raw, loads=json.loads):
+    decoded = loads(raw)
+    return decoded if isinstance(decoded, list) else [decoded]
+
+
 def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None]]]:
     """Keep native claims, launch configuration and optional requests distinct."""
     try:
-        decoded = json.loads(result.raw)
-        envelopes = decoded if isinstance(decoded, list) else [decoded]
+        envelopes = _read_envelopes(result.raw)
     except (TypeError, ValueError):
         envelopes = []
     if len(envelopes) != result.chunk_count:
         envelopes = [{}] * result.chunk_count
-    requested = result.provenance.get("requested_settings", [])
-    requested = requested if isinstance(requested, list) else []
-    configured = result.provenance.get("configured_settings", [])
-    configured = configured if isinstance(configured, list) else []
+    fields = (result.provenance.get(key) for key in ("requested_settings", "configured_settings"))
+    requested, configured = (value if isinstance(value, list) else [] for value in fields)
     settings = []
     for index, envelope in enumerate(envelopes):
         envelope = envelope if isinstance(envelope, dict) else {}
@@ -560,11 +559,10 @@ def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None
             usage = envelope.get("modelUsage")
             models = [key for key in usage if _setting(key)] if isinstance(usage, dict) else []
             reported = {"model": ", ".join(models[:8]) or None, "effort": None}
+            pinned = configured[index] if index < len(configured) else None
         else:
             reported = _settings(envelope.get("reported_settings"))
-        pinned = envelope.get("configured_settings")
-        if result.family == "claude":
-            pinned = configured[index] if index < len(configured) else None
+            pinned = envelope.get("configured_settings")
         settings.append({"configured": _settings(pinned), "requested": _settings(request),
                          "reported": reported})
     return settings
@@ -644,9 +642,7 @@ def _valid_codex_evidence(value):
     }
     if not isinstance(value, dict) or set(value) != fields:
         return False
-    if (
-        type(value["version"]) is not int
-        or value["version"] != 1
+    if (type(value["version"]) is not int or value["version"] != 1
         or value["family"] != "codex"
         or not isinstance(value["repo"], str)
         or len(value["repo"]) > 256
@@ -663,8 +659,7 @@ def _valid_codex_evidence(value):
         or type(value["complete"]) is not bool
         or not _bounded_int(value["chunk_count"])
         or not isinstance(value["calls"], list)
-        or len(value["calls"]) != value["chunk_count"]
-    ):
+        or len(value["calls"]) != value["chunk_count"]):
         return False
     sessions, ranges = set(), set()
     for index, call in enumerate(value["calls"], 1):
@@ -673,17 +668,13 @@ def _valid_codex_evidence(value):
         settings_keys = ("requested", "reported", "configured") if "configured" in call else ("requested", "reported")
         event_keys = ("head_event", "diff_event") if call.get("inspection") == "verified" else ()
         keys = {"index", "session", "fatal", "inspection", "base", "diff_sha256", *settings_keys, *event_keys}
-        if (
-            set(call) != keys
-            or not _bounded_int(call["index"])
-            or call["index"] != index
+        if (set(call) != keys or not _bounded_int(call["index"]) or call["index"] != index
             or not _identifier(call["session"])
             or call["session"] in sessions
             or call["fatal"] not in {"present", "absent", "unknown"}
             or call["inspection"] not in {"verified", "unknown"}
             or not _hex(call["base"], 40)
-            or not _hex(call["diff_sha256"], 64)
-        ):
+            or not _hex(call["diff_sha256"], 64)):
             return False
         sessions.add(call["session"])
         ranges.add((call["base"], call["diff_sha256"]))
@@ -839,12 +830,11 @@ def _native_inspection(envelope, context):
 def _codex_evidence(result):
     """Pure extraction from complete normalized raw; caller/model summaries are never inputs."""
     try:
-        decoded = _evidence_json(result.raw)
+        envelopes = _read_envelopes(result.raw, _evidence_json)
     except ValueError:
         if result.provenance:
             raise RunnerBadOutput("codex: malformed complete native raw") from None
         return None  # historical transport-only rendering, never native execution evidence
-    envelopes = decoded if isinstance(decoded, list) else [decoded]
     if all(isinstance(item, dict) and "review_context" not in item for item in envelopes):
         return None  # valid legacy native receipt: ordinary UNKNOWN, not retrospective failure
     if len(envelopes) != result.chunk_count:
@@ -879,12 +869,8 @@ def _codex_evidence(result):
         ):
             raise RunnerBadOutput("codex: inconsistent evidence context/chunk order")
         session, events = envelope.get("session_id"), envelope.get("events")
-        if (
-            not _identifier(session)
-            or session in sessions
-            or not isinstance(events, list)
-            or not events
-        ):
+        if (not _identifier(session) or session in sessions
+                or not isinstance(events, list) or not events):
             raise RunnerBadOutput("codex: missing or duplicate native session")
         sessions.add(session)
         if (
@@ -1002,25 +988,13 @@ def _codex_provenance(
     events = _json_lines(stdout)
     if codex_fatal_startup({"type": "codex_exec_result", "events": events}):
         raise RunnerBadOutput("codex: fatal Code Mode startup failure", _tail(stdout))
-    session_id = next(
-        (
-            str(event[key])
-            for event in events
-            for key in ("thread_id", "session_id")
-            if isinstance(event.get(key), str) and event[key]
-        ),
-        None,
-    )
+    ids = (event.get(key) for event in events for key in ("thread_id", "session_id"))
+    session_id = next((str(value) for value in ids if isinstance(value, str) and value), None)
     usage = next((event["usage"] for event in reversed(events)
                   if isinstance(event.get("usage"), dict)), None)
-    session_match = re.search(
-        r"(?:session|thread)(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{6,})", stderr,
-        re.IGNORECASE,
-    )
-    tokens_match = re.search(
-        r"tokens used\s*(?:[:=]|\r?\n)\s*([0-9][0-9,]*)", stderr,
-        re.IGNORECASE,
-    )
+    session_match = re.search(r"(?:session|thread)(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{6,})",
+                              stderr, re.IGNORECASE)
+    tokens_match = re.search(r"tokens used\s*(?:[:=]|\r?\n)\s*([0-9][0-9,]*)", stderr, re.IGNORECASE)
     session_id = session_id or (session_match.group(1) if session_match else None)
     usage = usage or ({"total_tokens": int(tokens_match.group(1).replace(",", ""))}
                       if tokens_match else None)
@@ -1036,17 +1010,11 @@ def _codex_provenance(
             and [event.get("thread_id") for event in events if event.get("type") == "thread.started"] == [session_id]):
         claims = _codex_rollout_settings(home, session_id)
     envelope = {
-        "type": "codex_exec_result",
-        "session_id": session_id,
-        "token_usage": usage,
-        "final_message": message,
-        "events": events,
-        "reported_settings": claims,
+        "type": "codex_exec_result", "session_id": session_id, "token_usage": usage,
+        "final_message": message, "events": events, "reported_settings": claims,
     }
     provenance = {
-        "family": "codex",
-        "session_id": session_id,
-        "session_ids": [session_id],
+        "family": "codex", "session_id": session_id, "session_ids": [session_id],
         "token_usage": usage,
     }
     return provenance, json.dumps(envelope, separators=(",", ":"))
@@ -1156,7 +1124,8 @@ def _review_codex(
         cli_version = _observe_codex_version(binary, cwd, config.env_allowlist)
         ignore_user_config = _codex_supports_ignore_user_config(binary, cwd, config.env_allowlist)
         argv = [
-            str(binary), "exec", "-c", "developer_instructions=" + json.dumps(policy, ensure_ascii=False),
+            *prefix, str(binary), "exec",
+            "-c", "developer_instructions=" + json.dumps(policy, ensure_ascii=False),
             *(["-m", model] if model else []),
             *(["-c", f"model_reasoning_effort={effort}"] if effort else []),
             *(["--ignore-user-config"] if ignore_user_config else []),
@@ -1174,9 +1143,9 @@ def _review_codex(
         if review_context is not None:
             review_context = {**review_context,
                 "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                "argv_sha256": hashlib.sha256(json.dumps([*prefix, *argv]).encode()).hexdigest()}
+                "argv_sha256": hashlib.sha256(json.dumps(argv).encode()).hexdigest()}
         done = _run(
-            [*prefix, *argv], cwd=cwd, prompt=prompt,
+            argv, cwd=cwd, prompt=prompt,
             env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
             family="codex",
         )
@@ -1194,12 +1163,11 @@ def _review_codex(
         raise RunnerBadOutput("codex: no final message written", _tail(done.stdout + done.stderr))
     try:
         payload = _extract_json_object(message)
-    except (json.JSONDecodeError, ValueError) as exc:
+    except ValueError as exc:
         raise RunnerMalformedOutput("codex: final message is not JSON", _tail(message)) from exc
     envelope = _evidence_json(raw)
     envelope["configured_settings"] = configured
-    envelope["cli_version"] = cli_version
-    provenance["cli_version"] = cli_version
+    envelope["cli_version"] = provenance["cli_version"] = cli_version
     if review_context is not None:
         envelope["review_context"] = review_context
     raw = json.dumps(envelope, separators=(",", ":"))
@@ -1269,9 +1237,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     sessions = [str(result.provenance["session_id"]) for result in results]
     settings = [call for result in results for call in review_settings(result)]
     provenance: dict[str, object] = {
-        "family": first.family,
-        "session_id": sessions[0],
-        "session_ids": sessions,
+        "family": first.family, "session_id": sessions[0], "session_ids": sessions,
         "requested_settings": [call["requested"] for call in settings],
         "configured_settings": [call["configured"] for call in settings],
     }
@@ -1288,8 +1254,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
         model=", ".join(dict.fromkeys(r.model for r in results if r.model)) or None,
         effort=", ".join(dict.fromkeys(r.effort for r in results if r.effort)) or None,
         duration_s=sum(r.duration_s for r in results if r.duration_s is not None),
-        provenance=provenance,
-        chunk_count=len(results),
+        provenance=provenance, chunk_count=len(results),
     )
 
 
@@ -1393,38 +1358,30 @@ def _valid_claude_envelopes(envelopes, provenance):
 def validate_runner_result(result: ReviewResult) -> bool:
     """Return whether saved provenance agrees with the provider envelope(s)."""
     provenance = result.provenance
-    if (
-        not isinstance(provenance, dict)
-        or provenance.get("family") != result.family
-        or not isinstance(result.fallback, str)
-        or isinstance(result.chunk_count, bool)
-        or not isinstance(result.chunk_count, int)
-        or result.chunk_count <= 0
-    ):
+    if (not isinstance(provenance, dict)
+            or provenance.get("family") != result.family
+            or not isinstance(result.fallback, str)
+            or isinstance(result.chunk_count, bool)
+            or not isinstance(result.chunk_count, int)
+            or result.chunk_count <= 0):
         return False
     sessions = provenance.get("session_ids")
-    if (
-        not isinstance(sessions, list)
-        or len(sessions) != result.chunk_count
-        or not all(isinstance(item, str) and item for item in sessions)
-        or provenance.get("session_id") != sessions[0]
-    ):
+    if (not isinstance(sessions, list) or len(sessions) != result.chunk_count
+            or not all(isinstance(item, str) and item for item in sessions)
+            or provenance.get("session_id") != sessions[0]):
         return False
     try:
-        decoded = json.loads(result.raw)
+        envelopes = _read_envelopes(result.raw)
     except (json.JSONDecodeError, TypeError):
         return False
-    envelopes = decoded if isinstance(decoded, list) else [decoded]
     if len(envelopes) != result.chunk_count or not all(isinstance(item, dict) for item in envelopes):
         return False
     payloads = _validated_payloads(result.family, envelopes, provenance, sessions)
     if payloads is None:
         return False
     try:
-        parsed = [
-            parse_review(payload, family=result.family, head=result.head, kind=result.kind, raw=result.raw)
-            for payload in payloads
-        ]
+        parsed = [parse_review(payload, family=result.family, head=result.head, kind=result.kind,
+                               raw=result.raw) for payload in payloads]
     except RunnerBadOutput:
         return False
     if (result.findings, result.verdict) != _review_outcome(parsed):
