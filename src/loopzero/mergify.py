@@ -7,15 +7,18 @@ import http.client
 import json
 import os
 import re
+import signal
 import stat
+import ssl
 import time
 import urllib.error
 import urllib.request
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-from . import github
+from . import candidate, github
 from .types import LoopZeroError
 
 API = "https://api.mergify.com/v1"
@@ -72,21 +75,45 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _retry_sleep = time.sleep
 
 
-def _open(request: urllib.request.Request):
-    return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+class _RequestDeadline(Exception):
+    """Bypass transport handlers that retry OSError."""
+
+
+@contextmanager
+def _open(request: urllib.request.Request, timeout: float = 30):
+    def expire(_signum, _frame):
+        raise _RequestDeadline()
+
+    if signal.getitimer(signal.ITIMER_REAL) != (0, 0):
+        raise TimeoutError("Mergify HTTP request cannot start with an active alarm")
+    try:
+        with ExitStack() as cleanup:
+            cleanup.callback(signal.signal, signal.SIGALRM, signal.signal(signal.SIGALRM, expire))
+            cleanup.callback(signal.setitimer, signal.ITIMER_REAL, 0)
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+            try:
+                response = urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout)
+            except ValueError:
+                raise MergifyError("Mergify API request has an invalid URL or header") from None
+            yield cleanup.enter_context(response)
+    except _RequestDeadline:
+        raise TimeoutError("Mergify HTTP request timed out") from None
+
+
+def _api_request(repo: str, suffix: str, method: str | None = None) -> urllib.request.Request:
+    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
+    return urllib.request.Request(
+        f"{API}/repos/{owner}/{name}{suffix}", method=method,
+        headers={"Accept": "application/json", "User-Agent": "loopzero",
+                 "Authorization": f"Bearer {_credential()}"},
+    )
 
 
 def api_get(repo: str, suffix: str) -> object | None:
     """GET one documented endpoint below this repository's fixed Mergify API path."""
     if not suffix.startswith("/") or "://" in suffix or ".." in suffix:
         raise ValueError("Mergify API suffix must be a repository-relative absolute path")
-    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
-    endpoint = f"{API}/repos/{owner}/{name}{suffix}"
-    request = urllib.request.Request(
-        endpoint,
-        headers={"Accept": "application/json", "User-Agent": "loopzero",
-                 "Authorization": f"Bearer {_credential()}"},
-    )
+    request = _api_request(repo, suffix)
     for delay in (2.0, 5.0, None):  # reads retry server errors, throttling and dropped reads
         try:
             with _open(request) as response:
@@ -96,7 +123,11 @@ def api_get(repo: str, suffix: str) -> object | None:
                 return None
             if delay is None or not (exc.code >= 500 or exc.code == 429):
                 raise MergifyError(f"Mergify queue lookup failed with HTTP {exc.code}") from exc
-        except (OSError, ValueError, http.client.IncompleteRead) as exc:
+        except (OSError, http.client.IncompleteRead) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if delay is None or isinstance(reason, ssl.SSLCertVerificationError):
+                raise MergifyError(f"Mergify queue transport failed: {reason}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             if delay is None:
                 raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
         _retry_sleep(delay)
@@ -136,6 +167,43 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise MergifyError("invalid Mergify queue membership response") from exc
+
+
+def queue_predecessors(repo: str, branch: str, queue: str, number: int) -> tuple[int, ...]:
+    """Identify a single chain of one-PR batches ahead of a new request."""
+    status = api_get(repo, f"/merge-queue/status?branch={quote(branch, safe='')}")
+    if (not isinstance(status, dict) or status.get("mode") != "serial"
+            or status.get("waiting_pull_requests") != [] or status.get("forming_batches") != []):
+        return ()
+    try:
+        batches = candidate.flatten_batches(status)
+        successors: dict[str | None, tuple[str, int]] = {}
+        for batch_id, batch in batches.items():
+            pulls, parents = batch["pull_requests"], batch["parent_ids"]
+            if pulls == [] and batch.get("sub_batches"):
+                continue  # Container batches carry no direct source.
+            if (batch.get("queue_rule_name") != queue or not isinstance(pulls, list)
+                    or len(pulls) != 1 or not isinstance(parents, list) or len(parents) > 1):
+                return ()
+            source = pulls[0]["number"]
+            parent = next(iter(parents), None)
+            if type(source) is not int or source <= 0 or source == number or parent in successors:
+                return ()
+            successors[parent] = batch_id, source
+        return _ordered_sources(successors)
+    except (candidate.CandidateError, KeyError, TypeError, RecursionError):
+        return ()
+
+
+def _ordered_sources(successors: dict[str | None, tuple[str, int]]) -> tuple[int, ...]:
+    if len(successors) > 32:
+        return ()
+    sources = []
+    cursor = None
+    while cursor in successors:
+        cursor, source = successors.pop(cursor)
+        sources.append(source)
+    return tuple(sources) if not successors and len(sources) == len(set(sources)) else ()
 
 
 def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
@@ -203,13 +271,7 @@ def configured(repo: str, branch: str, queue: str) -> bool:
 
 
 def dequeue(repo: str, number: int) -> None:
-    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
-    endpoint = f"{API}/repos/{owner}/{name}/merge-queue/pull/{number}/dequeue"
-    request = urllib.request.Request(
-        endpoint, method="POST",
-        headers={"Accept": "application/json", "User-Agent": "loopzero",
-                 "Authorization": f"Bearer {_credential()}"},
-    )
+    request = _api_request(repo, f"/merge-queue/pull/{number}/dequeue", "POST")
     try:
         with _open(request):
             return

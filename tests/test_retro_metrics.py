@@ -17,31 +17,22 @@ def issue(number, created, closed=None, reason=None):
 @pytest.fixture
 def sources(tmp_path, monkeypatch, request):
     commit_rows, commit_total = getattr(request, "param", (1, 1))
-    merged = issue(1, "2026-05-26T06:00:00Z", SINCE)
-    at_end = issue(2, SINCE, END)
-    p0 = issue(4, "2026-05-23T12:00:00Z")
-    active = issue(5, "2026-05-25T12:00:00Z")
-    pull_ref = {
-        "event": "cross-referenced", "created_at": "2026-05-26T01:00:00Z",
-        "source": {"issue": {"created_at": "2026-05-26T00:00:00Z", "pull_request": {
-            "url": f"https://api.github.com/repos/{REPO}/pulls/3",
-        }}},
-    }
+    pulls = [(1, "2026-05-26T06:00:00Z", SINCE), (2, SINCE, END)]
     rows = {
-        "pulls": [dict(merged, merged_at=SINCE), dict(at_end, merged_at=END)],
-        "outcomes": [
-            issue(6, "2026-05-24T00:00:00Z", SINCE, "completed"),
-            issue(7, "2026-05-24T00:00:00Z", SINCE, "not_planned"),
-        ],
+        "pulls": [dict(issue(n, created, closed), merged_at=closed) for n, created, closed in pulls],
+        "outcomes": [issue(n, "2026-05-24T00:00:00Z", SINCE, reason)
+                     for n, reason in [(6, "completed"), (7, "not_planned")]],
         "orders": [issue(8, "2026-05-27T00:00:00Z", SINCE, "completed")],
         "orders_open": [issue(9, "2026-01-01T00:00:00Z")],
-        "p0": [p0, active],
-        "issues/4/timeline": [
-            {"event": "labeled", "created_at": "2026-05-28T23:45:00Z"},
-            {"event": "commented", "created_at": "2026-05-28T06:00:00Z"},
-            {"event": "commented", "created_at": END},
-        ],
-        "issues/5/timeline": [pull_ref],
+        "p0": [issue(4, "2026-05-23T12:00:00Z"), issue(5, "2026-05-25T12:00:00Z")],
+        "issues/4/timeline": [{"event": event, "created_at": time} for event, time in [
+            ("labeled", "2026-05-28T23:45:00Z"), ("commented", "2026-05-28T06:00:00Z"), ("commented", END),
+        ]],
+        "issues/5/timeline": [{
+            "event": "cross-referenced", "created_at": "2026-05-26T01:00:00Z",
+            "source": {"issue": {"created_at": "2026-05-26T00:00:00Z",
+                                 "pull_request": {"url": f"https://api.github.com/repos/{REPO}/pulls/3"}}},
+        }],
         "pulls/3": {"commits": commit_total},
         "pulls/3/commits": [{"commit": {"committer": {"date": "2026-05-28T21:00:00Z"}}}] * commit_rows,
         "issues/3/comments": [],
@@ -78,11 +69,8 @@ def sources(tmp_path, monkeypatch, request):
     monkeypatch.setattr(retro_metrics.subprocess, "run", collect)
     ledger = tmp_path / "receipts.jsonl"
     base = {"event": "job", "command_class": "loopzero-check"}
-    outcomes = [
-        ("ok", 0, "2026-04-30T00:00:00Z"), ("ok", 0, SINCE), ("ok", 0, SINCE),
-        ("fail", 1, "2026-05-28T01:00:00Z"), ("cancelled", 143, "2026-05-28T02:00:00Z"),
-        ("ok", 0, END),
-    ]
+    outcomes = [("ok", 0, when) for when in ("2026-04-30T00:00:00Z", SINCE, SINCE, END)]
+    outcomes += [("fail", 1, "2026-05-28T01:00:00Z"), ("cancelled", 143, "2026-05-28T02:00:00Z")]
     ledger.write_text("".join(json.dumps(dict(base, outcome=outcome, exit_code=code, end_utc=end)) + "\n"
                               for outcome, code, end in outcomes))
     return calls, [
@@ -92,16 +80,27 @@ def sources(tmp_path, monkeypatch, request):
     ]
 
 
-def test_record_replay_and_weekly_window(sources, capsys):
+@pytest.fixture
+def record(sources, capsys):
     calls, args = sources
-    assert retro_metrics.main([*args, "--record", "--host-command", "host-adapter"]) == 0
-    live = capsys.readouterr()
-    assert sum(call == ["host-adapter"] for call in calls) == 1
-    assert retro_metrics.main(args) == 0
-    assert capsys.readouterr() == live
-    assert len(calls) == 6
 
-    report = json.loads(live.out)
+    def run(*options, host=False, replay=True):
+        command = [*args, *options]
+        adapter = ["--host-command", "host-adapter"] if host else []
+        assert retro_metrics.main([*command, "--record", *adapter]) == 0
+        live, count = capsys.readouterr(), len(calls)
+        if replay:
+            assert retro_metrics.main(command) == 0
+            assert capsys.readouterr() == live and len(calls) == count
+        return json.loads(live.out), live.err
+
+    return run
+
+
+def test_record_replay_and_weekly_window(sources, record):
+    calls, _ = sources
+    report, stderr = record(host=True)
+    assert sum(call == ["host-adapter"] for call in calls) == 1 and len(calls) == 6
     row = report["custom_window"]
     assert row["merges"] == 1
     assert row["open_to_merge_median_hours"] == 42
@@ -122,7 +121,7 @@ def test_record_replay_and_weekly_window(sources, capsys):
         {"kind": "oldest_open_order", "number": 9},
     ]
     assert report["weekly_sample"]["shortfall"] == 3
-    assert "Previous 7d" in live.err
+    assert "Previous 7d" in stderr
 
 
 def test_weekly_sample_reserves_controls_and_deduplicates_stalled_order():
@@ -148,46 +147,27 @@ def test_weekly_sample_reserves_controls_and_deduplicates_stalled_order():
     assert [item["number"] for item in sample["items"][2:]] == [8, 7, 1, 2, 3, 4]
 
 
-def assert_replay(args, calls, capsys, live):
-    count = len(calls)
-    assert retro_metrics.main(args) == 0
-    assert capsys.readouterr() == live
-    assert len(calls) == count
+@pytest.mark.parametrize("alerts", [False, True])
+def test_stall_and_dead_owner_modes_record_and_replay(record, alerts):
+    options = (["--alerts", "--owner", "coordinator", "--band", "merges", "2", "3"] if alerts
+               else ["--dead-owner", "coordinator"])
+    report, stderr = record("--stall-hours", "12", *options, host=alerts)
+    findings = [item for item in report["alerts"] if item["kind"] != "unknown"]
+    if alerts:
+        assert stderr == "" and findings == [
+            {"kind": "outside_band", "metric": "merges", "value": 1, "min": 2, "max": 3},
+            {"kind": "stalled_p0", "issue": 4, "last_activity": "2026-05-28T06:00:00Z", "hours": 18},
+            {"kind": "dead_owner", "owner": "coordinator"},
+        ]
+    else:
+        assert not findings and {"kind": "stalled_p0", "number": 4} in report["weekly_sample"]["items"]
 
 
-def test_weekly_report_uses_stall_threshold_without_running_other_alerts(sources, capsys):
-    calls, args = sources
-    args = [*args, "--stall-hours", "12", "--dead-owner", "coordinator"]
-    assert retro_metrics.main([*args, "--record"]) == 0
-    live = capsys.readouterr()
-    report = json.loads(live.out)
-    assert {"kind": "stalled_p0", "number": 4} in report["weekly_sample"]["items"]
-    assert all(alert["kind"] == "unknown" for alert in report["alerts"])
-    assert_replay(args, calls, capsys, live)
-
-
-def test_alerts_find_stalled_order_and_dead_owner(sources, capsys):
-    calls, args = sources
-    options = ["--alerts", "--stall-hours", "12", "--owner", "coordinator",
-               "--band", "merges", "2", "3"]
-    assert retro_metrics.main([*args, *options, "--record", "--host-command", "host-adapter"]) == 0
-    live = capsys.readouterr()
-    findings = json.loads(live.out)["alerts"]
-    assert live.err == ""
-    assert [finding for finding in findings if finding["kind"] != "unknown"] == [
-        {"kind": "outside_band", "metric": "merges", "value": 1, "min": 2, "max": 3},
-        {"kind": "stalled_p0", "issue": 4, "last_activity": "2026-05-28T06:00:00Z", "hours": 18},
-        {"kind": "dead_owner", "owner": "coordinator"},
-    ]
-    assert_replay([*args, *options], calls, capsys, live)
-
-
-def test_missing_and_failed_sources_do_not_report_zero(sources, capsys):
+def test_missing_and_failed_sources_do_not_report_zero(sources, record):
     _, args = sources
     args[args.index("--label-order") + 1] = "missing"
     args[args.index("--check-receipts") + 1] = "/no-such-receipt-test-file"
-    assert retro_metrics.main([*args, "--record"]) == 0
-    report = json.loads(capsys.readouterr().out)
+    report, _ = record(replay=False)
     for key in ("orders_accepted", "checks_passed", "checks_failed", *retro_metrics.HOST_KEYS):
         assert report["custom_window"][key] == "UNKNOWN"
         assert any(a["source"] == f"custom_window/{key}" for a in report["alerts"])
@@ -208,14 +188,10 @@ def test_invalid_band_is_usage_error(capsys):
     ((250, 251), 1, False),
     ((250, None), 1, False),
 ], indirect=["sources"])
-def test_stalled_issue_checks_linked_pr_commit_count_at_limit(sources, detail_reads, stalled, capsys):
-    calls, args = sources
-    options = ["--alerts", "--stall-hours", "1"]
-    assert retro_metrics.main([*args, *options, "--record"]) == 0
-    live = capsys.readouterr()
-    alerts = json.loads(live.out)["alerts"]
+def test_stalled_issue_checks_linked_pr_commit_count_at_limit(sources, detail_reads, stalled, record):
+    calls, _ = sources
+    report, _ = record("--alerts", "--stall-hours", "1")
+    alerts = report["alerts"]
     assert any(a["kind"] == "stalled_p0" and a["issue"] == 5 for a in alerts) == stalled
     assert any(a.get("source") == "p0/#5/activity" for a in alerts) == (not stalled)
     assert sum(call[-1] == f"repos/{REPO}/pulls/3" for call in calls) == detail_reads
-
-    assert_replay([*args, *options], calls, capsys, live)

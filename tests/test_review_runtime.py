@@ -9,7 +9,7 @@ import pytest
 
 from loopzero import cli, eligibility, runners
 from tests import test_cli, test_runners
-from tests.test_cli import post_key, prepare_review, run
+from tests.test_cli import expect_cli, post_key, prepare_review
 from tests.test_runners import (
     APPROVE, _fake_claude, _fake_codex, _native_codex_result, _review, replace_codex_events,
 )
@@ -52,30 +52,33 @@ def result(row):
 
 
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
-def test_legacy_startup_failure_refuses_saved_result_and_multichunk(row, tmp_path):
+def test_legacy_startup_failure_refuses_saved_result_and_multichunk(row, git_repo):
     bad = result(row)
     assert not runners.validate_runner_result(bad)
-    cli._save_review(tmp_path, bad)
+    cli._save_review(git_repo, bad)
     with pytest.raises(cli.CliError, match="provenance/envelope mismatch"):
-        cli._load_review(tmp_path, bad.head, bad.kind)
+        cli._load_review(git_repo, bad.head, bad.kind)
     clean = dataclasses.replace(bad, raw=json.dumps(envelope(row) | {"events": []}))
     with pytest.raises(runners.RunnerBadOutput, match="Code Mode"):
         runners.merge_reviews([clean, bad])
 
 
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
-def test_legacy_startup_exit_zero_never_publishes(wt, gh, fake_bin, capsys, row):
-    prepare_review(wt, gh, fake_bin)
-    # Force the already-configured Codex route without changing the public CLI policy.
-
-    _fake_claude(fake_bin, "{}", exit_code=1)
-    raw = envelope(row)
-    script = _fake_codex(fake_bin, json.dumps(APPROVE))
-    replace_codex_events(script, [raw["events"][1]], prepend=True)
-    code, _, error = run(capsys, "review")
-    assert code == 4 and "Code Mode" in error
+@pytest.mark.parametrize("repost", [False, True], ids=["fresh-launch", "repost"])
+def test_legacy_startup_never_publishes(wt, gh, fake_bin, capsys, row, repost):
+    current = prepare_review(wt, gh, fake_bin)
+    if repost:
+        cli._save_review(wt, dataclasses.replace(result(row), head=current, kind="primary"))
+        expect_cli(capsys, 1, "review", "--repost", stderr_contains=("provenance/envelope mismatch",))
+        assert not (fake_bin / "codex.stdin").exists() and not (fake_bin / "claude.stdin").exists()
+    else:
+        # Fall through to the configured Codex route and inject the fatal native event.
+        _fake_claude(fake_bin, "{}", exit_code=1)
+        script = _fake_codex(fake_bin, json.dumps(APPROVE))
+        replace_codex_events(script, [envelope(row)["events"][1]], prepend=True)
+        expect_cli(capsys, 4, "review", stderr_contains=("Code Mode",))
+        assert not list((wt / ".loopzero").glob("review-*.json"))
     assert not any(c["argv"][:2] == post_key().split() for c in gh.calls)
-    assert not list((wt / ".loopzero").glob("review-*.json"))
 
 
 @pytest.mark.parametrize(
@@ -121,12 +124,7 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, mode):
             )
         )
     if mode not in ("clean", "projected_quote"):
-        script.write_text(
-            script.read_text().replace(
-                'echo \'{"type":"thread.started"',
-                "printf '%s\\n' '" + json.dumps(fatal) + '\'\necho \'{"type":"thread.started"',
-            )
-        )
+        replace_codex_events(script, [fatal], prepend=True)
     if mode in ("clean", "quoted", "unrelated_error", "quoted_error", "projected_quote"):
         assert _review("codex", tmp_path).verdict == "approve"
     else:
@@ -139,18 +137,6 @@ def test_invalid_latest_cannot_revive_older_approval(row):
     older = copy.deepcopy(row)
     older["body"] = cli.review_marker(row["commit_id"], "primary") + "\n**approve**"
     assert eligibility.eligible_review([older, row], row["commit_id"], PUBLISHER) is None
-
-
-@pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
-def test_legacy_startup_repost_refuses_before_any_publication(wt, gh, fake_bin, capsys, row):
-    current = prepare_review(wt, gh, fake_bin)
-    bad = dataclasses.replace(result(row), head=current, kind="primary")
-    cli._save_review(wt, bad)
-    code, _, error = run(capsys, "review", "--repost")
-    assert code == 1 and "provenance/envelope mismatch" in error
-    assert not any(c["argv"][:2] == post_key().split() for c in gh.calls)
-    assert not (fake_bin / "codex.stdin").exists() and not (fake_bin / "claude.stdin").exists()
-
 
 
 # Keep the original routing inputs to catch a return of target-specific behavior.
@@ -186,5 +172,5 @@ def test_duplicate_primary_markers_on_one_head_count_as_one():
     assert cli._decide_kind(duplicate, head) == ("delta", reviewed)
     with pytest.raises(cli.CliError, match="already has a primary"):
         cli._decide_kind(duplicate, reviewed)
-    with pytest.raises(cli.CliError, match=r"review cap reached \(2 rounds per PR\)"):
+    with pytest.raises(cli.CliError, match="review cap reached"):
         cli._decide_kind([*duplicate, cli.Marker("c" * 40, "primary", "COMMENTED")], head)
