@@ -331,23 +331,23 @@ def test_pr_view_rejects_malformed_or_mismatched_rest_detail(gh: FakeGh, invalid
     with pytest.raises(github.GhError):
         github.pr_view(REPO, 7)
 
-def test_create_draft_pr_passes_body_file_and_returns_pr(gh: FakeGh) -> None:
-    gh.respond_pr_create(pr_json(), branch="lz/x")
-    pr = github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body text\n")
-    argv = gh.argv(0)
-    assert argv[:4] == ["api", f"repos/{REPO}/pulls", "--method", "POST"]
-    assert json.loads(gh.calls[0]["--input"]) == {"head": "lz/x", "base": "main", "title": "Title", "body": "Body text\n", "draft": True}
-    assert pr.number == 7 and pr.is_draft and len(gh.calls) == 1
-
 @pytest.mark.parametrize("change", [
-    {"draft": False}, {"base": {"ref": "other"}},
+    {}, {"draft": False}, {"base": {"ref": "other"}},
     {"head": {"sha": HEAD, "ref": "lz/x", "repo": {"full_name": "fork/widgets"}}},
-])
-def test_create_draft_pr_rejects_inconsistent_response_without_retry(gh: FakeGh, change: dict) -> None:
+], ids=["created", "ready", "wrong-base", "foreign-head"])
+def test_create_draft_pr_verifies_response(gh: FakeGh, change: dict) -> None:
     gh.respond(f"api repos/{REPO}/pulls", rest_pr_json(pr_json(), branch="lz/x") | change)
-    with pytest.raises(github.GhError, match="created PR differs"):
-        github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body")
+    if change:
+        with pytest.raises(github.GhError, match="created PR differs"):
+            github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body")
+    else:
+        pr = github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body text\n")
+        assert gh.argv(0)[:4] == ["api", f"repos/{REPO}/pulls", "--method", "POST"]
+        assert json.loads(gh.calls[0]["--input"]) == {
+            "head": "lz/x", "base": "main", "title": "Title", "body": "Body text\n", "draft": True}
+        assert pr.number == 7 and pr.is_draft
     assert len(gh.calls) == 1
+
 
 @pytest.mark.parametrize("error,stdout,status", [
     ("", "", ""), ("not logged in", "", "unavailable"), ("unexpected end of JSON input", "", "unavailable"),
@@ -487,20 +487,23 @@ def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: s
     assert "Reviewer location src/a.py:3 is not in the diff" in comments[1]["body"]
 
 
-def test_post_review_anchor_skips_files_without_hunks(gh: FakeGh) -> None:
-    arm_review(gh, files=[{"filename": "img.png"},
-                          {"filename": "src/d.py", "patch": "@@ -3,0 +4,2 @@\n+p\n+q"}])
-    github.post_review(REPO, 7, HEAD, review(findings=(Finding("important", None, None, "G", ""),)))
-    (comment,) = comments_posted(gh)
-    assert (comment["path"], comment["line"]) == ("src/d.py", 4)
-    assert "subject_type" not in comment
-
-
-def test_post_review_fails_loud_when_nothing_to_anchor(gh: FakeGh) -> None:
-    arm_review(gh, files=[{"filename": "img.png"}])
-    with pytest.raises(github.GhError, match="no diff hunks"):
-        github.post_review(REPO, 7, HEAD, review(findings=(Finding("critical", None, None, "G", ""),)))
-    assert calls_for(gh, REVIEWS_KEY) == []
+@pytest.mark.parametrize(("files", "severity", "anchor"), [
+    ([{"filename": "img.png"}, {"filename": "src/d.py", "patch": "@@ -3,0 +4,2 @@\n+p\n+q"}],
+     "important", ("src/d.py", 4)),
+    ([{"filename": "img.png"}], "critical", None),
+], ids=["skip-image", "no-hunks"])
+def test_post_review_requires_diff_hunk(gh: FakeGh, files, severity, anchor):
+    arm_review(gh, files=files)
+    result = review(findings=(Finding(severity, None, None, "G", ""),))
+    if anchor is None:
+        with pytest.raises(github.GhError, match="no diff hunks"):
+            github.post_review(REPO, 7, HEAD, result)
+        assert calls_for(gh, REVIEWS_KEY) == []
+    else:
+        github.post_review(REPO, 7, HEAD, result)
+        (comment,) = comments_posted(gh)
+        assert (comment["path"], comment["line"]) == anchor
+        assert "subject_type" not in comment
 
 
 @pytest.mark.parametrize("location", ["first-page", "second-page", "missing"])
@@ -863,13 +866,15 @@ def test_gh_api_reads_with_fields_use_method_get(gh: FakeGh) -> None:
         assert argv[argv.index("--method") + 1] == "GET", argv
 
 
+def check_run(conclusion, *, name="checks", status="completed", **fields):
+    return {"name": name, "status": status, "conclusion": conclusion, **fields}
+
+
 def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
-    filler = [{"name": f"job{i}", "status": "completed", "conclusion": "success"}
-              for i in range(99)]
+    filler = [check_run("success", name=f"job{i}") for i in range(99)]
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
-               {"check_runs": [*filler,
-                   {"name": "checks", "status": "completed", "conclusion": "success"}]},
-               {"check_runs": [{"name": "lint", "status": "in_progress", "conclusion": None}]})
+               {"check_runs": [*filler, check_run("success")]},
+               {"check_runs": [check_run(None, name="lint", status="in_progress")]})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [
         {"context": "ci/legacy", "state": "failure"},
         {"context": "checks", "state": "pending"},
@@ -882,24 +887,12 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
 
 
 @pytest.mark.parametrize(("runs", "expected"), [
-    ([
-        {"id": 10, "name": "checks", "status": "completed", "conclusion": "skipped"},
-        {"id": 11, "name": "checks", "status": "completed", "conclusion": "success"},
-    ], {"checks": "success"}),
-    ([
-        {"id": 20, "name": "checks", "status": "in_progress", "conclusion": None},
-        {"id": 19, "name": "checks", "status": "completed", "conclusion": "success"},
-    ], {"checks": "pending"}),
-    ([
-        {"id": 30, "name": "checks", "status": "completed", "conclusion": "success"},
-        {"id": 31, "name": "lint", "status": "completed", "conclusion": "failure"},
-    ], {"checks": "success", "lint": "failure"}),
-    ([
-        {"id": 40, "name": "checks", "started_at": "2026-09-18T01:00:00Z",
-         "status": "completed", "conclusion": "failure"},
-        {"id": 40, "name": "checks", "started_at": "2026-09-18T02:00:00Z",
-         "status": "completed", "conclusion": "success"},
-    ], {"checks": "success"}),
+    ([check_run("skipped", id=10), check_run("success", id=11)], {"checks": "success"}),
+    ([check_run(None, id=20, status="in_progress"), check_run("success", id=19)], {"checks": "pending"}),
+    ([check_run("success", id=30), check_run("failure", name="lint", id=31)],
+     {"checks": "success", "lint": "failure"}),
+    ([check_run("failure", id=40, started_at="2026-09-18T01:00:00Z"),
+      check_run("success", id=40, started_at="2026-09-18T02:00:00Z")], {"checks": "success"}),
 ], ids=["stale-skipped", "newer-pending", "distinct-names", "timestamp-tie"])
 def test_check_runs_ordering(gh: FakeGh, runs: list[dict], expected: dict) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
@@ -1358,34 +1351,26 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, remaining, retry_after
     ]
 
 
-def test_graphql_limit_reports_verified_reset_from_one_diagnostic(gh: FakeGh) -> None:
-    gh.respond("api graphql",
-               {"stdout": "", "stderr": "GraphQL: API rate limit exceeded", "exit": 1},
-               {"data": {"rateLimit": {"remaining": 0, "resetAt": "2099-01-01T00:00:00Z"}}})
-
-    with pytest.raises(github.GhError, match="GraphQL quota resets at 2099-01-01") as info:
-        github._gh("api", "graphql", "-f", "query={viewer{login}}")
-
-    assert info.value.command[-1] == "query={viewer{login}}"
-    assert len(gh.calls) == 2
-    assert "rateLimit { remaining resetAt }" in gh.calls[1]["argv"][-1]
-
-
-@pytest.mark.parametrize("diagnostic", [
-    "null", "[]", {"data": {"rateLimit": {"remaining": 0, "resetAt": 42}}},
-    {"data": []}, {"data": {"rateLimit": None}},
+@pytest.mark.parametrize(("diagnostic", "verified"), [
+    ({"data": {"rateLimit": {"remaining": 0, "resetAt": "2099-01-01T00:00:00Z"}}}, True),
+    ("null", False), ("[]", False),
+    ({"data": {"rateLimit": {"remaining": 0, "resetAt": 42}}}, False),
+    ({"data": []}, False), ({"data": {"rateLimit": None}}, False),
 ])
-def test_bad_graphql_reset_evidence_preserves_original_error(gh: FakeGh, diagnostic: object) -> None:
+def test_graphql_limit_reports_only_verified_reset(gh: FakeGh, diagnostic: object, verified: bool) -> None:
     gh.respond("api graphql",
                {"stdout": "", "stderr": "GraphQL: API rate limit exceeded", "exit": 1},
                diagnostic)
-
-    with pytest.raises(github.GhError, match="GraphQL: API rate limit exceeded") as info:
+    match = "GraphQL quota resets at 2099-01-01" if verified else "GraphQL: API rate limit exceeded"
+    with pytest.raises(github.GhError, match=match) as info:
         github._gh("api", "graphql", "-f", "query={viewer{login}}")
 
-    assert "quota resets at" not in str(info.value)
     assert info.value.command[-1] == "query={viewer{login}}"
     assert len(gh.calls) == 2
+    if verified:
+        assert "rateLimit { remaining resetAt }" in gh.calls[1]["argv"][-1]
+    else:
+        assert "quota resets at" not in str(info.value)
 
 
 def test_graphql_limit_prefers_failing_response_reset_header(gh: FakeGh) -> None:
@@ -1483,53 +1468,34 @@ def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, stat
     assert gh.argv(2) == [*endpoint.split(), "--include"]
 
 
-@pytest.mark.parametrize("capped", [False, True])
-def test_readiness_distinguishes_capped_check_suites_from_missing_check(gh: FakeGh, capped: bool) -> None:
-    arm_readiness(gh)
-    runs = [
-        {"name": "required-ci", "conclusion": "success", "check_suite": {"id": 1}},
-        *({"name": "unrelated", "conclusion": "success", "check_suite": {"id": suite}}
-          for suite in range(2, 1002)),
-    ]
-    visible = runs[-1000:] if capped else runs[1:-1]
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
-               *({"check_runs": visible[i:i + 100]} for i in range(0, len(visible) + 1, 100)))
-
-    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
-                              "main", ("required-ci",), HEAD)
-
-    assert not result.ready
-    assert result.reasons == (
-        f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"
-        if capped else f"required check 'required-ci' missing on {HEAD[:12]}",
-    )
-
-
-@pytest.mark.parametrize(("unrelated", "include_failure", "reason"), [
-    (1000, False, f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"),
-    (100, True, "required check 'required-ci' is failure"),
-    (100, False, None),
+@pytest.mark.parametrize(("unrelated", "legacy_success", "check_failure", "reason"), [
+    (1000, False, False, "suite limit"),
+    (999, False, False, "missing"),
+    (1000, True, False, "suite limit"),
+    (100, True, True, "failure"),
+    (100, True, False, None),
 ])
-def test_readiness_requires_check_run_evidence_for_status_success_at_suite_cap(
-    gh: FakeGh, unrelated: int, include_failure: bool, reason: str | None,
-) -> None:
+def test_readiness_at_check_suite_limit(gh: FakeGh, unrelated, legacy_success, check_failure, reason):
     arm_readiness(gh)
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
-               [{"context": "required-ci", "state": "success"}])
-    runs = [
-        {"name": "unrelated", "conclusion": "success", "check_suite": {"id": suite}}
-        for suite in range(2, unrelated + 2)
-    ]
-    if include_failure:
+    if legacy_success:
+        gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
+                   [{"context": "required-ci", "state": "success"}])
+    runs = [{"name": "unrelated", "conclusion": "success", "check_suite": {"id": suite}}
+            for suite in range(2, unrelated + 2)]
+    if check_failure:
         runs.append({"name": "required-ci", "conclusion": "failure", "check_suite": {"id": 1}})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
                *({"check_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
-
     result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
                               "main", ("required-ci",), HEAD)
 
+    reasons = {
+        "suite limit": f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit",
+        "missing": f"required check 'required-ci' missing on {HEAD[:12]}",
+        "failure": "required check 'required-ci' is failure",
+    }
     assert result.ready == (reason is None)
-    assert result.reasons == ((reason,) if reason else ())
+    assert result.reasons == ((reasons[reason],) if reason else ())
 
 
 @pytest.mark.parametrize("changed_files,path,severity,live_head,anchor", [

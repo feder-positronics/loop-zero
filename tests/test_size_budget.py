@@ -60,6 +60,17 @@ def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_to
         assert done.stdout.startswith("src=1 (base 3," if failure else "src=3 (base 3, delta 0,")
 
 
+def run_budget(repo, base, *, python=sys.executable):
+    return subprocess.run(["bash", str(SCRIPT), base], cwd=repo,
+                          env={**os.environ, "PYTHON": python},
+                          capture_output=True, text=True, check=False)
+
+
+def stage_tree(repo):
+    git(repo, "add", ".")
+    return git(repo, "write-tree").strip()
+
+
 @pytest.mark.parametrize("case,expected_rc", [
     ("new_over_cap", 1),
     ("existing_hold", 0),
@@ -73,8 +84,7 @@ def test_complexity_ratchet(git_repo, case, expected_rc):
         src.write_text("def ok():\n    return 1\n")
     else:
         src.write_text(_branchy("hot", 11))  # CC = 12 > 10
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
+    base = stage_tree(git_repo)
 
     if case == "new_over_cap":
         src.write_text(_branchy("new_hot", 10))  # CC = 11 > 10
@@ -83,9 +93,7 @@ def test_complexity_ratchet(git_repo, case, expected_rc):
     elif case == "existing_grow":
         src.write_text(_branchy("hot", 12))  # CC = 13 > 12
 
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
+    done = run_budget(git_repo, base)
     assert done.returncode == expected_rc, done.stdout + done.stderr
     assert ("complexity=FAIL" if expected_rc else "complexity=PASS") in done.stdout
 
@@ -104,11 +112,8 @@ def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo):
         "    except KeyError, TypeError:\n"
         "        return 0\n"
     )
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
+    base = stage_tree(git_repo)
+    done = run_budget(git_repo, base)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
 
@@ -117,8 +122,7 @@ def test_complexity_rejects_old_python(git_repo, tmp_path):
     src = git_repo / "src/loopzero/mod.py"
     src.parent.mkdir(parents=True)
     src.write_text("def ok():\n    return 1\n")
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
+    base = stage_tree(git_repo)
     fake_py = tmp_path / "old-python"
     fake_py.write_text(
         f"#!{sys.executable}\n"
@@ -128,9 +132,7 @@ def test_complexity_rejects_old_python(git_repo, tmp_path):
         "exec(compile(sys.stdin.read(), '<size_budget>', 'exec'), {'__name__': '__main__'})\n"
     )
     fake_py.chmod(0o755)
-    env = {**os.environ, "PYTHON": str(fake_py)}
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo, env=env,
-                          capture_output=True, text=True, check=False)
+    done = run_budget(git_repo, base, python=str(fake_py))
     assert done.returncode == 1
     assert "requires Python 3.14+" in done.stderr
 
@@ -145,11 +147,8 @@ def test_markdown_doc_budgets(git_repo, path, cap, grew, expected_rc):
     doc = git_repo / path
     doc.parent.mkdir(parents=True)
     doc.write_text("line\n" * (cap + 5))
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
+    base = stage_tree(git_repo)
     if grew:
         doc.write_text("line\n" * (cap + 6))
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
+    done = run_budget(git_repo, base)
     assert done.returncode == expected_rc, done.stdout + done.stderr
