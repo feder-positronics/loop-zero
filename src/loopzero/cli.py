@@ -108,7 +108,7 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     path = args.config or root / "workflow.toml"
     if not pin_checks:
         return config_mod.load(path)
-    readiness = args.command in {"ready", "merge"} and not getattr(args, "cancel", False)
+    readiness = args.command in {"ready", "merge", "status"} and not getattr(args, "cancel", False)
     if args.config:
         print("checks are unpinned because --config was provided")
         return config_mod.load(path, readiness=readiness)
