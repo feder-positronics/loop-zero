@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -143,19 +144,20 @@ _CREDENTIAL_TOKEN_RE = re.compile(
 
 
 @contextmanager
-def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False):
+def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False, check_on_exit: bool = True):
     """Share a monotonic budget across reads, including any retries."""
     previous = _read_scope.get()
     deadline = min(previous[0], deadline) if previous else deadline
     scope = _read_scope.set((deadline, token, retry))
     try:
         yield
-        _read_timeout(0)
+        if check_on_exit:
+            read_timeout(0)
     finally:
         _read_scope.reset(scope)
 
 
-def _read_timeout(limit: float, *, scoped: bool = True) -> float:
+def read_timeout(limit: float = math.inf, *, scoped: bool = True) -> float:
     scope = _read_scope.get() if scoped else None
     if scope is None:
         return limit
@@ -297,7 +299,7 @@ def app_token() -> str:
         return ""
     minted = _app_token_clock()  # before minting so a suspend mid-call ages the token
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_BASE_ENV, timeout=_read_timeout(10))
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_BASE_ENV, timeout=read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
@@ -327,7 +329,7 @@ def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> boo
 
 
 def _retry_pause(delay: float | None, limit: float, *, scoped: bool = True) -> bool:
-    if delay is None or delay >= _read_timeout(limit, scoped=scoped):
+    if delay is None or delay >= read_timeout(limit, scoped=scoped):
         return False
     _retry_sleep(delay)
     return True
@@ -377,12 +379,12 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout, scoped=read_only), encoding="utf-8")
+                       timeout=read_timeout(timeout, scoped=read_only), encoding="utf-8")
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
-            _read_timeout(timeout, scoped=bool(scope and scope[2]))
+            read_timeout(timeout, scoped=bool(scope and scope[2]))
             if not _retry_pause(delay, timeout, scoped=read_only):
                 raise ProcTimeout(
                     _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
@@ -471,7 +473,7 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         query = "query { rateLimit { remaining resetAt } }"
         result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=cwd,
                      env_allowlist=GH_ENV, extra_env={"GH_TOKEN": token} if token else None,
-                     timeout=_read_timeout(10))
+                     timeout=read_timeout(10))
         if result.exit_code:
             return ""
         data = json.loads(result.stdout)
@@ -1443,6 +1445,7 @@ def merged_sha(
     state = view.get("state")
     if merged and state == "closed":
         if isinstance(sha := view.get("merge_commit_sha"), str) and re.fullmatch(r"[0-9a-f]{40}", sha):
+            read_timeout(0)
             return sha
     elif not merged and state == "open":
         if check_hold and (hold := merge_hold(number, _pr_labels(view))):
@@ -1462,6 +1465,8 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
         auto = pr.get("autoMergeRequest")
         if type(queued) is not bool or (auto is not None and not isinstance(auto, dict)):
             raise ValueError("invalid queue fields")
+    except ReadDeadline:
+        raise
     except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
         raise MergeFailed(("gh", "api", "graphql"),
                           f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
@@ -1472,18 +1477,12 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
 
 
 def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
-    """Merge PR `number` at exactly `head_sha` and return the verified merge SHA.
-
-    Returns None when the base branch uses a merge queue and GitHub accepted the PR
-    into it: the merge will land later, and the caller must verify on a later run.
-    """
+    """Merge at exactly this head, returning None if GitHub queued the PR."""
     if strategy not in ("squash", "merge", "rebase", "queue"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
     # A merge queue owns the method; gh rejects an explicit --squash/--merge/--rebase.
     method = () if strategy == "queue" else (f"--{strategy}",)
-    argv = (
-        "pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha,
-    )
+    argv = ("pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha)
     if strategy == "queue" and merge_pending(repo, number, head_sha):
         return None
     write_error = None
@@ -1491,7 +1490,12 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         _gh(*argv, timeout=300)
     except (GhError, ProcTimeout, OSError) as exc:
         write_error = exc
-    sha = merged_sha(repo, number, expected_head=head_sha)
+    # A direct merge already in flight still needs verification and cleanup.
+    scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
+    try:
+        sha = merged_sha(repo, number, expected_head=head_sha)
+    finally:
+        _read_scope.reset(scope)
     if sha:
         return sha
     queue_error = None
@@ -1500,7 +1504,7 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
             return None
     except MergeFailed as exc:
         queue_error = exc
-    # The queue may have landed the PR between the two reads; look once more.
+    # The queue may have landed the PR between the two reads.
     sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
