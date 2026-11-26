@@ -15,7 +15,8 @@ def issue(number, created, closed=None, reason=None):
 
 
 @pytest.fixture
-def sources(tmp_path, monkeypatch):
+def sources(tmp_path, monkeypatch, request):
+    commit_rows, commit_total = getattr(request, "param", (1, 1))
     merged = issue(1, "2026-05-26T06:00:00Z", SINCE)
     at_end = issue(2, SINCE, END)
     p0 = issue(4, "2026-05-23T12:00:00Z")
@@ -41,7 +42,8 @@ def sources(tmp_path, monkeypatch):
             {"event": "commented", "created_at": END},
         ],
         "issues/5/timeline": [pull_ref],
-        "pulls/3/commits": [{"commit": {"committer": {"date": "2026-05-28T21:00:00Z"}}}],
+        "pulls/3": {"commits": commit_total},
+        "pulls/3/commits": [{"commit": {"committer": {"date": "2026-05-28T21:00:00Z"}}}] * commit_rows,
         "issues/3/comments": [],
     }
     calls = []
@@ -68,6 +70,9 @@ def sources(tmp_path, monkeypatch):
                     raise subprocess.CalledProcessError(1, argv)
                 path = label
             data = rows[path]
+            if path == "pulls/3/commits":
+                offset = (int(query.rsplit("=", 1)[1]) - 1) * 100
+                data = data[offset:offset + 100]
         return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
 
     monkeypatch.setattr(retro_metrics.subprocess, "run", collect)
@@ -196,3 +201,25 @@ def test_invalid_band_is_usage_error(capsys):
         retro_metrics.main(["--repo", REPO, "--until", END, "--band", "merges", "3", "2"])
     assert exc.value.code == 2
     assert "ordered limits" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("sources", "detail_reads", "stalled"), [
+    ((101, None), 0, True),
+    ((250, 250), 1, True),
+    ((250, 251), 1, False),
+    ((250, None), 1, False),
+], indirect=["sources"])
+def test_stalled_issue_checks_linked_pr_commit_count_at_limit(sources, detail_reads, stalled, capsys):
+    calls, args = sources
+    options = ["--alerts", "--stall-hours", "1"]
+    assert retro_metrics.main([*args, *options, "--record"]) == 0
+    live = capsys.readouterr()
+    alerts = json.loads(live.out)["alerts"]
+    assert any(a["kind"] == "stalled_p0" and a["issue"] == 5 for a in alerts) == stalled
+    assert any(a.get("source") == "p0/#5/activity" for a in alerts) == (not stalled)
+    assert sum(call[-1] == f"repos/{REPO}/pulls/3" for call in calls) == detail_reads
+
+    count = len(calls)
+    assert retro_metrics.main([*args, *options]) == 0
+    assert capsys.readouterr() == live
+    assert len(calls) == count
