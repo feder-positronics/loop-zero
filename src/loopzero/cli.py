@@ -810,11 +810,13 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         candidates = [family for family in config.reviewers if family not in authors]
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             raise CliError("saved fallback note is not in the published form; run without --repost")
-        allowed, _ = _decide_kind(
+        allowed, reviewed = _decide_kind(
             _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget")
+        if reviewed is not None:
+            _verify_delta_history(wt, config, reviewed, head, pr.number)
     else:
         try:
             result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
@@ -963,12 +965,28 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     return True
 
 
-def _delta_merge_recovery(wt: Path, reviewed: str, merge: str) -> str:
-    pre_merge = _git(wt, "rev-parse", f"{merge}^1")
-    if not _is_ancestor(wt, reviewed, pre_merge):
-        return f"replay the fixes on the reviewed head {reviewed[:12]}"
-    return (f"save the current tip on a backup branch, use `git reset --hard {pre_merge}`, "
-            "and cherry-pick any later fixes from the backup")
+def _verify_delta_history(wt: Path, config: Config, since: str, head: str, number: int | None) -> None:
+    if not _is_ancestor(wt, since, head):
+        raise CliError(
+            f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original "
+            "branch tip with `git reflog`. Save the current tip on a backup branch, then use "
+            "`git reset --hard <original-tip>` and replay any later fixes. To publish the restored "
+            f"head, run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR "
+            "from the current branch"
+        )
+    if worktree.merges_since(wt, since):
+        try:
+            if number is None:
+                raise eligibility.BaseMergeError("missing PR identity")
+            with eligibility.base_merge_history(config.repo, number, since, head, config.base_branch):
+                pass
+        except eligibility.BaseMergeError as exc:
+            raise CliError(
+                f"could not verify merge history since {since[:12]} against {config.base_branch}: {exc}. "
+                "Restore the branch from the configured base and reviewed first-parent history, "
+                f"or replay the fixes on the reviewed head {since[:12]}, including resolution edits. "
+                "Push the recovered head with `loopzero pr` and run `loopzero review`, or open a new PR"
+            ) from exc
 
 
 def _run_review(
@@ -978,22 +996,8 @@ def _run_review(
 ) -> ReviewResult:
     lineage_base = _primary_base(wt, config)
     since = reviewed if kind == "delta" else lineage_base
-    if kind == "delta" and not _is_ancestor(wt, since, head):
-        raise CliError(
-            f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original "
-            "branch tip with `git reflog`. Save the current tip on a backup branch, then use "
-            "`git reset --hard <original-tip>` and replay any later fixes. To publish the restored "
-            f"head, run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR "
-            "from the current branch"
-        )
-    if kind == "delta" and (merges := worktree.merges_since(wt, since)):
-        recovery = _delta_merge_recovery(wt, since, merges[0])
-        raise CliError(
-            f"merge commit {merges[0][:12]} since the reviewed head {since[:12]} would put the "
-            f"merged-in changes in the delta material. To recover, {recovery}. "
-            f"To publish the recovered head, run `loopzero pr`, then `loopzero review` "
-            f"before merging {config.base_branch} again"
-        )
+    if kind == "delta":
+        _verify_delta_history(wt, config, since, head, publication[1] if publication else None)
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
     authors = runners.author_families(wt, head, lineage_base)

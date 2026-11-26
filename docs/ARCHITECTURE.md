@@ -95,6 +95,10 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    the PR-wide cap of one primary and one delta across head rewrites, and the
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
+   The delta requires the reviewed commit on the current head's first-parent
+   history and verifies merged parents against the live configured base. The
+   runner receives the full reviewed-to-current tree diff, including manual
+   merge resolutions.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings,
    target branch and required CI. The receipt must record a clean passing run
