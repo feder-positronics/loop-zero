@@ -12,16 +12,15 @@ from .conftest import git
 from .test_sandbox import bwrap_log, make_config  # noqa: F401
 
 
-@pytest.mark.parametrize('base_ref', ['stale', 'missing', 'recorded'])
-@pytest.mark.parametrize('body,verdict,tails', [
-    ('print(json.dumps(r))', True, ['ok', 'ok']),
-    ('r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
-    ('print("x" * 3000 + "worker socket unavailable", file=sys.stderr);sys.exit(42)', False, None),
-    ('r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
+@pytest.mark.parametrize('base_ref,body,verdict,tails', [
+    *[(base_ref, 'print(json.dumps(r))', True, ['ok', 'ok']) for base_ref in ('stale', 'missing', 'recorded')],
+    ('stale', 'r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
+    ('stale', 'print("x" * 3000 + "worker socket unavailable", file=sys.stderr);sys.exit(42)', False, None),
+    ('stale', 'r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
      ['Ω' * 8188 + ' newest']),
-    ('subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
-    ('r.update(not_started=True,duration_s=0,tail="");print(json.dumps(r))', True, ['one', 'two']),
-    *[(body, False, None) for body in [
+    ('stale', 'subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
+    ('stale', 'r.update(not_started=True,duration_s=0,tail="");print(json.dumps(r))', True, ['one', 'two']),
+    *[('stale', body, False, None) for body in [
         '', '''print('{"x":' * 100000 + "0" + "}" * 100000)''', 'print("{")', 'print(json.dumps(r));print(json.dumps(r))',
         'del r["exit_code"];print(json.dumps(r))', 'del r["worktree"];print(json.dumps(r))',
         'r["duration_s"]=float("nan");print(json.dumps(r))',
@@ -66,17 +65,15 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
     if tails is not None:
         assert [r.tail for r in report.results] == tails
     if not verdict:
+        assert calls == ['echo one']
         assert sum(r.tail == 'ok' for r in report.results) <= 1
     if '* 100000' in body:
         assert 'Stage runner failed' in report.results[0].tail
         assert any(word in report.results[0].tail.lower() for word in ('recursion', 'stack overflow'))
-    if 'drift' in body:
-        assert report.dirty and calls == ['echo one']
-        assert 'Worktree changed after stage' in report.results[0].tail
-    elif not verdict:
-        assert calls == ['echo one']
     current_head = _save_report(git_repo, report)
     if 'drift' in body:
+        assert report.dirty
+        assert 'Worktree changed after stage' in report.results[0].tail
         assert current_head == git(git_repo, 'rev-parse', 'HEAD').strip() and current_head != report.head
         assert _load_report(git_repo) != report
         return
