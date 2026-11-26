@@ -11,7 +11,7 @@ queue_rules:
   - name: main
     batch_size: 1
     branch_protection_injection_mode: queue
-    max_checks_retries: 0
+    max_checks_retries: 1
     merge_method: squash
     queue_conditions:
       - base = main

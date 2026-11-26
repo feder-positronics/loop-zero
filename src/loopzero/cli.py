@@ -1556,8 +1556,8 @@ def _mergify_timeout_detail(
 
 
 MERGIFY_REQUEUE = (
-    "To requeue, post `@mergifyio queue` as the whole PR comment "
-    "(same login), then rerun `loopzero merge --wait`."
+    "To requeue an unchanged head, post `@mergifyio queue` as the whole PR comment (same login); a new head is "
+    "requested by `loopzero merge` or readmitted by a repository queue rule. Then rerun `loopzero merge --wait`."
 )
 MERGIFY_DEQUEUE_HINT = (
     'Read Mergify\'s "Left the queue" comment on the PR for the reason. Address it before requeueing.'

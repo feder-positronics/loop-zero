@@ -4534,7 +4534,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert wt.exists() and code == (3 if outcome == "timeout" else 1)
         if outcome == "ejected":
             assert err.index('"Left the queue" comment') < err.index("post `@mergifyio queue`")
-        message = {"ejected": "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`", "head_changed": "head changed",
+        message = {"ejected": "post `@mergifyio queue` as the whole PR comment (same login); a new head", "head_changed": "head changed",
                    "timeout": "timed out", "api_error": "HTTP 503",
                    "incompatible_absent": "incompatible settings fingerprint", "incompatible_unverified": "HTTP 503",
                    "unsafe_config": "unsafe or unavailable", "unsafe_pending": "unsafe or unavailable", "config_error": "HTTP 503",
@@ -4546,6 +4546,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     (False, "current"), (False, "stale"), (False, "missing"),
     (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"), (True, "conflict"),
     (False, "head"), (False, "requeue"), (False, "author"), (False, "landed"),
+    (False, "rule"), (False, "rule_requeue"), (True, "batch"), (True, "dequeued"),
 ])
 def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, confirmed, kind):
     head = arm_mergify_pr(wt, gh)
@@ -4553,13 +4554,14 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
     comments = [{"id": 42, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
                  "body": MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)}]
     if kind != "missing":
-        template = MERGIFY_QUEUE_FIXTURE.get("admission_report" if admission else f"{kind}_report", MERGIFY_QUEUE_FIXTURE["report"])
+        template = MERGIFY_QUEUE_FIXTURE.get(
+            "admission_report" if admission else f"{kind.removesuffix('_requeue')}_report", MERGIFY_QUEUE_FIXTURE["report"])
         body = template.replace("@url@", URL).replace("@sha@", "f" * 7 if kind == "head" else head[:7])
         comments.append({"id": 43, "user": {"login": "someone-else" if kind == "author" else "mergify[bot]"},
-                         "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind),
+                         "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind, "2026-11-25T19:01:00Z"),
                          "body": body + MERGIFY_QUEUE_FIXTURE["attribution"].get(kind, "")})
-    if kind == "requeue":
-        comments.append({"id": 44, "user": {"login": LOGIN}, "body": "@mergifyio queue"})
+    if kind.endswith("requeue"):
+        comments.append({"id": 44, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:02:00Z", "body": "@mergifyio queue"})
     gh.respond(f"api repos/{REPO}/issues/7/comments", comments)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     membership = iter([mergify.Membership()] if confirmed else [])
@@ -4577,26 +4579,30 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
     if kind == "landed":
         assert (code, err) == (0, "") and not wt.exists() and out.splitlines()[-1] == "e" * 40
     elif kind in MERGIFY_QUEUE_FIXTURE["expected"]:
-        assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and ("'checks'" in err) == (kind != "conflict")
+        assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and ("'checks'" in err) == (kind not in {"conflict", "dequeued"})
         assert all(part in err for part in [*MERGIFY_QUEUE_FIXTURE["requeue_guidance"], *MERGIFY_QUEUE_FIXTURE["expected"][kind]])
     else:
         assert code == 3 and wt.exists() and "waiting for admission" in out
         assert (f"{URL}#issuecomment-43" in out) is (kind == "current")
 
 
-@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None, "long", "many"])
+@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None, "long", "many", "any_of"])
 def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result):
     arm_mergify_pr(wt, gh)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
-    payload = MERGIFY_QUEUE_FIXTURE["candidate_responses"]["blocking" if result in {"long", "many"} else result or "missing"]
-    if extra := {"long": 1, "many": 30}.get(result, 0):
-        conditions = payload["mergeability_check"]["conditions_evaluation"]
-        monkeypatch.setitem(conditions, "subconditions", conditions["subconditions"] + [{"match": False, "label": "界" * 3000}] * extra)
+    blocking = result in {"long", "many", "any_of"}
+    payload = MERGIFY_QUEUE_FIXTURE["candidate_responses"]["blocking" if blocking else result or "missing"]
+    conditions = payload["mergeability_check"]["conditions_evaluation"]
+    any_of = {"match": False, "label": "any of", "subconditions": [{"match": False, "label": f"check-{s} = gate"} for s in ("neutral", "success")]}
+    if extra := {"long": 1, "many": 30, "any_of": 1}.get(result, 0):
+        added = any_of if result == "any_of" else {"match": False, "label": "界" * 3000}
+        monkeypatch.setitem(conditions, "subconditions", conditions["subconditions"] + [added] * extra)
     monkeypatch.setattr(mergify, "api_get", lambda *_: payload)
     out, _ = expect_cli(capsys, 3, "merge", "--wait=0", stderr="")
     assert f"https://github.com/{REPO}/pull/42" in out
-    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) == (result in {"blocking", "long", "many"})
+    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) == (result == "blocking" or blocking)
+    assert ("check-neutral = gate | check-success = gate" in out) == (result == "any_of")
     assert "failed" not in out and "check-success = checks" not in out
     assert len(out.encode()) < 2048 and ("27 more" in out) == (extra == 30)
 
