@@ -44,7 +44,7 @@ flowchart TD
     C -->|split needed| E["PR owner splits the PR"]
     G["Reviewer gives no verdict:<br/>tool or login failure"] --> H["Costs nothing: try the next<br/>eligible model family"]
     H -->|none can run| J["Same-family review in a fresh session,<br/>disclosed on the PR"]
-    J -->|none can run| I["Report the blocker to whoever commissioned the PR"]
+    J -->|none can run| I["Wait for the PR owner"]
 ```
 
 See the contract's [review budget](../core/CONTRACT.md#review-budget).
