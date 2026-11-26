@@ -42,8 +42,10 @@ and branch protection remains essential.
 
 Local `.loopzero/task.md` is working handoff context, rendered into the PR.
 The CLI also writes a head-bound checks receipt and saved review output in
-`.loopzero/` for local readiness and reposting. They do not form a second authoritative delivery history; new Codex native audit
-receipts have the restricted retention requirement described below. Local readiness requires
+`.loopzero/` for local readiness and reposting. The CLI rejects tracked state
+and symlinks and uses the worktree's state directory descriptor for receipt I/O.
+GitHub retains authoritative delivery history. The retention rule for Codex
+native audit receipts is described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
 review evidence using trusted base configuration. Local readiness and merge fetch
 the configured origin base once at startup before loading its publisher policy.
@@ -103,7 +105,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    local history.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
-   the PR-wide cap of one primary and one delta across head rewrites, and the
+   the PR-wide review budget across head rewrites, and the
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
    The delta requires the reviewed commit on the current head's first-parent
@@ -111,6 +113,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    runner receives topic patches in first-parent order and the difference
    between each automatic remerge and its recorded tree. Isolated Git verifies
    the history and builds the patch, excluding unrelated base changes.
+   After an approved ordinary delta, one extra delta can cover a first-parent
+   suffix consisting only of verified base merges with a conflict. Isolated Git
+   reconstructs the automatic merges to confirm the conflict. Unresolved
+   blocking findings or a third recorded review rule out this allowance.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),

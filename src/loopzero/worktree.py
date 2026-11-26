@@ -6,12 +6,13 @@ import errno
 import fcntl
 import os
 import re
+import stat
 import subprocess
-import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from select import select
+from uuid import uuid4
 
 from loopzero._proc import build_env, run, run_git_paths
 
@@ -96,6 +97,81 @@ def task_file(wt: Path) -> Path:
     return Path(wt) / ".loopzero" / "task.md"
 
 
+@contextmanager
+def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False):
+    path = wt / ".loopzero"
+    if _git(wt, "ls-files", "-z", "--", ".loopzero"):
+        raise WorktreeError(f"refusing repository-tracked local state: {path}")
+    if create:
+        with suppress(FileExistsError):
+            path.mkdir(mode=0o700)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except NotADirectoryError as exc:
+        raise WorktreeError(f"local state directory is not a directory or is a symbolic link: {path}") from exc
+    try:
+        if lock:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def lock_local_state(wt: Path):
+    """Serialize receipt publication and PR-body updates for this worktree."""
+    return _local_state_directory(wt, create=True, lock=True)
+
+
+def _regular_state(wt: Path, fd: int, name: str) -> bool:
+    with suppress(FileNotFoundError):
+        if not stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+            raise WorktreeError(f"local state file is not regular or is a symbolic link: {wt / '.loopzero' / name}")
+        return True
+    return False
+
+
+def local_state_files(wt: Path, *names: str) -> tuple[bool, ...]:
+    with suppress(FileNotFoundError), _local_state_directory(wt) as fd:
+        return tuple(_regular_state(wt, fd, name) for name in names)
+    return (False,) * len(names)
+
+
+def read_local_state(wt: Path, name: str) -> str:
+    with _local_state_directory(wt) as fd, os.fdopen(
+        os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd), encoding="utf-8"
+    ) as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise WorktreeError(f"local state file is not regular: {wt / '.loopzero' / name}")
+        return stream.read()
+
+
+def write_local_state(
+    wt: Path, name: str, text: str, *, private: bool = False, exclusive: bool = False,
+    expected_head: str | None = None,
+) -> str | None:
+    with _local_state_directory(wt, create=True, lock=private or expected_head is not None) as fd:
+        if expected_head is not None and (current_head := head(wt)) != expected_head:
+            return current_head
+        _regular_state(wt, fd, name)
+        if private:
+            os.fchmod(fd, 0o700)
+        temp = f".{name}-{uuid4().hex}"
+        file_fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
+        try:
+            with os.fdopen(file_fd, "w", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if exclusive:
+                os.link(temp, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            else:
+                os.replace(temp, name, src_dir_fd=fd, dst_dir_fd=fd)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temp, dir_fd=fd)
+    return None
+
+
 def _branch_exists(repo_root: Path, branch: str) -> bool:
     done = run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
@@ -135,7 +211,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     task = task_file(wt)
     existing = wt.exists()
     refusal = f"worktree directory already exists: {wt}"
-    if wt.is_symlink() or task.exists() or task.is_symlink() or task.parent.is_symlink():
+    if wt.is_symlink() or task.parent.is_symlink() or task.is_symlink() or task.exists():
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
@@ -189,30 +265,17 @@ def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | No
 
 
 def _initialize_task(task: Path, text: str) -> None:
-    if task.parent.is_symlink():
-        raise WorktreeError(f"task directory is a symbolic link: {task.parent}")
-    task.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=task.parent, prefix=".task.md-", delete=False
-    ) as stream:
-        temp = Path(stream.name)
-        try:
-            stream.write(text)
-            stream.close()
-            # Publish the complete file without replacing an existing handoff.
-            try:
-                task.hardlink_to(temp)
-            except FileExistsError as exc:
-                raise WorktreeError(f"task file already exists: {task}") from exc
-            except OSError as exc:
-                if exc.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS, errno.EPERM):
-                    raise
-                raise WorktreeError(
-                    f"cannot publish task file {task} ({exc.strerror}): hard links are required; "
-                    "run loopzero start from a checkout on a filesystem that supports hard links"
-                ) from exc
-        finally:
-            temp.unlink(missing_ok=True)
+    try:
+        write_local_state(task.parent.parent, task.name, text, exclusive=True)
+    except FileExistsError as exc:
+        raise WorktreeError(f"task file already exists: {task}") from exc
+    except OSError as exc:
+        if exc.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS, errno.EPERM):
+            raise
+        raise WorktreeError(
+            f"cannot publish task file {task} ({exc.strerror}): hard links are required; "
+            "run loopzero start from a checkout on a filesystem that supports hard links"
+        ) from exc
 
 
 def head(wt: Path) -> str:
@@ -233,14 +296,14 @@ def branch(wt: Path) -> str:
 
 
 def task_text(wt: Path) -> str:
-    task = task_file(wt)
-    if not task.exists():
+    try:
+        return read_local_state(wt, "task.md")
+    except FileNotFoundError:
         raise WorktreeError(
-            f"missing {task}. Run `loopzero start <slug>` for a new task worktree, "
+            f"missing {task_file(wt)}. Run `loopzero start <slug>` for a new task worktree, "
             "or recreate the file using the handoff template at "
             "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md"
-        )
-    return task.read_text(encoding="utf-8")
+        ) from None
 
 
 def base_sha(wt: Path) -> str:
