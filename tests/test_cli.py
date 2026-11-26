@@ -1536,13 +1536,14 @@ def test_review_runtime_paths_use_only_verified_base(
 def test_runtime_pinning_requires_trusted_workflow(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, command: str, missing: str,
 ) -> None:
+    origin = Path(git(wt, "remote", "get-url", "origin").strip())
     if missing == "default":
         git(wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
-    elif missing == "remote":
-        git(wt, "update-ref", "-d", "refs/remotes/origin/main")
     else:
-        git(wt, "update-ref", "refs/remotes/origin/main",
-            git(wt, "rev-list", "--max-parents=0", "HEAD").strip())
+        options = ("-d",) if missing == "remote" else ()
+        revision = () if options else (git(wt, "rev-list", "--max-parents=0", "HEAD").strip(),)
+        for checkout, ref in ((wt, "refs/remotes/origin/main"), (origin, "refs/heads/main")):
+            git(checkout, "update-ref", *options, ref, *revision)
     prepare_review(wt, gh, fake_bin)
     code, out, err = run(capsys, command)
     assert "reviewer paths" not in out + err
@@ -2242,7 +2243,7 @@ def test_ready_after_reviewed_head(
     popen = subprocess.Popen
 
     def isolated_fetch(argv, **kwargs):
-        if "fetch" in argv:
+        if "fetch" in argv and f"https://github.com/{REPO}.git" in argv:
             if history == "missing history":
                 raise cli.eligibility.candidate.CandidateError("history unavailable")
             argv = [wt.as_uri() if arg == f"https://github.com/{REPO}.git" else arg for arg in argv]
@@ -2283,7 +2284,7 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch, git
     gh.respond("pr ready", "")
     git_calls.clear()
     code, out, err = run(capsys, "ready")
-    assert_git_cost(git_calls, 7, 1)
+    assert_git_cost(git_calls, 8, 1)
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
@@ -3208,6 +3209,7 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     repo: Path, gh: FakeGh, capsys, monkeypatch, state
 ) -> None:
     primary = repo.parent / "origin.git"
+    git(primary, "remote", "add", "origin", str(primary))
     linked = repo.parent / "linked task"
     git(primary, "worktree", "add", "-q", "-b", "lz/bare", str(linked), "main")
     monkeypatch.chdir(linked)
@@ -3737,7 +3739,7 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
         git(wt, "checkout", "-q", "--ignore-other-worktrees", base)
     else:
         publish_workflow(wt, workflow.read_text())
-        git(wt, "update-ref", f"refs/remotes/origin/{base}", "refs/remotes/origin/main")
+        git(wt, "push", "-q", "origin", f"origin/main:refs/heads/{base}")
         git(wt, "checkout", "-q", "-b", base)
     for command in ("pr", "review", "ready", "merge"):
         code, out, err = run(capsys, command)
@@ -4232,12 +4234,25 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
 
 
 @pytest.mark.parametrize("publisher", ["stranger", "lz-bot"])
-def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+def test_ready_pins_review_publishers_to_base(wt, repo, gh, capsys, monkeypatch, publisher, head):
+    policy = WORKFLOW.replace('required_ci = ["checks"]', 'required_ci = ["checks", "Loop-zero Eligibility"]')
+    publish_workflow(wt, policy + '\nreview_publishers = ["stranger"]\n')
+    commit_file(repo, "workflow.toml", policy + f'\nreview_publishers = ["{LOGIN}"]\n', "rotate publisher")
+    git(repo, "push", str(repo.parent / "origin.git"), "main")  # preserve the retired local publisher
+    (wt / "workflow.toml").write_text(policy + f'\nreview_publishers = ["{publisher}"]\n')
     arm_approved_pr_with_check_result(
         gh, head, wt, "success", review_login=publisher, isDraft=False
     )
+    gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [{"context": "Loop-zero Eligibility", "state": "success"}])
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
+    event = repo / "event.json"
+    event.write_text(json.dumps({"inputs": {"pr": "7"}}))
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    assert hosted.main() == 0
+    assert json.loads(gh.calls[-1]["--input"])["state"] == ("success" if publisher == LOGIN else "pending")
 
 
 def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatch):
