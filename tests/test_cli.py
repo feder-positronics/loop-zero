@@ -2736,7 +2736,7 @@ def test_ready_wait_revalidates_its_ready_transition(
 
 
 @pytest.mark.parametrize("after", ["pending", "late_success", "head_move", "blocker", "cancelled"])
-def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypatch, head, after):
+def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypatch, head, after, replay_gh):
     arm_approved_pr_with_check_result(gh, head, wt, "pending")
     gh.respond("pr ready", "")
     clock, sleeps, transitioned = [0.0], [], [False]
@@ -2817,14 +2817,13 @@ def test_ready_transition_missing_run_gets_observation_grace(
 
 
 @pytest.mark.parametrize("wait,draft", [(True, True), (False, True), (True, False)])
-def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, wait, draft):
+def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, wait, draft, replay_gh):
     arm_approved_ready_pr(gh, head, wt, isDraft=draft)
     gh.respond("pr ready", "")
 
     code, out, err = run(capsys, "ready", *(["--wait"] if wait else []))
 
-    out = without_accepted_receipt(out)
-    assert (code, out, err) == (0, f"ready: {URL}\n", "")
+    assert (code, without_accepted_receipt(out), err) == (0, f"ready: {URL}\n", "")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == int(draft)
     observations = sum(c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/check-runs"]
                        for c in gh.calls)
@@ -2865,7 +2864,7 @@ def test_ready_wait_review_failure_freshness(
     wait,
     expected,
     waited,
-    head,
+    head, replay_gh,
 ) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
     arm_approved_pr_with_check_result(
