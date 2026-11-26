@@ -180,8 +180,6 @@ def _fake_codex(
         printf '%s\\0' "$@" > "{bin_dir}/codex.argv"
         printf '%s' "$codex_home" > "{bin_dir}/codex.home"
         [ -e "$codex_home/config.toml" ] && echo yes > "{bin_dir}/codex.config" || true
-        [ ! -f "$codex_home/auth.json" ] || cat "$codex_home/auth.json" > "{bin_dir}/codex.auth"
-        [ ! -f "$codex_home/auth.json" ] || printf refreshed > "$codex_home/auth.json"
         cat > "{bin_dir}/codex.stdin"
         [ "$1" = exec ] || {{ echo "expected exec subcommand" >&2; exit 64; }}
         out=""; schema=""
@@ -218,6 +216,28 @@ def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
             "result": json.dumps(payload), "structured_output": payload,
             "session_id": "claude-session-123", "usage": {"input_tokens": 10},
             "total_cost_usd": 0.01, "duration_api_ms": 25, **extra}
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_fake_codex_does_not_read_or_overwrite_auth(fake_bin, tmp_path, override):
+    script = _fake_codex(fake_bin, json.dumps(APPROVE))
+    home = tmp_path / "outer-home"
+    codex_home = tmp_path / "outer-codex" if override else home / ".codex"
+    codex_home.mkdir(parents=True)
+    auth = codex_home / "auth.json"
+    sentinel = '{"tokens":{"access_token":"synthetic-sentinel"}}'
+    auth.write_text(sentinel)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}")
+    env = {"HOME": str(home), "PATH": os.defpath}
+    if override:
+        env["CODEX_HOME"] = str(codex_home)
+    subprocess.run(
+        [str(script), "exec", "--output-last-message", str(tmp_path / "last.json"), "--output-schema", str(schema)],
+        input="", encoding="utf-8", capture_output=True, check=True, env=env,
+    )
+    assert auth.read_text() == sentinel
+    assert not (fake_bin / "codex.auth").exists()
 
 
 def replace_codex_events(script: Path, events, *, prepend=False) -> None:
@@ -332,7 +352,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
     for index, diff in enumerate(diffs, 1):
         results.append(review_with(
             "codex", cwd=tmp_path, head=head, kind=kind, diff=diff, task_text=task,
-            review_context=context, chunk=(index, len(diffs)) if split else None,
+            review_context=context, chunk=(index, len(diffs)),
         ))
         override = next(arg for arg in _argv(fake_bin, "codex")
                         if arg.startswith("developer_instructions="))
@@ -342,7 +362,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
         assert json.loads(header)["head"] == head and json.loads(header)["task_text"] == task
         assert raw_diff == diff.encode()
 
-    proof = codex_evidence(merge_reviews(results) if split else results[0])
+    proof = codex_evidence(merge_reviews(results))
     assert proof["complete"]
     assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
 
@@ -874,6 +894,7 @@ def test_claude_settings_and_merged_calls_preserve_native_evidence(fake_bin, tmp
         result = _review("claude", tmp_path, model=model, effort=effort)
         assert result.provenance["requested_settings"] == [{"model": model, "effort": effort}]
         assert json.loads(result.raw) == envelope
+        assert runners.validate_runner_result(merge_reviews([result]))
         results.append(result)
     results[0].provenance.pop("requested_settings")
     merged = merge_reviews(results)

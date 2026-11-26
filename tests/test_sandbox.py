@@ -341,7 +341,8 @@ def test_alternate_probe_skips_default_inventory_and_honors_override(git_repo, m
     with pytest.raises(sandbox.SandboxUnavailable, match="Git alternate visibility probe timed out") as info:
         sandbox._preflight_alternates(cfg, git_repo, prefix, common)
     rendered = "".join(traceback.format_exception(info.value))
-    assert "private alternate probe diagnostic" not in rendered and "Create a standalone clone" in rendered
+    assert "private alternate probe diagnostic" not in rendered
+    assert "Transfer this task branch" in rendered
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):
@@ -395,7 +396,8 @@ class TestRealSandbox:
         message = str(failure.value)
         assert str(objects) in message
         assert "alternate" in message.lower() and "sandbox" in message.lower()
-        assert "standalone clone" in message.lower() and "loopzero start" in message
+        assert "transfer this task branch" in message.lower() and "standalone clone" in message.lower()
+        assert "rerun loopzero check at the same commit" in message.lower()
 
     @pytest.mark.parametrize("visibility", ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured"))
     def test_real_sandbox_allows_visible_git_alternates(self, git_repo, tmp_path, visibility):
@@ -875,6 +877,16 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
 
+def test_input_blobs_keep_git_output_byte_for_byte(git_repo):
+    # Input keys hash diff-tree output; stripping would invalidate saved receipts.
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=git_repo, capture_output=True, text=True, check=True).stdout
+    empty = git("hash-object", "-t", "tree", "/dev/null").strip()
+    raw = git("-c", "core.quotePath=true", "diff-tree", "--no-commit-id", "--raw", "-r", "--no-abbrev",
+              empty, "HEAD", "--", "README.md")
+    assert raw.endswith("\n") and sandbox._input_blobs(make_config(), git_repo, ("README.md",)) == raw
+
+
 @pytest.mark.parametrize("error", [errno.E2BIG, errno.ENOENT])
 def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkeypatch, error, cache_check):
     command = "echo stage ran"
@@ -889,7 +901,7 @@ def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkey
             raise OSError(error, os.strerror(error))
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(sandbox._proc, "run", fail_fingerprint)
+    monkeypatch.setattr("loopzero.worktree.run", fail_fingerprint)
     if error != errno.E2BIG:
         with pytest.raises(OSError) as exc:
             sandbox.run_checks(config, git_repo)

@@ -11,8 +11,11 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    design doc you write, for the human owner under [Reporting](#reporting).
 2. Implement, commit, then `loopzero check`: run each `workflow.toml`
    `[checks].commands` entry (a stage) in the sandbox; the result is the
-   head's check receipt. Open the draft before a long check under a
-   [provider-portable handoff](../docs/DELEGATION.md#provider-portable-handoff).
+   head's check receipt. A stage running over one hour is stopped with exit
+   code 124. Before a long check, push and open the draft (`loopzero pr`) and
+   start the check as a [long-running job](../docs/DELEGATION.md#long-running-jobs)
+   so the work survives a lost session; on resume, read the PR's Validation or
+   the saved receipt.
 3. `loopzero pr` pushes and opens a **draft** PR from the task text plus
    generated Validation checks. Later calls sync narrative, preserving live
    Validation, Review and extra sections; `check` refreshes only its checks
@@ -90,7 +93,8 @@ and delegation templates' fields and apply these rules to their prose.
 Merge is authorized by default outside six reserved classes: auth, public API,
 destructive migrations, CI/required checks, production lease (the consumer's
 lock on who may change production) and spending beyond
-current accounts. A reserved class carries a `hold` label plus one issue comment
+current accounts. A reserved class carries a `hold` label on the PR (the CLI
+reads PR labels only, so copy an issue's hold to its PR) plus one issue comment
 naming the hazard and end condition for the
 [decisions owner](../docs/DELEGATION.md#team-roles) (or human owner) to resolve.
 No separate per-PR go-ahead to merge, take out of draft or queue; no hold renewal. Merge-authority
@@ -120,8 +124,9 @@ holds also block the owner queue route below.
   visible. Ordinary missing-run grace and the early out-of-draft switch do not apply.
 
 Push fixes or use `loopzero resolve <id> "<reason>"` to reply to and resolve
-one finding; no bulk or silent resolution. The CLI has no waiver file or override
-flag. Hosted review eligibility uses the current authored SHA, review ancestry and trusted-base
+one finding; no bulk or silent resolution. The CLI has no waiver file. `--config`
+replaces the pinned policy for bootstrap or an operator override and says so in
+its output. Hosted review eligibility uses the current authored SHA, review ancestry and trusted-base
 `workflow.toml` publishers; pending/dismissed reviews are ineligible. Local
 readiness also requires its sandboxed check receipt and source CI. Writers
 can edit/resolve evidence; branch protection and CI enforce these blockers.
@@ -143,9 +148,7 @@ and `loopzero merge`. Where a repository rule queues ready PRs, taking a PR out 
 draft is the queue request, whatever tool does it: after a receipt refusal, post
 the one reason first, or fix the cause and rerun `loopzero check`.
 
-Infra-only PRs (changing only delivery infrastructure: CI, queue or runner
-configuration and scripts) need owning tests + lint instead of a full check. An
-attributed main regression is repaired or reverted by the PR owner of the change
+An attributed main regression is repaired or reverted by the PR owner of the change
 that caused it; for a shared critical
 product, build or deployment hazard, revert the culprit first within 1 h under
 the consumer's rollback rules. Non-critical failures of monitoring jobs outside a change
@@ -163,8 +166,7 @@ main-regression rule above. Never make a path-filtered job a required check.
 
 **Delivery fixes go first.** Fixes to the delivery system itself (CI, queue and
 runner reliability or speed) go to the front of the merge queue, ahead of feature
-work, through the repository's queue priority if it has one. Infra-only fixes
-may use the infra-only route above.
+work, through the repository's queue priority if it has one.
 
 Finish planned base updates before starting checks. Reuse an identical check
 already queued or running at the same head and settings fingerprint. A second local
@@ -210,8 +212,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   another may advise read-only and review independently. Before committing
   imported work, record every actual writing delegate in truthful
   `Co-Authored-By` trailers; the committer does not replace the writer.
-  Preserve every actual contributor's truthful trailers through squash/amend
-  except under the authorized disclosure route below. Missing attribution
+  Preserve every actual contributor's truthful trailers through squash/amend.
+  Missing attribution
   stays unknown; never invent it.
 - Primary and delta prefer families absent from recognized trailers across
   all commits/trailers from configured-base merge-base through HEAD,
@@ -222,7 +224,7 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
 - Batch substantive and mechanical repairs into one head for the delta.
   Preserve the approved head; optional suggestions do not justify edits.
 - After an approved ordinary delta with blocking findings resolved, one more delta can review a suffix of verified
-  base merges containing a conflict. Otherwise, merge with readiness passing or split a head that needs more review.
+  base merges containing a conflict. Otherwise, merge with readiness passing or open a replacement PR for changes that need more review.
 - When a base update is needed after a published review, merge the configured
   base into the existing branch to preserve reviewed ancestry. Readiness and
   hosted eligibility can inherit coverage only across proven clean base merges.
@@ -244,17 +246,6 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   [setup and rollback](../SETUP.md#connect-your-agent).
 
 [Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
-
-### Owner-approved contributor-review exception
-
-Only the confirmed mixed-authoring route
-([#264 ruling](../docs/design/2026-10-12-contributor-review-exception.md)) permits
-genuine native review by a less-writing family, with reduced assurance rather
-than independence. Use truthful main-contributor trailers, disclose every
-minority writing model in the commit body and PR comment labelled
-**owner-approved contributor-review exception**, and never rewrite past an
-existing primary review; selector, budget and readiness gates stay unchanged.
-Outside that confirmed scope, retain all-writer trailers.
 
 ## Sandbox rules for checks
 

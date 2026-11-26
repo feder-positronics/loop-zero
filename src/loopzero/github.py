@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from itertools import count, pairwise
+from itertools import chain, islice, pairwise
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -24,7 +24,7 @@ from urllib.parse import quote
 from loopzero import runners
 from loopzero._proc import ProcTimeout, ToolMissing, run
 from loopzero.runners import review_settings
-from loopzero.types import BLOCKING, Finding, ReviewResult
+from loopzero.types import BLOCKING, Finding, ReviewResult, is_sha
 
 GH_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_HOST")
 GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
@@ -40,7 +40,7 @@ MARKER_RE = re.compile(
 PAGE = 100
 PR_FILE_LIMIT = 3_000
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
-RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
+RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After."
 CHECK_SUITE_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -414,7 +414,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
     error = GhUnavailable if transient else GhError
-    confirmed_limit = rate_limited and status in {"403", "429"}
+    confirmed_limit = rate_limited and status in {"200", "403", "429"}
     reset = headers.get("x-ratelimit-reset", "")
     rate_reset = int(reset) if (confirmed_limit and headers.get("x-ratelimit-remaining") == "0"
                                 and re.fullmatch(r"[0-9]{1,18}", reset)) else None
@@ -442,7 +442,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     }
     guidance = RATE_LIMIT_GUIDANCE
     if remaining == 0:
-        guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}; No automatic retry."
+        guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}."
     elif remaining is not None or retry_seconds or retry_date:
         delay = f"{retry_after} s" if retry_seconds else retry_after if retry_date else "~60 s"
         guidance = f"\nRate limited: short-window limit: retry after {delay}."
@@ -505,25 +505,27 @@ def record_full_page(endpoint: str, rows: list, seen: set[bytes]) -> None:
     seen.add(digest)
 
 
-def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
-    """Yield validated rows until the last page."""
+def _iter_paged(endpoint: str, key: str | None = None, **kwargs) -> Iterator[dict]:
+    """Yield validated rows of a list (or of `key` in an envelope) until the last of at most 100 pages."""
     seen: set[bytes] = set()
-    for page in count(1):
+    for page in range(1, 101):
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
-                         "-F", f"page={page}")
-        if isinstance(chunk, dict):
-            chunk = chunk.get(key)
-        if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
+                         "-F", f"page={page}", **kwargs)
+        if key is not None:
+            chunk = chunk.get(key) if isinstance(chunk, dict) else None
+        if (not isinstance(chunk, list) or len(chunk) > PAGE
+                or not all(isinstance(row, dict) for row in chunk)):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
-        if len(chunk) >= PAGE:
+        if len(chunk) == PAGE:
             record_full_page(endpoint, chunk, seen)
         yield from chunk
         if len(chunk) < PAGE:
             return
+    raise GhError(("gh", "api", endpoint), "pagination exceeds 100 pages")
 
 
-def _paged(endpoint: str, key: str = "check_runs") -> list:
-    return list(_iter_paged(endpoint, key))
+def paged(endpoint: str, key: str | None = None, **kwargs) -> list[dict]:
+    return list(_iter_paged(endpoint, key, **kwargs))
 
 
 def api_get(endpoint: str, **kwargs) -> object:
@@ -594,8 +596,7 @@ def pr_from_rest(data: object) -> PR:
                 or (merged and state != "closed")
                 or not isinstance(url, str) or not url.startswith("https://")
                 or not isinstance(base_ref, str) or not base_ref
-                or not isinstance(head_sha, str)
-                or not re.fullmatch(r"[0-9a-f]{40}", head_sha)):
+                or not is_sha(head_sha)):
             raise ValueError("invalid PR state, mergeability, or head")
         return PR(
             number=number, url=url, head_sha=head_sha, base_ref=base_ref, is_draft=draft,
@@ -608,7 +609,7 @@ def pr_from_rest(data: object) -> PR:
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
-        raise _not_found(number, exc) from exc
+        raise GhError(("gh", "api"), f"malformed PR detail for #{number} ({exc!r})") from exc
 
 
 def _pr_detail(repo: str, number: int) -> tuple[PR, dict]:
@@ -635,7 +636,7 @@ def _branch_sha(endpoint: str, field: str, invalid: str, *, full_sha: bool = Fal
         raise
     ref_data = ref.get(field) if isinstance(ref, dict) else None
     sha = ref_data.get("sha") if isinstance(ref_data, dict) else None
-    if not isinstance(sha, str) or not sha or (full_sha and not re.fullmatch(r"[0-9a-f]{40}", sha)):
+    if not isinstance(sha, str) or not sha or (full_sha and not is_sha(sha)):
         raise GhError(("gh", "api", endpoint), invalid)
     return sha
 
@@ -662,25 +663,19 @@ def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> t
     if sha is None:
         return "", []
 
-    matches: list[dict] = []
-    for page in range(1, 101):
-        endpoint = f"repos/{repo}/commits/{sha}/pulls?per_page={PAGE}&page={page}"
-        try:
-            rows = api_get(endpoint)
-        except GhError as exc:
-            # A local head can be unpushed. Let the branch fallback find its actual PR.
-            missing_commit = re.search(r"\bHTTP 404\b", exc.tail) or (
-                f"No commit found for SHA: {sha}" in exc.tail and re.search(r"\bHTTP 422\b", exc.tail)
-            )
-            if head_sha is not None and page == 1 and missing_commit:
-                return endpoint, []
-            raise
-        if not isinstance(rows, list) or len(rows) > PAGE:
-            raise GhError(("gh", "api", endpoint), "invalid commit PR page")
-        matches.extend(row for row in rows if _matches_commit_pr(row, repo, branch, endpoint))
-        if len(rows) < PAGE:
-            return endpoint, matches
-    raise GhError(("gh", "api", endpoint), "commit PRs exceed 100 pages")
+    endpoint = f"repos/{repo}/commits/{sha}/pulls"
+    rows = _iter_paged(endpoint)
+    try:
+        first = list(islice(rows, 1))  # the first request
+    except GhError as exc:
+        # A local head can be unpushed. Let the branch fallback find its actual PR.
+        missing_commit = re.search(r"\bHTTP 404\b", exc.tail) or (
+            f"No commit found for SHA: {sha}" in exc.tail and re.search(r"\bHTTP 422\b", exc.tail)
+        )
+        if head_sha is not None and missing_commit:
+            return endpoint, []
+        raise
+    return endpoint, [row for row in chain(first, rows) if _matches_commit_pr(row, repo, branch, endpoint)]
 
 
 def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state: str) -> PR:
@@ -820,7 +815,7 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         prefix = first + "\n" + header + (separator + rest if separator else "")
         _, span = runners.leading_review_block(prefix)
         if len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
-            raise runners.RunnerBadOutput("codex: oversized leading machine block; HOLD")
+            raise runners.RunnerBadOutput("codex: oversized leading machine block. To publish a review, split the PR and review the smaller changes.")
     severities = [f.severity for f in result.findings]
     summary = ", ".join(f"{severities.count(s)} {s}" for s in ("critical", "important", "suggestion"))
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
@@ -1239,7 +1234,7 @@ def _check_signals(
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
     latest_runs: dict[str, dict] = {}
-    runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
+    runs = paged(f"repos/{repo}/commits/{head_sha}/check-runs", "check_runs")
     for cr in runs:
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
@@ -1249,7 +1244,7 @@ def _check_signals(
         timestamp = cr.get("started_at" if state in _PENDING_CHECKS else "completed_at")
         signals[name] = [(state, readiness_timestamp(timestamp))]
     latest_status: dict[str, dict] = {}
-    for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
+    for status in paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status)
     for name, status in latest_status.items():
         signals.setdefault(name, []).append((status.get("state") or "unknown", readiness_timestamp(status.get("created_at"))))
@@ -1272,7 +1267,7 @@ def _check_signals(
                 or any(state not in _NONFAILING_CHECKS for state, _ in signals[name][1:])):
             continue
         if workflows is None:
-            workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
+            workflows = paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
         if _has_active_replacement(repo, cr, workflows, head_sha):
             superseded.append(name)
     capped = _check_suites_at_limit(runs)
@@ -1298,6 +1293,13 @@ def _missing_check_reason(name: str, head_sha: str, capped: bool) -> str:
     return f"required check '{name}' missing on {head_sha[:12]}"
 
 
+def has_check_activity(repo: str, head_sha: str, readiness: Readiness) -> bool:
+    if readiness.has_pending_checks:
+        return True
+    runs = _iter_paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
+    return any(run.get("head_sha") == head_sha and run.get("status") in _ACTIVE_WORKFLOWS for run in runs)
+
+
 def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_sha: str) -> bool:
     """A producer can be superseded only by its own workflow on the same head."""
     suite_id = check["check_suite"]["id"]
@@ -1306,7 +1308,7 @@ def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_
                      and run.get("head_sha") == head_sha), None)
     producer = find_producer(workflows)
     if producer is None and len(workflows) >= 1_000 and type(suite_id) is int:
-        producer = find_producer(_paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
+        producer = find_producer(paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
     if producer is None or not producer.get("workflow_id"):
         return False
     created = readiness_timestamp(producer.get("created_at"))
@@ -1384,7 +1386,7 @@ def readiness(
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha,
+    for f in open_blocking_findings(repo, pr.number, None if ancestor_review or not reviewed_head else pr.head_sha,
                                     publishers):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
@@ -1437,7 +1439,7 @@ def merged_sha(
         raise GhError(argv, "PR head changed before merge verification")
     state = view.get("state")
     if merged and state == "closed":
-        if isinstance(sha := view.get("merge_commit_sha"), str) and re.fullmatch(r"[0-9a-f]{40}", sha):
+        if is_sha(sha := view.get("merge_commit_sha")):
             return sha
     elif not merged and state == "open":
         if check_hold and (hold := merge_hold(number, _pr_labels(view))):
@@ -1564,6 +1566,6 @@ def _status_limit_reached(repo: str, head: str, context: str) -> bool:
     with suppress(GhError, ProcTimeout, OSError):
         return sum(
             str(status.get("context", "")).casefold() == context.casefold()
-            for status in _paged(f"repos/{repo}/commits/{head}/statuses")
+            for status in paged(f"repos/{repo}/commits/{head}/statuses")
         ) >= 1_000
     return False

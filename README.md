@@ -10,8 +10,8 @@ record.
 It exists for people and coding agents who ship many small PRs and want the
 same discipline on every one of them: checks run in a sandbox with read-only
 Git metadata and no network by default, a reviewer reads the exact head (from a
-different family by default, subject to the contract's bounded owner-approved
-contributor-review exception), and a PR needs an eligible review, resolved
+different family by default, with a disclosed same-family fallback when none
+can run), and a PR needs an eligible review, resolved
 blocking findings and green required CI to merge. The full rules fit in
 [core/CONTRACT.md](core/CONTRACT.md).
 
@@ -22,8 +22,8 @@ ownership and the contributor routine that keeps documentation current.
 
 | Command | What it does |
 | --- | --- |
-| `loopzero start <slug>` | Create a worktree and branch from base; write the Context/Problem/Goal task template. |
-| `loopzero check` | Run trusted-base checks with local bwrap. |
+| `loopzero start <slug>` | Create a worktree and branch from base; write the Goal/Problem/Context task template. |
+| `loopzero check` | Run trusted-base checks with local bwrap. Before a long check, open the draft with `loopzero pr` first. |
 | `loopzero pr` | Push and open a draft PR from the task file, with its Validation section rendered. |
 | `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. Exits 0 on approval, 5 on changes requested. |
 | `loopzero ready [--wait[=SECONDS]]` | Verify head, findings and CI; optionally wait for required checks on that head. |

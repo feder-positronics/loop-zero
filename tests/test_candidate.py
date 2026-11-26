@@ -21,7 +21,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from loopzero import candidate, github
+from loopzero import candidate, eligibility, github
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
 from tests.conftest import commit_file, git as isolated_git
 
@@ -305,6 +305,31 @@ def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate, bas
     assert seen == [102]
 
 
+def test_isolated_proofs_deepen_for_an_older_merge_base(tree_candidate, monkeypatch):
+    attest, git, _, _, _, source, _ = tree_candidate
+    monkeypatch.setattr(candidate, "_TREE_DEPTH", 2)
+    popen, depths = subprocess.Popen, []
+
+    def record_fetch(argv, **kwargs):
+        depths.extend(arg for arg in argv if arg.startswith(("--depth=", "--deepen=")))
+        return popen(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", record_fetch)
+    for index in range(5):
+        git("commit", "--allow-empty", "-m", f"base advance {index}")
+    main = git("rev-parse", "main")
+    assert attest(main_head=main) == expected_sources((102, source))
+    assert depths[0] == "--depth=2" and any(depth.startswith("--deepen=") for depth in depths)
+
+    depths.clear()
+    git("checkout", "--detach", source)
+    git("merge", "--no-ff", main, "-m", "merge current main")
+    head = git("rev-parse", "HEAD")
+    with candidate.fetched_git("owner/repo", [source, head, main]) as run:
+        assert eligibility._verified_base_chain(run, source, head, main, clean=True, conflict_only=False)
+    assert depths[0] == "--depth=2" and any(depth.startswith("--deepen=") for depth in depths)
+
+
 @pytest.mark.parametrize("mutation,diagnostic", [
     ("replaced", "tree mismatch"), ("withdrawn", "tree mismatch"), ("extra", "tree mismatch|objects unavailable"),
     ("tampered", "tree mismatch"), ("missing", "objects unavailable"),
@@ -346,7 +371,7 @@ def test_vanished_parent_rejects_main_change(tree_candidate):
     seen = []
     with pytest.raises(CandidateRaceError, match="main changed"):
         tree_candidate[0](main_after=tree_candidate[3], policy=lambda n, _: seen.append(n))
-    assert seen == [102, 102, 102]
+    assert seen == [102, 102, 102, 102]
 
 
 @pytest.fixture
@@ -483,7 +508,7 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
                            source_policy=policy) == expected_sources((102, source))
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
     assert candidate_reads == (4 if timing == "metadata" else 3)
-    assert verified == [(main, head, [source])] and sleeps == [2]
+    assert verified == [(main, head, [source])] and sleeps == [4]
 
 
 @pytest.mark.parametrize("field,value", [("body", "new policy evidence"), ("draft", True)])
@@ -555,7 +580,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
 
 @pytest.mark.parametrize(
     "elapsed,oversleep,attempt_count",
-    [(0, 0, 3), (29, 0, 1), (0, 30, 1)],
+    [(0, 0, 4), (29, 0, 1), (0, 30, 1)],
 )
 def test_persistent_race_preserves_last_error_and_bounds_retry(
     monkeypatch, no_retry_delay, elapsed, oversleep, attempt_count
@@ -577,7 +602,20 @@ def test_persistent_race_preserves_last_error_and_bounds_retry(
     with pytest.raises(CandidateRaceError, match="membership changed") as caught:
         run_attestation(github_get=lambda _: None, status_reads=[None])
     assert len(attempts) == attempt_count and caught.value is attempts[-1]
-    assert sum(sleeps) <= 4
+    assert sum(sleeps) <= 12
+
+
+def test_candidate_retries_across_predecessor_landing(monkeypatch, no_retry_delay):
+    clock = no_retry_delay
+    sources = expected_sources((102, "2" * 40))
+
+    def attest(*_args, **_kwargs):
+        if clock[0] < 10:
+            raise CandidateRaceError("source PR #101 is not open")
+        return sources
+
+    monkeypatch.setattr(candidate, "_attest_candidate_once", attest)
+    assert run_attestation() == sources
 
 
 def test_membership_drift_is_a_retryable_race():

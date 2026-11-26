@@ -23,7 +23,7 @@ from tests.test_cli import (
 
 gh, git_seed, repo, wt = support.gh, support.git_seed, support.repo, support.wt
 replay_gh = support.replay_gh
-REVIEW_COMMENTS = f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1"
+REVIEW_COMMENTS = f"api repos/{REPO}/pulls/7/reviews/17/comments --method GET"
 
 
 def published_review(head, body, *, state="COMMENTED"):
@@ -191,13 +191,13 @@ def test_recovery_requires_exact_live_publication(
             rows[-1]["id"] = 18
             if change == "newer":
                 rows[-1]["state"] = "PENDING"
-            gh.respond(f"api repos/{REPO}/pulls/7/reviews/18/comments?per_page=100&page=1",
+            gh.respond(f"api repos/{REPO}/pulls/7/reviews/18/comments --method GET",
                        [{**c, "pull_request_review_id": 18} for c in comments])
         elif change == "head":
             arm_pr(gh, "b" * 40)
         elif change == "comment_page":
             comments[:] = comments * 100
-            gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=2", None)
+            gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments page=2", None)
         elif change in {"bad_page", "auth", "quota"}:
             rows[:] = [copy.deepcopy(rows[-1]) for _ in range(100)]
             gh.respond(reviews_key(2), None)
@@ -239,12 +239,12 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
     replay_gh, wt, gh, fake_bin, monkeypatch, capsys, change,
 ):
     lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5)
-    original, monotonic = github.api_get, github.time.monotonic
-    def read(endpoint):
-        data = original(endpoint)
-        if "/comments?" in endpoint:
+    original, monotonic = github.paged, github.time.monotonic
+    def read(endpoint, *args, **kwargs):
+        data = original(endpoint, *args, **kwargs)
+        if endpoint.endswith("/comments"):
             if change == "revoked":
-                rows = original(reviews_key().removeprefix("api "))
+                rows = original(reviews_key().split()[1])
                 rows[-1]["state"] = "DISMISSED"
                 gh.respond(reviews_key(), rows)
             elif change == "deadline":
@@ -252,7 +252,7 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
             else:
                 raise _proc.ProcTimeout("read timed out")
         return data
-    monkeypatch.setattr(github, "api_get", read)
+    monkeypatch.setattr(github, "paged", read)
     out, _ = expect_cli(capsys, 1, "review", stderr_contains=("read-back blocked",))
     assert out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
     assert len([c for c in gh.calls if "--input" in c]) == 1
@@ -317,24 +317,11 @@ def test_recovery_transport_retries_only_within_deadline(monkeypatch, failure, b
 
 
 @pytest.mark.parametrize("source", ["model", "repost"])
-@pytest.mark.parametrize("metadata,shape", [
-    ("legacy", "single"), ("legacy", "chunked"), ("legacy", "truncated"),
-    ("null", "single"), ("empty", "single"), ("malformed", "single"),
-])
-def test_historical_publication_recovery_is_exact_and_legacy_only(
-    replay_gh, interrupted_receipt, gh, fake_bin, capsys, metadata, source, shape,
+@pytest.mark.parametrize("metadata", ["legacy", "null", "empty", "malformed"])
+def test_repost_refuses_publications_without_usable_settings(
+    replay_gh, interrupted_receipt, gh, fake_bin, capsys, metadata, source,
 ):
     head, path, saved, _ = interrupted_receipt
-    envelope = json.loads(saved["raw"])
-    if shape == "chunked":
-        saved["chunk_count"] = 2
-        saved["raw"] = json.dumps([envelope, envelope], separators=(",", ":"))
-        saved["provenance"]["session_ids"] *= 2
-        saved["provenance"]["usage"] = [envelope["usage"], envelope["usage"]]
-        for key in ("total_cost_usd", "duration_api_ms"):
-            saved["provenance"][key] *= 2
-    elif shape == "truncated":
-        saved["raw"] = json.dumps({**envelope, "padding": "é" * 20_000}, ensure_ascii=False)
     if metadata == "legacy":
         saved["provenance"].pop("requested_settings", None)
     else:
@@ -342,33 +329,14 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
     path.write_text(json.dumps(saved))
     prefix = support.marker(head, "primary", source)
     if source == "repost":
-        prefix += ("\nReposted from runner sessions: `claude-session-123`, `claude-session-123`"
-                   if shape == "chunked" else "\nReposted from runner session: `claude-session-123`")
-    chunks = "\n\nReviewed in 2 chunks with the same model family." if shape == "chunked" else ""
-    transcript = saved["raw"]
-    if shape == "truncated":
-        transcript = ("[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
-                      "Full output remains in the saved local review artifact.]\n"
-                      + transcript.encode()[-30_000:].decode(errors="ignore"))
+        prefix += "\nReposted from runner session: `claude-session-123`"
     effort = f" (effort {saved['effort']})" if saved["effort"] else ""
     body = (f"{prefix}\nloopzero primary review by claude on `{head}`, "
             f"model {saved['model'] or 'unknown'}{effort}, {saved['duration_s']:.1f}s: "
-            f"**approve** (0 critical, 0 important, 0 suggestion){chunks}" + raw_details(transcript))
+            f"**approve** (0 critical, 0 important, 0 suggestion)" + raw_details(saved["raw"]))
     arm_published_review(gh, head, body)
-    expect_cli(capsys, 0 if metadata == "legacy" else 1, "review", "--repost")
+    expect_cli(capsys, 1, "review", "--repost")
     assert_single_publication(gh, fake_bin)
-    if metadata == "legacy":
-        summary = "\n\nNative Claude output is retained in the restricted local review receipt."
-        mixed = body.partition("\n\n<details>")[0] + summary
-        for altered_body in (mixed, body + "changed"):
-            arm_published_review(gh, head, altered_body)
-            expect_cli(capsys, 1, "review", "--repost")
-        arm_published_review(gh, head, body)
-        gh.respond(REVIEW_COMMENTS, [
-            {"path": "feature.py", "line": 1, "side": "RIGHT", "body": "changed finding",
-             "commit_id": head, "pull_request_review_id": 17, "user": {"login": LOGIN}},
-        ])
-        assert run(capsys, "review", "--repost")[0] == 1
 
 
 @pytest.mark.parametrize("optional", ["junk", [], [{"model": "request"}] * 5])

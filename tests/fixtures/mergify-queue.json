@@ -16,11 +16,11 @@
       "tested this PR alone",
       "flake"
     ],
-    "conflict": ["conflicts with main", "git fetch origin main", "Requeue only after"],
+    "conflict": ["conflicts with main", "git fetch origin main", "After resolving the conflict", "loopzero review", "loopzero merge --wait"],
     "unknown": ["Address it before requeueing"],
     "batch": ["stack", "earlier"],
     "rule": ["Address it before requeueing"],
-    "dequeued": ["conflicts with main", "git fetch origin main", "Requeue only after"]
+    "dequeued": ["conflicts with main", "git fetch origin main", "After resolving the conflict", "loopzero review", "loopzero merge --wait"]
   },
   "admission": {
     "current": "2026-11-25T19:01:00Z",
