@@ -27,6 +27,10 @@ class MergifyError(LoopZeroError):
     """Authentication, transport, or response failure from Mergify."""
 
 
+class ReadDeadline(TimeoutError):
+    """The caller's Mergify read budget expired."""
+
+
 @dataclass(frozen=True)
 class Membership:
     candidate_number: int | None = None
@@ -72,11 +76,18 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _retry_sleep = time.sleep
 
 
-def _open(request: urllib.request.Request):
-    return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+def _open(request: urllib.request.Request, timeout: float = 30):
+    return urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout)
 
 
-def api_get(repo: str, suffix: str) -> object | None:
+def _read_timeout(deadline: float | None) -> float:
+    remaining = 30.0 if deadline is None else deadline - time.monotonic()
+    if remaining <= 0:
+        raise ReadDeadline("Mergify read deadline exceeded")
+    return min(30.0, remaining)
+
+
+def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | None:
     """GET one documented endpoint below this repository's fixed Mergify API path."""
     if not suffix.startswith("/") or "://" in suffix or ".." in suffix:
         raise ValueError("Mergify API suffix must be a repository-relative absolute path")
@@ -88,17 +99,25 @@ def api_get(repo: str, suffix: str) -> object | None:
                  "Authorization": f"Bearer {_credential()}"},
     )
     for delay in (2.0, 5.0, None):  # reads retry server errors, throttling and dropped reads
+        timeout = _read_timeout(deadline)
         try:
-            with _open(request) as response:
-                return json.load(response)
+            with _open(request, timeout) as response:
+                data = json.load(response)
         except urllib.error.HTTPError as exc:
+            _read_timeout(deadline)
             if exc.code == 404:
                 return None
             if delay is None or not (exc.code >= 500 or exc.code == 429):
                 raise MergifyError(f"Mergify queue lookup failed with HTTP {exc.code}") from exc
         except (OSError, ValueError, http.client.IncompleteRead) as exc:
+            _read_timeout(deadline)
             if delay is None:
                 raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
+        else:
+            _read_timeout(deadline)
+            return data
+        if deadline is not None and time.monotonic() + delay >= deadline:
+            raise ReadDeadline("Mergify read retry would exceed the wait deadline")
         _retry_sleep(delay)
     return None
 
@@ -113,8 +132,8 @@ def _unmet_conditions(node: object) -> tuple[str, ...]:
     return (label,) if isinstance(label, str) and label.isprintable() else ()
 
 
-def membership(repo: str, number: int, queue: str) -> Membership | None:
-    data = api_get(repo, f"/merge-queue/pull/{number}")
+def membership(repo: str, number: int, queue: str, deadline: float | None = None) -> Membership | None:
+    data = api_get(repo, f"/merge-queue/pull/{number}", deadline)
     if data is None:
         return None
     try:

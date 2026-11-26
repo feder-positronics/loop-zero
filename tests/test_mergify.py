@@ -21,7 +21,7 @@ def test_membership_uses_bearer_and_validates_queue(monkeypatch):
     monkeypatch.setenv("MERGIFY_API_KEY", "secret")
     seen = []
 
-    def open_(request):
+    def open_(request, *_):
         seen.append(request)
         return response({
             "number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 2,
@@ -37,13 +37,13 @@ def test_membership_uses_bearer_and_validates_queue(monkeypatch):
 def test_membership_maps_404_only_to_absent(monkeypatch):
     monkeypatch.setenv("MERGIFY_API_KEY", "secret")
 
-    def missing(request):
+    def missing(request, *_):
         raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, None)
 
     monkeypatch.setattr(mergify, "_open", missing)
     assert mergify.membership("acme/widgets", 7, "main") is None
 
-    def forbidden(request):
+    def forbidden(request, *_):
         raise urllib.error.HTTPError(request.full_url, 403, "forbidden", {}, None)
 
     monkeypatch.setattr(mergify, "_open", forbidden)
@@ -62,7 +62,7 @@ def test_dequeue_posts_to_documented_endpoint(monkeypatch):
     monkeypatch.setenv("MERGIFY_API_KEY", "secret")
     seen = []
 
-    def open_(request):  # a transient failure must not repeat the write
+    def open_(request, *_):  # a transient failure must not repeat the write
         seen.append(request)
         raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
 
@@ -217,7 +217,7 @@ def test_api_get_retries_transient_reads(monkeypatch, failure):
                 raise {"dropped_read": ConnectionResetError(), "truncated": mergify.http.client.IncompleteRead(b"{")}[failure]
             return super().read(*args)
 
-    def fake_open(request):
+    def fake_open(request, *_):
         calls.append(request.get_method())
         if failure == "http503" and len(calls) == 1:
             raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)

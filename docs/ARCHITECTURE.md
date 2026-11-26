@@ -124,9 +124,11 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    branch and immutable revision match the preceding observation.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge
-   admission checks readiness again. A wait can follow a live Mergify entry
-   with blocked readiness. That observation cannot request or confirm admission. Missing-run diagnosis keeps its two-minute
-   grace after activation without extending the deadline.
+   admission checks readiness again. While readiness is blocked, a merge wait
+   can follow an authenticated Mergify entry from any source-check poll.
+   Membership probes and retries use the remaining positive wait budget, and
+   following an existing entry never requests or confirms admission. Missing-run
+   diagnosis keeps its two-minute grace after activation without extending the deadline.
    When every non-success signal of a required check strictly predates the eligible
    review, `ready --wait` allows up to 15 minutes from that review for a refresh,
    including time before GitHub publishes pending. Past the ordinary two-minute
@@ -277,7 +279,8 @@ The restricted receipt stays in the task worktree until completion.
 The review command locks the worktree’s Git directory from round selection
 through publication to reserve the round across overlapping local invocations.
 
-After confirming a merge, cleanup reads the remote branch ref and deletes it
+Queue waiters verify the live PR head and configured target branch before
+accepting a landed SHA. After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that
 step, and a moved ref is left in place with a warning. The Git push lease
 checks the expected SHA at deletion time even if the ref changes after the REST read.

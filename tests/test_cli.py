@@ -1354,10 +1354,10 @@ def publish_workflow(wt: Path, policy: str, message: str = "configure delivery")
     git(repo, "push", "-q", "origin", "main")
 
 
-def stub_mergify_admission(monkeypatch, *, configured=True):
+def stub_mergify_admission(monkeypatch, *, configured=True, markers=(False, False)):
     if configured is not None:
         monkeypatch.setattr(mergify, "configured", lambda *_: configured)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "markers", lambda *_: markers)
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
 
 
@@ -3945,55 +3945,51 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
-@pytest.mark.parametrize("state", ["ejected", "queued", "queued-pending", "queued-later", "absent", "wrong-base", "lookup-error"])
+@pytest.mark.parametrize("state", ["ejected", "queued", "queued-pending", "queued-later",
+                                  "absent", "wrong-base", "lookup-error", "expired", "retargeted"])
 def test_mergify_wait_resume(wt, gh, capsys, monkeypatch, state):
     head = commit_mergify_configuration(wt)
     pending = state in {"queued-pending", "queued-later"}
-    readiness = {} if pending or state == "ejected" else {"local_exit": None}
-    base = "release" if state == "wrong-base" else "main"
-    arm_approved_pr_with_check_result(gh, head, wt, "pending" if pending else "success",
-                                     readiness=readiness, isDraft=False, baseRefName=base)
-    gh.append(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, isDraft=False)))
-    gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=head, sha=None))
-    monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
-    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: pytest.fail("resume must not confirm again"))
-    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("resume must not submit another command"))
-    followed = []
-    queued = state in {"queued", "queued-pending"}
+    arm_approved_pr_with_check_result(
+        gh, head, wt, "pending" if pending else "success", isDraft=False,
+        readiness={} if pending or state == "ejected" else {"local_exit": None},
+        baseRefName="release" if state == "wrong-base" else "main",
+    )
+    if state == "retargeted":
+        gh.append(f"api repos/{REPO}/pulls/7", merge_json("MERGED", head, "e" * 40, base="release"))
+    stub_mergify_admission(monkeypatch, markers=(True, True))
+    for write in ("mark_confirmed", "request"):
+        monkeypatch.setattr(mergify, write, lambda *_: pytest.fail("resume must not write to Mergify"))
+    entries = iter((None, mergify.Membership()) if state == "queued-later" else ())
 
-    def membership(*_):
+    def membership(_repo, _number, _queue, deadline=None):
         assert state != "wrong-base"
         if state == "lookup-error":
             raise mergify.MergifyError("queued state could not be read")
-        return mergify.Membership() if queued else None
+        if state == "expired":
+            monkeypatch.setattr(cli.time, "monotonic", lambda: deadline + 1)
+        return next(entries, mergify.Membership() if state.startswith("queued") or state in {"expired", "retargeted"} else None)
 
-    def follow(config, pr, timeout, confirmed):
-        assert pr.head_sha == head and confirmed and 0 <= timeout <= 1
-        followed.append(True)
+    followed = []
 
-    def settle(_wt, _config, pr, *_args, **_kwargs):
-        nonlocal queued
-        queued = True
-        return pr, github.Readiness(False, ("required check 'checks' is failure",)), False
-
+    def follow(_config, pr, timeout, confirmed):
+        assert confirmed and 0 <= timeout <= 10
+        followed.append(pr.head_sha)
     monkeypatch.setattr(mergify, "membership", membership)
-    if state.startswith("queued"):
+    monkeypatch.setattr(cli, "_sleep", lambda *_: None)
+    if state != "retargeted":
         monkeypatch.setattr(cli, "_wait_for_mergify", follow)
-    if state == "queued-later":
-        monkeypatch.setattr(cli, "_wait_for_checks", settle)
-    code, _out, err = run(capsys, "merge", "--wait=0" if queued else "--wait=1")
-    if queued:
-        assert (code, err, followed) == (3, "", [True])
-    elif state == "wrong-base":
-        assert code == 1 and "release" in err and not followed
-    elif state == "absent":
-        assert code == 1 and "run loopzero check at this head" in err and not followed
-    elif state == "lookup-error":
-        assert code == 1 and "queued state could not be read" in err and not followed
+    code, out, err = run(capsys, "merge", "--wait=0" if state in {"queued", "queued-pending"} else "--wait=10")
+    if state.startswith("queued"):
+        assert (code, err, followed) == (3, "", [head])
+    elif state == "expired":
+        assert code == 3 and "wait budget expired before following Mergify" in out and not followed
     else:
-        assert code == 1 and 'Read Mergify\'s "Left the queue" comment' in err
-        assert "post `@mergifyio queue` as the whole PR comment" in err
+        assert code == 1 and wt.exists() and not followed
+        assert {"ejected": "post `@mergifyio queue` as the whole PR comment",
+                "wrong-base": "release", "absent": "run loopzero check at this head",
+                "lookup-error": "queued state could not be read",
+                "retargeted": "PR target branch differs from 'main'"}[state] in err
 
 
 @pytest.mark.parametrize("outcome", ["merged", "ejected", "landed-on-ejection",

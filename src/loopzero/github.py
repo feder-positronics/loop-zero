@@ -1383,6 +1383,7 @@ class ClosedUnmerged(GhError):
 
 def merged_sha(
     repo: str, number: int, *, expected_head: str | None = None, check_hold: bool = False,
+    expected_base: str | None = None,
 ) -> str | None:
     """The verified merge commit, or None while open. Admission may check the hold label."""
     argv = ("gh", "api", f"repos/{repo}/pulls/{number}")
@@ -1392,6 +1393,9 @@ def merged_sha(
     if expected_head and (not isinstance(view.get("head"), dict)
                           or view["head"].get("sha") != expected_head):
         raise GhError(argv, "PR head changed before merge verification")
+    if expected_base and (not isinstance(view.get("base"), dict)
+                          or view["base"].get("ref") != expected_base):
+        raise GhError(argv, f"PR target branch differs from {expected_base!r} before merge verification")
     if view["merged"] and view.get("state") == "closed":
         sha = view.get("merge_commit_sha")
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
