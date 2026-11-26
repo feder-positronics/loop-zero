@@ -252,7 +252,6 @@ def _fetch_base(repo_root: Path, base_branch: str) -> str:
 
 def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     """Create a task worktree or finish initializing an interrupted start."""
-    repo_root = Path(repo_root)
     branch = branch_name(repo_root, slug)
     wt = worktree_dir(repo_root, slug)
     task = task_file(wt)
