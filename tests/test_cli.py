@@ -19,7 +19,7 @@ import pytest
 
 from loopzero import cli, config, github, hosted, mergify
 from loopzero._proc import Completed, build_env
-from loopzero.types import CheckReport, CheckResult, ReviewResult
+from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
 from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
 from tests.test_github import (
@@ -196,6 +196,44 @@ def test_review_marker_parser_accepts_old_and_v1_forms() -> None:
     new = cli.review_marker("b" * 40, "delta")
     assert cli.REVIEW_MARKER_RE.search(old).groups() == ("a" * 40, "primary")
     assert cli.REVIEW_MARKER_RE.search(new).groups() == ("b" * 40, "delta")
+
+
+@pytest.mark.parametrize("source", ["model", "pair"])
+def test_review_marker_quoted_in_prose_neither_voids_nor_hides_a_review(gh: FakeGh, source: str) -> None:
+    head = "a" * 40
+    quote = cli.review_marker("b" * 40, "primary", source)
+    result = ReviewResult("claude", head, "primary", "approve",
+                          (Finding("suggestion", None, None, "Fixture", f"The fixture quotes {quote}."),),
+                          "raw", provenance={"session_ids": ["s"]})
+    gh.respond(f"api repos/{REPO}/pulls/7/files", [])
+    (payload,) = github.review_payloads(REPO, 7, head, result, [(marker(head, "primary"), "current", False)])
+    review = {"body": payload["body"], "state": "COMMENTED", "commit_id": head, "user": {"login": LOGIN}}
+    assert quote in review["body"]
+
+    assert cli.eligibility.eligible_review([review], head, (LOGIN,)) is review
+    assert cli.eligibility.readiness_review(
+        [review], head, (LOGIN,), repo=REPO, number=7, base_branch="main") is review
+    assert cli._pr_markers([review], head, (LOGIN,)) == [cli.Marker(head, "primary", "COMMENTED")]
+
+
+def test_second_review_marker_in_the_leading_block_voids_the_review() -> None:
+    head = "a" * 40
+    body = f"{marker(head, 'primary')}\n{marker('b' * 40, 'primary')}\nreview: **approve**"
+    review = {"body": body, "state": "APPROVED", "commit_id": head, "user": {"login": LOGIN}}
+    assert cli.eligibility.eligible_review([review], head, (LOGIN,)) is None
+    assert cli.eligibility.readiness_review(
+        [review], head, (LOGIN,), repo=REPO, number=7, base_branch="main") is None
+    assert cli._pr_markers([review], head, (LOGIN,)) == []
+
+
+def test_publication_recovery_ignores_markers_quoted_on_other_commits(wt: Path, gh: FakeGh, head) -> None:
+    config = cli.config_mod.load(wt / "workflow.toml")
+    result = ReviewResult("claude", head, "primary", "approve", (), "raw", provenance={"session_ids": ["s"]})
+    other = rev("f" * 40, "primary")
+    other["body"] += f"\nA finding quotes {marker(head, 'primary')}"
+    gh.respond_pr_view(pr_json(headRefOid=head))
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    assert cli._confirm_review(wt, config, pr, result, LOGIN, [other]) is False
 
 
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,

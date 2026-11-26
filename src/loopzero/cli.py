@@ -220,7 +220,7 @@ def _pr_markers(reviews: list[dict], head: str,
         if not eligibility.review_projection(review, head, repo, number)[0] and any(
                 runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1]):
             continue
-        match = REVIEW_MARKER_RE.search(body)
+        match = eligibility.leading_marker(body)
         if not match or review.get("commit_id") != match.group(1):
             continue
         if not trusted:
@@ -893,8 +893,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
     trusted = config.review_publishers or (publisher,)
-    evidence = [r for r in reviews if "loopzero:review" in (r.get("body") or "") and (r.get("commit_id") == result.head or any(
-                    m.group(1) == result.head for m in REVIEW_MARKER_RE.finditer(r["body"])))]
+    evidence = [r for r in reviews if "loopzero:review" in (r.get("body") or "") and (
+        r.get("commit_id") == result.head
+        or ((marker := eligibility.leading_marker(r["body"])) and marker.group(1) == result.head))]
     fresh = github.pr_view(config.repo, pr.number)
     if fresh.head_sha != result.head or fresh.state != "OPEN" or fresh.base_ref != pr.base_ref:
         raise CliError("PR changed during publication recovery")
