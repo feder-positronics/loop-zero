@@ -858,7 +858,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
 def _require_open_review_round(config: Config, pr: github.PR, head: str, kind: str) -> None:
     markers = _pr_markers(_pr_reviews(config.repo, pr.number), head, config.review_publishers,
                           repo=config.repo, number=pr.number)
-    if any(marker.kind == kind for marker in markers):
+    if any(marker.kind == kind and marker.head == head for marker in markers):
         raise CliError(f"the {kind} review round is already taken; run loopzero ready")
     if _decide_kind(markers, head)[0] != kind:
         raise CliError("review round changed during publication; run loopzero review again")

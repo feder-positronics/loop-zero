@@ -4784,3 +4784,14 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
     assert "unverified" not in draft
     assert f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0" in draft
     assert "Manual validation evidence." in draft
+
+
+@pytest.mark.parametrize("same_head", [False, True])
+def test_final_review_round_check_distinguishes_heads(wt, gh, head, same_head):
+    cfg = config.load(wt / "workflow.toml")
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": LOGIN}}})
+    gh.respond(reviews_key(), [rev(head if same_head else "a" * 40, "primary")])
+    expected = "round is already taken" if same_head else "round changed during publication"
+    with pytest.raises(cli.CliError, match=expected):
+        cli._require_open_review_round(cfg, pr, head, "primary")
