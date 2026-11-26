@@ -19,6 +19,8 @@ freeze them. Change Acceptance only with a recorded reason in Notes, before
 implementing the change. For changes touching guards, auth, permissions,
 sessions, secrets or trust boundaries, record a short design pass in Notes
 before the first code edit: threats, invariants and chosen approach.
+When deduplicating tests, list their distinct assertions before editing,
+keep each in a surviving test, and record where in the PR body.
 
 Use [write-tests](../write-tests/SKILL.md) to prove the bounded acceptance.
 Map migration, authorization, locking/concurrency and policy edge cases to tests
@@ -55,7 +57,10 @@ the job's scope, give the owner the
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head.
-Suggestions must not expand scope.
+Keep review suggestions within scope. Finish planned test, documentation and
+generated-file edits before primary review.
+After approval, defer optional polish to a follow-up. Fix new evidence of an
+acceptance failure and get review coverage for the changed head.
 Before the check and draft push for primary review, rebase your own commits onto `origin/<base>` using
 `[repo].base` (default `main`). For a stack, follow
 [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).

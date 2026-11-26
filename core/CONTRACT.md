@@ -154,6 +154,9 @@ runner reliability or speed) go to the front of the merge line, ahead of feature
 work, through the repository's queue priority if it has one. Infra-only fixes
 may use the infra-only route above.
 
+Finish planned base updates before starting checks. Wait for an identical check
+already queued or running at the same head and fingerprint. Before a fallback
+check on a published head, run `loopzero ready` and reuse any receipt it accepts.
 The builder runs each full local gate once and records its command, exact head SHA,
 environment fingerprint (from consumer AGENTS.md/docs), result, time and log path.
 Builders, reviewers and coordinators reuse green receipts at the same head and
@@ -203,9 +206,10 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
   Preserve the approved head; optional suggestions do not justify edits.
 - After an approved ordinary delta with blocking findings resolved, one more delta can review a suffix of verified
   base merges containing a conflict. Otherwise, merge with readiness passing or split a head that needs more review.
-- After an approved primary or a delta review, take base changes by merging the
-  base into the existing branch. Readiness and hosted eligibility can inherit
-  coverage only across proven clean base merges. A request_changes primary
+- When a base update is needed after a published review, merge the configured
+  base into the existing branch to preserve reviewed ancestry. Readiness and
+  hosted eligibility can inherit coverage only across proven clean base merges.
+  A request_changes primary
   additionally requires resolution of every blocking finding. Source commits,
   modified merges, and rebases that rewrite the reviewed commit require
   review coverage for the new head.

@@ -3919,6 +3919,51 @@ def test_mergify_merge_requests_once_for_behind_head(
     else:
         assert "queue configuration is unverified" in err
 
+@pytest.mark.parametrize(("accepted", "transient"), [(True, False), (False, False), (True, True)])
+def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accepted, transient):
+    head = arm_mergify_pr(wt, gh)
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    settings = config.load_trusted(wt)
+    monkeypatch.setattr(cli, "_context", lambda *_args, **_kwargs: (wt, settings))
+    monkeypatch.setattr(cli, "_pr_readiness", lambda *_args, **_kwargs: (pr, github.Readiness(True, ())))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(github, "merged_sha", lambda *_args, **_kwargs: None)
+    endpoint = f"repos/{REPO}/issues/7/comments"
+    gh.respond(f"api {endpoint}", [])
+    gh.respond(f"api {endpoint} --method POST", {})
+    writing, overlap = Event(), Event()
+    original_api, flock = github._api, cli.fcntl.flock
+
+    def lock(fd, operation):
+        if writing.is_set():
+            overlap.set()
+        return flock(fd, operation)
+
+    def transport(path, payload, **kwargs):
+        if path != endpoint:
+            return original_api(path, payload, **kwargs)
+        if not writing.is_set():
+            writing.set()
+            assert overlap.wait(10), "second merge did not reach admission"
+            if accepted:
+                original_api(path, payload, **kwargs)
+                gh.respond(f"api {path}", [{"user": {"login": LOGIN}, "body": payload["body"]}])
+            if transient:
+                raise github.GhUnavailable(("GitHub API request",), "HTTP 502")
+            raise github.ProcTimeout("lost Mergify command reply")
+        return original_api(path, payload, **kwargs)
+
+    monkeypatch.setattr(cli.fcntl, "flock", lock)
+    monkeypatch.setattr(github, "_api", transport)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(cli.main, ["merge"])
+        assert writing.wait(10), "first merge did not reach the command POST"
+        second = pool.submit(cli.main, ["merge"])
+        assert first.result(timeout=15) == (0 if accepted else 1)
+        assert second.result(timeout=15) == 0
+    assert len([c for c in gh.calls if "--input" in c and c["argv"][1] == endpoint]) == 1
+
+
 
 @pytest.mark.parametrize("command", ["ready", "status"])
 @pytest.mark.parametrize("merge_state", ["CLEAN", "BEHIND"])
