@@ -987,7 +987,8 @@ def test_check_rejects_invalid_base_workflow(wt, repo, capsys, workflow, error):
         commit_file(repo, "workflow.toml", workflow, "break workflow")
         git(repo, "push", "-q", "origin", "main")
 
-    out, _ = expect_cli(capsys, 1, "check", stderr_contains=(f"origin/main:workflow.toml: {error}",))
+    diagnostic = error if workflow is None else f"origin/main:workflow.toml: {error}"
+    out, _ = expect_cli(capsys, 1, "check", stderr_contains=(diagnostic,))
     assert "PASS" not in out if workflow is None else out == ""
     assert not (wt / ".loopzero" / "checks.json").exists()
     if workflow is None:
