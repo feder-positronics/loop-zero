@@ -285,17 +285,22 @@ def _marker(kind: str, head: str, queue: str) -> str:
     return f"<!-- {kind} head={head} queue={queue} -->"
 
 
+def _comments_by(comments: list[dict], login: str):
+    for comment in comments:
+        if isinstance(user := comment.get("user"), dict) and user.get("login") == login:
+            yield comment
+
+
+def _updated_at(comment: dict) -> str:
+    return str(comment.get("updated_at") or "")
+
+
 def _admission_report(comments: list[dict], requested_at: str) -> int | None:
-    vendor_comments = [
-        comment for comment in comments
-        if isinstance(user := comment.get("user"), dict) and user.get("login") == "mergify[bot]"
-        and str(comment.get("updated_at") or "") >= requested_at
-    ]
-    latest = max(vendor_comments, key=lambda comment: str(comment.get("updated_at") or ""), default={})
-    if "### ⏳ Waiting for queue conditions" in str(latest.get("body") or "").splitlines():
+    latest = max(_comments_by(comments, "mergify[bot]"), key=_updated_at, default={})
+    if (_updated_at(latest) >= requested_at
+            and "### ⏳ Waiting for queue conditions" in str(latest.get("body") or "").splitlines()):
         report_id = latest.get("id")
-        if type(report_id) is int and report_id > 0:
-            return report_id
+        return report_id if type(report_id) is int and report_id > 0 else None
     return None
 
 
@@ -335,18 +340,15 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
         (item for item in comments if _queue_command(str(item.get("body") or ""), queue)),
         key=lambda item: item["id"], default={},
     )
-    latest = max(
-        (item for item in comments if isinstance(user := item.get("user"), dict)
-         and user.get("login") == "mergify[bot]"),
-        key=lambda item: (str(item.get("updated_at") or ""), item["id"]), default={},
-    )
+    latest = max(_comments_by(comments, "mergify[bot]"), key=lambda item: (_updated_at(item), item["id"]), default={})
     body = str(latest.get("body") or "")
     payload = _departure_payload(body, queue)
     if not command or not payload:
         return None
 
     url = f"https://github.com/{repo}/pull/{number}#issuecomment-"
-    entered = next((line for line in body.splitlines() if line.startswith("- ✅ **Entered the queue** ")), "")
+    lines = body.splitlines()
+    entered = next((line for line in lines if line.startswith("- ✅ **Entered the queue** ")), "")
     source = re.search(r"^- 🚫 \*\*Left the queue\*\* [^\n]+ · `([0-9a-f]{7,40})`$", body, re.M)
     if f"]({url}{command['id']})" not in entered or not source or not head.startswith(source[1]):
         return None
@@ -361,7 +363,7 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
     attribution = next((kind for prefix, kind in (
         ("**The failure is in this pull request.** It failed tested alone on top of ", "isolated"),
         ("**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.", "stacked"),
-    ) if any(line.startswith(prefix) for line in body.splitlines())), "")
+    ) if any(line.startswith(prefix) for line in lines)), "")
     if isinstance(reason, dict) and reason.get("code") == "CONFLICT_WITH_BASE_BRANCH":
         attribution = "base_conflict"
     return Departure(f"{url}{latest['id']}", names, attribution)
@@ -371,14 +373,12 @@ def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool,
     login, requested, confirmed = github.login(token=""), False, False
     requested_at = ""
     comments = github._paged(f"repos/{repo}/issues/{number}/comments")
-    for item in comments:
-        user = item.get("user")
-        if isinstance(user, dict) and user.get("login") == login:
-            lines = str(item.get("body") or "").splitlines()
-            requeue = _queue_command(str(item.get("body") or ""), queue)
-            if _marker(REQUEST, head, queue) in lines or (requeue and confirmed):
-                requested, requested_at = True, str(item.get("created_at") or "")
-            confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)
+    for item in _comments_by(comments, login):
+        body = str(item.get("body") or "")
+        lines, requeue = body.splitlines(), _queue_command(body, queue)
+        if _marker(REQUEST, head, queue) in lines or (requeue and confirmed):
+            requested, requested_at = True, str(item.get("created_at") or "")
+        confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)
     report_id = _admission_report(comments, requested_at)
     report = f"https://github.com/{repo}/pull/{number}#issuecomment-{report_id}" if report_id else None
     return requested, confirmed, report
