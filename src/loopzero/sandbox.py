@@ -104,7 +104,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                                                    "Runner requires a clean worktree"),))
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config)
-    previous = _previous(worktree, settings_sha256) if config.inputs and base and settings_sha256 and not dirty else {}
+    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and settings_sha256 and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -177,7 +177,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
 INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
 
 
-def _previous(worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
+def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
     try:
         data = json.loads(read_local_state(worktree, "checks.json"))
         if (data["dirty"] is not False or not isinstance(data["head"], str)
