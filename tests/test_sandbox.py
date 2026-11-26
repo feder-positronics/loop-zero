@@ -16,6 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 from select import select
 from threading import Event, current_thread
+from unittest.mock import Mock
 
 import pytest
 
@@ -308,25 +309,32 @@ def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypat
     )
 
 
-@pytest.mark.parametrize("alternate", [False, True], ids=["namespace", "alternate"])
-def test_probe_timeout_omits_process_diagnostics(git_repo, monkeypatch, alternate):
+def test_probe_timeout_reports_only_the_timeout(git_repo, monkeypatch):
     def timed_out(*args, **kwargs):
         raise sandbox._proc.ProcTimeout("private probe diagnostic")
 
     monkeypatch.setattr(sandbox._proc, "run", timed_out)
-    probe = sandbox.probe
-    if alternate:
-        monkeypatch.setattr(sandbox, "_git", lambda *_: "alternate: /tmp/objects\n")
-        probe = sandbox._preflight_alternates
     with pytest.raises(sandbox.SandboxUnavailable) as info:
-        probe(make_config(), git_repo, ["bwrap", "--"])
-    if alternate:
-        assert "Git alternate visibility probe timed out" in str(info.value)
-        rendered = "".join(traceback.format_exception(info.value))
-        assert "private probe diagnostic" not in rendered and "Create a standalone clone" in rendered
-    else:
-        assert str(info.value) == f"bwrap namespace creation timed out after {sandbox.GIT_TIMEOUT:g}s"
-        assert info.value.__suppress_context__
+        sandbox.probe(make_config(), git_repo, ["bwrap", "--"])
+
+    assert str(info.value) == f"bwrap namespace creation timed out after {sandbox.GIT_TIMEOUT:g}s"
+    assert info.value.__suppress_context__
+
+
+def test_alternate_probe_skips_default_inventory_and_honors_override(git_repo, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sandbox, "_git", lambda *args: calls.append(args) or "alternate: /tmp/objects\n")
+    monkeypatch.setattr(sandbox._proc, "run", Mock(side_effect=sandbox._proc.ProcTimeout("private alternate probe diagnostic")))
+    cfg = make_config(env_allowlist=("GIT_ALTERNATE_OBJECT_DIRECTORIES",))
+    monkeypatch.delenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", raising=False)
+    prefix, common = ["bwrap", "--"], git_repo / ".git"
+    sandbox._preflight_alternates(cfg, git_repo, prefix, common)
+    assert not calls
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/objects")
+    with pytest.raises(sandbox.SandboxUnavailable, match="Git alternate visibility probe timed out") as info:
+        sandbox._preflight_alternates(cfg, git_repo, prefix, common)
+    rendered = "".join(traceback.format_exception(info.value))
+    assert "private alternate probe diagnostic" not in rendered and "Create a standalone clone" in rendered
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):
@@ -354,9 +362,7 @@ def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_
     objects = git_repo / ".git/objects"
     worktree = shared
     if layout == "relative":
-        (shared / ".git/objects/info/alternates").write_text(
-            os.path.relpath(objects, shared / ".git/objects") + "\n"
-        )
+        (shared / ".git/objects/info/alternates").write_text(os.path.relpath(objects, shared / ".git/objects") + "\n")
     elif layout == "linked":
         worktree = tmp_path / "linked"
         git(shared, "worktree", "add", "-q", "-b", "linked", str(worktree))
@@ -370,9 +376,8 @@ def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_
         objects = tmp_path / ("zażółć" if layout == "unicode" else "alternate objects; $(false)")
         shutil.copytree(git_repo / ".git/objects", objects)
         (shared / ".git/objects/info/alternates").write_text(str(objects) + "\n")
-    config = make_config(checks=("echo first-stage",))
-    if layout == "transitive":
-        config = make_config(checks=config.checks, sandbox_ro=(str(shared / ".git/objects"),))
+    visible_stores = (str(shared / ".git/objects"),) if layout == "transitive" else ()
+    config = make_config(checks=("echo first-stage",), sandbox_ro=visible_stores)
     started = []
 
     with pytest.raises(sandbox.SandboxUnavailable) as failure:
