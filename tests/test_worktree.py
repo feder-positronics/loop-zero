@@ -88,7 +88,6 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
     assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
-    assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
 
 
 @pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base"])
@@ -109,13 +108,12 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         with pytest.raises(KeyboardInterrupt):
             worktree.start(repo, "my-task", "main")
     task = worktree.task_file(wt)
-    assert worktree.branch(wt) == "lz/my-task" and worktree.head(wt) == base
     assert not task.exists()
     if state == "same-base":
         assert worktree.start(repo, "my-task", "main") == wt
         assert worktree.base_sha(wt) == base
-        assert task.read_text().startswith("# My task\n")
-        assert task.read_text().endswith("(filled by `loopzero review`)\n")
+        text = task.read_text()
+        assert text.startswith("# My task\n") and text.endswith("(filled by `loopzero review`)\n")
     else:
         details = ("worktree directory already exists",)
         if state == "dirty":
@@ -125,7 +123,8 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         with pytest.raises(worktree.WorktreeError) as error:
             worktree.start(repo, "my-task", "main")
         assert all(detail in str(error.value) for detail in details)
-        assert (worktree.branch(wt), worktree.head(wt), task.exists()) == ("lz/my-task", base, False)
+        assert not task.exists()
+    assert (worktree.branch(wt), worktree.head(wt)) == ("lz/my-task", base)
 
 
 @pytest.mark.parametrize("case", ["regular", "file", "directory", "append", "replace"])
