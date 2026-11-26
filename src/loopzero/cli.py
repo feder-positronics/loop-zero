@@ -1558,7 +1558,8 @@ def _wait_for_mergify(
     state = None
     deferred_landing_read = False
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
-    for _ in _poll_until(started, timeout, admitted=lambda: confirmed):
+    polls = _poll_until(started, timeout, admitted=lambda: confirmed)
+    for _ in polls:
         sha = _landed(config, pr, closed)
         if sha:
             return sha
