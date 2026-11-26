@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Plan PR-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or planned blueprints.
+description: Plan outcome-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or planned blueprints.
 ---
 
 # Plan
@@ -9,8 +9,14 @@ Read [the contract](../../CONTRACT.md), repository guidance, the issue/task and
 relevant code. Use [delegation guidance](../../../docs/DELEGATION.md) for executors.
 
 Before slicing, restate the ask in one precise sentence and check it against the
-issue or request. Choose a coherent, reviewable acceptance slice. Split or
-sequence when coupling, uncertainty or ownership makes integration hard. Scale
+issue or request. Size each task to one outcome someone can accept, or one
+failure family, in one PR by default. Every PR pays a fixed check, review and
+queue cost: keep tests, generated files, docs and related cleanup with their
+change, and batch queued, non-urgent chores of one risk class and area, never
+into a risky change or ahead of an urgent fix. Split an outcome only at a named
+seam. The seam must be separate rollout or rollback, a measurement that could
+change the design, a higher risk class (a destructive migration, a trust
+boundary), separate ownership or a diff too wide to review reliably. Scale
 planning depth to the cost of reversing a choice later: spend planning on
 persisted state, CLI or config interfaces, trust boundaries, public APIs and
 shared abstractions—asking "if this assumption changes after merge, what
@@ -23,7 +29,7 @@ constraints and proving `workflow.toml` checks. Add checks only when existing
 checks cannot cover behavior.
 
 When authorized to file slices from an active goal or planned blueprint, use its
-tracking issue as the parent. Give each PR-sized task a plain issue title and
+tracking issue as the parent. Give each task a plain issue title and
 use the task shape above for its body. Name the parent step and the evidence it
 needs in an `Unblocks: #<parent> (step N) — <evidence>` line. Link each child with
 `gh api "repos/$repo/issues/$parent/sub_issues" -F sub_issue_id="$id"`. Use
