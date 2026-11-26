@@ -585,15 +585,13 @@ def pr_from_rest(data: object) -> PR:
                 or not re.fullmatch(r"[0-9a-f]{40}", head_sha)):
             raise ValueError("invalid PR state, mergeability, or head")
         return PR(
-            number=number, url=url, head_sha=head_sha,
-            base_ref=base_ref, is_draft=draft,
+            number=number, url=url, head_sha=head_sha, base_ref=base_ref, is_draft=draft,
             state="MERGED" if merged else state.upper(),
             mergeable="UNKNOWN" if mergeable is None else
                       ("MERGEABLE" if mergeable else "CONFLICTING"),
             merge_state=merge_state.upper() if merge_state else "UNKNOWN",
             author=str((data.get("user") or {}).get("login") or ""),
-            body=str(data.get("body") or ""),
-            labels=_pr_labels(data),
+            body=str(data.get("body") or ""), labels=_pr_labels(data),
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
@@ -809,13 +807,10 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         effort = f" (effort {result.effort})" if result.effort else ""
         settings = f"model {result.model or 'unknown'}{effort}, "
     lines = [prefix.rstrip("\n")] if prefix else []
-    lines += [
-        (
-            f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
-            f"{settings}{duration}: "
-            f"**{result.verdict}** ({summary})"
-        ),
-    ]
+    lines.append(
+        f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
+        f"{settings}{duration}: **{result.verdict}** ({summary})"
+    )
     if result.fallback:
         lines.append(f"\nSame-family fallback: {result.fallback}. Cross-family review is preferred.")
     if result.chunk_count > 1:
@@ -836,14 +831,12 @@ def _review_settings_lines(result: ReviewResult, *, include_configured: bool) ->
         if result.family == "codex":
             request, reported = ({key: value if runners._identifier(value, 128 if key == "model" else 32) else None
                                   for key, value in settings.items()} for settings in (request, reported))
-        lines.append(f"- Call {index}: requested model {request['model'] or 'unknown'} "
-                     f"(effort {request['effort'] or 'unknown'}); "
-                     f"CLI-reported model {reported['model'] or 'unknown'} "
-                     f"(effort {reported['effort'] or 'unknown'})")
+        fields = [("requested", request), ("CLI-reported", reported)]
         if include_configured:
-            configured = call["configured"]
-            lines[-1] += (f"; configured model {configured['model'] or 'unknown'} "
-                          f"(effort {configured['effort'] or 'unknown'})")
+            fields.append(("configured", call["configured"]))
+        settings = "; ".join(f"{label} model {value['model'] or 'unknown'} "
+                             f"(effort {value['effort'] or 'unknown'})" for label, value in fields)
+        lines.append(f"- Call {index}: {settings}")
     return lines
 
 
@@ -1349,8 +1342,7 @@ def readiness(
         elif name in failures:
             reasons.append(failures[name])
     return Readiness(
-        ready=not reasons,
-        reasons=tuple(reasons),
+        ready=not reasons, reasons=tuple(reasons),
         waitable_failures=tuple(failures[name] for name in required_ci if name in stale
                                or (workflow_wait and review_grace and checks.get(name) in _FAILED_VERDICTS)),
         stale_verdicts=tuple(name for name in required_ci if name in stale_verdicts),

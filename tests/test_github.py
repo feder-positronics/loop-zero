@@ -508,36 +508,31 @@ def test_post_review_requires_diff_hunk(gh: FakeGh, files, severity, anchor):
         assert "subject_type" not in comment
 
 
-@pytest.mark.parametrize("location", ["first-page", "second-page", "missing"])
-def test_post_review_reads_only_pages_needed_for_placement(gh: FakeGh, location: str) -> None:
-    unrelated = [{"filename": f"f{i}.py", "patch": "@@ -1 +1 @@\n+new"} for i in range(100)]
+@pytest.mark.parametrize("location", ["first-page", "second-page", "missing", "fallback-page"])
+def test_post_review_reads_only_pages_needed_for_placement(gh, location):
     file = PR_FILES[0]
-    page1, page2 = ([file, *unrelated[:99]], unrelated[99:]) if location == "first-page" else (
-        unrelated, [file]
-    )
-    finding = FINDINGS[0] if location != "missing" else replace(FINDINGS[0], path="missing.py")
+    unrelated = [{"filename": f"f{i}.py", "patch": "@@ -1 +1 @@\n+new"} for i in range(100)]
+    page1, page2 = unrelated, [file]
+    finding = FINDINGS[0]
+    if location == "first-page":
+        page1, page2 = [file, *unrelated[:99]], unrelated[99:]
+    if location == "missing":
+        finding = replace(finding, path="missing.py")
+    elif location == "fallback-page":
+        page1 = [{"filename": f"image{i}.png"} for i in range(100)]
+        finding = Finding("important", None, None, "Global concern", "")
     arm_review(gh)
     gh.respond(FILES_KEY, page1, page2)
     github.post_review(REPO, 7, HEAD, review(findings=(finding,)))
+
     pages = ["page=1"] if location == "first-page" else ["page=1", "page=2"]
     assert [c["argv"][-2] for c in calls_for(gh, FILES_KEY)] == pages
     (comment,) = comments_posted(gh)
-    assert (comment["path"], comment["line"], comment["side"]) == (
-        ("f0.py", 1, "RIGHT") if location == "missing" else ("src/a.py", 10, "RIGHT")
-    )
-    assert ("anchored here" in comment["body"]) == (location == "missing")
-
-
-def test_post_review_searches_later_pages_for_fallback_hunk(gh: FakeGh) -> None:
-    page1 = [{"filename": f"image{i}.png"} for i in range(100)]
-    arm_review(gh)
-    gh.respond(FILES_KEY, page1, PR_FILES[:1])
-    result = review(findings=(Finding("important", None, None, "Global concern", ""),))
-    github.post_review(REPO, 7, HEAD, result)
-
-    assert [c["argv"][-2] for c in calls_for(gh, FILES_KEY)] == ["page=1", "page=2"]
-    (comment,) = comments_posted(gh)
-    assert (comment["path"], comment["line"]) == ("src/a.py", 11)
+    anchor = {"missing": ("f0.py", 1), "fallback-page": ("src/a.py", 11)}
+    assert (comment["path"], comment["line"]) == anchor.get(location, ("src/a.py", 10))
+    if location != "fallback-page":
+        assert comment["side"] == "RIGHT"
+        assert ("anchored here" in comment["body"]) == (location == "missing")
 
 
 def test_post_review_approve_event(gh: FakeGh) -> None:
@@ -570,40 +565,32 @@ def test_post_review_falls_back_to_comment_for_own_pr(gh: FakeGh, verdict: str, 
     assert first["comments"] == second["comments"] and first["body"] == second["body"]
 
 
-@pytest.mark.parametrize(("failure", "remedy"), [
-    ("not logged in", github.GH_AUTH_REMEDY),
-    ("HTTP 429 rate limit", "retry after GitHub's reset or Retry-After"),
+@pytest.mark.parametrize("failure,remedy,label,gap", [
+    ("not logged in", github.GH_AUTH_REMEDY, "", ""),
+    ("HTTP 429 rate limit", "retry after GitHub's reset or Retry-After", "", ""),
+    *(("HTTP 401", "HTTP 401", label, gap) for label in (
+        "Authorization: Basic", "Authorization: Bearer", "Authorization: token",
+        "Bearer", "access_token:", "auth_token:", "token:",
+    ) for gap in (" ", "\n  ")),
 ])
-def test_gh_errors_keep_remediation_after_redaction(gh: FakeGh, failure: str, remedy: str) -> None:
-    token = "ghs_FAKE000"
-    gh.fail("api user", f"{failure}: {token}\ntoken:")
+def test_gh_errors_redact_credentials_and_keep_remediation(gh, failure, remedy, label, gap):
+    if label:
+        secret = "opaque-synthetic-value"
+        header = f"{label}{gap}{secret}"
+        gh.fail("api user", f"{failure}\n{header}")
+        args, token = ("-H", header), ""
+    else:
+        secret = token = "ghs_FAKE000"
+        gh.fail("api user", f"{failure}: {token}\ntoken:")
+        args = ("-f", f"value={token}")
 
     with pytest.raises(github.GhError) as info:
-        github._gh("api", "user", "-f", f"value={token}", token=token)
+        github._gh("api", "user", *args, token=token)
 
     assert remedy in str(info.value)
-    if failure.startswith("HTTP"):
+    if failure.startswith("HTTP 429"):
         assert "Rate limited:" in str(info.value)
-    assert token not in str(info.value)
-    assert token not in info.value.tail
-    assert all(token not in arg for arg in info.value.command)
-
-
-@pytest.mark.parametrize("label", [
-    "Authorization: Basic", "Authorization: Bearer", "Authorization: token",
-    "Bearer", "access_token:", "auth_token:", "token:",
-])
-@pytest.mark.parametrize("gap", [" ", "\n  "])
-def test_gh_errors_redact_labeled_credentials(gh: FakeGh, label: str, gap: str) -> None:
-    header = f"{label}{gap}opaque-synthetic-value"
-    gh.fail("api user", f"HTTP 401\n{header}")
-
-    with pytest.raises(github.GhError, match="HTTP 401") as info:
-        github._gh("api", "user", "-H", header)
-
-    assert "opaque-synthetic-value" not in str(info.value)
-    assert "opaque-synthetic-value" not in info.value.tail
-    assert "opaque-synthetic-value" not in " ".join(info.value.command)
+    assert all(secret not in text for text in (str(info.value), info.value.tail, " ".join(info.value.command)))
 
 
 def test_invalid_gh_json_reports_location_without_response_content(gh: FakeGh) -> None:
@@ -1064,21 +1051,18 @@ def test_readiness_defers_only_replaceable_failure(gh, check, producer, replacem
     assert result.waitable_failures == (result.reasons if waitable else ())
 
 
-def test_readiness_looks_up_only_required_failed_checks(gh: FakeGh) -> None:
-    arm_workflow_check(gh, check_run("success"), failed_check(name="optional"))
+@pytest.mark.parametrize("conclusion", [None, "skipped", "neutral"])
+def test_readiness_skips_actions_runs_without_a_failed_required_check(gh, conclusion):
+    if conclusion is None:
+        arm_workflow_check(gh, check_run("success"), failed_check(name="optional"))
+    else:
+        arm_workflow_check(gh, failed_check(conclusion))
     result = readiness(workflow_wait=True)
-    assert result.ready
-    assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
-
-
-@pytest.mark.parametrize("conclusion", ["skipped", "neutral"])
-def test_readiness_wait_does_not_lookup_nonfailure_conclusion(
-    gh: FakeGh, conclusion: str
-) -> None:
-    arm_workflow_check(gh, failed_check(conclusion))
-    result = readiness(workflow_wait=True)
-    assert result.reasons == (f"required check 'checks' is {conclusion}",)
-    assert result.waitable_failures == ()
+    if conclusion is None:
+        assert result.ready
+    else:
+        assert result.reasons == (f"required check 'checks' is {conclusion}",)
+        assert result.waitable_failures == ()
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
@@ -1226,20 +1210,22 @@ def test_merge_unverified(gh: FakeGh, missing: bool) -> None:
     assert not any(c["argv"][:2] == ["api", "-X"] for c in gh.calls), "no ref delete"
 
 
-@pytest.mark.parametrize("strategy,auto", [("squash", False), ("queue", False), ("queue", True)])
-def test_merge_queued_returns_none(gh: FakeGh, strategy, auto) -> None:
-    accepted = _queue_json(not auto)
-    if auto:
+@pytest.mark.parametrize("strategy,queue_state", [
+    ("squash", "queued"), ("queue", "queued"), ("queue", "auto"), ("squash", "landed"),
+])
+def test_merge_reports_queue_admission_or_landing(gh, strategy, queue_state):
+    accepted = _queue_json(queue_state == "queued")
+    landed = queue_state == "landed"
+    if queue_state == "auto":
         accepted["data"]["repository"]["pullRequest"]["autoMergeRequest"] = {"enabledAt": "t"}
-    arm_merge(gh, accepted, merge_json())
-    assert github.merge(REPO, 7, strategy, HEAD) is None
-    assert ("--squash" in gh.argv(0)) == (strategy == "squash")
-    assert "--queue" not in gh.argv(0)
-
-
-def test_merge_landed_between_reads_is_reported_merged(gh: FakeGh) -> None:
-    arm_merge(gh, _queue_json(False), merge_json(), merge_json(state="MERGED", sha="d" * 40))
-    assert github.merge(REPO, 7, "squash", HEAD) == "d" * 40
+    snapshots = [merge_json()]
+    if landed:
+        snapshots.append(merge_json(state="MERGED", sha="d" * 40))
+    arm_merge(gh, accepted, *snapshots)
+    assert github.merge(REPO, 7, strategy, HEAD) == ("d" * 40 if landed else None)
+    if not landed:
+        assert ("--squash" in gh.argv(0)) == (strategy == "squash")
+        assert "--queue" not in gh.argv(0)
 
 
 def test_merged_sha_only_for_merged_state(gh: FakeGh) -> None:
@@ -1336,37 +1322,31 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining
         [[*branch_head_key("lz/x").split(), "--include"]] + [[*pr_list_key("lz/x").split(), "--include"]] * (1 + len(sleeps)))
 
 
-@pytest.mark.parametrize(("diagnostic", "verified"), [
-    ({"data": {"rateLimit": {"remaining": 0, "resetAt": "2099-01-01T00:00:00Z"}}}, True),
-    ("null", False), ("[]", False),
-    ({"data": {"rateLimit": {"remaining": 0, "resetAt": 42}}}, False),
-    ({"data": []}, False), ({"data": {"rateLimit": None}}, False),
+@pytest.mark.parametrize("diagnostic", [
+    {"data": {"rateLimit": {"remaining": 0, "resetAt": "2099-01-01T00:00:00Z"}}},
+    "null", "[]", {"data": {"rateLimit": {"remaining": 0, "resetAt": 42}}},
+    {"data": []}, {"data": {"rateLimit": None}}, "response-header",
 ])
-def test_graphql_limit_reports_only_verified_reset(gh: FakeGh, diagnostic: object, verified: bool) -> None:
-    gh.respond("api graphql",
-               {"stdout": "", "stderr": "GraphQL: API rate limit exceeded", "exit": 1},
-               diagnostic)
-    match = "GraphQL quota resets at 2099-01-01" if verified else "GraphQL: API rate limit exceeded"
+def test_graphql_limit_reports_only_verified_reset(gh, diagnostic):
+    failure = "GraphQL: API rate limit exceeded"
+    header = diagnostic == "response-header"
+    verified = isinstance(diagnostic, dict) and "2099-01-01" in str(diagnostic)
+    if header:
+        gh.fail("api graphql", failure + "\nx-ratelimit-resource: graphql\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 4070908800")
+        match = "response header"
+    else:
+        gh.respond("api graphql", {"stdout": "", "stderr": failure, "exit": 1}, diagnostic)
+        match = "GraphQL quota resets at 2099-01-01" if verified else failure
     with pytest.raises(github.GhError, match=match) as info:
         github._gh("api", "graphql", "-f", "query={viewer{login}}")
 
-    assert info.value.command[-1] == "query={viewer{login}}"
-    assert len(gh.calls) == 2
-    if verified:
-        assert "rateLimit { remaining resetAt }" in gh.calls[1]["argv"][-1]
-    else:
-        assert "quota resets at" not in str(info.value)
-
-
-def test_graphql_limit_prefers_failing_response_reset_header(gh: FakeGh) -> None:
-    gh.fail("api graphql", "GraphQL: API rate limit exceeded\n"
-            "x-ratelimit-resource: graphql\nx-ratelimit-remaining: 0\n"
-            "x-ratelimit-reset: 4070908800")  # 2099-01-01 UTC
-
-    with pytest.raises(github.GhError, match="response header"):
-        github._gh("api", "graphql", "-f", "query={viewer{login}}")
-
-    assert len(gh.calls) == 1
+    assert len(gh.calls) == (1 if header else 2)
+    if not header:
+        assert info.value.command[-1] == "query={viewer{login}}"
+        if verified:
+            assert "rateLimit { remaining resetAt }" in gh.calls[1]["argv"][-1]
+        else:
+            assert "quota resets at" not in str(info.value)
 
 
 @pytest.mark.parametrize("view", [None, {}, merge_json("CLOSED"),
