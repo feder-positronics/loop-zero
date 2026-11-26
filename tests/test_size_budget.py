@@ -34,12 +34,34 @@ def test_executable_scripts_keep_lf_in_autocrlf_checkout(git_repo, tmp_path):
     assert all(line.split()[1] == "w/lf" for line in eol)
 
 
+def test_size_budget_batches_base_blobs(git_repo, tmp_path, fake_tool):
+    source = git_repo / "src/loopzero"
+    source.mkdir(parents=True)
+    for index in range(160):
+        (source / f"é {index}\nmodule.py").write_text("def f():\n    return 1\n")
+    git(git_repo, "add", ".")
+    base = git(git_repo, "write-tree").strip()
+    (source / "untracked.py").write_text("def f():\n    return 2")
+    calls = tmp_path / "git-calls"
+    fake_tool("git", 'echo git >> "$GIT_CALLS"\n' f'exec {shutil.which("git")} "$@"\n')
+
+    done = subprocess.run(
+        ["bash", str(SCRIPT), base], cwd=git_repo,
+        env={**os.environ, "PYTHON": sys.executable, "GIT_CALLS": str(calls)},
+        capture_output=True, text=True, check=False,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.stdout.startswith("src=321 (base 320, delta 1,")
+    assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
+    assert len(calls.read_text().splitlines()) <= 10
+
+
 def _branchy(name: str, branches: int) -> str:
     body = "".join(f"    if x == {i}:\n        return {i}\n" for i in range(branches))
     return f"def {name}(x):\n{body}    return -1\n"
 
 
-@pytest.mark.parametrize("failure", [None, "deleted", "show"])
+@pytest.mark.parametrize("failure", [None, "deleted", "batch"])
 def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_tool, failure):
     source = git_repo / "src/loopzero" / ("a.py" if failure else "é space\nname.py")
     source.parent.mkdir(parents=True)
@@ -49,14 +71,14 @@ def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_to
     base = git(git_repo, "write-tree").strip()
     if failure == "deleted":  # unstaged deletion: skipped, not an error
         source.unlink()
-    elif failure == "show":
-        fake_tool("git", 'if [ "$1" = show ]; then case "$2" in */a.py) exit 1;; esac; fi\n'
+    elif failure == "batch":
+        fake_tool("git", 'if [ "$1" = cat-file ]; then exit 1; fi\n'
                   f'exec {shutil.which("git")} "$@"\n')
     done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
                           env={**os.environ, "PYTHON": sys.executable},
                           capture_output=True, text=True, check=False)
-    assert bool(done.returncode) is (failure == "show")
-    if failure != "show":
+    assert bool(done.returncode) is (failure == "batch")
+    if failure != "batch":
         assert done.stdout.startswith("src=1 (base 3," if failure else "src=3 (base 3, delta 0,")
 
 

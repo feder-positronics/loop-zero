@@ -19,28 +19,7 @@ DELEGATION_DOC_CAP=660
 COMPLEXITY_CAP=10
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 base=${1:-$(git merge-base HEAD origin/main)}
-count_base() {
-  local path=$1 ext=$2
-  git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$path" | { grep -z "$ext" || true; } \
-    | xargs -0 -r -I{} git show "$base:{}" | wc -l
-}
-# The candidate is the working tree, so uncommitted and new files count too.
-count_tree() {
-  local path=$1 ext=$2
-  git -c core.quotepath=off ls-files -zco --exclude-standard -- "$path" | { grep -z "$ext" || true; } \
-    | xargs -0 -r sh -ec 'for f; do if [ -f "$f" ]; then cat -- "$f"; fi; done' _ | wc -l
-}
 status=0
-report() { # name path cap ext_re
-  local now was
-  now=$(count_tree "$2" "$4"); was=$(count_base "$2" "$4")
-  echo "$1=$now (base $was, delta $((now - was)), cap $3, headroom $(($3 - now)))"
-  if [ "$now" -gt "$3" ] && [ "$now" -gt "$was" ]; then status=1; fi
-}
-report src src/loopzero "$SRC_CAP" '\.py$'
-report tests tests "$TESTS_CAP" '\.py$'
-report core_docs core "$CORE_DOCS_CAP" '\.md$'
-report delegation_doc docs/DELEGATION.md "$DELEGATION_DOC_CAP" '\.md$'
 
 # Parse src/loopzero with the repository's pinned Python 3.14+ interpreter (PEP 758 syntax).
 if [ -n "${PYTHON:-}" ]; then
@@ -53,21 +32,60 @@ else
   PY=(python3)
 fi
 
-"${PY[@]}" - "$base" src/loopzero "$COMPLEXITY_CAP" <<'PY' || status=1
+"${PY[@]}" - "$base" "$COMPLEXITY_CAP" "$SRC_CAP" "$TESTS_CAP" "$CORE_DOCS_CAP" "$DELEGATION_DOC_CAP" <<'PY' || status=1
+from __future__ import annotations
+
 import ast
+import os
 import subprocess
 import sys
 from pathlib import Path
 
-if sys.version_info < (3, 14):
-    sys.exit(f"size_budget: requires Python 3.14+ to parse src/loopzero, got {sys.version.split()[0]}")
-
-base, target, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
+base, cap = sys.argv[1], int(sys.argv[2])
+budgets = (
+    ("src", b"src/loopzero", b".py"),
+    ("tests", b"tests", b".py"),
+    ("core_docs", b"core", b".md"),
+    ("delegation_doc", b"docs/DELEGATION.md", b".md"),
+)
+paths = [os.fsdecode(root) for _, root, _ in budgets]
 
 
 def git_bytes(*args: str) -> bytes:
     return subprocess.run(["git", "-c", "core.quotepath=off", *args], check=True,
                           capture_output=True).stdout
+
+
+def budget_index(path: bytes) -> int | None:
+    for index, (_, root, suffix) in enumerate(budgets):
+        if path.endswith(suffix) and (path == root or path.startswith(root + b"/")):
+            return index
+    return None
+
+
+def base_blobs():
+    entries = git_bytes("ls-tree", "-rz", base, "--", *paths).split(b"\0")
+    with subprocess.Popen(["git", "cat-file", "--batch"], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE) as batch:
+        for raw in filter(None, entries):
+            metadata, path = raw.split(b"\t", 1)
+            index = budget_index(path)
+            if index is None:
+                continue
+            oid = metadata.rsplit(b" ", 1)[1]
+            batch.stdin.write(oid + b"\n")
+            batch.stdin.flush()
+            header = batch.stdout.readline().split()
+            if len(header) != 3 or header[1] != b"blob":
+                raise RuntimeError(f"cannot read base blob for {os.fsdecode(path)!r}: {header!r}")
+            size = int(header[2])
+            blob = batch.stdout.read(size)
+            if len(blob) != size or batch.stdout.read(1) != b"\n":
+                raise RuntimeError(f"incomplete base blob for {os.fsdecode(path)!r}")
+            yield index, os.fsdecode(path), blob
+        batch.stdin.close()
+        if batch.wait():
+            raise subprocess.CalledProcessError(batch.returncode, batch.args)
 
 
 def count_stmts(stmts: list[ast.stmt]) -> int:
@@ -118,21 +136,45 @@ def file_complexities(path: str, source: bytes) -> dict[tuple[str, str], int]:
     return scores
 
 
+base_counts = [0] * len(budgets)
 base_scores: dict[tuple[str, str], int] = {}
-for raw in git_bytes("ls-tree", "-rz", "--name-only", base, "--", target).split(b"\0"):
-    if not raw or not raw.endswith(b".py"):
+parse_error = None
+can_parse = sys.version_info >= (3, 14)
+for index, rel, blob in base_blobs():
+    base_counts[index] += blob.count(b"\n")
+    if index == 0 and can_parse and parse_error is None:
+        try:
+            base_scores.update(file_complexities(rel, blob))
+        except SyntaxError as exc:
+            parse_error = exc
+
+# Match the previous wc -l counts, including untracked files and incomplete lines.
+tree_counts = [0] * len(budgets)
+source_paths = []
+for raw in git_bytes("ls-files", "-zco", "--exclude-standard", "--", *paths).split(b"\0"):
+    index = budget_index(raw)
+    if index is None:
         continue
-    rel = raw.decode("utf-8", errors="surrogateescape")
-    base_scores.update(file_complexities(rel, git_bytes("show", f"{base}:{rel}")))
+    path = Path(os.fsdecode(raw))
+    if path.is_file():
+        with path.open("rb") as stream:
+            tree_counts[index] += sum(block.count(b"\n") for block in iter(lambda: stream.read(65536), b""))
+        if index == 0:
+            source_paths.append(path)
+
+over_budget = False
+for (name, _, _), now, was, limit in zip(budgets, tree_counts, base_counts, map(int, sys.argv[3:])):
+    print(f"{name}={now} (base {was}, delta {now - was}, cap {limit}, headroom {limit - now})")
+    over_budget |= now > limit and now > was
+
+if not can_parse:
+    sys.exit(f"size_budget: requires Python 3.14+ to parse src/loopzero, got {sys.version.split()[0]}")
+if parse_error is not None:
+    raise parse_error
 
 tree_scores: dict[tuple[str, str], int] = {}
-for raw in git_bytes("ls-files", "-zco", "--exclude-standard", "--", target).split(b"\0"):
-    if not raw or not raw.endswith(b".py"):
-        continue
-    rel = raw.decode("utf-8", errors="surrogateescape")
-    p = Path(rel)
-    if p.is_file():
-        tree_scores.update(file_complexities(rel, p.read_bytes()))
+for path in source_paths:
+    tree_scores.update(file_complexities(str(path), path.read_bytes()))
 
 regressions = []
 for key, now in sorted(tree_scores.items()):
@@ -147,6 +189,7 @@ if regressions:
         print(f"  {path}:{qualname}={now} (base {was}, cap {cap})")
     sys.exit(1)
 print(f"complexity=PASS (cap {cap}, over_cap {over_cap}, regressions 0)")
+sys.exit(over_budget)
 PY
 [ "$status" -eq 0 ] || echo "size budget: FAIL (over cap and grew against base, or complexity regressed)"
 exit "$status"
