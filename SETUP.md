@@ -509,6 +509,12 @@ the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
 eligibility workflow for the existing PR, or run the command below with its
 unchanged source SHA. The refreshed reader can use the approval already on GitHub.
 
+For inherited review coverage, advance both source and candidate workflow pins to
+a revision containing [23219dd3 (#1081)](https://github.com/feder-positronics/loop-zero/commit/23219dd39e641549164c346e137f4e09718115f6).
+The updated reader accepts an ancestor approval only across verified clean merges
+from the configured base. After deploying both pins, refresh eligibility for open
+sources judged by the older reader so their statuses reflect the updated policy.
+
 From a trusted base checkout, run:
 
 ```sh
