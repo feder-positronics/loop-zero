@@ -55,7 +55,6 @@ def unwind_on_sigterm():
         finally:
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
     except Terminated:
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.raise_signal(signal.SIGTERM)
         raise
 
