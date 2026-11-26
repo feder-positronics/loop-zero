@@ -227,7 +227,7 @@ def test_task_helpers_errors(repo: Path) -> None:
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
     monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
-    worktree.cleanup(wt)  # #439: no cleanup git runs in (or -C) the primary checkout
+    worktree.cleanup(wt, "lz/done", worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
@@ -236,13 +236,29 @@ def test_cleanup_refuses_dirty(repo: Path) -> None:
     wt = worktree.start(repo, "dirty", "main")
     (wt / "scratch.txt").write_text("x")
     with pytest.raises(worktree.WorktreeError, match="dirty"):
-        worktree.cleanup(wt)
+        worktree.cleanup(wt, "lz/dirty", worktree.head(wt))
     assert wt.exists() and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
 def test_cleanup_missing_worktree(repo: Path) -> None:
     with pytest.raises(worktree.WorktreeError, match="no such worktree"):
-        worktree.cleanup(repo / ".worktrees" / "ghost")
+        worktree.cleanup(repo / ".worktrees" / "ghost", "lz/ghost", "")
+
+
+@pytest.mark.parametrize("case", ["moved", "checked out"])
+def test_cleanup_preserves_branch_after_detach(repo: Path, case: str) -> None:
+    wt = worktree.start(repo, "done", "main")
+    git(wt, "commit", "--allow-empty", "-m", "merged task")
+    expected = worktree.head(wt)
+    git(wt, "switch", "--detach", expected)
+    if case == "moved":
+        git(repo, "branch", "-f", "lz/done", "main")
+    else:
+        git(repo, "worktree", "add", str(repo.parent / "other"), "lz/done")
+    tip = git(repo, "rev-parse", "refs/heads/lz/done")
+    with pytest.raises(worktree.WorktreeError, match="moved or is checked out"):
+        worktree.cleanup(wt, "lz/done", expected)
+    assert wt.exists() and git(repo, "rev-parse", "refs/heads/lz/done") == tip
 
 
 @pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])

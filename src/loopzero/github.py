@@ -573,8 +573,9 @@ def _branch_head(repo: str, branch: str) -> str | None:
     return sha
 
 
-def _commit_branch_prs(repo: str, branch: str) -> tuple[str, list[dict]]:
-    sha = _branch_head(repo, branch)
+def _commit_branch_prs(repo: str, branch: str, sha: str | None = None) -> tuple[str, list[dict]]:
+    if sha is None:
+        sha = _branch_head(repo, branch)
     if sha is None:
         return "", []
 
@@ -596,6 +597,18 @@ def _commit_branch_prs(repo: str, branch: str) -> tuple[str, list[dict]]:
         if len(rows) < PAGE:
             return endpoint, matches
     raise GhError(("gh", "api", endpoint), "commit PRs exceed 100 pages")
+
+
+def merged_pr_at_head(repo: str, branch: str, sha: str) -> PR | None:
+    """Find a merged PR for the exact source branch and commit."""
+    _, matches = _commit_branch_prs(repo, branch, sha)
+    for row in matches:
+        if row["state"] == "closed" and row["head"].get("sha") == sha:
+            pr, detail = _pr_detail(repo, row["number"])
+            if (pr.state == "MERGED" and pr.head_sha == sha
+                    and _matches_branch(detail["head"], repo, branch)):
+                return pr
+    return None
 
 
 def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state: str) -> PR:
