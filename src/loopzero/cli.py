@@ -1153,7 +1153,7 @@ _SIZE_BUDGET = "scripts/size_budget.sh"
 
 
 def _prequeue_size_budget(
-    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness,
+    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness, *, project: bool = True,
 ) -> None:
     if not readiness.ready or config.merge_strategy != "mergify" or _SIZE_BUDGET not in config.checks:
         return
@@ -1180,7 +1180,8 @@ def _prequeue_size_budget(
         result = evaluate(base)
         if result.exit_code:
             raise CliError("current target size budget failed:\n" + result.stdout.rstrip())
-        _warn_queue_size(config, pr, root, origin, base, git, evaluate)
+        if project:
+            _warn_queue_size(config, pr, root, origin, base, git, evaluate)
 
 
 def _warn_queue_size(
@@ -1569,7 +1570,7 @@ def _merge_with_mergify(
             return sha
         raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
     if not confirmed and not requested:
-        _prequeue_size_budget(wt, config, pr, readiness)
+        _prequeue_size_budget(wt, config, pr, readiness, project=admit_by is None)
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
         mergify.request(config.repo, pr.number, pr.head_sha, queue)

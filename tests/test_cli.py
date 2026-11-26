@@ -4748,7 +4748,7 @@ def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, co
 @pytest.mark.parametrize(("command", "queue_state"), [
     ("ready", "ordered"), ("merge", "ordered"), ("resume", "ordered"),
     ("ready", "empty"), ("ready", "ambiguous"), ("ready", "unavailable"),
-    ("ready", "waiting"), ("ready", "conflicting"),
+    ("ready", "waiting"), ("ready", "conflicting"), ("timed", "unavailable"),
 ])
 def test_prequeue_size_warning_replays_1238(wt, repo, gh, capsys, monkeypatch, command, queue_state):
     cap = size_budget_fixture(wt, repo, 48)
@@ -4766,6 +4766,7 @@ def test_prequeue_size_warning_replays_1238(wt, repo, gh, capsys, monkeypatch, c
                         "pull_requests": [{"number": number}], "sub_batches": []})
 
     def snapshot(_repo, suffix):
+        assert command != "timed", "advisory lookup must not spend the admission deadline"
         assert suffix == "/merge-queue/status?branch=main"
         if queue_state == "unavailable":
             raise mergify.MergifyError("queue status unavailable")
@@ -4786,11 +4787,13 @@ def test_prequeue_size_warning_replays_1238(wt, repo, gh, capsys, monkeypatch, c
     requested = []
     monkeypatch.setattr(mergify, "request", lambda *args: requested.append(args))
     monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
-    args = ("merge", "--wait=0") if command == "resume" else (command,)
+    args = {
+        "resume": ("merge", "--wait=0"), "timed": ("merge", "--wait=60"),
+    }.get(command, (command,))
     code, out, err = run(capsys, *args)
 
-    assert code == (3 if command == "resume" else 0)
-    assert requested == ([(REPO, 7, head, "main")] if command == "merge" else [])
+    assert code == (3 if command in {"timed", "resume"} else 0)
+    assert requested == ([(REPO, 7, head, "main")] if command in {"timed", "merge"} else [])
     if queue_state == "ordered" and command != "resume":
         assert "#1146, #1219" in out + err
         assert f"src={cap + 4} (base 26, delta {cap - 22}, cap {cap}" in out + err
