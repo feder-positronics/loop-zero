@@ -6,10 +6,11 @@ import errno
 import re
 import stat
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
-from loopzero._proc import run
+from loopzero._proc import ProcTimeout, Terminated, run
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 EXCLUDES = (".worktrees/", ".loopzero/")
@@ -57,7 +58,7 @@ def _git(
 ) -> str:
     argv = ("git", *args)
     done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-               preserve_newlines=preserve_newlines)
+               preserve_newlines=preserve_newlines or preserve_whitespace)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
     if preserve_newlines:
@@ -102,7 +103,8 @@ def _branch_exists(repo_root: Path, branch: str) -> bool:
 
 
 def _ensure_excludes(repo_root: Path) -> None:
-    common = Path(_git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    common = Path(_git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                       preserve_whitespace=True))
     exclude = common / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude = exclude.resolve()
@@ -159,11 +161,46 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
             )
     _ensure_excludes(repo_root)
     if not existing:
-        wt.parent.mkdir(parents=True, exist_ok=True)
-        _git(repo_root, "worktree", "add", "--quiet", "-b", branch, str(wt), base)
+        _add_task_worktree(repo_root, wt, branch, base)
     _initialize_task(task, _TASK_TEMPLATE.format(
         title=title_from_slug(slug), base_branch=base_branch, base=base))
     return wt
+
+
+def _add_task_worktree(repo_root: Path, wt: Path, branch: str, base: str) -> None:
+    # Claim the target before allowing the interrupt handler to remove anything.
+    wt.mkdir(parents=True)
+    try:
+        _git(repo_root, "worktree", "add", "--quiet", "-b", branch, str(wt), base)
+    except (KeyboardInterrupt, Terminated, ProcTimeout):
+        with suppress(WorktreeError, ProcTimeout, OSError):
+            _discard_interrupted_checkout(repo_root, wt, branch, base)
+        raise
+    except GitError:
+        with suppress(OSError):
+            wt.rmdir()
+        raise
+
+
+def _discard_interrupted_checkout(repo_root: Path, wt: Path, branch_name: str, base: str) -> None:
+    task = task_file(wt)
+    if wt.is_symlink() or task.exists() or task.is_symlink() or task.parent.is_symlink():
+        return
+    if not (wt / ".git").is_file():
+        wt.rmdir()
+        return
+    common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+    if (_git(wt, *common_dir, preserve_whitespace=True)
+            != _git(repo_root, *common_dir, preserve_whitespace=True)):
+        return
+    git_dir = Path(_git(wt, "rev-parse", "--absolute-git-dir", preserve_whitespace=True))
+    if (not (git_dir / "index.lock").is_file()
+            or (git_dir / "locked").read_text().strip() != "initializing"
+            or branch(wt) != branch_name or head(wt) != base):
+        return
+    # Git requires two force options to remove its own locked, incomplete checkout.
+    _git(repo_root, "worktree", "remove", "--force", "--force", str(wt))
+    _git(repo_root, "update-ref", "--no-deref", "-d", f"refs/heads/{branch_name}", base)
 
 
 def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | None:
