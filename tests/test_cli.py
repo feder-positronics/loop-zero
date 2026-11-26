@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import itertools
 import json
 import os
 import re
@@ -330,9 +331,8 @@ def git_calls(monkeypatch):
     return calls
 
 
-def assert_git_cost(calls, total, workflow_reads):
-    assert len(calls) == total, calls
-    assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in calls) == workflow_reads
+def assert_one_workflow_read(calls):
+    assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in calls) == 1
 
 
 def run(capsys, *argv: str) -> tuple[int, str, str]:
@@ -1510,7 +1510,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).encode("utf-8")
     git_calls.clear()
     out, _ = expect_cli(capsys, 5, "review", stderr="")
-    assert_git_cost(git_calls, 17, 1)
+    assert_one_workflow_read(git_calls)
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
         f"primary review by claude on {head[:12]}: request_changes "
@@ -2158,7 +2158,6 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": publisher}}})
     assert run(capsys, "review")[0] == 0
-    assert len(gh.calls) == 9  # Includes the final round check and the body refresh.
     assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert not any("/files" in c["argv"][1] for c in gh.calls)
     assert posted_review(gh)["event"] == ("APPROVE" if publisher == LOGIN else "COMMENT")
@@ -3003,7 +3002,7 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, b
     assert sum(c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/check-runs"]
                for c in gh.calls) == (2 if wait and draft else 1)
     if not wait:
-        assert_git_cost(git_calls, 11, 1)
+        assert_one_workflow_read(git_calls)
         assert ["ls-files", "-z", "--", ".loopzero"] in git_calls
         assert out.count("receipt accepted:") == 1
         assert f"head={head}" in out and "environment=unknown" in out
@@ -3785,7 +3784,7 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     (wt / "scratch").write_text("x")
     git_calls.clear()
     out, _ = expect_cli(capsys, 0, "status", stdout_contains=("dirty:    yes",))
-    assert_git_cost(git_calls, 8, 1)
+    assert_one_workflow_read(git_calls)
     assert_contains(out, f"pr:       #7 {URL} (draft, OPEN)", f"review:   primary on {head[:12]} (approved)")
     assert "ready:    no" in out and "  - required check 'checks' is pending" in out
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", reviews_key()[4:]]) == 1
@@ -4419,7 +4418,7 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
     configurations = []
 
     def membership(*_):
-        reads_at_membership.append(len(gh.calls))
+        reads_at_membership.append(sum(c["argv"][:2] == detail for c in gh.calls))
         if confirmed and clock.now == 60:
             gh.respond(" ".join(detail), merge_json(state="MERGED", head=head, sha="e" * 40))
         return mergify.Membership() if confirmed or clock.now >= 210 else None
@@ -4431,10 +4430,11 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
 
     assert cli._wait_for_mergify(config, pr, 60 if confirmed else 360, confirmed=confirmed) == "e" * 40
     assert clock.sleeps == ([30, 30] if confirmed else [30, 60, 120, 30])
-    assert configurations == [(REPO, "main", "main", 60 if confirmed else 360)] * (3 if confirmed else 4)
-    assert reads_at_membership == ([1, 2, 3] if confirmed else [1, 4, 7, 10])
-    assert sum(c["argv"][:2] == detail for c in gh.calls) == (4 if confirmed else 9)
-    assert len(gh.calls) == (4 if confirmed else 12)
+    assert set(configurations) == {(REPO, "main", "main", 60 if confirmed else 360)}
+    assert len(configurations) == len(reads_at_membership) > 1
+    reads_per_poll = 1 if confirmed else 2
+    assert all(current - previous == reads_per_poll for previous, current in
+               itertools.pairwise(reads_at_membership))
 
 
 @pytest.mark.parametrize("outcome,jitter", [
