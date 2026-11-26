@@ -40,6 +40,40 @@ def main() -> int:
         return _run(cfg)
 
 
+class _MergeabilityPending(LoopZeroError):
+    pass
+
+
+def _attest(cfg: Config, event: dict) -> None:
+    def policy(source_number: int, source: dict) -> None:
+        result = eligibility.evaluate(cfg.repo, source_number, source["head"]["sha"],
+                                      cfg.base_branch, cfg.review_publishers)
+        if not result.ready:
+            if result.reasons == (github.MERGEABILITY_PENDING,):
+                raise _MergeabilityPending(f"source #{source_number}: {github.MERGEABILITY_PENDING}")
+            raise LoopZeroError(f"source #{source_number}: " + "; ".join(result.reasons))
+
+    candidate_mod.attest_candidate(
+        event,
+        github_get=lambda path: github.api_get(path.lstrip("/")),
+        mergify_status=lambda owner, repo, branch: mergify.api_get(
+            f"{owner}/{repo}", f"/merge-queue/status?branch={branch}"),
+        source_policy=policy,
+    )
+
+
+def _source_status(result: github.Readiness, current: github.PR) -> tuple[str, str]:
+    reasons = result.reasons
+    if result.ready:
+        if not (blocker := github.mergeability_blocker(current)):
+            return "success", "Reviewed source head"
+        reasons = (blocker,)
+    if reasons == (github.MISSING_REVIEW_REASON,):
+        return "pending", "Awaiting trusted review of current source head"
+    state = "pending" if reasons == (github.MERGEABILITY_PENDING,) else "failure"
+    return state, "; ".join(reasons)
+
+
 def _run(cfg: Config) -> int:
     if cfg.repo != os.environ.get("GITHUB_REPOSITORY") or not cfg.review_publishers:
         raise LoopZeroError("trusted repository configuration or review publishers missing")
@@ -67,31 +101,21 @@ def _run(cfg: Config) -> int:
     publish("pending", "Refreshing live source review evidence")
     try:
         if candidate:
-            def policy(source_number: int, source: dict) -> None:
-                result = eligibility.evaluate(cfg.repo, source_number, source["head"]["sha"],
-                                              cfg.base_branch, cfg.review_publishers)
-                if not result.ready:
-                    raise LoopZeroError(f"source #{source_number}: " + "; ".join(result.reasons))
-            candidate_mod.attest_candidate(
-                event,
-                github_get=lambda path: github.api_get(path.lstrip("/")),
-                mergify_status=lambda owner, repo, branch: mergify.api_get(
-                    f"{owner}/{repo}", f"/merge-queue/status?branch={branch}"),
-                source_policy=policy,
-            )
-            ready, message = True, "All attested candidate sources are reviewed"
+            _attest(cfg, event)
         else:
             result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers)
-            ready, message = result.ready, "; ".join(result.reasons) or "Reviewed source head"
-        if github.pr_view(cfg.repo, number).head_sha != head:
+        current = github.pr_view(cfg.repo, number)
+        if current.head_sha != head:
             raise LoopZeroError("head changed before publication; refresh eligibility")
-        state = "success" if ready else "failure"
-        if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
-            message = "Awaiting trusted review of current source head"
-            state = "pending"
+        state, message = (("success", "All attested candidate sources are reviewed")
+                          if candidate else _source_status(result, current))
         publish(state, message)
         print(message)
-        return 0 if ready or state == "pending" else 1
+        return 1 if state == "failure" else 0
+    except _MergeabilityPending as exc:
+        publish("pending", str(exc))
+        print(exc)
+        return 0
     except Exception as exc:
         _mark_refresh_failed(publish, exc)
         raise

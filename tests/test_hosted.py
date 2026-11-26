@@ -74,7 +74,7 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     ("stale", "", "pending"), ("malformed", "", "pending"),
     ("revoked", "", "pending"), ("absent", "important", "failure"),
     ("absent", "conflict", "failure"), ("COMMENTED", "important", "failure"),
-    ("APPROVED", "mergeability-reset", "failure"),
+    ("APPROVED", "mergeability-reset", "pending"), ("APPROVED", "publish-reset", "pending"),
 ])
 def test_source_publication_is_bound_to_live_review(publisher, case, blocker, status):
     review = {"state": "COMMENTED", "commit_id": HEAD, "user": {"login": "trusted-publisher"},
@@ -87,11 +87,12 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     if case == "revoked":
         reviews.insert(0, review | {"state": "APPROVED"})
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", reviews)
-    if blocker == "mergeability-reset":
+    if blocker in {"mergeability-reset", "publish-reset"}:
         endpoint = f"api repos/{REPO}/pulls/7"
         mergeable, unknown = (fixtures.rest_pr_json(pr_json(mergeable=state))
                               for state in ("MERGEABLE", "UNKNOWN"))
-        publisher.respond(endpoint, mergeable, mergeable, unknown)
+        prefix = [mergeable] * (2 if blocker == "mergeability-reset" else 3)
+        publisher.respond(endpoint, *prefix, unknown)
     if blocker == "conflict":
         publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(mergeable="CONFLICTING")))
     if blocker == "important":
@@ -100,7 +101,10 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     statuses = [json.loads(c["--input"]) for c in publisher.calls if "--input" in c]
     assert ([s["state"] for s in statuses] == ["pending", status]
             and all(s["context"] == "Loop-zero Eligibility" for s in statuses))
-    assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
+    if status == "pending":
+        expected = (github.MERGEABILITY_PENDING if blocker.endswith("-reset")
+                    else "Awaiting trusted review of current source head")
+        assert statuses[-1]["description"] == expected
 
 
 def test_merged_source_refresh_publishes_nothing(publisher):
@@ -136,6 +140,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
 
 @pytest.mark.parametrize("case,error,message", [
     ("valid", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
+    ("mergeability", None, ""),
     ("merged", CandidateError, "not open"),
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
@@ -186,7 +191,10 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
         evaluated.append((repo, number, head, base, publishers))
         if case == "interrupt":
             raise KeyboardInterrupt()
-        reasons = (github.MISSING_REVIEW_REASON,) if case == "policy" else ()
+        reasons = {
+            "policy": (github.MISSING_REVIEW_REASON,),
+            "mergeability": (github.MERGEABILITY_PENDING,),
+        }.get(case, ())
         return github.Readiness(not reasons, reasons)
     monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
@@ -197,6 +205,10 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
             hosted.main()
     else:
         assert hosted.main() == 0
+    if case == "mergeability":
+        assert [call[3] for call in published] == ["pending", "pending"]
+        assert published[-1][-1] == f"source #101: {github.MERGEABILITY_PENDING}"
+        return
     terminal = [] if case in {"manual", "metadata", "stale", "interrupt"} else ["failure"]
     expected = [] if case in {"manual", "metadata", "stale"} else ["pending", *terminal]
     assert case != "race" or (len(attempts) == 3 and sleeps == [2, 2] and len(evaluated) == 6)

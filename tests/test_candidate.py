@@ -526,9 +526,10 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
     assert verified == [(main, head, [source])] and sleeps == [2]
 
 
-@pytest.mark.parametrize("field,value", [("body", "new policy evidence"), ("draft", True)])
+@pytest.mark.parametrize("field,value", [("body", "new policy evidence"), ("draft", True), ("mergeable", None)])
 def test_metadata_retry_evaluates_fresh_policy(field, value):
     values, snapshots, reads = payloads(event()), [], 0
+    values["/repos/owner/repo/pulls/101"]["mergeable"] = True
 
     def get(path):
         nonlocal reads

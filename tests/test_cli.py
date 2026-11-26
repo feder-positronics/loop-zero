@@ -2521,14 +2521,17 @@ def test_hosted_and_local_mergeability_verdicts(wt, gh, head, tmp_path, monkeypa
     gh.calls_file.write_text("[]")
     gh.respond(endpoint, before, before, after)
     gh.respond(f"api repos/{REPO}/statuses/{head}", {})
-    assert hosted.main() == verdict
+    status = {"UNKNOWN": "pending", "MERGEABLE": "success", "CONFLICTING": "failure"}[settled]
+    assert hosted.main() == (1 if status == "failure" else 0)
     payload = json.loads(gh.calls[-1]["--input"])
     assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{head}"
-    assert payload["state"] == ("failure" if verdict else "success")
+    assert payload["state"] == status
     if settled == "UNKNOWN":
         assert "GitHub is computing mergeability" in out
         assert "GitHub is computing mergeability" in payload["description"]
-    assert len(sleeps) == (1 if initial == "UNKNOWN" else 0)
+        assert sleeps == [2, 4, 8]
+    else:
+        assert sleeps == ([2] if initial == "UNKNOWN" else [])
 
 
 @pytest.mark.parametrize("command,check,hold_at_admission", [

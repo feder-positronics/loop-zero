@@ -287,8 +287,6 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     return "delta", reviewed
 
 
-
-
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
@@ -1188,7 +1186,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if waiting:
         github.mark_ready(config.repo, pr.number)
         if args.wait is None:
-            pending = f"; {github.MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
+            pending = f"; {github.MERGEABILITY_PENDING}" if github.MERGEABILITY_PENDING in readiness.reasons else ""
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
@@ -1309,7 +1307,7 @@ def _wait_with_deadline(
 
 
 def _print_check_wait_timeout(pr: github.PR) -> None:
-    if pr.mergeable == "UNKNOWN":
+    if github.mergeability_blocker(pr) == github.MERGEABILITY_PENDING:
         print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
     else:
         print(f"timed out waiting for required checks on {pr.head_sha[:12]}")

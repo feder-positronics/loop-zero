@@ -281,8 +281,8 @@ review publication; the existing reviewer selector and delivery gates still appl
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
 Local readiness and hosted eligibility both block while GitHub computes
-mergeability. Hosted eligibility takes one more reading for the same head
-before it publishes the verdict.
+mergeability. Hosted eligibility rereads the same head with bounded backoff
+and keeps eligibility pending if mergeability is still the only blocker.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
