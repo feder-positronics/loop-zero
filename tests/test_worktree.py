@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
-from tests.conftest import commit_file, git
+from tests.conftest import commit_file, git, git_environment
 
 
 @pytest.fixture
@@ -34,11 +34,13 @@ def commit_on_origin(repo: Path, name: str) -> str:
     return git(clone, "rev-parse", "HEAD").strip()
 
 
-def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
+def test_branch_preserves_unicode_whitespace(repo: Path, monkeypatch) -> None:
+    ambient = repo.parent / "ambient.git"
+    monkeypatch.setenv("GIT_DIR", str(ambient))
     name = worktree.branch_name(repo, "zażółć\u00a0")
     git(repo, "switch", "-c", name)
 
-    assert worktree.branch(repo) == "lz/zażółć\u00a0"
+    assert worktree.branch(repo) == "lz/zażółć\u00a0" and not ambient.exists()
 
 
 def test_branch_refuses_detached_head(repo: Path) -> None:
@@ -310,7 +312,7 @@ def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> Non
     commands = section.split("```sh\n", 1)[1].split("```", 1)[0]
     result = subprocess.run(
         ["sh", "-c", commands, "cleanup-guide", str(wt), "abandoned", head],
-        cwd=caller, capture_output=True, text=True, check=False,
+        cwd=caller, env=git_environment(), capture_output=True, text=True, check=False,
     )
 
     assert (result.returncode == 0) == (state == "clean"), result.stderr
