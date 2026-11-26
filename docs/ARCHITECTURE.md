@@ -64,7 +64,8 @@ a new persistent store.
 
 ## Delivery and feedback
 
-The [CLI](../src/loopzero/cli.py) implements the contract's
+The [console entry point](../src/loopzero/_cli_entry.py) parses arguments before
+loading the delivery [commands](../src/loopzero/cli.py), which implement the contract's
 [six steps](../core/CONTRACT.md#the-six-steps):
 
 1. `start` creates an isolated worktree and task branch from the configured base.
@@ -192,10 +193,16 @@ stdout in runner provenance and the saved review receipt. A failed probe uses
 RunnerBadOutput and existing family fallback before model input. Successful
 probe output is accepted across CLI releases. Unsupported Claude options follow
 existing native failure handling.
-Native defaults, repository AGENTS.md/CLAUDE.md processing and read-only tools
-remain enabled. Repository instructions remain a native authority surface, so
-structural transport tests do not prove injection immunity, reviewer quality or
-backend identity.
+Native defaults and read-only tools remain enabled. Neither reviewer loads
+instructions from the reviewed head, which the PR controls: Claude runs with
+`--setting-sources ""`, and Codex runs with `project_doc_max_bytes=0` (no
+AGENTS.md or AGENTS.override.md) and a `skills.config` entry disabling every
+skill under the checkout's `.agents/skills` and `.codex/skills`; a skill
+directory linking outside the checkout, or more skills than one argument can
+disable, fails the attempt before launch. Repository
+conventions reach reviewers only as evidence or through
+`delivery.reviewer_ro_paths` from the pinned base. Structural transport tests do
+not prove injection immunity, reviewer quality or backend identity.
 The [dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
 owns the implementation history, native comparison results and their limits.
 
