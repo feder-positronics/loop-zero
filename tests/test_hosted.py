@@ -1,5 +1,6 @@
 """Trusted publisher behavior against GitHub metadata, without candidate execution."""
 import json
+import signal
 import subprocess
 import sys
 from contextlib import nullcontext
@@ -52,12 +53,12 @@ def test_event_selection(event, number):
         assert hosted.event_number(event) == number
 
 
-def prepare_event(tmp_path, monkeypatch, repo, event):
+def prepare_event(tmp_path, monkeypatch, repo, event, *, base="main"):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_REPOSITORY", repo)
     Path("event.json").write_text(json.dumps(event))
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "event.json"))
-    Path("workflow.toml").write_text(f'[repo]\nname="{repo}"\nbase="main"\n[delivery]\nreview_publishers=["trusted-publisher"]\n')
+    Path("workflow.toml").write_text(f'[repo]\nname="{repo}"\nbase="{base}"\n[delivery]\nreview_publishers=["trusted-publisher"]\n')
 
 
 @pytest.fixture
@@ -71,9 +72,9 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     return gh
 
 
-def approval(head=HEAD):
-    return {"state": "APPROVED", "commit_id": head, "user": {"login": "trusted-publisher"},
-            "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n**approve**"}
+def approval(head=HEAD, *, state="APPROVED", verdict="**approve**"):
+    return {"state": state, "commit_id": head, "user": {"login": "trusted-publisher"},
+            "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n{verdict}"}
 
 
 def check_source(publisher, states, *, exit_code=0, error=None, match=None):
@@ -110,6 +111,39 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
 
 
+@pytest.mark.parametrize("phase,expected", [("evaluate", "failure"), ("publish", "success")])
+def test_sigterm_does_not_strand_or_overwrite_eligibility(publisher, phase, expected):
+    script = """
+import signal
+import sys
+from loopzero import github, hosted
+
+def evaluate(*_, **_kwargs):
+    if sys.argv[1] == "evaluate":
+        signal.raise_signal(signal.SIGTERM)
+    return github.Readiness(True, ())
+
+post = github.commit_status
+def publish(*args, **kwargs):
+    post(*args, **kwargs)
+    if sys.argv[1] == "publish" and args[3] == "success":
+        signal.raise_signal(signal.SIGTERM)
+
+hosted.eligibility.evaluate = evaluate
+github.commit_status = publish
+raise SystemExit(hosted.main())
+"""
+    def statuses():
+        return [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c]
+
+    stopped = subprocess.run([sys.executable, "-c", script, phase], timeout=10)
+    assert stopped.returncode == -signal.SIGTERM
+    assert statuses() == ["pending", expected]
+
+    subprocess.run([sys.executable, "-c", script, "retry"], timeout=10, check=True)
+    assert statuses() == ["pending", expected, "pending", "success"]
+
+
 @pytest.mark.parametrize("candidate", [False, True])
 @pytest.mark.parametrize("change", ["exact", "ordinary", "clean merge"])
 def test_hosted_review_coverage_after_source_head_changes(
@@ -130,11 +164,9 @@ def test_hosted_review_coverage_after_source_head_changes(
     source = fixtures.rest_pr_json(pr_json(headRefOid=head))
     source["base"]["sha"] = base
     publisher.respond(f"api repos/{REPO}/pulls/7", source)
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [{
-        "state": "COMMENTED", "commit_id": reviewed, "user": {"login": "trusted-publisher"},
-        "body": f"<!-- loopzero:review v=1 head={reviewed} kind=primary source=model -->\n"
-                "loopzero primary review by claude: **approve** (0 critical, 0 important, 0 suggestion)",
-    }])
+    verdict = "loopzero primary review by claude: **approve** (0 critical, 0 important, 0 suggestion)"
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1",
+                      [approval(reviewed, state="COMMENTED", verdict=verdict)])
     publisher.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": "ahead"})
     monkeypatch.setattr(hosted.candidate_mod, "fetched_git",
                         lambda *_: nullcontext(partial(git, git_repo)))
@@ -152,21 +184,18 @@ def test_hosted_review_coverage_after_source_head_changes(
                             lambda _event, *, source_policy, **_: source_policy(7, source))
     publisher.respond(f"api repos/{REPO}/statuses/{target}", {})
 
-    if change == "ordinary" and candidate:
-        with pytest.raises(hosted.LoopZeroError, match="no review recorded"):
-            hosted.main()
-    else:
-        assert hosted.main() == 0
-    states = [json.loads(call["--input"])["state"] for call in publisher.calls if "--input" in call]
-    assert states == ["pending", ("failure" if candidate else "pending")
-                      if change == "ordinary" else "success"]
+    ordinary = change == "ordinary"
+    state = ("failure" if candidate else "pending") if ordinary else "success"
+    check_source(publisher, ["pending", state], error=hosted.LoopZeroError if state == "failure" else None,
+                 match="no review recorded")
 
 
 def test_merged_source_refresh_publishes_nothing(publisher):
     body = json.dumps({"head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"}, "merged": True,
                        "title": "before\u2028after"}, ensure_ascii=False)
     publisher.respond(f"api repos/{REPO}/pulls/7", f"HTTP/2.0 200 OK\r\nX-GitHub-Request-Id: GHREQ-456\r\n\r\n{body}")
-    assert hosted.main() == 0 and not [c for c in publisher.calls if "--input" in c] and publisher.argv(0)[-1] == "--include"
+    check_source(publisher, [])
+    assert publisher.argv(0)[-1] == "--include"
 
 
 @pytest.mark.parametrize("state,readback", [
@@ -280,10 +309,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
     if case == "malformed":
         values["/repos/owner/repo/pulls/101"] = []
-    prepare_event(tmp_path, monkeypatch, "owner/repo", {"inputs": {"pr": "900"}} if case == "manual" else event)
-    if case == "trunk":
-        workflow = Path("workflow.toml")
-        workflow.write_text(workflow.read_text().replace('base="main"', 'base="trunk"'))
+    prepare_event(tmp_path, monkeypatch, "owner/repo", {"inputs": {"pr": "900"}} if case == "manual" else event, base=branch)
     rest_calls, sleeps = [], []
 
     def api_get(path):
@@ -316,10 +342,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
     monkeypatch.setattr("loopzero.mergify.api_get", lambda repo, suffix: candidate_status()
                         if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
-    if error:
-        with pytest.raises(error, match=message or None):
-            hosted.main()
-    else:
+    with pytest.raises(error, match=message or None) if error else nullcontext():
         assert hosted.main() == 0
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
               "manual": [], "metadata": [], "stale": []}

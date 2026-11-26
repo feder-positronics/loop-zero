@@ -433,6 +433,14 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> 
     assert all("subject_type" not in c for c in comments)
 
 
+def test_legacy_transcript_truncates_on_utf8_boundary():
+    tail = "x" * 29_999
+    result = ReviewResult("claude", HEAD, "primary", "approve", (), "🧪" + tail)
+    output = github._review_transcript(result, legacy_display=True)
+    assert "Transcript truncated" in output
+    assert output.endswith(f"\n{tail}\n```\n</details>")
+
+
 @pytest.mark.parametrize("metadata", ["new", "legacy", "malformed"])
 def test_publication_qualifies_each_call_from_native_evidence(gh, metadata):
     arm_review(gh)
@@ -444,31 +452,17 @@ def test_publication_qualifies_each_call_from_native_evidence(gh, metadata):
         provenance["requested_settings"] = None
     result = replace(review(verdict="approve"), family="claude", raw=json.dumps(envelopes),
                      model="unqualified-model", effort="unqualified-effort", chunk_count=2,
-                     provenance=provenance)
+                     duration_s=0.25, provenance=provenance)
     github.post_review(REPO, 7, HEAD, result)
-    body = review_payloads(gh)[0]["body"]
+    payload = review_payloads(gh)[0]
+    assert payload["event"] == "APPROVE" and payload["comments"] == [] and not calls_for(gh, FILES_KEY)
+    body = payload["body"]
+    assert "0.2s: **approve**" in body
     requested = "requested-one" if metadata == "new" else "unknown"
     assert f"Call 1: requested model {requested} (effort {'medium' if metadata == 'new' else 'unknown'})" in body
     assert "CLI-reported model reported-one (effort unknown)" in body
     assert "Call 2: requested model unknown (effort unknown); CLI-reported model unknown (effort unknown)" in body
     assert "unqualified-" not in body and "forged-" not in body
-
-
-def test_post_review_reroutes_findings_outside_diff(gh: FakeGh) -> None:
-    arm_review(gh)
-    findings = (
-        Finding("important", "src/a.py", 99, "Off diff", "line not in hunk"),
-        Finding("important", "src/zzz.py", 1, "Unknown file", "path not in PR"),
-        Finding("critical", "src/c.py", 7, "Deleted side", "line 7 was only on the left"),
-        Finding("suggestion", "src/a.py", 99, "Nit off diff", "stays loose"),
-    )
-    github.post_review(REPO, 7, HEAD, review(findings=findings))
-    payload = review_payloads(gh)[0]
-    comments = payload["comments"]
-    assert [(c["path"], c["line"]) for c in comments] == [("src/a.py", 11)] * 3
-    assert comments[0]["body"].split("\n")[1] == (
-        "Reviewer location src/a.py:99 is not in the diff; anchored here.")
-    assert "Nit off diff" in payload["body"]
 
 
 @pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
@@ -535,36 +529,6 @@ def test_post_review_reads_only_pages_needed_for_placement(gh, location):
         assert ("anchored here" in comment["body"]) == (location == "missing")
 
 
-def test_post_review_approve_event(gh: FakeGh) -> None:
-    arm_review(gh)
-    result = ReviewResult("codex", HEAD, "primary", "approve", (), "RAW", duration_s=0.25)
-    github.post_review(REPO, 7, HEAD, result)
-    assert calls_for(gh, FILES_KEY) == []
-    payload = review_payloads(gh)[0]
-    assert payload["event"] == "APPROVE" and payload["comments"] == []
-    assert "0.2s: **approve**" in payload["body"]
-    assert "requested model unknown (effort unknown); CLI-reported model unknown (effort unknown)" in payload["body"]
-
-
-@pytest.mark.parametrize("verdict,msg", [
-    ("approve", "Can not approve your own pull request"),
-    ("request_changes", "Can not request changes on your own pull request"),
-])
-def test_post_review_falls_back_to_comment_for_own_pr(gh: FakeGh, verdict: str, msg: str) -> None:
-    """Hand fake: recording the 422 would require a forbidden write to the reference PR."""
-    arm_review(gh)
-    body = {"message": "Unprocessable Entity", "errors": [{"message": msg}],
-            "documentation_url": "https://docs.github.com/rest"}
-    gh.respond(REVIEWS_KEY,
-               {"stdout": json.dumps(body), "stderr": "gh: Unprocessable Entity (HTTP 422)\n",
-                "exit": 1},
-               {"stdout": '{"id": 2}', "exit": 0})
-    github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]))
-    first, second = review_payloads(gh)
-    assert (first["event"], second["event"]) == (verdict.upper(), "COMMENT")
-    assert first["comments"] == second["comments"] and first["body"] == second["body"]
-
-
 @pytest.mark.parametrize("failure,remedy,label,gap", [
     ("not logged in", github.GH_AUTH_REMEDY, "", ""),
     ("HTTP 429 rate limit", "retry after GitHub's reset or Retry-After", "", ""),
@@ -617,16 +581,32 @@ def test_gh_timeout_redacts_diagnostics(monkeypatch) -> None:
     assert info.value.__suppress_context__
 
 
-@pytest.mark.parametrize("verdict,supplied", [("approve", False), ("request_changes", False), ("approve", True)])
-def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str, supplied: bool) -> None:
-    details = f"api repos/{REPO}/pulls/7"
-    arm_review(gh, author="someone-else" if supplied else "bot-user")
-    pr = github.pr_from_rest(rest_pr_json(pr_json(author={"login": "bot-user"}))) if supplied else None
+@pytest.mark.parametrize("verdict,own_pr", [
+    ("approve", "lookup"), ("request_changes", "lookup"), ("approve", "supplied"),
+    ("approve", "fallback"), ("request_changes", "fallback"),
+])
+def test_post_review_comments_on_own_pr(gh: FakeGh, verdict: str, own_pr: str) -> None:
+    arm_review(gh, author="bot-user" if own_pr == "lookup" else "someone-else")
+    pr = github.pr_from_rest(rest_pr_json(pr_json(author={"login": "bot-user"}))) if own_pr == "supplied" else None
+    if own_pr == "fallback":
+        action = "approve" if verdict == "approve" else "request changes on"
+        rejection = {"message": "Unprocessable Entity", "errors": [{"message": f"Can not {action} your own pull request"}],
+                     "documentation_url": "https://docs.github.com/rest"}
+        gh.respond(REVIEWS_KEY, {"stdout": json.dumps(rejection), "stderr": "gh: Unprocessable Entity (HTTP 422)\n",
+                               "exit": 1}, {"stdout": '{"id": 2}', "exit": 0})
     github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]), pr=pr)
-    (payload,) = review_payloads(gh)
-    assert payload["event"] == "COMMENT"
-    assert [c["argv"] for c in calls_for(gh, details)] == ([] if supplied else [[*details.split(), "--include"]])
-    assert gh.argv(int(not supplied))[:2] == ["api", "graphql"]
+    payloads = review_payloads(gh)
+    assert payloads[-1]["event"] == "COMMENT"
+    if own_pr == "fallback":
+        first, second = payloads
+        assert first["event"] == verdict.upper()
+        assert first["comments"] == second["comments"] and first["body"] == second["body"]
+    else:
+        assert len(payloads) == 1
+        details = f"api repos/{REPO}/pulls/7"
+        looked_up = own_pr != "supplied"
+        assert [c["argv"] for c in calls_for(gh, details)] == ([[*details.split(), "--include"]] if looked_up else [])
+        assert gh.argv(int(looked_up))[:2] == ["api", "graphql"]
 
 
 def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
@@ -666,6 +646,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     assert argv[:2] == ["api", "graphql"]
     assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
     assert any(a.startswith("query=") and "author { __typename login }" in a for a in argv)
+    assert github.open_blocking_findings(REPO, 7, HEAD, ()) == []
 
 
 @pytest.mark.parametrize("body, author", [
@@ -691,11 +672,6 @@ def test_open_findings_ignore_untrusted_or_quoted_markers(gh: FakeGh, body: str,
     gh.respond("api graphql", threads_json({**thread(body, author=author), "id": "T_1"}))
     assert github.open_blocking_findings(REPO, 7, HEAD, ("bot-user", "loopzero-app[bot]")) == []
     assert github.open_findings(REPO, 7, ("bot-user", "loopzero-app[bot]")) == []
-
-
-def test_open_findings_without_publishers_block_nothing(gh: FakeGh) -> None:
-    gh.respond("api graphql", threads_json(thread(f"{marker('critical')}\n**critical: X**")))
-    assert github.open_blocking_findings(REPO, 7, HEAD, ()) == []
 
 
 @pytest.mark.parametrize("data", [
@@ -800,7 +776,7 @@ def test_app_review_is_comment_with_inline_findings(gh: FakeGh, app_token_helper
     assert payload["event"] == "COMMENT" and payload["comments"]
 
 
-def test_marker_parser_accepts_only_the_emitted_v1_line() -> None:
+def test_marker_parser_and_finding_ids() -> None:
     assert github.MARKER_RE.fullmatch("<!-- loopzero:finding severity=critical -->") is None
     finding = Finding("important", "src/b.py", 2, "Missing check", "validate")
     new = github.MARKER_RE.fullmatch(github.finding_marker("important", HEAD, finding))
@@ -808,9 +784,6 @@ def test_marker_parser_accepts_only_the_emitted_v1_line() -> None:
         "severity": "important", "head": HEAD,
         "id": github.finding_id(HEAD, "src/b.py", 2, "Missing check"),
     }
-
-
-def test_finding_id_is_deterministic_and_uses_location_and_title() -> None:
     expected = "aa3b81ec"
     assert github.finding_id(HEAD, "src/a.py", 10, "Null deref") == expected
     assert github.finding_id(HEAD, "src/a.py", 10, "Null deref") == expected
@@ -844,18 +817,6 @@ def test_thread_reply_read_rejects_repeated_cursor(gh: FakeGh) -> None:
 
 
 # --- checks --------------------------------------------------------------------------------
-
-
-def test_gh_api_reads_with_fields_use_method_get(gh: FakeGh) -> None:
-    arm_review(gh)
-    github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    github._check_signals(REPO, HEAD)
-    reads = [c["argv"] for c in gh.calls if c["argv"][0] == "api" and "-F" in c["argv"]]
-    assert len(reads) == 3, "files, check-runs and status all pass -F"
-    for argv in reads:
-        assert argv[argv.index("--method") + 1] == "GET", argv
 
 
 def check_run(conclusion, *, name="checks", status="completed", **fields):
@@ -899,6 +860,9 @@ def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
 
     if page.get("check_runs") == []:
         assert github._check_signals(REPO, HEAD)[0] == {}
+        assert len(gh.calls) == 2
+        for argv in (gh.argv(0), gh.argv(1)):
+            assert "-F" in argv and argv[argv.index("--method") + 1] == "GET"
     else:
         with pytest.raises(github.GhError, match=endpoint):
             github._check_signals(REPO, HEAD)
@@ -928,10 +892,8 @@ def test_status_pagination_rejects_a_repeated_full_page(gh: FakeGh) -> None:
 
 def arm_readiness(gh: FakeGh, *, threads=(), runs=None) -> None:
     runs = {"checks": "success"} if runs is None else runs
-    arm_workflow_check(gh, *(
-        {"name": name, "status": "completed", "conclusion": conclusion}
-        for name, conclusion in runs.items()
-    ), threads=threads)
+    checks = (check_run(conclusion, name=name) for name, conclusion in runs.items())
+    arm_workflow_check(gh, *checks, threads=threads)
 
 
 def arm_workflow_check(gh: FakeGh, *checks: dict, statuses=(), threads=()) -> None:
@@ -939,15 +901,14 @@ def arm_workflow_check(gh: FakeGh, *checks: dict, statuses=(), threads=()) -> No
     arm_check_pages(gh, {"check_runs": list(checks)}, statuses=(list(statuses),))
 
 
-def readiness(*, reviewed=HEAD, workflow_wait=False):
-    pr = github.pr_from_rest(rest_pr_json(pr_json()))
-    return github.readiness(REPO, pr, "main", ("checks",), reviewed, workflow_wait=workflow_wait,
+def readiness(*, reviewed=HEAD, workflow_wait=False, required_ci=("checks",), **metadata):
+    pr = github.pr_from_rest(rest_pr_json(pr_json(**metadata)))
+    return github.readiness(REPO, pr, "main", required_ci, reviewed, workflow_wait=workflow_wait,
                             publishers=PUBLISHERS)
 
 
 def failed_check(conclusion="failure", **fields):
-    return {"name": "checks", "status": "completed", "conclusion": conclusion,
-            "check_suite": {"id": 10}, **fields}
+    return check_run(conclusion, **({"check_suite": {"id": 10}} | fields))
 
 
 def producing_run(**fields):
@@ -965,33 +926,22 @@ def arm_workflow_runs(gh, *runs):
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", *pages)
 
 
-@pytest.mark.parametrize("reviewed,reasons", [
-    (HEAD, ()),
-    ("b" * 40, (f"head {HEAD[:12]} differs from reviewed {'b' * 12}",)),
-    (None, ("no review recorded for the current head",)),
+@pytest.mark.parametrize("reviewed,finding,reasons", [
+    (HEAD, None, ()),
+    ("b" * 40, None, (f"head {HEAD[:12]} differs from reviewed {'b' * 12}",)),
+    (None, None, ("no review recorded for the current head",)),
+    pytest.param(HEAD, thread(f"{marker('important')}\n**important: Oops**"),
+                 ("open important finding at src/a.py:3: Oops",), id="located"),
+    pytest.param(HEAD, thread(f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n"
+                            "**critical: Global**\n\nno file", path="src/first.py", line=12),
+                 ("open critical finding at src/first.py:12: Global",), id="anchored"),
 ])
-def test_readiness_requires_current_review(gh: FakeGh, reviewed, reasons) -> None:
-    arm_readiness(gh, threads=(thread(f"{marker('critical')}\nX", resolved=True),
-                               thread(f"{marker('suggestion')}\nY")))
+def test_readiness_requires_current_review_and_resolved_findings(gh: FakeGh, reviewed, finding, reasons) -> None:
+    threads = (finding,) if finding else (thread(f"{marker('critical')}\nX", resolved=True),
+                                          thread(f"{marker('suggestion')}\nY"))
+    arm_readiness(gh, threads=threads)
     assert readiness(reviewed=reviewed) == github.Readiness(not reasons, reasons)
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
-
-
-@pytest.mark.parametrize("finding,reason", [
-    pytest.param(
-        thread(f"{marker('important')}\n**important: Oops**"),
-        "open important finding at src/a.py:3: Oops", id="located",
-    ),
-    pytest.param(
-        thread(f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n"
-               "**critical: Global**\n\nno file", path="src/first.py", line=12),
-        "open critical finding at src/first.py:12: Global", id="anchored",
-    ),
-])
-def test_readiness_blocking_finding(gh: FakeGh, finding: dict, reason: str) -> None:
-    arm_readiness(gh, threads=(finding,))
-    result = readiness()
-    assert not result.ready and result.reasons == (reason,)
 
 
 def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
@@ -1128,25 +1078,16 @@ def test_readiness_rerun_attempt_requires_start_after_old_failure(
 ], ids=["behind-base", "merge-conflict", "merged-pr"])
 def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> None:
     arm_readiness(gh)
-    pr = github.pr_from_rest(rest_pr_json(pr_json(**metadata)))
-    r = github.readiness(REPO, pr, "main", ("checks",), HEAD, publishers=PUBLISHERS)
-    assert r.reasons == (reason,)
+    assert readiness(**metadata).reasons == (reason,)
 
 
 def test_readiness_without_required_ci_skips_check_lookup(gh: FakeGh) -> None:
     gh.respond("api graphql", threads_json())
-    assert github.readiness(REPO, github.pr_from_rest(rest_pr_json(pr_json())), "main", (), HEAD,
-                            publishers=PUBLISHERS).ready
+    assert readiness(required_ci=()).ready
     assert [c["argv"][:2] for c in gh.calls] == [["api", "graphql"]]
 
 
 # --- ready / merge ---------------------------------------------------------------------
-
-
-def test_mark_ready(gh: FakeGh) -> None:
-    gh.respond("pr ready", "")
-    github.mark_ready(REPO, 7)
-    assert gh.argv(0) == ["pr", "ready", "7", "--repo", REPO]
 
 
 def test_merge_success_verifies_rest_landing(gh: FakeGh) -> None:
@@ -1374,31 +1315,28 @@ def test_merged_branch_history_reads_terminal_page(gh: FakeGh, merged: dict | No
     assert gh.argv(3) == [*branch_history_key(2).split(), "--include"]
 
 
-@pytest.mark.parametrize("change", [
-    {"number": True}, {"state": "open"}, {"merged_at": False},
-    {"merged_at": "bad-date"}, {"merged_at": "2026-10-07T05:04:29"},
-    {"head": None}, {"head": {"ref": "lz/other", "repo": {"full_name": REPO}}},
-    {"head": {"ref": "lz/t1", "repo": {"full_name": "other/widgets"}}},
+@pytest.mark.parametrize("change,detail", [
+    *((change, None) for change in (
+        {"number": True}, {"state": "open"}, {"merged_at": False},
+        {"merged_at": "bad-date"}, {"merged_at": "2026-10-07T05:04:29"},
+        {"head": None}, {"head": {"ref": "lz/other", "repo": {"full_name": REPO}}},
+        {"head": {"ref": "lz/t1", "repo": {"full_name": "other/widgets"}}},
+    )),
+    *(({}, detail) for detail in (
+        rest_pr_json(pr_json(state="CLOSED")),
+        rest_pr_json(pr_json(state="MERGED"), branch="lz/other"),
+        rest_pr_json(pr_json(state="MERGED")) |
+        {"head": {"sha": HEAD, "ref": "lz/t1", "repo": {"full_name": "other/widgets"}}},
+    )),
 ])
-def test_merged_branch_history_rejects_invalid_rows(gh: FakeGh, change: dict) -> None:
-    row = closed_history_row(pr_json(state="CLOSED"))
-    gh.respond(branch_history_key(), [{**row, **change}])
-
-    with pytest.raises(github.GhError, match="invalid or repeated closed PR history"):
-        github.merged_pr_for_branch(REPO, "lz/t1")
-
-
-@pytest.mark.parametrize("detail", [
-    rest_pr_json(pr_json(state="CLOSED")),
-    rest_pr_json(pr_json(state="MERGED"), branch="lz/other"),
-    {**rest_pr_json(pr_json(state="MERGED")),
-     "head": {"sha": HEAD, "ref": "lz/t1", "repo": {"full_name": "other/widgets"}}},
-])
-def test_merged_branch_history_rejects_changed_detail(gh: FakeGh, detail: dict) -> None:
-    gh.respond(branch_history_key(), [closed_history_row(pr_json(state="MERGED"))])
-    gh.respond(f"api repos/{REPO}/pulls/7", detail)
-
-    with pytest.raises(github.GhError, match="PR changed during completion lookup"):
+def test_merged_branch_history_requires_consistent_evidence(gh: FakeGh, change: dict, detail: dict | None) -> None:
+    row = closed_history_row(pr_json(state="CLOSED" if detail is None else "MERGED"))
+    gh.respond(branch_history_key(), [row | change])
+    reason = "invalid or repeated closed PR history"
+    if detail is not None:
+        gh.respond(f"api repos/{REPO}/pulls/7", detail)
+        reason = "PR changed during completion lookup"
+    with pytest.raises(github.GhError, match=reason):
         github.merged_pr_for_branch(REPO, "lz/t1")
 
 

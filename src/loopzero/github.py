@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ from loopzero.types import BLOCKING, Finding, ReviewResult
 GH_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_HOST")
 GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
+PR_LOCK_DIR = Path.home() / ".cache/loopzero/pr-locks"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
 MARKER_RE = re.compile(
@@ -128,6 +130,9 @@ _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str | None, bool] | None] = ContextVar("github_reads", default=None)
 _api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
+_READINESS_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.([0-9]+))?"
+                                  r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
+_HTTP_DATE = re.compile(r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT")
 _CREDENTIAL_TOKEN_RE = re.compile(
     r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})"
 )
@@ -168,24 +173,20 @@ def api_error_diagnostics():
 
 def _included_response(output: str) -> tuple[str | None, dict[str, str], str]:
     """Split one `gh api --include` response into status, headers and body."""
-    head, separator, body = output.partition("\r\n\r\n")
-    line_separator = "\r\n"
-    if not separator:
-        head, separator, body = output.partition("\n\n")
-        line_separator = "\n"
-    if not separator:
+    for line_separator in ("\r\n", "\n"):
+        head, separator, body = output.partition(line_separator * 2)
+        if separator:
+            break
+    else:
         return None, {}, output
     lines = head.split(line_separator)
     match = _HTTP_STATUS_RE.match(lines[0])
     if match is None:
         return None, {}, output
-    status = match.group(1)
-    headers: dict[str, str] = {}
-    for line in lines[1:]:
-        name, separator, value = line.partition(":")
-        if separator:
-            headers[name.strip().casefold()] = value.strip()
-    return status, headers, body
+    headers = {name.strip().casefold(): value.strip()
+               for name, separator, value in (line.partition(":") for line in lines[1:])
+               if separator}
+    return match.group(1), headers, body
 
 
 def _api_methods(args: tuple[str, ...]) -> list[str]:
@@ -290,6 +291,16 @@ def _cached_app_token() -> str:
     return token if now is not None and 0 <= now - minted < 3000 else ""
 
 
+@contextmanager
+def pr_lock(repo: str, number: int) -> Iterator[None]:
+    """Serialize a GitHub write across local checkouts for this PR."""
+    key = hashlib.sha256(f"{repo.casefold()}#{number}".encode()).hexdigest()
+    PR_LOCK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (PR_LOCK_DIR / key).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def app_token() -> str:
     global _app_token_cache
     if token := _cached_app_token():
@@ -334,15 +345,21 @@ def _retry_pause(delay: float | None, limit: float, *, scoped: bool = True) -> b
     return True
 
 
+def retry_after(value: str) -> float | None:
+    try:
+        if re.fullmatch(r"[0-9]{1,18}", value):
+            return float(value)
+        date = parsedate_to_datetime(value)
+        return max(0.0, date.timestamp() - time.time()) if date.tzinfo is not None else None
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _rate_limit_delay(headers: dict[str, str], delay: float | None) -> float | None:
     if delay is None or headers.get("x-ratelimit-remaining") == "0":
         return None
-    value = headers.get("retry-after", "")
-    try:
-        wait = int(value) if re.fullmatch(r"[0-9]{1,18}", value) else parsedate_to_datetime(value).timestamp() - time.time()
-    except (OverflowError, OSError, ValueError):
-        return None
-    return max(delay, wait)
+    wait = retry_after(headers.get("retry-after", ""))
+    return None if wait is None else max(delay, wait)
 
 
 def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
@@ -354,7 +371,8 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
 
 
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
-        token: str | None = None, retry_idempotent: bool = False) -> str:
+        token: str | None = None, retry_idempotent: bool = False, dates: list[str] | None = None) -> str:
+    dates = [] if dates is None else dates
     api = args[:1] == ("api",)
     diagnostic_api = api and _api_error_diagnostics.get()
     rest_api = api and args[:2] != ("api", "graphql")
@@ -387,6 +405,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         status, headers, body = response
         tail = "\n".join(part for part in (done.stderr, body) if part)
         if done.exit_code == 0:
+            dates[:] = [headers.get("date", "")]
             return body
         rate_limited = _rate_limited(status, headers, tail)
         transient = rate_limited or _transient_error(tail, retry_idempotent, status)
@@ -416,9 +435,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     remaining = int(remaining_value) if re.fullmatch(r"[0-9]{1,18}", remaining_value) else None
     retry_after = headers.get("retry-after", "")
     retry_seconds = re.fullmatch(r"[0-9]{1,18}", retry_after)
-    retry_date = re.fullmatch(
-        r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT", retry_after,
-    )
+    retry_date = _HTTP_DATE.fullmatch(retry_after)
     reset = ""
     try:
         if epoch := headers.get("x-ratelimit-reset"):
@@ -479,8 +496,8 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
     return ""
 
 
-def _gh_json(*args: str, token: str | None = None) -> object:
-    out = _gh(*args, token=token)
+def _gh_json(*args: str, token: str | None = None, **kwargs) -> object:
+    out = _gh(*args, token=token, **kwargs)
     try:
         return json.loads(out) if out.strip() else None
     except json.JSONDecodeError as exc:
@@ -518,9 +535,16 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
     return list(_iter_paged(endpoint, key))
 
 
-def api_get(endpoint: str) -> object:
+def api_get(endpoint: str, **kwargs) -> object:
     """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
-    return _gh_json("api", endpoint)
+    return _gh_json("api", endpoint, **kwargs)
+
+
+def response_date(value: str) -> datetime | None:
+    if _HTTP_DATE.fullmatch(value):
+        with suppress(OverflowError, ValueError):
+            return parsedate_to_datetime(value)
+    return None
 
 
 def auth_token() -> str:
@@ -544,13 +568,13 @@ def _not_found(number: int, exc: Exception) -> GhError:
 
 
 def _api(endpoint: str, payload: dict, method: str = "POST",
-         token: str | None = None) -> object:
+         token: str | None = None, *, timeout: float = 120) -> object:
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".loopzero", encoding="utf-8", delete_on_close=False
     ) as handle:
         handle.write(json.dumps(payload))
         handle.close()
-        return _gh_json("api", endpoint, "--method", method, "--input", handle.name, token=token)
+        return _gh_json("api", endpoint, "--method", method, "--input", handle.name, token=token, timeout=timeout)
 
 
 def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
@@ -796,9 +820,8 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         _, span = runners.leading_review_block(prefix)
         if len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
             raise runners.RunnerBadOutput("codex: oversized leading machine block; HOLD")
-    counts = {s: sum(1 for f in result.findings if f.severity == s) for s in
-              ("critical", "important", "suggestion")}
-    summary = ", ".join(f"{n} {s}" for s, n in counts.items())
+    severities = [f.severity for f in result.findings]
+    summary = ", ".join(f"{severities.count(s)} {s}" for s in ("critical", "important", "suggestion"))
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
     settings = ""
     if settings_layout == "summary":
@@ -848,11 +871,9 @@ def _review_transcript(result: ReviewResult, legacy_display: bool) -> str:
                "Exact raw SHA256: " + hashlib.sha256(result.raw.encode()).hexdigest())
     encoded = raw.encode("utf-8")
     if len(encoded) > 30_000:
-        raw = encoded[-30_000:].decode("utf-8", errors="ignore")
-        raw = (
-            "[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
-            "Full output remains in the saved local review artifact.]\n" + raw
-        )
+        tail = encoded[-30_000:].decode("utf-8", errors="ignore")
+        raw = ("[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
+               "Full output remains in the saved local review artifact.]\n" + tail)
     return f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
 
 
@@ -1171,34 +1192,41 @@ _NONFAILING_CHECKS = _PENDING_CHECKS | {"success"}
 _FAILED_VERDICTS = {"failure", "error", "cancelled", "timed_out"}
 
 
+ReadinessTimestamp = tuple[datetime, str]
+
+
+def readiness_timestamp(value: object) -> ReadinessTimestamp | None:
+    if isinstance(value, str) and (match := _READINESS_TIMESTAMP.fullmatch(value)):
+        with suppress(OverflowError, ValueError):
+            return datetime.fromisoformat(value).astimezone(UTC), (match[1] or "")[6:].rstrip("0")
+    return None
+
+
 def _check_signals(
     repo: str,
     head_sha: str,
-    review_at: str | None = None,
+    review_at: ReadinessTimestamp | None = None,
     review_grace: bool = False,
     required_ci: tuple[str, ...] = (),
     stale_verdict_grace: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
+    signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
     latest_runs: dict[str, dict] = {}
     runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
     for cr in runs:
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
             latest_runs[cr["name"]] = cr
-    signals = {
-        name: [(cr.get("conclusion") or cr.get("status") or "unknown",
-                cr.get("completed_at") or cr.get("started_at"))]
-        for name, cr in latest_runs.items()
-    }
+    for name, cr in latest_runs.items():
+        state = cr.get("conclusion") or cr.get("status") or "unknown"
+        timestamp = cr.get("started_at" if state in _PENDING_CHECKS else "completed_at")
+        signals[name] = [(state, readiness_timestamp(timestamp))]
     latest_status: dict[str, dict] = {}
     for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status)
     for name, status in latest_status.items():
-        signals.setdefault(name, []).append((status.get("state") or "unknown", status.get("created_at")))
-    states = {
-        name: _aggregate_signal([state for state, _ in values])
-        for name, values in signals.items()
-    }
+        signals.setdefault(name, []).append((status.get("state") or "unknown", readiness_timestamp(status.get("created_at"))))
+    states = {name: _aggregate_signal([state for state, _ in values]) for name, values in signals.items()}
     stale = tuple(name for name, values in signals.items() if review_at
                   and states[name] not in _NONFAILING_CHECKS
                   and all(at and at < review_at for state, at in values if state not in _NONFAILING_CHECKS)
@@ -1302,7 +1330,7 @@ def readiness(
     required_ci: tuple[str, ...],
     reviewed_head: str | None,
     *, allow_behind: bool = False, ancestor_review: bool = False,
-    review_at: str | None = None,
+    review_at: ReadinessTimestamp | None = None,
     review_grace: bool = False,
     workflow_wait: bool = False,
     stale_verdict_grace: bool = False,
@@ -1467,11 +1495,13 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     return True
 
 
-def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:
+def commit_status(
+    repo: str, head: str, context: str, state: str, description: str, *, timeout: float = 120,
+) -> None:
     """Publish a SHA-scoped status using the caller's narrowly scoped credential."""
     endpoint = f"repos/{repo}/statuses/{head}"
     try:
-        _api(endpoint, {"state": state, "context": context, "description": description})
+        _api(endpoint, {"state": state, "context": context, "description": description}, timeout=timeout)
     except GhError as exc:
         validation_error = re.search(r"\bHTTP 422\b|^method=POST endpoint=\S+ status=422\b", exc.tail)
         if validation_error and _status_limit_reached(repo, head, context):

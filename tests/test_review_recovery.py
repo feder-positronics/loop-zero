@@ -65,8 +65,7 @@ def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=Fals
             if mutate:
                 mutate(rows, comments)
             gh.respond(reviews_key(), rows)
-            gh.respond(REVIEW_COMMENTS,
-                       comments)
+            gh.respond(REVIEW_COMMENTS, comments)
             if interrupted:
                 raise KeyboardInterrupt
             if timeout:
@@ -87,9 +86,20 @@ def interrupted_receipt(wt, gh, fake_bin, monkeypatch, capsys):
     return head, path, json.loads(path.read_text()), original
 
 
-def assert_single_publication(gh, fake_bin):
+def legacy_settings(label, requested, reported):
+    return (f"Settings per native call ({label}, not backend attestation):\n"
+            f"- Call 1: requested model {requested['model'] or 'unknown'} (effort {requested['effort'] or 'unknown'}); "
+            f"CLI-reported model {reported['model'] or 'unknown'} (effort {reported['effort'] or 'unknown'})")
+
+
+def raw_details(raw):
+    return f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
+
+
+def assert_single_publication(gh, fake_bin, *, allow_body_update=False):
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    writes = [c["argv"][1] for c in gh.calls if "--input" in c]
+    assert (writes.count(support.post_key().split()[1]) if allow_body_update else len(writes)) == 1
 
 
 @pytest.mark.parametrize("override", [None, "pr", "head", "raw", "bytes", "effort"])
@@ -126,10 +136,7 @@ def test_plain_review_surfaces_receipt_after_interruption_before_post(
         assert path.read_bytes() == saved
         assert not any("--input" in c for c in gh.calls)
         assert run(capsys, "review", "--repost")[0] == 0
-        assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
-        assert sum(
-            c["argv"][1] == support.post_key().split()[1] and "--input" in c for c in gh.calls
-        ) == 1
+        assert_single_publication(gh, fake_bin, allow_body_update=True)
     else:
         assert code == 0, err
         assert (fake_bin / "claude.runs").read_text().splitlines() == ["run", "run"]
@@ -285,8 +292,8 @@ def test_interrupted_explicit_repost_recovers_repost_body(wt, gh, fake_bin, monk
     monkeypatch.setattr(github, "_api", original)
     assert run(capsys, "review", "--repost")[0] == 130
     (fake_bin / "claude.stdin").unlink()
-    code, out, err = run(capsys, "review", "--repost")
-    assert code == 5 and out.startswith("primary review by claude"), err
+    out, _ = expect_cli(capsys, 5, "review", "--repost")
+    assert out.startswith("primary review by claude")
     assert not (fake_bin / "claude.stdin").exists()
     assert len([c for c in gh.calls if "--input" in c]) == 1
     assert support.marker(head, "primary", "repost") in support.posted_review(gh)["body"]
@@ -346,15 +353,13 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
     effort = f" (effort {saved['effort']})" if saved["effort"] else ""
     body = (f"{prefix}\nloopzero primary review by claude on `{head}`, "
             f"model {saved['model'] or 'unknown'}{effort}, {saved['duration_s']:.1f}s: "
-            f"**approve** (0 critical, 0 important, 0 suggestion){chunks}\n\n"
-            f"<details><summary>Raw reviewer output</summary>\n\n```\n{transcript}\n```\n</details>")
+            f"**approve** (0 critical, 0 important, 0 suggestion){chunks}" + raw_details(transcript))
     arm_published_review(gh, head, body)
     expect_cli(capsys, 0 if metadata == "legacy" else 1, "review", "--repost")
     assert_single_publication(gh, fake_bin)
     if metadata == "legacy":
-        mixed = body.partition("\n\n<details>")[0] + (
-            "\n\nNative Claude output is retained in the restricted local review receipt."
-        )
+        summary = "\n\nNative Claude output is retained in the restricted local review receipt."
+        mixed = body.partition("\n\n<details>")[0] + summary
         for altered_body in (mixed, body + "changed"):
             arm_published_review(gh, head, altered_body)
             expect_cli(capsys, 1, "review", "--repost")
@@ -422,17 +427,14 @@ def test_repost_confirms_historical_claude_publication(
         f'{support.marker(head, "primary", "model")}\n'
         f"loopzero primary review by claude on `{head}`, {saved['duration_s']:.1f}s: "
         "**approve** (0 critical, 0 important, 0 suggestion)\n\n"
-        f"Settings per native call ({settings}, not backend attestation):\n"
-        f"- Call 1: requested model {request['model'] or 'unknown'} "
-        f"(effort {request['effort'] or 'unknown'}); "
-        f"CLI-reported model {saved['model'] or 'unknown'} (effort {saved['effort'] or 'unknown'})"
+        + legacy_settings(settings, request, saved)
     )
     if publication != "pre-configured":
         body += "; configured model unknown (effort unknown)"
     if publication == "summary":
         body += "\n\nNative Claude output is retained in the restricted local review receipt."
     else:
-        body += f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{saved['raw']}\n```\n</details>"
+        body += raw_details(saved["raw"])
     arm_published_review(gh, head, body)
     if publication == "pre-configured":
         assert "configured_settings" in saved["provenance"]
@@ -461,14 +463,10 @@ def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkey
         f"{cli.runners.encode_codex_evidence(evidence)}\n"
         f"loopzero primary review by codex on `{head}`, unknown: "
         "**approve** (0 critical, 0 important, 0 suggestion)\n\n"
-        "Settings per native call (CLI claims, not backend attestation):\n"
-        f"- Call 1: requested model {call['requested']['model']} "
-        f"(effort {call['requested']['effort']}); "
-        f"CLI-reported model {call['reported']['model']} (effort {call['reported']['effort']})"
-        "\n\n<details><summary>Raw reviewer output</summary>\n\n```\n"
-        "Native Codex transcript retained in the restricted local review receipt; "
-        "public evidence is publisher-derived, not backend attestation. "
-        f"Exact raw SHA256: {evidence['raw_sha256']}\n```\n</details>"
+        + legacy_settings("CLI claims", call["requested"], call["reported"])
+        + raw_details("Native Codex transcript retained in the restricted local review receipt; "
+                      "public evidence is publisher-derived, not backend attestation. "
+                      f"Exact raw SHA256: {evidence['raw_sha256']}")
     )
     if altered:
         body += "changed"

@@ -944,33 +944,23 @@ def _codex_evidence(result):
                 raise RunnerBadOutput("codex: configured settings/context mismatch")
             settings["configured"] = configured
         inspection = _native_inspection(envelope, context)
-        calls.append(
-            {
-                "index": index,
-                "session": session,
-                **settings,
-                "fatal": "present" if codex_fatal_startup(envelope) else "absent",
-                "inspection": "verified" if inspection else "unknown",
-                **inspection,
-                "base": context["base"],
-                "diff_sha256": context["diff_sha256"],
-            }
-        )
+        calls.append({
+            "index": index, "session": session, **settings,
+            "fatal": "present" if codex_fatal_startup(envelope) else "absent",
+            "inspection": "verified" if inspection else "unknown",
+            **inspection,
+            "base": context["base"], "diff_sha256": context["diff_sha256"],
+        })
     raw_bytes = result.raw.encode("utf-8")
     value = {
-        "version": 1,
-        "family": "codex",
-        "repo": common["repo"],
-        "pr": common["pr"],
-        "head": result.head,
-        "kind": result.kind,
+        "version": 1, "family": "codex",
+        "repo": common["repo"], "pr": common["pr"],
+        "head": result.head, "kind": result.kind,
         "publisher": common["publisher"],
         "receipt": f".loopzero/review-{result.head[:12]}-{result.kind}.json",
         "raw_sha256": hashlib.sha256(raw_bytes).hexdigest(),
-        "raw_bytes": len(raw_bytes),
-        "complete": True,
-        "chunk_count": len(calls),
-        "calls": calls,
+        "raw_bytes": len(raw_bytes), "complete": True,
+        "chunk_count": len(calls), "calls": calls,
     }
     if not valid_codex_evidence(value):
         raise RunnerBadOutput("codex: invalid full native evidence")
@@ -983,6 +973,7 @@ def codex_evidence(result):
     if not validate_runner_result(result):
         raise RunnerBadOutput("codex: invalid complete native result")
     return _codex_evidence(result)
+
 
 def _codex_rollout_settings(home: Path, session_id: str) -> dict:
     """Read only unambiguous native settings for this private session."""
@@ -1009,7 +1000,7 @@ def _codex_rollout_settings(home: Path, session_id: str) -> dict:
         contexts = [record.get("payload") for record in records if record.get("type") == "turn_context"]
         if not contexts or any(not isinstance(context, dict) for context in contexts):
             return unknown
-        claims = [{key: _setting(context.get(key)) for key in unknown} for context in contexts]
+        claims = [_settings(context) for context in contexts]
         return claims[0] if all(claims[0].values()) and all(claim == claims[0] for claim in claims) else unknown
     except (OSError, ValueError, TypeError):
         return unknown
@@ -1030,10 +1021,8 @@ def _codex_provenance(
         ),
         None,
     )
-    usage = next(
-        (event["usage"] for event in reversed(events) if isinstance(event.get("usage"), dict)),
-        None,
-    )
+    usage = next((event["usage"] for event in reversed(events)
+                  if isinstance(event.get("usage"), dict)), None)
     session_match = re.search(
         r"(?:session|thread)(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{6,})", stderr,
         re.IGNORECASE,
@@ -1043,11 +1032,8 @@ def _codex_provenance(
         re.IGNORECASE,
     )
     session_id = session_id or (session_match.group(1) if session_match else None)
-    usage = usage or (
-        {"total_tokens": int(tokens_match.group(1).replace(",", ""))}
-        if tokens_match
-        else None
-    )
+    usage = usage or ({"total_tokens": int(tokens_match.group(1).replace(",", ""))}
+                      if tokens_match else None)
     if not session_id or not isinstance(usage, dict):
         raise RunnerBadOutput(
             "codex: execution output lacks session/token provenance", _tail(stdout + stderr)
@@ -1273,6 +1259,12 @@ def review_with(
     )
 
 
+def _review_outcome(results: list[ReviewResult]) -> tuple[tuple[Finding, ...], str]:
+    findings = tuple(finding for result in results for finding in result.findings)
+    verdict = "request_changes" if any(r.verdict == "request_changes" for r in results) else "approve"
+    return findings, verdict
+
+
 def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     """Merge same-family chunk reviews while retaining every provider envelope/session."""
     if not results:
@@ -1280,8 +1272,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     first = results[0]
     if any((r.family, r.head, r.kind) != (first.family, first.head, first.kind) for r in results):
         raise ValueError("chunk reviews do not describe the same review")
-    findings = tuple(finding for result in results for finding in result.findings)
-    verdict = "request_changes" if any(r.verdict == "request_changes" for r in results) else "approve"
+    findings, verdict = _review_outcome(results)
     envelopes = [json.loads(result.raw) for result in results]
     if any(codex_fatal_startup(envelope) for envelope in envelopes):
         raise RunnerBadOutput("codex: fatal Code Mode startup failure")
@@ -1302,10 +1293,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
         provenance["token_usage"] = [result.provenance["token_usage"] for result in results]
         provenance["cli_versions"] = [result.provenance.get("cli_version") for result in results]
     return replace(
-        first,
-        fallback="",
-        verdict=verdict,
-        findings=findings,
+        first, fallback="", verdict=verdict, findings=findings,
         raw=json.dumps(envelopes, separators=(",", ":")),
         model=", ".join(dict.fromkeys(r.model for r in results if r.model)) or None,
         effort=", ".join(dict.fromkeys(r.effort for r in results if r.effort)) or None,
@@ -1444,18 +1432,12 @@ def validate_runner_result(result: ReviewResult) -> bool:
         return False
     try:
         parsed = [
-            parse_review(
-                payload, family=result.family, head=result.head, kind=result.kind, raw=result.raw
-            )
+            parse_review(payload, family=result.family, head=result.head, kind=result.kind, raw=result.raw)
             for payload in payloads
         ]
     except RunnerBadOutput:
         return False
-    findings = tuple(finding for item in parsed for finding in item.findings)
-    verdict = "request_changes" if any(
-        item.verdict == "request_changes" for item in parsed
-    ) else "approve"
-    if result.findings != findings or result.verdict != verdict:
+    if (result.findings, result.verdict) != _review_outcome(parsed):
         return False
     try:
         if result.family == "codex":

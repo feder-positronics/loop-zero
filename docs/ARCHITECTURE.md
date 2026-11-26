@@ -35,6 +35,8 @@ reserved classes.
 Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
 reviews, finding threads, check statuses and merge state. Within a task worktree,
 PR body writers lock the state directory from the live read through the update.
+Review publication rechecks the round while holding a same-host lock keyed by
+repository and PR. The lock covers POST and lost-response read-back.
 CI and branch protection
 provide the hosted enforcement. Readiness is a checklist over these sources,
 not a tamper-proof security boundary: repository writers can edit PR evidence,
@@ -121,7 +123,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
-   target branch and required CI. The receipt must record a clean passing run
+   target branch and required CI. Readiness compares parsed instants for verdict
+   freshness and uses a valid GitHub response Date during waits. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. Ready and
    merge validate the PR, head and hold before checking the local receipt.
    An invalid receipt stops the command before it fetches remote readiness
@@ -372,6 +375,9 @@ the last race error unchanged, and hosted eligibility publishes terminal failure
 success requires one complete successful attestation. Source-PR eligibility uses
 its existing path without these retries; a merged source PR publishes nothing, so a
 late refresh cannot turn its landed head red.
+After GitHub acknowledges a pending status, SIGTERM during evaluation triggers a
+bounded failure write for that SHA. Once the final write starts, publication
+recovery owns its verdict.
 
 
 Agent sessions and T3 runs own interaction, execution and workspace management.
@@ -388,8 +394,9 @@ one state transition should not become repeated writes that trigger policy CI.
 GitHub reads and the idempotent thread resolution mutation retry transient
 failures once after five seconds. They stop on exhausted quota and honor a
 secondary limit’s Retry-After when the delay fits the read budget. Mergify
-reads retry server errors, throttling and failed
-reads up to twice (2/5 seconds). Waits use bounded backoff. See the
+queue reads retry once after two seconds, subject to Retry-After and the
+remaining queue wait budget. Calls without a deadline allow less than five
+seconds of backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).
 The optional host ai-accounts helper owns managed credential selection and exact-model
 eligibility under its existing lock. Its Claude exec reserve guard (including pinned
@@ -537,11 +544,14 @@ unpushed local commits, with the supplied environment and network policy under
 equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
 every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
-the authoritative `checks.json` receipt. Writers lock the task state directory
-while rechecking HEAD and atomically replacing the receipt from a synced sibling
-temporary file. Successful keyed stages are checkpointed in the same receipt
-for reuse. The checkpoint cannot satisfy readiness before final worktree
-validation. Runners cannot select stages or mint receipts. Stage admission
+the authoritative `checks.json` receipt. Checks lock the task state directory
+through execution and receipt publication. A waiter can reuse a newly published
+passing receipt when HEAD, settings and declared inputs match. Writers recheck
+HEAD and atomically replace the receipt from a synced sibling temporary file.
+Successful keyed stages are checkpointed in the same receipt
+for reuse. A checkpoint cannot replace a clean pass for the same head and
+settings or satisfy readiness before final worktree validation. Completed
+failures still replace passes. Runners cannot select stages or mint receipts. Stage admission
 belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
