@@ -223,6 +223,18 @@ def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path)
     assert "diff --git a/deleted file mode 100644 b/deleted file mode 100644\ncontent not shown" in "".join(chunks)
 
 
+def test_diff_since_reads_past_submodule_commits_to_classify_later_files(git_repo: Path) -> None:
+    base = _commit_files(git_repo, {"z.bin": b"old\n"})
+    # A gitlink whose commit is in the object database returns a commit payload.
+    git(git_repo, "update-index", "--add", "--cacheinfo", f"160000,{base},a-sub")
+    _commit_files(git_repo, {"z.bin": b"\xff\xfe" * 3})
+
+    diff = worktree.diff_since(git_repo, base)
+
+    assert f"+Subproject commit {base}" in diff
+    assert "diff --git a/z.bin b/z.bin\ncontent not shown: not UTF-8 text, 6 bytes at HEAD" in diff
+
+
 def test_split_diff_summarizes_only_files_git_reports_deleted(git_repo: Path) -> None:
     base = _commit_files(git_repo, {"gone.py": b"old = 1\n", "padded.py": b"old = 1\n",
                                     "carriage.py": b"old = 1\n"})

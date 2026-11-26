@@ -376,7 +376,7 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
                                  publication=(repo, 7, "bot"))
         proof = runners.codex_evidence(result)
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
-        delta_diff = git(native[2], "diff", "--no-color", reviewed, head).strip().encode()
+        delta_diff = git(native[2], "diff", "--no-color", "--full-index", reviewed, head).strip().encode()
         assert proof["calls"][0]["diff_sha256"] == hashlib.sha256(delta_diff).hexdigest()
     head = result.head
     prefix = (

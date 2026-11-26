@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import errno
 import subprocess
 import re
@@ -264,7 +265,8 @@ def diff_since(wt: Path, sha: str) -> str:
     drivers. A file whose content is not UTF-8 is replaced by its header and size.
     """
     wt = Path(wt)
-    patch = _git_bytes(wt, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", sha, "HEAD")
+    patch = _git_bytes(wt, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                       "--full-index", sha, "HEAD")
     blocks = [block for block in re.split(rb"(?m)^(?=diff --git )", patch) if block]
     # Classify each file by its own content (HEAD, or the base when deleted), not its patch.
     sides = [_content_side(block) for block in blocks]
@@ -282,30 +284,52 @@ def diff_since(wt: Path, sha: str) -> str:
 
 
 def _content_side(block: bytes) -> tuple[str, str] | None:
-    index = re.search(rb"(?m)^index ([0-9a-f]+)\.\.([0-9a-f]+)", block.partition(b"\n@@")[0])
+    # Full object IDs: an abbreviated one could resolve as a ref name instead.
+    index = re.search(rb"(?m)^index ([0-9a-f]{40}|[0-9a-f]{64})\.\.([0-9a-f]{40}|[0-9a-f]{64})",
+                      block.partition(b"\n@@")[0])
     if not index:
-        return None
+        return None  # rename or mode change only: no content changed
     old, new = (side.decode() for side in index.groups())
     return (old, "the reviewed base") if not new.strip("0") else (new, "HEAD")
 
 
 def _non_utf8_sizes(wt: Path, blobs: list[str]) -> dict[str, int]:
-    """Sizes of the given blobs whose content is not UTF-8, read in one Git call."""
-    out = _git_bytes(wt, "cat-file", "--batch", stdin="".join(f"{b}\n" for b in blobs).encode())
-    sizes, offset = {}, 0
-    for blob in blobs:
-        start = out.index(b"\n", offset) + 1
-        fields = out[offset:start].split()
-        if len(fields) != 3 or fields[1] != b"blob":  # missing, or a submodule commit
-            offset = start
-            continue
-        size = int(fields[2])
+    """Sizes of the given blobs whose content is not UTF-8: one Git call, bounded reads."""
+    argv = ("git", "cat-file", "--batch")
+    sizes = {}
+    with subprocess.Popen(argv, cwd=wt, env=build_env(GIT_ENV), stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
         try:
-            out[start:start + size].decode("utf-8")
-        except UnicodeDecodeError:
-            sizes[blob] = size
-        offset = start + size + 1
+            for blob in dict.fromkeys(blobs):
+                proc.stdin.write(f"{blob}\n".encode())
+                proc.stdin.flush()
+                fields = proc.stdout.readline().split()
+                if len(fields) != 3:  # missing or ambiguous: no payload follows
+                    continue
+                size = int(fields[2])
+                utf8 = _stream_is_utf8(proc.stdout, size, argv)
+                proc.stdout.read(1)  # each payload ends with a newline, whatever its type
+                if fields[1] == b"blob" and not utf8:
+                    sizes[blob] = size
+        finally:
+            proc.stdin.close()
+            proc.kill()
     return sizes
+
+
+def _stream_is_utf8(stream, size: int, argv: tuple[str, ...]) -> bool:
+    decoder, valid = codecs.getincrementaldecoder("utf-8")(), True
+    while size:
+        chunk = stream.read(min(size, 1 << 16))
+        if not chunk:
+            raise GitError(argv, "object content ended early")
+        size -= len(chunk)
+        try:
+            decoder.decode(chunk, final=not size)
+        except UnicodeDecodeError:
+            valid = False
+            decoder = codecs.getincrementaldecoder("latin-1")()  # keep draining, stop checking
+    return valid
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:
