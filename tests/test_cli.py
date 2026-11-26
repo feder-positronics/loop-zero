@@ -2218,9 +2218,9 @@ def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monke
 
     monkeypatch.setattr(cli.runners, "review_with", malformed)
     if not save:
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise PermissionError("diagnostic write denied")
-        monkeypatch.setattr(cli, "_write_json_atomically", fail)
+        monkeypatch.setattr(cli.worktree, "write_local_state", fail)
     code, out, err = run(capsys, "review")
     size = len((out + err).encode())
     assert size < 650, size
