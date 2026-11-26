@@ -356,10 +356,15 @@ writes the receipt. For remote stages, configure an operator-trusted
 `[checks].runner` using the [stage protocol](docs/ARCHITECTURE.md#check-stage-runners).
 
 Without a stage adapter, run the whole check locally. Use a local slot if the
-host requires one. On miki, run this from the task worktree.
+host requires one. On miki, if you used the isolated install, run these from
+the task worktree with the `install_dir` from that recipe.
 
 ```sh
+export PATH="$install_dir/venv/bin:$PATH"
 HEAVY_SLOT_REMOTE_HOSTS="$HOME/.cache/intelflo-scratch/locks/no-remote-hosts.json" "$HOME/.cache/intelflo-scratch/locks/heavy-slot.sh" loopzero check
+# After opening and reviewing the PR, keep this PATH for delivery.
+loopzero ready --wait
+loopzero merge --wait
 ```
 
 A whole-job remote worker writes its own receipt. Ready can use it only if it
