@@ -51,27 +51,29 @@ def test_branch_reads_valid_names_and_rejects_detached_head(repo: Path, slug: st
         worktree.branch(repo)
 
 
-@pytest.mark.parametrize("branch", [None, "feature/ci+release", "symbolic"])
+@pytest.mark.parametrize("branch", [None, "feature/ci+release", "symbolic", "legacy"])
 def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None, monkeypatch) -> None:
     side = branch or "side"
     git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{side}")
     upstream = commit_on_origin(repo, "feature.txt")
     if branch == "symbolic":
         git(repo, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/main")
-    elif branch:
+    elif branch and branch != "legacy":
         checkout = repo.parent / "single-branch"
         origin = (repo.parent / "origin.git").as_uri()
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
         assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
         repo = checkout
-    invoke, local_head = worktree._git, worktree.head(repo)
-    def interleave(path, *args, **kwargs):
-        result = invoke(path, *args, **kwargs)
-        if args[0] == "fetch":
-            git(path, "fetch", "-q", "origin", f"refs/heads/{side}")
+    invoke, local_head = worktree.run, worktree.head(repo)
+    def interleave(argv, **kwargs):
+        if branch == "legacy" and argv[:3] == ("git", "fetch", "--porcelain"):
+            return invoke(("git", "fetch", "--loopzero-unsupported"), **kwargs)
+        result = invoke(argv, **kwargs)
+        if argv[1] == "fetch" and result.exit_code == 0:
+            git(kwargs["cwd"], "fetch", "-q", "origin", f"refs/heads/{side}")
         return result
 
-    monkeypatch.setattr(worktree, "_git", interleave)
+    monkeypatch.setattr(worktree, "run", interleave)
     wt = worktree.start(repo, "my-task", "main")
     assert wt == repo / ".worktrees" / "my-task"
     assert (wt / "feature.txt").exists(), "fetched origin/main before branching"
@@ -200,7 +202,8 @@ def test_start_explains_missing_origin(repo: Path, change: tuple[str, ...]) -> N
 def test_start_reports_git_failure_with_command(repo: Path) -> None:
     with pytest.raises(worktree.GitError) as info:
         worktree.start(repo, "nobase", "does-not-exist")
-    assert info.value.command[:2] == ("git", "ls-remote")
+    assert info.value.command[0] == "git"
+    assert info.value.command[1] in {"fetch", "ls-remote"}
     assert info.value.tail
 
 
