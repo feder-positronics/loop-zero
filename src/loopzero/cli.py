@@ -796,7 +796,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             confirmed, _ = _recover_review(wt, config, pr, result,
                                                  publication["publisher"], token)
             if confirmed:
-                return _review_verdict(result)
+                return _finish_review(wt, config, pr, result)
         # Exact read-back above may confirm an older published note; a new post needs the current form.
         candidates = [family for family in config.reviewers if family not in authors]
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
@@ -841,20 +841,26 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         except (github.GhError, _proc.ProcTimeout) as exc:
             path = _review_file(wt, head, kind)
             try:
-                if _recover_review(wt, config, pr, result, publisher, token)[0]:
-                    return _review_verdict(result)
+                confirmed, _ = _recover_review(wt, config, pr, result, publisher, token)
             except (github.GhError, CliError, _proc.ProcTimeout) as recovery:
                 raise CliError(f"{exc} | publication read-back blocked: {recovery}; "
                                f"review saved at {path}; retry `loopzero review --repost` "
                                "after resolving the read-back failure") from recovery
-            raise CliError(
-                f"{exc} | publication unconfirmed; review saved at {path}; "
-                "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
-            ) from exc
+            if not confirmed:
+                raise CliError(
+                    f"{exc} | publication unconfirmed; review saved at {path}; "
+                    "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
+                ) from exc
+    return _finish_review(wt, config, pr, result)
+
+
+def _finish_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult) -> int:
     try:
         with _lock_task_state(wt):
             live = github.pr_view(config.repo, pr.number)
-            github.update_body(config.repo, pr.number, _append_review(live.body, result))
+            body = _append_review(live.body, result)
+            if body != live.body:
+                github.update_body(config.repo, pr.number, body)
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)

@@ -24,7 +24,7 @@ gh, git_seed, repo, wt = support.gh, support.git_seed, support.repo, support.wt
 
 
 def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=False,
-               mutate=None, timeout=False):
+               mutate=None, timeout=False, summary_timeout=False):
     history = []
     if kind == "delta":
         history = [rev(head_of(wt), "primary")]
@@ -50,11 +50,17 @@ def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=Fals
             gh.respond(reviews_key(), rows)
             gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1",
                        comments)
+            if summary_timeout:
+                return response
             if interrupted:
                 raise KeyboardInterrupt
             if timeout:
                 raise _proc.ProcTimeout("gh POST timed out")
             raise github.GhError(("gh", "api", endpoint), "client timed out after acceptance")
+        if summary_timeout and kwargs.get("method") == "PATCH":
+            gh.respond(f"api {endpoint}", support.rest_pr_json(
+                support.pr_json(headRefOid=head, body=payload["body"])))
+            raise _proc.ProcTimeout("lost summary PATCH reply")
         return response
 
     monkeypatch.setattr(github, "_api", transport)
@@ -70,9 +76,9 @@ def interrupted_receipt(wt, gh, fake_bin, monkeypatch, capsys):
     return head, path, json.loads(path.read_text()), original
 
 
-def assert_single_publication(gh, fake_bin):
+def assert_single_publication(gh, fake_bin, *, summary=True):
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert len([c for c in gh.calls if "--input" in c]) == 1 + int(summary)
 
 
 @pytest.mark.parametrize("kind", ["primary", "delta"])
@@ -81,8 +87,8 @@ def assert_single_publication(gh, fake_bin):
 def test_accepted_publication_recovers_saved_verdict(
     wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, interrupted,
 ):
-    lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict,
-               interrupted=interrupted is True, timeout=interrupted == "timeout")
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict,
+                      interrupted=interrupted is True, timeout=interrupted == "timeout")
     if interrupted is True:
         assert run(capsys, "review")[0] == 130
         (fake_bin / "claude.stdin").unlink()
@@ -94,11 +100,30 @@ def test_accepted_publication_recovers_saved_verdict(
     assert out.splitlines()[-1].startswith(f"{kind} review by claude")
     assert interrupted is True or out.startswith("reviewer paths pinned to origin/main@")
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
-    writes = [c for c in gh.calls if "--input" in c]
-    assert len(writes) == 1, "confirmed recovery must not write again, including the PR body"
+    assert_review_and_summary(gh, head, kind, verdict)
     if verdict == 5:
         files = ["api", f"repos/{REPO}/pulls/7/files"]
         assert sum(call["argv"][:2] == files for call in gh.calls) == 2
+
+
+def assert_review_and_summary(gh, head, kind, verdict):
+    review, summary = [c for c in gh.calls if "--input" in c]
+    assert review["argv"][1].endswith("/reviews")
+    assert "PATCH" in summary["argv"]
+    expected = "approve" if verdict == 0 else "request_changes"
+    body = json.loads(summary["--input"])["body"]
+    assert body == f"# T1\n\n## Review\n- {kind}, claude, {head[:12]}, {expected}\n\n## Notes\n"
+
+
+def test_repost_after_lost_summary_reply_does_not_patch_again(wt, gh, fake_bin, monkeypatch, capsys):
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0,
+                      summary_timeout=True)
+    code, _, err = run(capsys, "review")
+    assert code == 0 and "lost summary PATCH reply" in err
+    code, _, err = run(capsys, "review", "--repost")
+    assert (code, err) == (0, "")
+    assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
+    assert_review_and_summary(gh, head, "primary", 0)
 
 
 @pytest.mark.parametrize("change", ["body", "comment", "location", "publisher", "pending",
@@ -151,7 +176,7 @@ def test_recovery_requires_exact_live_publication(
         assert not out if interrupted else (
             out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
         )
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert len([c for c in gh.calls if "--input" in c]) == (2 if change == "duplicates" else 1)
 
 
 @pytest.mark.parametrize("change", ["login", "raw", "repo", "publisher", "number"])
@@ -171,7 +196,7 @@ def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
     path.write_text(json.dumps(saved))
     code, _out, err = run(capsys, "review", "--repost")
     assert code == (5 if change == "login" else 1), err
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert len([c for c in gh.calls if "--input" in c]) == (2 if change == "login" else 1)
 
 
 @pytest.mark.parametrize("change", ["revoked", "deadline", "read_timeout"])
@@ -214,7 +239,7 @@ def test_interrupted_explicit_repost_recovers_repost_body(wt, gh, fake_bin, monk
     code, out, err = run(capsys, "review", "--repost")
     assert code == 5 and out.startswith("primary review by claude"), err
     assert not (fake_bin / "claude.stdin").exists()
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert len([c for c in gh.calls if "--input" in c]) == 2
     assert support.marker(head, "primary", "repost") in support.posted_review(gh)["body"]
 
 
@@ -277,7 +302,7 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
                                "state": "COMMENTED", "user": {"login": LOGIN}}])
     code, _out, err = run(capsys, "review", "--repost")
     assert code == (0 if metadata == "legacy" else 1), err
-    assert_single_publication(gh, fake_bin)
+    assert_single_publication(gh, fake_bin, summary=metadata == "legacy")
     if metadata == "legacy":
         mixed = body.partition("\n\n<details>")[0] + (
             "\n\nNative Claude output is retained in the restricted local review receipt."
@@ -342,7 +367,7 @@ def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
         assert code == 0, err
     else:
         assert code == 1 and "not in the published form" in err
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert len([c for c in gh.calls if "--input" in c]) == (2 if published else 1)
 
 
 @pytest.mark.parametrize("publication", ["pre-configured", "transcript", "summary"])
@@ -422,4 +447,4 @@ def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkey
     assert code == int(altered), err
     if altered:
         assert "conflicting or ambiguous review publication" in err
-    assert all("--input" not in call for call in gh.calls)
+    assert sum("--input" in call for call in gh.calls) == int(not altered)
