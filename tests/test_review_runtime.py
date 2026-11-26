@@ -10,7 +10,9 @@ import pytest
 from loopzero import cli, eligibility, runners
 from tests import test_cli, test_runners
 from tests.test_cli import post_key, prepare_review, run
-from tests.test_runners import APPROVE, _fake_claude, _fake_codex, _native_codex_result, _review
+from tests.test_runners import (
+    APPROVE, _fake_claude, _fake_codex, _native_codex_result, _review, replace_codex_events,
+)
 
 repo, wt, gh, head = test_cli.repo, test_cli.wt, test_cli.gh, test_cli.head
 git_seed = test_cli.git_seed
@@ -69,14 +71,7 @@ def test_legacy_startup_exit_zero_never_publishes(wt, gh, fake_bin, capsys, row)
     _fake_claude(fake_bin, "{}", exit_code=1)
     raw = envelope(row)
     script = _fake_codex(fake_bin, json.dumps(APPROVE))
-    script.write_text(
-        script.read_text().replace(
-            'echo \'{"type":"thread.started"',
-            "printf '%s\\n' '"
-            + json.dumps(raw["events"][1])
-            + '\'\necho \'{"type":"thread.started"',
-        )
-    )
+    replace_codex_events(script, [raw["events"][1]], prepend=True)
     code, _, error = run(capsys, "review")
     assert code == 4 and "Code Mode" in error
     assert not any(c["argv"][:2] == post_key().split() for c in gh.calls)
