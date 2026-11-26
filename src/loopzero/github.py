@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -22,7 +23,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from loopzero import runners
-from loopzero._proc import ProcTimeout, ToolMissing, run
+from loopzero._proc import Completed, ProcTimeout, ToolMissing, run
 from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, ReviewResult, is_sha
 
@@ -39,7 +40,6 @@ MARKER_RE = re.compile(
 )
 PAGE = 100
 PR_FILE_LIMIT = 3_000
-PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
 RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After."
 CHECK_SUITE_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
@@ -350,12 +350,21 @@ def _rate_limit_delay(headers: dict[str, str], delay: float | None) -> float | N
     return None if wait is None else max(delay, wait)
 
 
-def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
-    if (using_app and len(args) > 1 and args[0] == "api"
-            and re.fullmatch(r"repos/[^/]+/[^/]+/pulls\?.+", args[1])
-            and "(HTTP 404)" in stderr):
-        return f"\n{PR_APP_INSTALLATION_HINT}"
-    return ""
+def _app_read_fallback_repo(args: tuple[str, ...], status: str | None, stderr: str) -> str | None:
+    if len(args) < 2 or (status != "404" and not (status is None and "(HTTP 404)" in stderr)):
+        return None
+    match = re.match(r"/?repos/([\w.-]+/[\w.-]+)(?=[/?]|$)", args[1])
+    return match[1] if match else None
+
+
+def _run_gh(argv: tuple[str, ...], cwd: Path, selected: str, timeout: float) -> Completed:
+    try:
+        return run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
+                   extra_env={"GH_TOKEN": selected} if selected else None,
+                   timeout=timeout, encoding="utf-8")
+    except ToolMissing as exc:
+        raise GhMissing(argv, str(exc), token=selected,
+                        guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
 
 
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
@@ -371,16 +380,12 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
+    implicit_app_read = rest_api and read_only and token is None and (scope is None or scope[1] is None)
     delays = (RETRY_DELAY, None) if retryable and (not scope or scope[2]) else (None,)
     for delay in delays:
         selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         try:
-            done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
-                       extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout, scoped=read_only), encoding="utf-8")
-        except ToolMissing as exc:
-            raise GhMissing(argv, str(exc), token=selected,
-                            guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
+            done = _run_gh(argv, cwd, selected, _read_timeout(timeout, scoped=read_only))
         except ProcTimeout as exc:
             _read_timeout(timeout, scoped=bool(scope and scope[2]))
             if not _retry_pause(delay, timeout, scoped=read_only):
@@ -395,6 +400,11 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         if done.exit_code == 0:
             dates[:] = [headers.get("date", "")]
             return body
+        if implicit_app_read and selected and (repo := _app_read_fallback_repo(args, status, done.stderr)):
+            print(f"GitHub App may not be installed on {repo}. Retrying once with your GitHub CLI login.",
+                  file=sys.stderr)
+            with bounded_reads(time.monotonic() + timeout):
+                return _gh(*args, cwd=cwd, timeout=timeout, token="", dates=dates)
         rate_limited = _rate_limited(status, headers, tail)
         transient = rate_limited or _transient_error(tail, retry_idempotent, status)
         pause = _rate_limit_delay(headers, delay) if rate_limited else delay
@@ -412,7 +422,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     else:
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
-        guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
+        guidance = ""
     error = GhUnavailable if transient else GhError
     confirmed_limit = rate_limited and status in {"200", "403", "429"}
     reset = headers.get("x-ratelimit-reset", "")

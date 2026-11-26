@@ -344,6 +344,10 @@ are not features shipped by loop-zero.
 The current CLI writes PR bodies only when content changes, excluding volatile
 check timing from the generated validation block. Keep refreshes idempotent:
 one state transition should not become repeated writes that trigger policy CI.
+Implicit repository REST reads that receive HTTP 404 with an App token report
+the possible installation gap and retry once with the operator's GitHub CLI
+credentials. Writes and explicitly pinned credentials are excluded from this
+fallback. The configured review publisher remains responsible for publication.
 GitHub reads and the idempotent thread resolution mutation retry transient
 failures once after five seconds and honor a secondary limit’s Retry-After
 within the read budget. An active waiter can resume a fresh poll after a

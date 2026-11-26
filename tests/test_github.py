@@ -607,12 +607,25 @@ def test_post_review_comments_on_own_pr(gh: FakeGh, verdict: str, own_pr: str) -
         assert gh.argv(int(looked_up))[:2] == ["api", "graphql"]
 
 
-def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
+def test_pr_view_retries_an_app_404_with_operator_credentials(gh: FakeGh, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(github, "app_token", lambda: "app-token")
+    monkeypatch.setenv("GH_TOKEN", "operator-token")
+    key = f"api repos/{REPO}/pulls/7"
+    gh.append(key, {"stdout": "HTTP/2 404 Not Found\r\n\r\n{}", "exit_code": 1})
+    gh.respond_pr_view(pr_json())
+    assert github.pr_view(REPO, 7).head_sha == HEAD
+    assert [call["token"] for call in calls_for(gh, key)] == ["app-token", "operator-token"]
+    assert f"GitHub App may not be installed on {REPO}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("error", ["HTTP 500 server error", "gh: Not Found (HTTP 404)"])
+def test_post_review_other_errors_propagate(gh: FakeGh, monkeypatch, error) -> None:
     arm_review(gh)
-    gh.fail(REVIEWS_KEY, "HTTP 500 server error")
-    with pytest.raises(github.GhError):
-        github.post_review(REPO, 7, HEAD, review())
-    assert len(calls_for(gh, REVIEWS_KEY)) == 1
+    monkeypatch.setenv("GH_TOKEN", "operator-token")
+    gh.fail(REVIEWS_KEY, error)
+    with pytest.raises(github.GhError, match=error.split(" (")[0]):
+        github.post_review(REPO, 7, HEAD, review(), token="app-token")
+    assert [call["token"] for call in calls_for(gh, REVIEWS_KEY)] == ["app-token"]
 
 
 # --- blocking findings ------------------------------------------------------------

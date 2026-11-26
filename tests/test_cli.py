@@ -1028,13 +1028,11 @@ def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys, token, 
         assert_contains(err, "PR #7", endpoint, "branch", "lz/t1", f"rerun `{command}`")
         assert [call["argv"] for call in gh.calls] == [
             [*BRANCH_READ, "--include"], [*PR_LIST_READ, "--include"], ["api", endpoint, "--include"],
+            ["api", endpoint, "--include"],
         ]
     else:
-        hint = token == "app-token" and status == 404
-        assert ("GitHub App installation" in err) == hint
-        if hint:
-            assert f"rerun `{command}`" in err
-        assert [call["token"] or "" for call in gh.calls] == [token, token]
+        assert [call["token"] or "" for call in gh.calls] == [token, token] + ([""] if token and status == 404 else [])
+    assert (f"GitHub App may not be installed on {REPO}" in err) == bool(token and status == 404)
     assert not (fake_bin / "claude.stdin").exists()
 
 
@@ -1052,11 +1050,11 @@ def test_pr_list_404_explains_app_installation(
     _, err = expect_cli(capsys, 1, command)
     assert key.removeprefix("api ") in err and "gh: Not Found (HTTP 404)" in err
     assert '"message": "Not Found"' in err
-    assert ("Check that the GitHub App installation includes this repository" in err) == use_app
+    assert (f"GitHub App may not be installed on {REPO}" in err) == use_app
     token = "app-token" if use_app else "personal-token"
     assert [(call["argv"], call["token"]) for call in gh.calls] == [
         ([*BRANCH_READ, "--include"], token), ([*key.split(), "--include"], token),
-    ]
+    ] + ([([*key.split(), "--include"], "personal-token")] if use_app else [])
     assert git(repo.parent / "origin.git", "branch", "--list", "lz/t1").strip() == ""
 
 
