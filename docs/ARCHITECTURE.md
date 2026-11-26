@@ -250,6 +250,8 @@ Historical transcript rendering is available only for exact read-back matching.
 Local publication, saved-result replay and exact confirmation regenerate these
 facts from complete raw, never the public transcript tail or a saved summary.
 The restricted receipt stays in the task worktree until completion.
+The review command locks the worktree’s Git directory from round selection
+through publication to reserve the round across overlapping local invocations.
 
 After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that
@@ -466,8 +468,9 @@ unpushed local commits, with the supplied environment and network policy under
 equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
 every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
-the authoritative `checks.json` receipt. It flushes and syncs a sibling temporary
-file before replacing the receipt atomically. Runners cannot select stages or
+the authoritative `checks.json` receipt. Writers lock the task state directory
+while rechecking HEAD and atomically replacing the receipt from a synced sibling
+temporary file. Runners cannot select stages or
 mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
