@@ -2243,6 +2243,35 @@ def test_review_observes_new_codex_version_in_saved_receipt(
     assert result.provenance["cli_version"] == version
 
 
+@pytest.mark.parametrize("save", [True, False])
+def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monkeypatch, capsys, save):
+    prepare_review(wt, gh, fake_bin)
+    envelopes = {family: json.dumps({"unexpected": family * 700}) for family in ("claude", "codex")}
+
+    def malformed(family, *, head, kind, **kwargs):
+        raw = envelopes[family]
+        cli.runners.parse_review(json.loads(raw), family=family, head=head, kind=kind, raw=raw)
+
+    monkeypatch.setattr(cli.runners, "review_with", malformed)
+    if not save:
+        def fail(*args):
+            raise PermissionError("diagnostic write denied")
+        monkeypatch.setattr(cli, "_write_json_atomically", fail)
+    code, out, err = run(capsys, "review")
+    size = len((out + err).encode())
+    assert size < 650, size
+    assert code == 4 and "rerun" in err and "wait for the owner" in err
+    for family in envelopes:
+        assert f"{family}: review has unexpected or missing keys" in err
+        assert family * 10 not in err
+    if save:
+        path = next((wt / ".loopzero").glob("reviewer-output-*.json"))
+        assert path.name in err and path.stat().st_mode & 0o777 == 0o600
+        assert json.loads(path.read_text()) == {family: raw[-2000:] for family, raw in envelopes.items()}
+    else:
+        assert "diagnostic write denied" in err
+
+
 @pytest.mark.parametrize("mixed_authors", [False, True])
 def test_review_fails_with_three_line_errors_and_remedies_without_spending_budget(
     wt: Path, gh: FakeGh, capsys, monkeypatch, head, mixed_authors
