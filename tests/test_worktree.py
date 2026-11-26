@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import shlex
+import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -89,6 +92,33 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
     assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
     assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
+
+
+def test_start_retries_after_signal_during_git_checkout(repo, tmp_path):
+    (repo / ".gitattributes").write_text("README.md filter=interrupt\n")
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-qm", "apply smudge filter")
+    git(repo, "push", "-q", "origin", "main")
+    pid_file = tmp_path / "starter.pid"
+    smudge = tmp_path / "smudge"
+    smudge.write_text(
+        f"#!/bin/sh\ncat >/dev/null\nkill -INT \"$(cat {shlex.quote(str(pid_file))})\"\nexec sleep 30\n"
+    )
+    smudge.chmod(0o700)
+    git(repo, "config", "filter.interrupt.smudge", shlex.quote(str(smudge)))
+    start = (
+        "import os, sys; from pathlib import Path; from loopzero import worktree; "
+        "Path(sys.argv[1]).write_text(str(os.getpid())); "
+        "worktree.start(Path.cwd(), 'interrupted', 'main')"
+    )
+
+    interrupted = subprocess.run([sys.executable, "-c", start, str(pid_file)], cwd=repo, timeout=10)
+
+    assert interrupted.returncode == -signal.SIGINT
+    git(repo, "config", "--unset", "filter.interrupt.smudge")
+    wt = worktree.start(repo, "interrupted", "main")
+    assert (wt / "README.md").read_text() == "hello\n"
+    assert worktree.task_file(wt).is_file()
 
 
 @pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base"])
