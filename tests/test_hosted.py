@@ -143,14 +143,14 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
     assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == ["pending", state]
 
 
-@pytest.mark.parametrize("error", ["api", "recover", "head", "publication", "config"])
+@pytest.mark.parametrize("error", ["api", "recover", "head", "publication", "config", "before"])
 def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, capsys, error):
     sleeps = []
     monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
-    reviews = f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1"
-    if error in {"api", "recover"}:
+    endpoint = f"api repos/{REPO}/pulls/7" + ("" if error == "before" else "/reviews?per_page=100&page=1")
+    if error in {"api", "recover", "before"}:
         fault = {"stdout": "HTTP/2.0 503 Service Unavailable\r\nX-GitHub-Request-Id: GHREQ-8774\r\n\r\n{\"message\":\"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ\"}", "exit": 1}
-        publisher.respond(reviews, fault, [{"state": "APPROVED", "commit_id": HEAD, "user": {"login": "trusted-publisher"}, "body": f"<!-- loopzero:review head={HEAD} kind=primary -->\nreview: **approve**"}] if error == "recover" else fault)
+        publisher.respond(endpoint, fault, [{"state": "APPROVED", "commit_id": HEAD, "user": {"login": "trusted-publisher"}, "body": f"<!-- loopzero:review head={HEAD} kind=primary -->\nreview: **approve**"}] if error == "recover" else fault)
     elif error == "head":
         publisher.respond_pr_view(pr_json(), pr_json(headRefOid="b" * 40))
     elif error == "publication":
@@ -158,13 +158,13 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [{"context": "other"}])
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
-    if error in {"api", "recover"}:
-        assert hosted.main() == 0 and sleeps == [5]
-        assert ("method=GET endpoint=/repos/acme/widgets/pulls/7/reviews status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error == "api")
+    if error in {"api", "recover", "before"}:
+        assert hosted.main() == (1 if error == "before" else 0) and sleeps == [5]
+        assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error != "recover")
     else:
         with pytest.raises(hosted.LoopZeroError, match="invalid description" if error == "publication" else None):
             hosted.main()
-    states = {"config": [], "head": ["pending", "failure"], "api": ["pending"], "recover": ["pending", "success"]}
+    states = {"before": [], "config": [], "head": ["pending", "failure"], "api": ["pending"], "recover": ["pending", "success"]}
     assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == states.get(error, ["pending", "pending"])
 
 
