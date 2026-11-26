@@ -42,7 +42,3 @@ and missing evidence or authority. Keep out-of-scope repairs open; report
 shared-gate impact and the consumer's owned retry, repair or exclusion route;
 apply it only when commissioned and authorized, preserving required proof and
 protected checks.
-
-Then continue the task you were given as far as it authorizes, or hand over
-what is left of its acceptance. If two repairs have failed, the route is
-probably wrong, so reconsider it before a third.
