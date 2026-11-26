@@ -136,8 +136,9 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
+    base_ref = f"refs/remotes/origin/{base_branch}"
     try:
-        _git(repo_root, "fetch", "--quiet", "origin", f"refs/heads/{base_branch}")
+        _git(repo_root, "fetch", "--quiet", "origin", f"+refs/heads/{base_branch}:{base_ref}")
     except GitError:
         if "origin" not in _git(repo_root, "remote").splitlines():
             raise WorktreeError(
@@ -146,8 +147,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
                 "with `git remote rename <name> origin`."
             ) from None
         raise
-    base_ref = f"origin/{base_branch}"
-    base = _git(repo_root, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+    base = _git(repo_root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
     if existing:
         existing_head = _resumable_head(repo_root, wt, branch)
         if existing_head is None:
@@ -155,7 +155,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         if existing_head != base:
             raise WorktreeError(
                 f"cannot resume start at {wt}: existing HEAD {existing_head} does not match "
-                f"{base_ref} at {base}; run loopzero start with a new slug"
+                f"origin/{base_branch} at {base}; run loopzero start with a new slug"
             )
     _ensure_excludes(repo_root)
     if not existing:
