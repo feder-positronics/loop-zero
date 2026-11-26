@@ -15,6 +15,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -187,7 +188,7 @@ def _included_response(output: str) -> tuple[str | None, dict[str, str], str]:
 
 
 def _api_methods(args: tuple[str, ...]) -> list[str]:
-    return [method.upper() for flag, method in zip(args, args[1:]) if flag in ("--method", "-X")]
+    return [method.upper() for flag, method in pairwise(args) if flag in ("--method", "-X")]
 
 
 _API_BODY_FLAGS = {"-f", "-F", "--field", "--raw-field", "--input"}
