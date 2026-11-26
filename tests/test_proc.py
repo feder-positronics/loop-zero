@@ -81,6 +81,25 @@ def test_run_raises_on_timeout(run_python):
         run_python("import time; time.sleep(5)", timeout=0.2)
 
 
+def test_run_reaps_child_before_propagating_keyboard_interrupt(run_python, monkeypatch):
+    children = []
+
+    class InterruptedPopen(subprocess.Popen):
+        def _communicate(self, *args, **kwargs):
+            children.append(self)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess, "Popen", InterruptedPopen)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_python("import time; time.sleep(30)", timeout=5)
+        assert children[0].returncode is not None
+    finally:
+        for child in children:
+            child.kill()
+            child.wait(timeout=5)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="checks Linux process state")
 def test_timeout_stops_descendant_and_preserves_output(tmp_path, monkeypatch):
     wait = "import signal; signal.pause()"
