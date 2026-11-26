@@ -1185,7 +1185,7 @@ def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
     added = "diff --git a/new.py b/new.py\n" + "+x\n" * 60
     chunks = split_diff(deleted + added, 100)
     assert all(len(chunk.encode()) <= 100 for chunk in chunks)
-    assert any("gone.py: deleted, 3 lines" in chunk for chunk in chunks)
+    assert any("diff --git a/gone.py b/gone.py\ndeleted file, 3 lines" in chunk for chunk in chunks)
 
 
 # ----------------------------------------------------------------- family detection

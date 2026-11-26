@@ -184,40 +184,60 @@ def test_start_reports_git_failure_with_command(repo: Path) -> None:
     assert info.value.tail
 
 
+def _commit_files(repo: Path, files: dict[str, bytes | None]) -> str:
+    for name, content in files.items():
+        if content is None:
+            git(repo, "rm", "-q", name)
+        else:
+            (repo / name).write_bytes(content)
+            git(repo, "add", name)
+    git(repo, "commit", "-q", "-m", "change")
+    return git(repo, "rev-parse", "HEAD").strip()
+
+
 def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path) -> None:
-    for name in ("attr.py", "nul.py"):
-        (git_repo / name).write_text("old = 1\n")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-q", "-m", "base")
-    base = git(git_repo, "rev-parse", "HEAD").strip()
-    (git_repo / ".gitattributes").write_text("attr.py -diff\nnul.py binary\n")
-    (git_repo / "attr.py").write_text("new = 'attr hunk'\n")
-    (git_repo / "nul.py").write_bytes(b"new = 'nul hunk'\x00\n")
-    (git_repo / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff\xfe")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-q", "-m", "head")
+    base = _commit_files(git_repo, {
+        "attr.py": b"old = 1\n", "nul.py": b"old = 1\n", "was_latin1.txt": b"caf\xe9\n",
+        "far.bin": b"\xff" + b"line\n" * 40,
+    })
+    _commit_files(git_repo, {
+        ".gitattributes": b"attr.py -diff\nnul.py binary\n",
+        "attr.py": b"new = 'attr hunk'\n",
+        "nul.py": b"new = 'nul hunk'\x00\n",
+        "image.png": b"\x89PNG\r\n\x1a\n\x00\xff\xfe",
+        "was_latin1.txt": "café \u00a0\n".encode(),
+        "far.bin": b"\xff" + b"line\n" * 39 + b"changed\n",
+        "deleted file mode 100644": b"\xff\xfe",
+        "r\u00e9sum\u00e9.bin": b"\xff",
+    })
 
     diff = worktree.diff_since(git_repo, base)
 
     assert "Binary files" not in diff
     assert "+new = 'attr hunk'" in diff and "+new = 'nul hunk'\x00" in diff
-    assert "image.png: not UTF-8 text, content not shown (11 bytes at HEAD)" in diff
+    assert "+café \u00a0" in diff.split("\n"), "UTF-8 additions survive a non-UTF-8 old side, untrimmed"
+    for header, size in (("a/image.png b/image.png", 11), ("a/far.bin b/far.bin", 204),
+                         ('"a/r\\303\\251sum\\303\\251.bin" "b/r\\303\\251sum\\303\\251.bin"', 1)):
+        assert f"diff --git {header}\ncontent not shown: not UTF-8 text, {size} bytes at HEAD\n" in diff
+    chunks = split_diff(diff, 400)
+    assert "diff --git a/deleted file mode 100644 b/deleted file mode 100644\ncontent not shown" in "".join(chunks)
 
 
 def test_split_diff_summarizes_only_files_git_reports_deleted(git_repo: Path) -> None:
-    for name in ("gone.py", "padded.py"):
-        (git_repo / name).write_text("old = 1\n")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-q", "-m", "base")
-    base = git(git_repo, "rev-parse", "HEAD").strip()
-    git(git_repo, "rm", "-q", "gone.py")
-    (git_repo / "padded.py").write_text("new = 'padded hunk'\n++ /dev/null\n" + "x = 0\n" * 200)
-    git(git_repo, "commit", "-qam", "head")
+    base = _commit_files(git_repo, {"gone.py": b"old = 1\n", "padded.py": b"old = 1\n",
+                                    "carriage.py": b"old = 1\n"})
+    _commit_files(git_repo, {
+        "gone.py": None,
+        "padded.py": b"new = 'padded hunk'\n++ /dev/null\n" + b"x = 0\n" * 200,
+        "carriage.py": b"new = 1 \rdiff --git a/carriage.py b/carriage.py\rdeleted file mode 100644\r"
+                       + b"y = 0\n" * 200,
+    })
 
     joined = "".join(split_diff(worktree.diff_since(git_repo, base), 1_000))
 
-    assert "+++ /dev/null" in joined and "+new = 'padded hunk'" in joined
-    assert "gone.py: deleted, 1 lines" in joined and "padded.py: deleted" not in joined
+    assert "+++ /dev/null" in joined and "+new = 'padded hunk'" in joined and "+new = 1 \r" in joined
+    assert "diff --git a/gone.py b/gone.py\ndeleted file, 1 lines" in joined
+    assert joined.count("deleted file, ") == 1
 
 
 def test_dirty_head_and_diff(repo: Path) -> None:

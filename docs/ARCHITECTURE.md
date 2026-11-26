@@ -181,7 +181,9 @@ enter Claude's append-system-prompt or Codex's developer_instructions override;
 commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
 that header, a newline and the raw diff without trimming task or diff text. Git
 diffs every file as text, ignoring attributes and diff drivers the PR could set;
-a file block that is not UTF-8 is replaced by its path and size. Chunked review
+a file whose
+HEAD content (base content when deleted) is not UTF-8 keeps only Git's header
+line and its size. Chunked review
 summarizes only files whose git header reports a deletion.
 The runner probes the selected Codex binary with `--version` and records its
 stdout in runner provenance and the saved review receipt. A failed probe uses

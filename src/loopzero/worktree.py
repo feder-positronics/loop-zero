@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import contextlib
 import errno
+import subprocess
 import re
 import stat
 import tempfile
 from pathlib import Path
 from uuid import uuid4
 
-from loopzero._proc import run
+from loopzero._proc import build_env, run
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 EXCLUDES = (".worktrees/", ".loopzero/")
@@ -244,37 +244,68 @@ def is_dirty(wt: Path) -> bool:
     return bool(_git(Path(wt), "status", "--porcelain", "--untracked-files=all"))
 
 
+def _git_bytes(wt: Path, *args: str, stdin: bytes | None = None) -> bytes:
+    """Git output as bytes: text mode would turn a bare CR into a line break."""
+    argv = ("git", *args)
+    try:
+        done = subprocess.run(argv, cwd=wt, env=build_env(GIT_ENV), input=stdin,
+                              capture_output=True, timeout=120, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(argv, "timed out") from exc
+    if done.returncode != 0:
+        raise GitError(argv, done.stderr.decode(errors="replace"))
+    return done.stdout
+
+
 def diff_since(wt: Path, sha: str) -> str:
     """The reviewer's diff from ``sha`` to HEAD, which the reviewed files cannot hide.
 
     Every file is diffed as text, whatever its attributes or NUL bytes, without diff
-    drivers. A file block that is not UTF-8 is replaced by its path and size.
+    drivers. A file whose content is not UTF-8 is replaced by its header and size.
     """
     wt = Path(wt)
-    argv = ("git", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", sha, "HEAD")
-    # Latin-1 keeps every byte, so each file block can be decoded strictly below.
-    done = run(list(argv), cwd=wt, env_allowlist=GIT_ENV, timeout=120, encoding="latin-1")
-    if done.exit_code != 0:
-        raise GitError(argv, done.stderr or done.stdout)
-    blocks = re.split(r"(?m)^(?=diff --git )", done.stdout.strip())
-    return "".join(_decoded_block(wt, sha, block) for block in blocks)
+    patch = _git_bytes(wt, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", sha, "HEAD")
+    blocks = [block for block in re.split(rb"(?m)^(?=diff --git )", patch) if block]
+    # Classify each file by its own content (HEAD, or the base when deleted), not its patch.
+    sides = [_content_side(block) for block in blocks]
+    blobs = [side[0] for side in sides if side]
+    sizes = _non_utf8_sizes(wt, blobs) if blobs else {}
+    parts = []
+    for block, side in zip(blocks, sides, strict=True):
+        if side and side[0] in sizes:
+            first = block.partition(b"\n")[0].decode("utf-8", "replace")
+            parts.append(f"{first}\ncontent not shown: not UTF-8 text, "
+                         f"{sizes[side[0]]} bytes at {side[1]}\n")
+        else:
+            parts.append(block.decode("utf-8", "replace"))
+    return "".join(parts).removesuffix("\n")  # only the final newline; line content stays
 
 
-def _decoded_block(wt: Path, sha: str, block: str) -> str:
-    raw = block.encode("latin-1")
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        pass
-    header = raw.partition(b"\n@@")[0].decode("utf-8", "replace").splitlines()
-    new = next((line[6:] for line in header if line.startswith("+++ b/")), None)
-    old = next((line[6:] for line in header if line.startswith("--- a/")), None)
-    path, rev = (new, "HEAD") if new else (old, sha)
-    size = "size unknown"
-    if path:
-        with contextlib.suppress(GitError):
-            size = f"{_git(wt, 'cat-file', '-s', f'{rev}:{path}')} bytes at {rev}"
-    return f"{header[0]}\n{path or '(unknown path)'}: not UTF-8 text, content not shown ({size})\n"
+def _content_side(block: bytes) -> tuple[str, str] | None:
+    index = re.search(rb"(?m)^index ([0-9a-f]+)\.\.([0-9a-f]+)", block.partition(b"\n@@")[0])
+    if not index:
+        return None
+    old, new = (side.decode() for side in index.groups())
+    return (old, "the reviewed base") if not new.strip("0") else (new, "HEAD")
+
+
+def _non_utf8_sizes(wt: Path, blobs: list[str]) -> dict[str, int]:
+    """Sizes of the given blobs whose content is not UTF-8, read in one Git call."""
+    out = _git_bytes(wt, "cat-file", "--batch", stdin="".join(f"{b}\n" for b in blobs).encode())
+    sizes, offset = {}, 0
+    for blob in blobs:
+        start = out.index(b"\n", offset) + 1
+        fields = out[offset:start].split()
+        if len(fields) != 3 or fields[1] != b"blob":  # missing, or a submodule commit
+            offset = start
+            continue
+        size = int(fields[2])
+        try:
+            out[start:start + size].decode("utf-8")
+        except UnicodeDecodeError:
+            sizes[blob] = size
+        offset = start + size + 1
+    return sizes
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:

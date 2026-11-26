@@ -1394,16 +1394,13 @@ def split_diff(diff: str, budget: int) -> list[str]:
 
 
 def _summarize_deleted(block: str) -> str:
-    # Judge deletion from git's header only; hunk lines are the PR's own text.
-    if "\ndeleted file mode " not in block.partition("\n@@")[0]:
+    # Judge deletion from git's header lines only; hunk lines are the PR's own text.
+    header, hunks = block.partition("\n@@")[::2]
+    if not re.search(r"(?m)^deleted file mode [0-7]{6}$", header):
         return block
-    match = re.match(r"diff --git a/(.+?) b/(.+?)\n", block)
-    path = match.group(2) if match else "(unknown file)"
-    deleted = sum(
-        1 for line in block.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-    )
-    return f"diff --git a/{path} b/{path}\n{path}: deleted, {deleted} lines\n"
+    first = header.split("\n", 1)[0]
+    deleted = sum(1 for line in hunks.split("\n") if line.startswith("-"))
+    return f"{first}\ndeleted file, {deleted} lines\n"
 
 
 def _split_bytes(text: str, budget: int) -> list[str]:
