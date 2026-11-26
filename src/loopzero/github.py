@@ -36,7 +36,6 @@ PR_FILE_LIMIT = 3_000
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
 RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
 CHECK_SUITE_LIMIT = 1_000
-WORKFLOW_SEARCH_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
@@ -1183,20 +1182,15 @@ def _missing_check_reason(name: str, head_sha: str, capped: bool) -> str:
     return f"required check '{name}' missing on {head_sha[:12]}"
 
 
-def _workflow_producer(repo: str, workflows: list[dict], head_sha: str, suite_id: int) -> dict | None:
-    def find(runs: list[dict]) -> dict | None:
-        return next((run for run in runs if run.get("check_suite_id") == suite_id
-                     and run.get("head_sha") == head_sha), None)
-
-    producer = find(workflows)
-    if producer is None and len(workflows) >= WORKFLOW_SEARCH_LIMIT and type(suite_id) is int:
-        producer = find(_paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
-    return producer
-
-
 def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_sha: str) -> bool:
     """A producer can be superseded only by its own workflow on the same head."""
-    producer = _workflow_producer(repo, workflows, head_sha, check["check_suite"]["id"])
+    suite_id = check["check_suite"]["id"]
+    def find_producer(runs: list[dict]) -> dict | None:
+        return next((run for run in runs if run.get("check_suite_id") == suite_id
+                     and run.get("head_sha") == head_sha), None)
+    producer = find_producer(workflows)
+    if producer is None and len(workflows) >= 1_000 and type(suite_id) is int:
+        producer = find_producer(_paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
     if producer is None or not producer.get("workflow_id"):
         return False
     created = producer.get("created_at")
