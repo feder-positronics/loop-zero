@@ -255,10 +255,11 @@ def tree_candidate(tmp_path, monkeypatch):
     def attest(
         *, head=candidate_sha, main_head=main, policy=lambda _n, _s: None,
         main_after=None, extra_source=None, lineage="vanished", run=attest_candidate,
-        held_source=None,
+        held_source=None, base_branch="main",
     ):
         candidate_event = event()
         candidate_event["pull_request"]["head"]["sha"] = head
+        candidate_event["pull_request"]["base"]["ref"] = base_branch
         values = payloads(candidate_event)
         source_payloads(values, head, (102, source))
         queue = status()
@@ -272,6 +273,7 @@ def tree_candidate(tmp_path, monkeypatch):
             source_payloads(values, head, (101, extra_source))
             queue["batches"][0]["sub_batches"][0]["pull_requests"].append({"number": 101})
         for number in (101, 102):
+            values[f"/repos/owner/repo/pulls/{number}"]["base"]["ref"] = base_branch
             values[f"/repos/owner/repo/pulls/{number}"].update(
                 labels=[{"name": "hold"}] if number == held_source else [],
                 body="## Objective\nApply a reviewed source change.",
@@ -281,21 +283,29 @@ def tree_candidate(tmp_path, monkeypatch):
         reads = cycle([main_head, main_after or main_head])
 
         def get(path):
-            if path.endswith("/git/ref/heads/main"):
+            if path.endswith(f"/git/ref/heads/{base_branch}"):
                 sha = next(reads)
                 return {"object": {"sha": sha}} if sha else {}
             return deepcopy(values[path])
 
-        return run(candidate_event, github_get=get, mergify_status=lambda *_: deepcopy(queue),
-                   source_policy=policy)
+        def queue_status(_owner, _repo, branch):
+            assert branch == base_branch
+            return deepcopy(queue)
+
+        options = {"base_branch": base_branch} if base_branch != "main" else {}
+        return run(candidate_event, github_get=get, mergify_status=queue_status,
+                   source_policy=policy, **options)
 
     return attest, git, commit, base, parent, source, candidate_sha
 
 
-def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate):
+@pytest.mark.parametrize("base_branch", ["main", "trunk"])
+def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate, base_branch):
     attest, _, _, _, _, source, _ = tree_candidate
     seen = []
-    assert attest(policy=lambda n, _: seen.append(n)) == [{"number": 102, "head_sha": source}]
+    assert attest(base_branch=base_branch, policy=lambda n, _: seen.append(n)) == [
+        {"number": 102, "head_sha": source},
+    ]
     assert seen == [102]
 
 

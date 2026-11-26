@@ -17,9 +17,10 @@ from urllib.parse import quote
 
 import pytest
 
-from loopzero import cli, config, github, mergify
+from loopzero import candidate, cli, config, github, hosted, mergify
 from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
+from tests import test_candidate as queue_fixtures
 from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
 from tests.test_github import (
@@ -2487,6 +2488,73 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, sett
         assert code == (0 if command == "ready" else 3)
     assert requests == ([(REPO, 7, head, "main")]
                         if command == "merge" and settled == "MERGEABLE" else [])
+
+
+@pytest.mark.parametrize("base,target", [("main", "main"), ("trunk", "trunk"), ("trunk", "main")])
+def test_configured_base_matches_local_source_and_candidate(wt, gh, head, tmp_path, monkeypatch,
+                                                            capsys, base, target):
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    workflow = trusted / "workflow.toml"
+    workflow.write_text(WORKFLOW.replace('base = "main"', f'base = "{base}"')
+                        .replace('merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"')
+                        + f'review_publishers = ["{LOGIN}"]\n')
+
+    event = queue_fixtures.event()
+    event["repository"].update(full_name=REPO, default_branch=base)
+    queued_pr = event["pull_request"]
+    for side in ("base", "head"):
+        queued_pr[side]["repo"].update(full_name=REPO, default_branch=base)
+    queued_pr["base"]["ref"] = target
+    queued_head = queued_pr["head"]["sha"]
+    fake = queue_fixtures.payloads(event)
+    gh.respond("api apps/mergify", fake["/apps/mergify"])
+    gh.respond("api users/mergify%5Bbot%5D", fake["/users/mergify%5Bbot%5D"])
+    gh.respond(f"api repos/{REPO}", event["repository"])
+    gh.respond(f"api repos/{REPO}/compare/{head}...{queued_head}",
+               {"status": "ahead", "merge_base_commit": {"sha": head}})
+    gh.respond(f"api repos/{REPO}/pulls/900", rest_pr_json(pr_json(
+        number=900, headRefOid=queued_head,
+    )) | fake["/repos/owner/repo/pulls/900"])
+
+    queue = queue_fixtures.status()
+    del queue["batches"][0]
+    queue["batches"][0]["sub_batches"][0].update(parent_ids=[], pull_requests=[{"number": 7}])
+    vendor = {
+        f"/merge-queue/status?branch={base}": queue | {"mode": "serial"},
+        "/queues/configuration": {"configuration": [{"name": "main", "config": {}}]},
+    }
+    monkeypatch.setattr(mergify, "api_get", lambda _repo, path: vendor[path])
+    gh.respond(f"api repos/{REPO}/contents/.mergify.yml?ref=refs%2Fheads%2F{base}", {
+        "type": "file", "encoding": "base64", "sha": "1" * 40,
+        "content": base64.b64encode(
+            b"merge_queue: {mode: serial, max_parallel_checks: 3}\nqueue_rules: [{name: main}]\n"
+        ).decode(),
+    })
+    arm_approved_ready_pr(gh, head, wt, baseRefName=base, isDraft=False)
+    source = rest_pr_json(pr_json(headRefOid=head, baseRefName=base, isDraft=False))
+    source["base"]["repo"] = event["repository"]
+    gh.respond(f"api repos/{REPO}/pulls/7", source)
+    assert run(capsys, "--config", str(workflow), "ready")[0] == 0
+
+    monkeypatch.chdir(trusted)
+    event_path = trusted / "event.json"
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+    event_path.write_text(json.dumps({"inputs": {"pr": "7"}}))
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    assert hosted.main() == 0
+    assert json.loads(gh.calls[-1]["--input"])["state"] == "success"
+
+    event_path.write_text(json.dumps(event))
+    gh.respond(f"api repos/{REPO}/statuses/{queued_head}", {})
+    if target == base:
+        assert hosted.main() == 0
+    else:
+        with pytest.raises(candidate.CandidateError, match="candidate must target"):
+            hosted.main()
+    assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{queued_head}"
+    assert json.loads(gh.calls[-1]["--input"])["state"] == ("success" if target == base else "failure")
 
 
 @pytest.mark.parametrize("command,check,hold_at_admission", [

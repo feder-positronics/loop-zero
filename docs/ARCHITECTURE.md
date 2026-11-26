@@ -282,6 +282,8 @@ PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
+Hosted candidate attestation takes its base branch from trusted workflow
+configuration for target checks, queue lineage and tree reconstruction.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
 backoff capped at 30 seconds and a shared 90-second retry-admission deadline across
 both reads and all attestation attempts. Each wait revalidates the candidate before
@@ -292,7 +294,7 @@ consume the separate race-retry window, but race retries remain capped by the
 shared 90-second deadline. A second-read wait lengthens the existing interval
 between source policy evaluation and final snapshots; policy evidence is not atomic.
 Candidate attestation retries typed concurrent source metadata, Mergify membership
-and main-ref drift, and landed sources still listed in lineage, up to three complete
+and base-ref drift, and landed sources still listed in lineage, up to three complete
 attempts with two-second pauses. A policy exception becomes a landing race only
 when a fresh REST read confirms `merged is True` at the same snapshotted head;
 failed reads or other evidence preserve the original exception. A non-open source

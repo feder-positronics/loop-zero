@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 MERGIFY_APP_ID = 10562
 MERGIFY_APP_OWNER = "Mergifyio"
@@ -71,7 +72,7 @@ class CandidateBatchError(CandidateError):
 
 
 class CandidateRaceError(CandidateError):
-    """A complete attestation observed concurrent source, lineage or main drift."""
+    """A complete attestation observed concurrent source, lineage or base drift."""
 
 
 def _require(condition: bool, message: str, error: type[CandidateError] = CandidateError) -> None:
@@ -183,6 +184,7 @@ def _candidate_snapshot(
     event_pr: JsonObject,
     repository: JsonObject,
     expected_identity: tuple[object, object, object, object],
+    base_branch: str,
 ) -> None:
     _require(
         candidate.get("number") == event_pr.get("number"),
@@ -213,8 +215,8 @@ def _candidate_snapshot(
         "Mergify candidate has an unexpected head ref",
     )
     _require(
-        base.get("ref") == "main",
-        "Mergify candidate must target the real main branch",
+        base.get("ref") == base_branch,
+        f"Mergify candidate must target the real {base_branch} branch",
     )
     expected_repo = (repository.get("id"), repository.get("full_name"))
     for label, repo in (("head", head.get("repo")), ("base", base.get("repo"))):
@@ -246,6 +248,7 @@ def _attest_source(
     repository: JsonObject,
     candidate_sha: str,
     github_get: GitHubGet,
+    base_branch: str,
 ) -> str:
     _require(
         source.get("number") == number,
@@ -264,11 +267,11 @@ def _attest_source(
     )
     base_repo = base.get("repo")
     _require(
-        base.get("ref") == "main"
+        base.get("ref") == base_branch
         and isinstance(base_repo, dict)
         and (base_repo.get("id"), base_repo.get("full_name"))
         == (repository.get("id"), repository.get("full_name")),
-        f"source PR #{number} does not target this repository's main branch",
+        f"source PR #{number} does not target this repository's {base_branch} branch",
     )
     source_sha = head.get("sha")
     _require(
@@ -363,11 +366,11 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         yield git
 
 
-def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> None:
+def _verify_tree(repo: str, base_sha: str, candidate: str, sources: list[str]) -> None:
     """Reconstruct only first-parent, two-parent integrations; never execute objects."""
     _require(len(sources) <= 32 and len(set(sources)) == len(sources),
              "ambiguous or oversized source set")
-    with fetched_git(repo, [main, candidate, *sources]) as git:
+    with fetched_git(repo, [base_sha, candidate, *sources]) as git:
         graph = {row[0]: row[1:] for line in git(
             "rev-list", "--parents", candidate).splitlines() if (row := line.split())}
         pending, reverse_order = set(sources), []
@@ -384,7 +387,7 @@ def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> No
                     reverse_order.append(parents[1])
             cursor = parents[0] if parents else ""
         _require(not pending, "ambiguous source order in candidate topology")
-        integrated = main
+        integrated = base_sha
         for source in reversed(reverse_order):
             tree = git("merge-tree", "--write-tree", integrated, source)
             _require(_SHA.fullmatch(tree) is not None, "invalid integration tree")
@@ -400,6 +403,7 @@ def attest_candidate(
     github_get: GitHubGet,
     mergify_status: MergifyStatus,
     source_policy: SourcePolicy,
+    base_branch: str = "main",
 ) -> list[dict[str, object]]:
     """Retry races afresh; the deadline bounds retry admission, not synchronous I/O."""
     batch_wait = [0.0]
@@ -412,6 +416,7 @@ def attest_candidate(
                 github_get=github_get,
                 mergify_status=mergify_status,
                 source_policy=source_policy,
+                base_branch=base_branch,
                 batch_deadline=batch_deadline,
                 batch_wait=batch_wait,
             )
@@ -431,6 +436,7 @@ def _attest_candidate_once(
     github_get: GitHubGet,
     mergify_status: MergifyStatus,
     source_policy: SourcePolicy,
+    base_branch: str,
     batch_deadline: float,
     batch_wait: list[float],
 ) -> list[dict[str, object]]:
@@ -504,18 +510,19 @@ def _attest_candidate_once(
         event_pr=event_pr,
         repository=repository,
         expected_identity=expected_identity,
+        base_branch=base_branch,
     )
 
     def live_lineage() -> tuple[str, list[int], list[str]]:
         delay = 2
         while True:
             try:
-                return _candidate_lineage(mergify_status(owner, repo, "main"), candidate_number)
+                return _candidate_lineage(mergify_status(owner, repo, base_branch), candidate_number)
             except CandidateBatchError:
                 def recheck_candidate() -> None:
                     current = _object(github_get(candidate_path), "Invalid candidate lookup")
                     _candidate_snapshot(current, event_pr=event_pr, repository=repository,
-                                        expected_identity=expected_identity)
+                                        expected_identity=expected_identity, base_branch=base_branch)
 
                 recheck_candidate()
                 remaining = batch_deadline - _retry_clock()
@@ -530,8 +537,8 @@ def _attest_candidate_once(
                 delay = min(delay * 2, 30)
 
     first_lineage = live_lineage()
-    main_path = f"/repos/{full_name}/git/ref/heads/main"
-    main_before = github_get(main_path) if first_lineage[2] else None
+    base_path = f"/repos/{full_name}/git/ref/heads/{quote(base_branch, safe='/')}"
+    base_before = github_get(base_path) if first_lineage[2] else None
     source_snapshots: dict[int, tuple[str, tuple[object, ...]]] = {}
     for number in first_lineage[1]:
         source = _object(
@@ -544,6 +551,7 @@ def _attest_candidate_once(
             repository=repository,
             candidate_sha=candidate_sha,
             github_get=github_get,
+            base_branch=base_branch,
         )
         source_snapshots[number] = (source_sha, _source_fingerprint(source))
         try:
@@ -560,17 +568,17 @@ def _attest_candidate_once(
 
     if first_lineage[2]:
         try:
-            main_ref = _object(main_before, "main ref unavailable")
-            main_sha = _object(main_ref.get("object"), "main object unavailable").get("sha")
+            base_ref = _object(base_before, f"{base_branch} ref unavailable")
+            base_sha = _object(base_ref.get("object"), f"{base_branch} object unavailable").get("sha")
             _require(
-                isinstance(main_sha, str) and _SHA.fullmatch(main_sha) is not None,
-                "invalid main head",
+                isinstance(base_sha, str) and _SHA.fullmatch(base_sha) is not None,
+                f"invalid {base_branch} head",
             )
-            _verify_tree(full_name, main_sha, candidate_sha,
+            _verify_tree(full_name, base_sha, candidate_sha,
                          [snapshot[0] for snapshot in source_snapshots.values()])
             _require(
-                github_get(main_path) == main_before,
-                "main changed during attestation",
+                github_get(base_path) == base_before,
+                f"{base_branch} changed during attestation",
                 CandidateRaceError,
             )
         except CandidateRaceError:
@@ -595,6 +603,7 @@ def _attest_candidate_once(
         event_pr=event_pr,
         repository=repository,
         expected_identity=expected_identity,
+        base_branch=base_branch,
     )
     for number, (expected_sha, expected_fingerprint) in source_snapshots.items():
         current = _object(
