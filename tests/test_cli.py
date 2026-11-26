@@ -3809,21 +3809,36 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
-def test_mergify_wait_resume_does_not_resubmit_and_reports_ejection(
-    wt: Path, gh: FakeGh, capsys, monkeypatch
+@pytest.mark.parametrize("command", ["ready", "merge", "resume"])
+def test_mergify_checks_current_target_before_queueing_or_resumes(
+    wt: Path, repo: Path, gh: FakeGh, capsys, monkeypatch, command
 ) -> None:
-    head = commit_mergify_configuration(wt)
+    commit_mergify_configuration(wt)
+    checker = (Path(__file__).resolve().parents[1] / "scripts/size_budget.sh").read_text()
+    (repo / "scripts").mkdir()
+    commit_file(repo, "scripts/size_budget.sh", re.sub(r"(?m)^SRC_CAP=\d+$", "SRC_CAP=3", checker), "add budget")
+    publish_workflow(wt, (repo / "workflow.toml").read_text().replace(
+        'commands = ["echo ok", "test -f README.md"]', 'commands = ["scripts/size_budget.sh"]'))
+    for checkout, filename in ((wt, "feature"), (repo, "upstream")):
+        (checkout / "src/loopzero").mkdir(parents=True)
+        commit_file(checkout, f"src/loopzero/{filename}.py", "# first line\n# second line\n", filename)
+    commit_file(wt, "ast.py", "raise AssertionError('loaded candidate module')\n", "add candidate module")
+    git(repo, "push", str(repo.parent / "origin.git"), "main")  # leave origin/main stale locally
+    head = head_of(wt)
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.append(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, isDraft=False)))
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=head, sha=None))
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
+    monkeypatch.setattr(mergify, "markers", lambda *_: (command == "resume",) * 2)
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
-    monkeypatch.setattr(
-        mergify, "request", lambda *_: pytest.fail("resume must not submit another command")
-    )
+    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("must not submit a queue request"))
 
-    code, _out, err = run(capsys, "merge", "--wait=1")
+    args = ("merge", "--wait=1") if command == "resume" else (command,)
+    code, _out, err = run(capsys, *args)
+    assert head_of(wt) == head and not (wt / "src/loopzero/upstream.py").exists()
+    if command != "resume":
+        assert code == 1 and "src=4 (base 2, delta 2, cap 3" in err and "loaded candidate module" not in err
+        return
 
     assert 'Read Mergify\'s "Left the queue" comment' in err
     assert code == 1 and "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`" in err

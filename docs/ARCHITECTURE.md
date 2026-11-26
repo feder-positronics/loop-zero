@@ -312,6 +312,10 @@ merge-authority holds. Adding or removing a hold refreshes source eligibility
 even when the head stays the same. Merge admission rechecks the live hold.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
+When delivery uses the existing size checker, local readiness and new Mergify
+requests evaluate a temporary integration with the freshly fetched target. The
+target supplies the checker and baseline. Existing requests continue to the
+queue wait path.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
 backoff capped at 30 seconds and a shared 90-second retry-admission deadline across
 both reads and all attestation attempts. Each wait revalidates the candidate before
