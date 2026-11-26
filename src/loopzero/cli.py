@@ -1320,7 +1320,7 @@ def _wait_with_deadline(
                                 allow_skipped=allow_skipped, initial=initial)
     deadline = started + timeout
     if time.monotonic() >= deadline:
-        _print_check_wait_timeout(pr)
+        _print_check_wait_timeout(pr, args)
         return None
     reported_timeout = False
     try:
@@ -1331,17 +1331,20 @@ def _wait_with_deadline(
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
-            _print_check_wait_timeout(pr)
+            _print_check_wait_timeout(pr, args)
         return None
     return waited
 
 
-def _print_check_wait_timeout(pr: github.PR) -> None:
-    if pr.mergeable == "UNKNOWN":
-        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
-    else:
-        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
-
+def _print_check_wait_timeout(pr: github.PR, args: argparse.Namespace | None) -> None:
+    waiting_for = "GitHub to compute mergeability" if pr.mergeable == "UNKNOWN" else "required checks"
+    command = ["loopzero", args.command if args else "ready", "--wait"]
+    if args and args.config:
+        command.insert(1, f"--config={args.config}")
+    print(
+        f"timed out waiting for {waiting_for} on {pr.head_sha[:12]}. "
+        f"Run `{shlex.join(command)}` to resume on this head."
+    )
 
 def _verify_wait_snapshot(
     args: argparse.Namespace | None, wt: Path, config: Config, head: str, current_head: str,
@@ -1420,7 +1423,7 @@ def _wait_for_checks(
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "rerun the same `--wait` command"
             )
-    _print_check_wait_timeout(current)
+    _print_check_wait_timeout(current, args)
     return None
 
 
