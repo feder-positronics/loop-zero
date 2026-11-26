@@ -36,6 +36,20 @@ def commit_on_origin(repo: Path, name: str) -> str:
     return git(clone, "rev-parse", "HEAD").strip()
 
 
+def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
+    name = worktree.branch_name(repo, "zażółć\u00a0")
+    git(repo, "switch", "-c", name)
+
+    assert worktree.branch(repo) == "lz/zażółć\u00a0"
+
+
+def test_branch_refuses_detached_head(repo: Path) -> None:
+    git(repo, "switch", "--detach")
+
+    with pytest.raises(worktree.WorktreeError):
+        worktree.branch(repo)
+
+
 @pytest.mark.parametrize("branch", [None, "feature/ci+release"])
 def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None) -> None:
     if branch:
