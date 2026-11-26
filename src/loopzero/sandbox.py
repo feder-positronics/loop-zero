@@ -360,8 +360,8 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], com
         if alternate.startswith('"'):
             alternate = os.fsdecode(ast.literal_eval("b" + alternate))
         remedy = (f"Git object alternate {alternate!r} is not readable in the check sandbox. "
-                  "Create a standalone clone without --shared/--reference, then run "
-                  "loopzero start there and rerun loopzero check.")
+                  f"Run `git repack -a -d` here, delete {common_dir / 'objects/info/alternates'}, "
+                  "and rerun loopzero check.")
         command = ("/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"', "loopzero-alternate", alternate)
         try:
             result = _run_bwrap(config, worktree, prefix, command, timeout=GIT_TIMEOUT)

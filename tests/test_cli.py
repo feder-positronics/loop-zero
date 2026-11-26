@@ -672,7 +672,7 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     body = "# PR\n\n## Validation\n<!-- loopzero:checks:start -->\nHuman evidence.\n"
     gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=body)])
-    out, _ = expect_cli(capsys, exit_code, command, stderr_contains=("malformed loopzero checks block",))
+    out, _ = expect_cli(capsys, exit_code, command, stderr_contains=("malformed loopzero checks block", "description's Validation section on GitHub"))
     history = HISTORY_CALLS if command == "pr" else []
     assert [c["argv"][:2] for c in gh.calls] == history + LOOKUP_CALLS + (LOOKUP_CALLS[-1:] if command == "check" else [])
     if command == "check":

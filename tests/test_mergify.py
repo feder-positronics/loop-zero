@@ -194,14 +194,21 @@ def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnost
         target = key.with_name("real-key")
         key.rename(target)
         key.symlink_to(target)
-    with pytest.raises(mergify.MergifyError, match=diagnostic):
+    with pytest.raises(mergify.MergifyError, match=diagnostic) as info:
         mergify._credential(key)
+    assert str(info.value).endswith("(need directory 0700 and file 0600; see SETUP.md)")
 
 
 @pytest.mark.parametrize("field,value", [("number", "7"), ("position", None), ("queued_at", None)])
 def test_malformed_membership_never_confirms(request_log, field, value):
     request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "main", field: value})
     with pytest.raises(mergify.MergifyError):
+        mergify.membership("acme/widgets", 7, "main")
+
+
+def test_wrong_queue_membership_names_both_queues(request_log):
+    request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "hotfix"})
+    with pytest.raises(mergify.MergifyError, match="expected queue 'main', got 'hotfix'"):
         mergify.membership("acme/widgets", 7, "main")
 
 

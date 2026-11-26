@@ -471,7 +471,8 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -
     if start or _CHECKS_END in content:
         _, end, suffix = after.partition(_CHECKS_END)
         if not end or _CHECKS_END in before or _CHECKS_END in suffix or _CHECKS_START in after:
-            raise CliError("malformed loopzero checks block in PR Validation; repair its markers")
+            raise CliError("malformed loopzero checks block in the PR description's Validation section on "
+                           f"GitHub; keep one {_CHECKS_START} ... {_CHECKS_END} pair there, then rerun")
         content = before + block + suffix
     else:
         # Migrate our old report/placeholder only, retaining behavioral evidence.
