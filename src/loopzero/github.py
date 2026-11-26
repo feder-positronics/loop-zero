@@ -639,6 +639,18 @@ def _branch_head(repo: str, branch: str) -> str | None:
     return _branch_sha(endpoint, "commit", "invalid remote branch SHA", full_sha=True)
 
 
+def _matches_commit_pr(row: dict, repo: str, branch: str, endpoint: str) -> bool:
+    if not isinstance(row, dict) or not isinstance(row.get("head"), dict):
+        raise GhError(("gh", "api", endpoint), "invalid commit PR head")
+    if not _matches_branch(row["head"], repo, branch):
+        return False
+    if (row.get("state") not in ("open", "closed")
+            or type(row.get("number")) is not int or row["number"] < 1
+            or not isinstance(row.get("created_at"), str)):
+        raise GhError(("gh", "api", endpoint), "invalid commit PR")
+    return True
+
+
 def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> tuple[str, list[dict]]:
     sha = head_sha if head_sha is not None else _branch_head(repo, branch)
     if sha is None:
@@ -656,15 +668,7 @@ def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> t
             raise
         if not isinstance(rows, list) or len(rows) > PAGE:
             raise GhError(("gh", "api", endpoint), "invalid commit PR page")
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("head"), dict):
-                raise GhError(("gh", "api", endpoint), "invalid commit PR head")
-            if _matches_branch(row["head"], repo, branch):
-                if (row.get("state") not in ("open", "closed")
-                        or type(row.get("number")) is not int or row["number"] < 1
-                        or not isinstance(row.get("created_at"), str)):
-                    raise GhError(("gh", "api", endpoint), "invalid commit PR")
-                matches.append(row)
+        matches.extend(row for row in rows if _matches_commit_pr(row, repo, branch, endpoint))
         if len(rows) < PAGE:
             return endpoint, matches
     raise GhError(("gh", "api", endpoint), "commit PRs exceed 100 pages")
