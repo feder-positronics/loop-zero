@@ -626,10 +626,30 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _reusable_check_report(wt: Path, config: Config) -> CheckReport | None:
+    with suppress(OSError, sandbox.SandboxUnavailable, _proc.ProcTimeout, worktree.WorktreeError):
+        if not (wt / CHECKS_FILE).is_file():
+            return None
+        with _lock_task_state(wt):
+            if worktree.is_dirty(wt) or not sandbox.has_untracked_task_state(config, wt):
+                return None
+            head = worktree.head(wt)
+            report = _current_check_report(wt, config, head)
+            if (report is not None and sandbox.receipt_checkout_matches(config, wt, report)
+                    and not worktree.is_dirty(wt) and worktree.head(wt) == head):
+                _refresh_existing_pr_checks(wt, config)
+                return report
+    return None
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
+    if (receipt := _reusable_check_report(wt, config)) is not None:
+        _print_receipt(wt, receipt, f"reused from {CHECKS_FILE}")
+        print("PASS")
+        return 0
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),

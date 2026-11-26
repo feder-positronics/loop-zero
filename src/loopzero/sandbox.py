@@ -183,8 +183,22 @@ def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
         checkpoint(replace(report, results=(*report.results, *unvisited, incomplete)))
 
 
+def has_untracked_task_state(config: Config, worktree: Path) -> bool:
+    return not _git(config, worktree, "ls-files", "--", ".loopzero")
+
+
+def receipt_checkout_matches(config: Config, worktree: Path, report: CheckReport) -> bool:
+    if not _stage_unchanged(config, worktree, report.head):
+        return False
+    base = _check_base(config, worktree)
+    return all(
+        result.input_key is not None and result.input_key == _input_key(config, worktree, result.command, base)
+        for result in report.results if _has_inputs(config, result.command)
+    ) and _stage_unchanged(config, worktree, report.head)
+
+
 def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
-    if _git(config, worktree, "ls-files", "--", ".loopzero"):
+    if not has_untracked_task_state(config, worktree):
         return {}
     try:
         data = json.loads((worktree / ".loopzero/checks.json").read_text())
@@ -274,10 +288,14 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
         raise
 
 
+def _has_inputs(config: Config, command: str) -> bool:
+    return command in config.inputs or "." in config.inputs.get("*", ())
+
+
 def _input_key(config: Config, worktree: Path, command: str, base: str, *,
                status: Callable[[str], None] | None = None,
                workflow: str | Path = "workflow.toml") -> str | None:
-    if command not in config.inputs and "." not in config.inputs.get("*", ()):
+    if not _has_inputs(config, command):
         return None
     if not base and status is None:
         return None

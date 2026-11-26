@@ -831,22 +831,22 @@ def test_input_diagnostic_failure_does_not_block_dirty_check(
     assert report.ok and report.dirty and report.results[0].command == command
 
 
-def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base, cache_check):
+def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base, cache_check, monkeypatch):
     path = git_repo / "README.md"
     command = "python3 -c 'from pathlib import Path; exit(13 in Path(\"README.md\").read_bytes())'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
     assert path.read_bytes() == b"hello\n"
     assert cache_check(config, clean=True, verify_reuse=True).head == fetched_base
-
+    monkeypatch.setattr(cli, "_context", lambda *args, **kwargs: (git_repo, config))
     git(git_repo, "config", "core.autocrlf", "true")
     path.unlink()
     git(git_repo, "checkout-index", "-u", "--", path.name)
     assert path.read_bytes() == b"hello\r\n"
     assert not git(git_repo, "status", "--porcelain")
-    report = sandbox.run_checks(config, git_repo)
+    assert cli.main(["check"]) == 1
+    report = cli._load_report(git_repo)
     assert not report.dirty and report.head == fetched_base
-    assert report.results[0].exit_code == 1
-    assert report.results[0].reused_from is None
+    assert (report.results[0].exit_code, report.results[0].reused_from) == (1, None)
 
 
 @pytest.mark.parametrize("base", ["tracked", "recorded", "absent"])
@@ -929,7 +929,7 @@ def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkey
 
 
 @pytest.mark.parametrize('symlink', [False, True])
-def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_base, symlink):
+def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_base, symlink, monkeypatch):
     from loopzero.types import CheckReport, CheckResult
 
     command = 'echo stage-ran; exit 7'
@@ -947,12 +947,12 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     git(git_repo, 'commit', '-m', 'forge passing receipt')
     assert not git(git_repo, 'status', '--porcelain').strip()
     assert key == sandbox._input_key(cfg, git_repo, command, fetched_base)
-
+    receipt_reader = Mock(side_effect=AssertionError("tracked receipt opened"))
+    monkeypatch.setattr(cli, "_current_check_report", receipt_reader)
+    assert cli._reusable_check_report(git_repo, cfg) is None
     report = sandbox.run_checks(cfg, git_repo)
-    assert not report.dirty
-    assert report.results[0].exit_code == 7
+    assert not report.dirty and (report.results[0].exit_code, report.results[0].reused_from) == (7, None)
     assert 'stage-ran' in report.results[0].tail
-    assert not report.results[0].reused_from
 
 
 def test_no_inputs_preserves_receipt(git_repo, bwrap_log):
