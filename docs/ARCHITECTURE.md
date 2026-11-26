@@ -43,9 +43,9 @@ The CLI also writes a head-bound checks receipt and saved review output in
 `.loopzero/` for local readiness and reposting. They do not form a second authoritative delivery history; new Codex native audit
 receipts have the restricted retention requirement described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
-review evidence using trusted base configuration. Local readiness and merge
-fetch the configured origin base before loading its publisher policy. Losing local artifacts may
-require rerunning checks or review, and never creates a hosted approval.
+review evidence using trusted base configuration. Local readiness and merge fetch
+the configured origin base before loading its publisher policy. Losing local
+artifacts may require rerunning checks or review, and never creates a hosted approval.
 Saved runner artifacts also retain the repository, PR and actual request publisher
 before publication. A lost POST reply triggers a read-only reconciliation bounded
 by one 30-second transport deadline, with no read retries. Recovery regenerates
@@ -154,11 +154,11 @@ For a Codex executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable and its existing sibling
 `codex-code-mode-host`, read-only. Neighboring history and configuration remain
 hidden; helper aliases into protected state and explicit state mounts fail closed.
-At native review launch the CLI pins checks, publishers and
-`delivery.reviewer_ro_paths` to one remote PR-base revision. A missing remote ref
-or workflow blocks launch. Bootstrap requires an explicit `--config`, which
-still undergoes validation. Reposts and other commands retain their fallback
-policy. Runners validate the complete mount plan against private review state and
+Check, review, ready, merge, and status use the workflow at one remote-tracking
+delivery revision selected by the workflow at Git's local `origin/HEAD`.
+Missing trusted refs or workflows block these commands. An explicit
+`--config` supplies validated policy for bootstrap or operator overrides.
+Runners validate the complete mount plan against private review state and
 known standard/custom native state roots. Existing file-backed auth mounts remain
 explicit exceptions. Claude's environment routes are `ANTHROPIC_API_KEY` and
 `CLAUDE_CODE_OAUTH_TOKEN`: a nonempty value (whitespace included) is forwarded
