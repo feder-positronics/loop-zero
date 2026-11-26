@@ -749,23 +749,25 @@ def cache_check(git_repo):
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
-                                    'dirty_tree', 'legacy', 'grant'])
-def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change):
+                                    'dirty_tree', 'legacy', 'grant', 'host_environment'])
+def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change, cache_check):
     cfg = make_config(checks=('echo one', 'echo two'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
-    if change == 'grant':
-        cfg = replace(cfg, env_allowlist=(*cfg.env_allowlist, "HEAVY_SLOT_GRANTED_CORES"))
-        monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "2")
+    original_path = os.environ["PATH"]
+    host_env = {"HEAVY_SLOT_GRANTED_CORES": "2"}
+    if change == 'host_environment':
+        host_env.update(PATH="/opt/tools:" + original_path, LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8", TERM="dumb")
+    if change in {'grant', 'host_environment'}:
+        cfg = replace(cfg, env_allowlist=tuple(dict.fromkeys((*cfg.env_allowlist, *host_env))))
+        for key, value in host_env.items():
+            monkeypatch.setenv(key, value)
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
         assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted', fetched_base) is None
     whole = replace(cfg, inputs={'*': ('.',)})
     key = sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     assert key is not None
-    _save_report(git_repo, sandbox.run_checks(cfg, git_repo))
+    cache_check(cfg)
     receipt = git_repo / '.loopzero/checks.json'
-    git(git_repo, 'config', 'core.excludesFile', str(git_repo / '.git/info/exclude'))
-    with (git_repo / '.git/info/exclude').open('a') as stream:
-        stream.write('\n.loopzero/\n')
     if change in {'other', 'input', 'shared', 'dirty_tree'}:
         path = 'README.md' if change in {'input', 'dirty_tree'} else 'src.py' if change == 'other' else change
         (git_repo / path).write_text('new content')
@@ -780,7 +782,12 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     elif change == 'environment':
         monkeypatch.setenv('LZ_KEEP', 'changed')
         assert _current_check_report(git_repo, cfg, fetched_base) is None
-    elif change == 'grant':
+    elif change in {'grant', 'host_environment'}:
+        for key in host_env.keys() - {"PATH", "LANG", "HEAVY_SLOT_GRANTED_CORES"}:
+            monkeypatch.delenv(key)
+        if change == 'host_environment':
+            monkeypatch.setenv("PATH", original_path)
+            monkeypatch.setenv("LANG", "C")
         monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "4")
         assert _current_check_report(git_repo, cfg, fetched_base) is not None
         monkeypatch.delenv("HEAVY_SLOT_GRANTED_CORES")
