@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+from urllib.parse import quote
 
 import pytest
 
@@ -745,13 +746,15 @@ exec /usr/bin/git "$@"
 
 
 @pytest.mark.parametrize("branch", [
-    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
+    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task", "lz/zażółć\u00a0",
 ])
 def test_pr_pushes_and_creates_draft(
     wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, branch
 ) -> None:
     git(wt, "branch", "-m", branch)
-    history_key = branch_history_key().replace("lz%2Ft1", branch.replace("/", "%2F"))
+    if branch.endswith("\u00a0"):
+        git(wt, "branch", branch.removesuffix("\u00a0"), "origin/main")
+    history_key = branch_history_key().replace("lz%2Ft1", quote(branch, safe=""))
     gh.respond(history_key, [])
     run(capsys, "check")
     head = head_of(wt)
@@ -760,7 +763,7 @@ def test_pr_pushes_and_creates_draft(
     pushes = trace_pushes(fake_tool, tmp_path)
     code, out, err = run(capsys, "pr")
     assert (code, out, err) == (0, URL + "\n", "")
-    assert pushes.read_text().strip() == f"push -u origin {branch}"
+    assert pushes.read_text() == f"push -u origin {branch}\n"
     origin = repo.parent / "origin.git"
     assert git(origin, "rev-parse", branch).strip() == head
     assert [c["argv"][:2] for c in gh.calls] == [
