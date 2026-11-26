@@ -21,6 +21,8 @@ from loopzero import candidate
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
 from loopzero.types import LoopZeroError
 
+from .conftest import git as isolated_git
+
 
 @pytest.fixture(autouse=True)
 def no_retry_delay(monkeypatch):
@@ -211,12 +213,9 @@ def tree_candidate(tmp_path, monkeypatch):
     remote.mkdir()
 
     def git(*args):
-        return subprocess.run(["git", *args], cwd=remote, check=True, capture_output=True,
-                              text=True).stdout.strip()
+        return isolated_git(remote, *args).strip()
 
     git("init", "-b", "main")
-    git("config", "user.name", "Test")
-    git("config", "user.email", "test@example.org")
 
     def commit(name, content):
         (remote / name).write_text(content)
