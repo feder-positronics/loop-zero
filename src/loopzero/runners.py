@@ -333,11 +333,9 @@ def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str, p
 def _git_dirs(cwd: Path, env_allowlist: tuple[str, ...]) -> tuple[Path, Path]:
     argv = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir"]
     done = _proc.run_git_paths(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=30)
-    paths = done.stdout.split("\n")
-    if done.exit_code == 0 and len(paths) == 2:
-        common_dir, git_dir = map(Path, paths)
-        if common_dir.is_absolute() and git_dir.is_absolute():
-            return common_dir.resolve(), git_dir.resolve()
+    paths = [Path(path) for path in done.stdout.split("\n")]
+    if done.exit_code == 0 and len(paths) == 2 and all(path.is_absolute() for path in paths):
+        return paths[0].resolve(), paths[1].resolve()
     # A path may contain a newline, which makes the combined output ambiguous.
     return _git_dir(cwd, "--git-common-dir", env_allowlist), _git_dir(cwd, "--git-dir", env_allowlist)
 

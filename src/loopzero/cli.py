@@ -116,8 +116,7 @@ def _repo_root(wt: Path) -> Path:
     if not first.startswith("worktree "):
         raise CliError("Git did not identify the primary worktree; refusing cleanup")
     root = Path(first.removeprefix("worktree "))
-    common = _git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)
-    common = Path(common).resolve()
+    common = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)).resolve()
     if root.resolve() == wt.resolve() or common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
     return root

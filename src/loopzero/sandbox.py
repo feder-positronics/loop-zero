@@ -561,8 +561,7 @@ def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str
 
 
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
-    raw = Path(_git(config, worktree, "rev-parse", flag, paths=True))
-    return (raw if raw.is_absolute() else worktree / raw).resolve()
+    return (worktree / _git(config, worktree, "rev-parse", flag, paths=True)).resolve()
 
 
 def _stage_unchanged(config: Config, worktree: Path, head: str) -> bool:
