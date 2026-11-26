@@ -3152,7 +3152,7 @@ def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, hea
       for case in ("missing", "during-gates", "transient")),
     ("head", "check receipt is for aaaaaaaaaaaa."),
     ("failed", "check receipt records a failed stage."), ("dirty", "check receipt was recorded in a dirty worktree."),
-    ("plan", "check receipt's plan differs from the trusted workflow."),
+    ("plan", "check receipt's plan differs from the trusted workflow (missing: '"),  # r7-b3-1: names it.
     ("legacy", "check receipt is missing its settings fingerprint."),
     ("incompatible", "check receipt has an incompatible settings fingerprint."),
     ("empty", "check receipt is incomplete."), ("checkpoint", "check receipt is incomplete."),

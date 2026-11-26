@@ -363,7 +363,10 @@ def _check_report_problem(
         if require_pass and not report.ok:
             return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
                     "Retry unchanged only if the failure was transient.")
-        return ("check receipt's plan differs from the trusted workflow. "
+        delta = [f"{label}: {', '.join(map(repr, items))}" for label, items in (
+            ("missing", [c for c in config.checks if c not in commands]),
+            ("extra", [c for c in commands if c not in config.checks])) if items]
+        return (f"check receipt's plan differs from the trusted workflow ({'; '.join(delta) or 'order differs'}). "
                 "Run `loopzero check` with the current workflow.")
     recovery = ("Run loopzero check in this worktree at this head with the same current CLI and effective "
                 "settings as ready.")
