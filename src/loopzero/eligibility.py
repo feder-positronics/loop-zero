@@ -162,7 +162,8 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
 
 
 def source_fingerprint(pr: github.PR) -> tuple[object, ...]:
-    return pr.number, pr.head_sha, pr.base_ref, pr.state, pr.mergeable, github.merge_hold(pr.number, pr.labels)
+    return (pr.number, pr.head_sha, pr.base_ref, pr.state, pr.mergeable == "CONFLICTING",
+            github.merge_hold(pr.number, pr.labels))
 
 
 def evaluate(repo: str, number: int, head: str, base: str,

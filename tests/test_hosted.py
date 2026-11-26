@@ -65,7 +65,7 @@ def publisher(tmp_path, fake_bin, monkeypatch):
 
 
 @pytest.mark.parametrize("case,blocker,status", [
-    ("COMMENTED", "", "success"), ("APPROVED", "", "success"),
+    ("COMMENTED", "", "success"), ("APPROVED", "settled", "success"),
     ("DISMISSED", "", "pending"), ("PENDING", "", "pending"),
     ("absent", "", "pending"), ("untrusted", "", "pending"),
     ("stale", "", "pending"), ("malformed", "", "pending"),
@@ -85,6 +85,10 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", reviews)
     if blocker == "conflict":
         publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(mergeable="CONFLICTING")))
+    if blocker == "settled":
+        publisher.respond(f"api repos/{REPO}/pulls/7",
+                          fixtures.rest_pr_json(pr_json(mergeable="UNKNOWN")),
+                          fixtures.rest_pr_json(pr_json(mergeable="MERGEABLE")))
     if blocker == "important":
         publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding")))
     assert hosted.main() == (1 if status == "failure" else 0)
