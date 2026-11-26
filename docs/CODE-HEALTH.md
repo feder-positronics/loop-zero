@@ -109,9 +109,8 @@ execution. Keep scheduled Canary and Delivery Health signals separate.
 
 The consumer coordinator owns the existing external audit reducer, invocation,
 paths and retention; link its runbook and current maintainer in each report.
-For IntelFlo, the [Lane P coordinator](https://github.com/feder-positronics/intelflo/issues/10948)
-owns the external session-audit handoff (`audit`, `lz_mine`, `pr_friction`,
-`compare`); its consumer runbook must identify the current reducer maintainer.
+The consumer runbook records the handoff, as in
+[IntelFlo's session-audit guidance](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/audit-health.md#session-audit-handoff).
 No loop-zero collector, command, state store or delivery gate is implied.
 
 Freeze an input manifest (source/query versions, byte counts and SHA-256 hashes),
@@ -154,7 +153,7 @@ keep missing data visible and avoid automatically filing per-metric issues.
 The [IntelFlo local protection sample](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/local-heavy-checks.md#local-protection-sample-from-2026-11-07)
 records source-tree execution. Report its scope and environment and leave the
 candidate and landed trees unknown until there is evidence for each.
-Consumer proof/replacement remains with [IntelFlo Lane P](https://github.com/feder-positronics/intelflo/issues/10948)
+Consumer proof/replacement remains with [IntelFlo Lane P](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/local-heavy-checks.md#lane-p-ownership)
 and [disabled-heavy coverage work](https://github.com/feder-positronics/intelflo/issues/10842).
 
 Include setup, partial, failed, retried and cancelled packets and other paid work

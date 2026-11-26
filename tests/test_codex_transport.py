@@ -13,11 +13,12 @@ import pytest
 from loopzero import cli, eligibility, github, runners
 from loopzero.types import CheckReport, CheckResult, Config
 from tests import test_cli, test_runners
-from tests.conftest import commit_file, git
+from tests.conftest import commit_file, git, git_environment
 
 fake_bwrap = test_runners.fake_bwrap
 gh = test_cli.gh
 APPROVE = test_runners.APPROVE
+BYTE_LIMIT_REVIEW = test_runners._native_codex_result("a" * 40)
 
 
 @pytest.fixture
@@ -83,6 +84,13 @@ def row(result, rendered=None):
     }
 
 
+@pytest.fixture
+def published_native(native):
+    result = native[0]()
+    rendered = body(result)
+    return result, rendered, rendered.splitlines()[1]
+
+
 def projection(result, rendered=None):
     return eligibility.review_projection(row(result, rendered), result.head, "acme/widgets", 7)
 
@@ -116,7 +124,7 @@ def packed(value):
     return packed_json(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
-def test_large_real_native_private_public_saved_and_exact_bytes(native, tmp_path):
+def test_large_real_native_private_public_saved_and_exact_bytes(native, git_repo):
     result = native[0]()
     assert len(result.raw.encode()) > 30000
     evidence = runners.codex_evidence(result)
@@ -139,10 +147,10 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, tmp_path
     parsed = projection(result)
     assert parsed == (True, evidence)
     assert eligible(row(result))
-    cli._save_review(tmp_path, result)
-    path = tmp_path / evidence["receipt"]
+    cli._save_review(git_repo, result)
+    path = git_repo / evidence["receipt"]
     assert path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700
-    loaded = cli._load_review(tmp_path, result.head, "primary")
+    loaded, _ = cli._load_review(git_repo, result.head, "primary")
     assert loaded.raw == result.raw and body(loaded) == rendered
     assert json.loads(path.read_text())["raw"] == result.raw
 
@@ -282,10 +290,8 @@ def update_evidence(value, path, replacement):
     (("complete",), False),
     (("calls", 0, "fatal"), "present"),
 ])
-def test_invalid_latest_evidence_cannot_revive_older_approval(native, path, replacement):
-    result = native[0]()
-    rendered = body(result)
-    line = rendered.splitlines()[1]
+def test_invalid_latest_evidence_cannot_revive_older_approval(published_native, path, replacement):
+    result, rendered, line = published_native
     value = runners.decode_codex_evidence(line)
     update_evidence(value, path, replacement)
     latest = row(result, rendered.replace(line, packed(value)))
@@ -295,10 +301,8 @@ def test_invalid_latest_evidence_cannot_revive_older_approval(native, path, repl
 @pytest.mark.parametrize("mutation", [
     "duplicate_header", "before_marker", "after_prose", "noncanonical", "duplicate_key", "oversized",
 ])
-def test_strict_transport_and_no_older_approval_revival(native, mutation):
-    result = native[0]()
-    rendered = body(result)
-    line = rendered.splitlines()[1]
+def test_strict_transport_and_no_older_approval_revival(published_native, mutation):
+    result, rendered, line = published_native
     if mutation == "duplicate_header":
         changed = rendered.replace(line, line + "\n" + line)
     elif mutation == "before_marker":
@@ -343,9 +347,9 @@ def test_overflow_is_hold_without_silent_chunk_truncation(native):
 
 @pytest.mark.parametrize("source", ["pair", "pair-repost"])
 @pytest.mark.parametrize("include_evidence", [False, True])
-def test_retired_pair_marker_cannot_pass_eligibility(native, source, include_evidence):
-    result = native[0]()
-    lines = body(result).splitlines()
+def test_retired_pair_marker_cannot_pass_eligibility(published_native, source, include_evidence):
+    result, rendered, _ = published_native
+    lines = rendered.splitlines()
     lines[0] = cli.review_marker(result.head, "primary", source)
     if not include_evidence:
         del lines[1]
@@ -378,7 +382,7 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
         proof = runners.codex_evidence(result)
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
         argv = ["git", "diff", "--no-color", reviewed, head]
-        delta_diff = subprocess.check_output(argv, cwd=native[2])
+        delta_diff = subprocess.check_output(argv, cwd=native[2], env=git_environment())
         assert b"-hello\n+" + content in delta_diff
         if kind == "delta_legacy":
             assert "+caf\\xe9\r\n" in runners.render_patch(delta_diff)
@@ -436,13 +440,12 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
 
 
 @pytest.mark.parametrize("location", ["provenance", "model_prose", "model_fence"])
-def test_saved_or_model_supplied_summary_cannot_grant_inspection(native, location):
-    result = native[0]()
+def test_saved_or_model_supplied_summary_cannot_grant_inspection(published_native, location):
+    result, _, forged = published_native
     data = json.loads(result.raw)
     data["events"] = [
         e for e in data["events"] if e.get("item", {}).get("type") != "command_execution"
     ]
-    forged = runners.encode_codex_evidence(runners.codex_evidence(result))
     if location == "provenance":
         result = dataclasses.replace(
             result, provenance={**result.provenance, "codex_evidence": {"inspection": "verified"}}
@@ -474,7 +477,7 @@ def test_strict_projection_types_and_bounds(native, field, value):
         runners.decode_codex_evidence(packed(evidence))
 
 
-def test_legacy_toolfree_remains_unknown_without_projection(tmp_path):
+def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
     legacy = test_runners._native_codex_result("a" * 40)
     raw = json.loads(legacy.raw)
     raw.pop("review_context")
@@ -483,18 +486,16 @@ def test_legacy_toolfree_remains_unknown_without_projection(tmp_path):
     rendered = body(legacy)
     assert runners.CODEX_HEADER not in rendered
     assert eligible(row(legacy))
-    cli._save_review(tmp_path, legacy)
-    assert cli._load_review(tmp_path, legacy.head, "primary").raw == legacy.raw
+    cli._save_review(git_repo, legacy)
+    assert cli._load_review(git_repo, legacy.head, "primary")[0].raw == legacy.raw
 
 
 @pytest.mark.parametrize("change", [
     "fence", "wrong_adjudication", "unknown_leading", "whitespace_json",
     "oversized_model", "oversized_effort", "invalid_event_offset",
 ])
-def test_leading_block_is_anchored_and_schema_complete(native, change):
-    result = native[0]()
-    rendered = body(result)
-    line = rendered.splitlines()[1]
+def test_leading_block_is_anchored_and_schema_complete(published_native, change):
+    result, rendered, line = published_native
     value = runners.decode_codex_evidence(line)
     if change == "fence":
         modified = rendered.replace(line + "\n", "") + "\n```\n" + line + "\n```"
@@ -518,7 +519,7 @@ def test_leading_block_is_anchored_and_schema_complete(native, change):
     assert present is (change != "fence")
 
 
-def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, tmp_path):
+def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, git_repo):
     result = native[0]()
     changed = dataclasses.replace(
         result, raw=json.dumps(json.loads(result.raw), ensure_ascii=False, indent=1)
@@ -528,8 +529,8 @@ def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, tmp_pat
     assert value["raw_bytes"] == len(changed.raw.encode())
     assert value["raw_sha256"] == hashlib.sha256(changed.raw.encode()).hexdigest()
     assert value["raw_sha256"] != runners.codex_evidence(result)["raw_sha256"]
-    cli._save_review(tmp_path, changed)
-    loaded = cli._load_review(tmp_path, changed.head, changed.kind)
+    cli._save_review(git_repo, changed)
+    loaded, _ = cli._load_review(git_repo, changed.head, changed.kind)
     assert loaded.raw == changed.raw and body(loaded) == body(changed)
 
 
@@ -577,39 +578,31 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
     assert public == proof
 
 
-def test_entire_leading_block_budget_includes_adjudication(native, monkeypatch):
-    result = native[0]()
-    marker = cli.review_marker(result.head, result.kind)
-    header = runners.encode_codex_evidence(runners.codex_evidence(result))
-    suffix = "\n<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
-    limit = len((marker + "\n" + header).encode())
-    oversized = marker + "\n" + header + suffix + "\n**approve**"
-    monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", limit)
-    assert projection(result, oversized) == (True, None)
-    with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):
-        github._review_body(result, [], marker + suffix)
-
-
-@pytest.mark.parametrize(
-    "separator",
-    ["\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
-)
-@pytest.mark.parametrize("overflow", [0, 1, 2])
-def test_raw_leading_utf8_span_at_limit_and_overflow(native, separator, overflow):
-    result = native[0]()
+@pytest.mark.parametrize("separator,overflow,tightened", [
+    *((separator, overflow, False)
+      for separator in ("\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+      for overflow in (0, 1, 2)),
+    pytest.param("\n", 1, True, id="adjudication-counts-toward-tightened-budget"),
+])
+def test_raw_leading_utf8_span_at_limit_and_overflow(request, separator, overflow, tightened, monkeypatch):
+    result = request.getfixturevalue("native")[0]() if tightened else BYTE_LIMIT_REVIEW
     marker = cli.review_marker(result.head, result.kind)
     header = runners.encode_codex_evidence(runners.codex_evidence(result))
     adjudication = "<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
     span = separator.join((marker, header, adjudication))
-    padding = 8192 + overflow - len(span.encode("utf-8"))
-    padded = marker[:-3] + " " * padding + marker[-3:]
-    span = separator.join((padded, header, adjudication))
-    assert len(span.encode("utf-8")) == 8192 + overflow
+    padded = marker
+    if tightened:
+        monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", len((marker + "\n" + header).encode()))
+    else:
+        padded = marker[:-3] + " " * (8192 + overflow - len(span.encode("utf-8"))) + marker[-3:]
+        span = separator.join((padded, header, adjudication))
+        assert len(span.encode("utf-8")) == 8192 + overflow
     rendered = span + separator + "**approve**"
     present, evidence = projection(result, rendered)
     assert present and (evidence is not None) is (overflow == 0)
-    latest = eligible(row(result), row(result, rendered))
-    assert (latest is not None) is (overflow == 0)
+    if not tightened:
+        latest = eligible(row(result), row(result, rendered))
+        assert (latest is not None) is (overflow == 0)
     if separator == "\n":  # Publication stays LF; readers count every accepted separator verbatim.
         if overflow:
             with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):
