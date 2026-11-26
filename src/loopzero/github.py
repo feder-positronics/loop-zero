@@ -259,10 +259,18 @@ def _read_only(args: tuple[str, ...]) -> bool:
     return False
 
 
+def _app_token_clock() -> float | None:
+    """Read elapsed time including suspend, when the OS provides it."""
+    if (clock := getattr(time, "CLOCK_BOOTTIME", None)) is not None:
+        with suppress(OSError):
+            return time.clock_gettime(clock)
+    return None
+
+
 def _cached_app_token() -> str:
-    # Installation tokens expire one hour after minting by wall clock, suspend included.
     token, minted = _app_token_cache
-    return token if token and 0 <= time.time() - minted < 3000 else ""
+    now = _app_token_clock() if token else None
+    return token if now is not None and 0 <= now - minted < 3000 else ""
 
 
 @contextmanager
@@ -281,14 +289,17 @@ def app_token() -> str:
         return token
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
-    minted = time.time()  # before the helper runs: a suspend mid-call still ages the token
+    minted = _app_token_clock()  # before minting so a suspend mid-call ages the token
     try:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
-    _app_token_cache = (result.stdout.strip(), minted)
+    token = result.stdout.strip()
+    if minted is None:
+        return token  # no suspend-aware clock, so use this token only for this call
+    _app_token_cache = (token, minted)
     return _cached_app_token()
 
 
@@ -514,7 +525,10 @@ def _api(endpoint: str, payload: dict, method: str = "POST",
         path.unlink(missing_ok=True)
 
 
-MERGE_HOLD_MESSAGE = "has a merge-authority hold; ask the decisions owner to release it"
+def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
+    if "hold" in labels:
+        return f"PR #{number} has a merge-authority hold; ask the decisions owner to release it"
+    return None
 
 
 def _pr_labels(data: dict) -> tuple[str, ...]:
@@ -1344,8 +1358,8 @@ def merged_sha(
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
             return sha
     elif not view["merged"] and view.get("state") == "open":
-        if check_hold and "hold" in _pr_labels(view):
-            raise GhError(argv, f"PR #{number} {MERGE_HOLD_MESSAGE}")
+        if check_hold and (hold := merge_hold(number, _pr_labels(view))):
+            raise GhError(argv, hold)
         return None  # An open PR's merge_commit_sha is only a test merge.
     if not view["merged"] and view.get("state") == "closed":
         raise ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")
@@ -1461,6 +1475,14 @@ def commit_status(repo: str, head: str, context: str, state: str, description: s
                 "Push a fresh head and obtain review evidence for it before refreshing eligibility."
             ) from exc
         raise
+
+
+def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
+    statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
+    latest = next((row for row in statuses if row.get("context") == context), {})
+    creator = latest.get("creator")
+    return (isinstance(creator, dict) and creator.get("login") == "github-actions[bot]"
+            and (latest.get("state"), latest.get("description")) == (state, description))
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:

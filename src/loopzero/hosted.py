@@ -89,12 +89,25 @@ def _run(cfg: Config) -> int:
         if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
             message = "Awaiting trusted review of current source head"
             state = "pending"
-        publish(state, message)
-        print(message)
-        return 0 if ready or state == "pending" else 1
     except Exception as exc:
         _mark_refresh_failed(publish, exc)
         raise
+    _publish_verdict(cfg.repo, head, state, message[:140])
+    print(message)
+    return 0 if ready or state == "pending" else 1
+
+
+def _publish_verdict(repo: str, head: str, state: str, description: str) -> None:
+    context = eligibility.CONTEXT
+    try:
+        github.commit_status(repo, head, context, state, description)
+    except github.StatusLimitReached:
+        raise
+    except (github.GhError, github.ProcTimeout, OSError) as exc:
+        with suppress(github.GhError, github.ProcTimeout, OSError):
+            if github.status_matches(repo, head, context, state, description):
+                return
+        raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
 
 
 def _mark_refresh_failed(publish: Callable[[str, str], None], exc: Exception) -> None:
