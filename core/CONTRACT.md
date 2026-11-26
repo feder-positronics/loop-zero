@@ -210,8 +210,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   another may advise read-only and review independently. Before committing
   imported work, record every actual writing delegate in truthful
   `Co-Authored-By` trailers; the committer does not replace the writer.
-  Preserve every actual contributor's truthful trailers through squash/amend
-  except under the authorized disclosure route below. Missing attribution
+  Preserve every actual contributor's truthful trailers through squash/amend.
+  Missing attribution
   stays unknown; never invent it.
 - Primary and delta prefer families absent from recognized trailers across
   all commits/trailers from configured-base merge-base through HEAD,
@@ -244,17 +244,6 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   [setup and rollback](../SETUP.md#connect-your-agent).
 
 [Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
-
-### Owner-approved contributor-review exception
-
-Only the confirmed mixed-authoring route
-([#264 ruling](../docs/design/2026-10-12-contributor-review-exception.md)) permits
-genuine native review by a less-writing family, with reduced assurance rather
-than independence. Use truthful main-contributor trailers, disclose every
-minority writing model in the commit body and PR comment labelled
-**owner-approved contributor-review exception**, and never rewrite past an
-existing primary review; selector, budget and readiness gates stay unchanged.
-Outside that confirmed scope, retain all-writer trailers.
 
 ## Sandbox rules for checks
 

@@ -44,9 +44,8 @@ The contract's commands and guards decide whether delivery advances. Models
 interpret intent, implement changes and produce genuine review findings through
 the [native runners](../../src/loopzero/runners.py). A model's confidence, private
 review or successful session cannot replace a required check or current-head
-review. Independence is the default; the
-[bounded owner-approved contributor-review exception](../../core/CONTRACT.md#owner-approved-contributor-review-exception)
-retains its disclosure and reduced-assurance meaning. Prompt-only orchestration
+review. Independence is the default, with a disclosed same-family fallback when
+no independent family can run. Prompt-only orchestration
 is the strongest alternative: it is flexible, but the deciding premise is that
 delivery constraints need repeatable, inspectable enforcement. Consequence:
 semantic output enters the existing evidence protocol, rather than inventing

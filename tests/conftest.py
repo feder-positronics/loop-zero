@@ -24,6 +24,17 @@ def isolate_github_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.fixture(autouse=True)
+def isolated_reviewer_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give tests disposable user and reviewer state outside their checkouts."""
+    home = tmp_path_factory.mktemp("test-home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_SECURESTORAGE_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def no_host_github_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     isolate_github_auth(tmp_path, monkeypatch)
     monkeypatch.setattr(github, "PR_LOCK_DIR", tmp_path / "pr-locks")

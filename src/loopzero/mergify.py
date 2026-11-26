@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import candidate, github
-from .types import LoopZeroError
+from .types import LoopZeroError, is_sha
 
 API = "https://api.mergify.com/v1"
 REQUEST = "loopzero:mergify-request"
@@ -54,7 +54,7 @@ def _credential(path: Path | None = None) -> str:
         ) from exc
     if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
             or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
-        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}")
+        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}; expected mode 0700 and user ownership")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
@@ -63,7 +63,7 @@ def _credential(path: Path | None = None) -> str:
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600):
         os.close(fd)
-        raise MergifyError(f"unsafe Mergify credential file permissions: {path}")
+        raise MergifyError(f"unsafe Mergify credential file permissions: {path}; expected mode 0600 and user ownership")
     with os.fdopen(fd, encoding="utf-8") as handle:
         token = handle.read().strip()
     if not token:
@@ -170,9 +170,11 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
     try:
         if type(data["number"]) is not int or data["number"] != number:
             raise ValueError("pull request number mismatch")
-        actual = str(data["queue_rule_name"])
+        actual = data["queue_rule_name"]
+        if not isinstance(actual, str) or not actual:
+            raise ValueError("invalid queue name")
         if actual != queue:
-            raise ValueError(f"expected queue {queue!r}, got {actual!r}")
+            raise MergifyError(f"PR #{number} is in Mergify queue {actual!r}, expected {queue!r}")
         if (not isinstance(data["queued_at"], str) or not data["queued_at"]
                 or type(data["position"]) is not int or data["position"] < 0):
             raise ValueError("invalid queue position or admission time")
@@ -245,7 +247,7 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
     blob = github.api_get(path)
     try:
         if (blob["type"] != "file" or blob["encoding"] != "base64"
-                or not isinstance(blob["sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", blob["sha"])
+                or not is_sha(blob["sha"])
                 or not isinstance(blob["content"], str) or len(blob["content"]) > 90000):
             return False
         document = yaml.load(base64.b64decode("".join(blob["content"].split()), validate=True),
@@ -348,7 +350,7 @@ def _departure_payload(body: str, queue: str) -> dict:
 def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
     """Use a bot report only when it identifies the latest command and current head."""
     try:
-        comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+        comments = github.paged(f"repos/{repo}/issues/{number}/comments")
     except github.GhError:
         return None
     comments = [item for item in comments if type(item.get("id")) is int and item["id"] > 0]
@@ -388,7 +390,7 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
 def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
     login, requested, confirmed = github.login(token=""), False, False
     requested_at = ""
-    comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+    comments = github.paged(f"repos/{repo}/issues/{number}/comments")
     for item in _comments_by(comments, login):
         body = str(item.get("body") or "")
         lines, requeue = body.splitlines(), _queue_command(body, queue)
