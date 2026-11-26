@@ -250,6 +250,8 @@ Historical transcript rendering is available only for exact read-back matching.
 Local publication, saved-result replay and exact confirmation regenerate these
 facts from complete raw, never the public transcript tail or a saved summary.
 The restricted receipt stays in the task worktree until completion.
+The review command locks the worktree’s Git directory from round selection
+through publication to reserve the round across overlapping local invocations.
 
 After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that

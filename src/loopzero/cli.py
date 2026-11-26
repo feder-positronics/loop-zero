@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from functools import partial
+from functools import partial, wraps
 from pathlib import Path
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
@@ -717,8 +717,26 @@ def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.P
         raise
 
 
-def cmd_review(args: argparse.Namespace) -> int:
-    wt, config = _context(args, pin_checks=True)
+def _lock_review(run_review: Callable[[argparse.Namespace, Path, Config], int]):
+    @wraps(run_review)
+    def locked(args: argparse.Namespace) -> int:
+        wt, config = _context(args, pin_checks=True)
+        git_dir = _git(wt, "rev-parse", "--absolute-git-dir")
+        fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise CliError("review already running in this worktree") from exc
+            return run_review(args, wt, config)
+        finally:
+            os.close(fd)
+
+    return locked
+
+
+@_lock_review
+def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
