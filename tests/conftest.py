@@ -37,6 +37,12 @@ def git(repo: Path, *args: str) -> str:
     ).stdout
 
 
+def commit_file(repo: Path, name: str, text: str, message: str) -> None:
+    (repo / name).write_text(text)
+    git(repo, "add", "--", name)
+    git(repo, "commit", "-qm", message)
+
+
 def init_git_repo(repo: Path) -> Path:
     """Initialize branch `main` with a single commit of README.md."""
     repo.mkdir()
@@ -72,3 +78,11 @@ def fake_tool(fake_bin: Path) -> Callable[[str, str], Path]:
         return path
 
     return make
+
+
+@pytest.fixture
+def app_token_helper(fake_tool, monkeypatch):
+    def install(body="echo synthetic-app-token\n"):
+        monkeypatch.setattr(github, "APP_TOKEN_HELPER", fake_tool("app-token", body))
+
+    return install
