@@ -324,13 +324,13 @@ def _check_report_problem(
     if report.dirty:
         return ("check receipt was recorded in a dirty worktree. Run `git status --short`, "
                 "settle the changes, then run `loopzero check`.")
-    if require_pass and report.results and not report.ok:
-        return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
-                "Retry unchanged only if the failure was transient.")
     commands = tuple(result.command for result in report.results)
-    if commands != config.checks or (require_pass and not report.ok):
-        if config.checks[:len(commands)] == commands:
+    if (require_pass and not report.ok) or commands != config.checks:
+        if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
             return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
+        if require_pass and not report.ok:
+            return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
+                    "Retry unchanged only if the failure was transient.")
         return ("check receipt's plan differs from the trusted workflow. "
                 "Run `loopzero check` with the current workflow.")
     recovery = ("Run loopzero check in this worktree at this head with the same current CLI and effective "

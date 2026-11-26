@@ -12,7 +12,7 @@ import signal
 import subprocess
 import sys
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from select import select
 from types import SimpleNamespace
@@ -3022,7 +3022,7 @@ def test_ready_requires_clean_successful_local_report_at_head(
         if condition == "wrong-head":
             report["head"] = "0" * 40
         elif condition == "wrong-commands":
-            report["results"][0]["command"] = "true"
+            report["results"].pop()
         elif condition == "legacy":
             del report["settings_sha256"]
         else:
@@ -3036,6 +3036,8 @@ def test_ready_requires_clean_successful_local_report_at_head(
         assert f"not ready: {reason}." in out
         assert ("Run loopzero check in this worktree at this head with the same current CLI and effective "
                 "settings as ready, using a local coordinator for delegated stages." in out)
+    elif condition == "wrong-commands":
+        assert "not ready: check receipt's plan differs from the trusted workflow." in out
     elif condition != "matching":
         assert ("not ready: run loopzero check at this head" if condition == "missing" else "not ready: check receipt") in out
 
@@ -4601,12 +4603,15 @@ def test_receipt_print_failure_preserves_verdict(wt, gh, capsys, head, monkeypat
     ("dirty", True, "check receipt was recorded in a dirty worktree."),
     ("command", "changed", "check receipt's plan differs from the trusted workflow."),
     ("results", [], "check receipt is incomplete."),
+    ("results", "checkpoint", "check receipt is incomplete."),
 ])
 def test_invalid_receipt_is_not_announced(wt, gh, capsys, head, field, value, reason):
     arm_approved_ready_pr(gh, head, wt)
     path = wt / ".loopzero/checks.json"
     data = json.loads(path.read_text())
     target = data["results"][0] if field in {"exit_code", "command"} else data
+    if value == "checkpoint":
+        value = [data["results"][0], asdict(CheckResult("<checks incomplete>", 1, 0.0, ""))]
     target[field] = value
     path.write_text(json.dumps(data))
     code, out, _ = run(capsys, "ready")
