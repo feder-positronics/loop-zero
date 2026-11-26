@@ -2894,7 +2894,7 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, w
     (True, 300, True, True, 1, False),
     (False, 300, "tie", True, 1, False),
     (False, 300, False, False, 1, False),
-    (False, 300, "missing", True, 1, False),
+    (False, 180, "missing", True, 1, False),
     (False, 5, "fractional-review", True, 0, True),
     (False, 180, "fractional-newer", True, 1, False),
     (False, 180, "offset-tie", True, 1, False),
@@ -2942,7 +2942,7 @@ def test_ready_wait_review_failure_freshness(
         "offset-tie": "2026-09-23T11:00:00-01:00",
         "offset-older": "2026-09-23T13:59:59+02:00",
         "naive-check": "2026-09-23T11:59:00",
-        "malformed-check": "bad",
+        "malformed-check": "2026-09-23T12:00:00+00:60",
     }.get(
         new_failure,
         "2026-09-23T12:00:10Z" if new_failure is True else "2026-09-23T11:59:59Z",
@@ -2950,6 +2950,8 @@ def test_ready_wait_review_failure_freshness(
     pending_at = "2026-09-23T12:00:20Z"
     if name == "checks":
         runs = [{"name": name, "conclusion": "failure", "status": "completed", "completed_at": failed_at}]
+        if new_failure == "missing":
+            runs[0]["started_at"] = "2026-09-23T11:59:59Z"
         statuses = [{"context": name, "state": "pending", "created_at": pending_at}] if pending else []
     else:
         runs = [{"name": name, "status": "in_progress", "started_at": pending_at}] if pending else []

@@ -1153,12 +1153,16 @@ def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -
             raise _not_found(number, exc) from exc
 
 
+_READINESS_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?"
+    r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
+)
+
+
 def readiness_timestamp(value: object) -> datetime | None:
-    if isinstance(value, str):
+    if isinstance(value, str) and _READINESS_TIMESTAMP.fullmatch(value):
         with suppress(OverflowError, ValueError):
-            stamp = datetime.fromisoformat(value)
-            if stamp.tzinfo is not None:
-                return stamp.astimezone(UTC)
+            return datetime.fromisoformat(value).astimezone(UTC)
     return None
 
 
@@ -1170,6 +1174,7 @@ def _check_signals(
     required_ci: tuple[str, ...] = (),
     stale_verdict_grace: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
+    pending = {"pending", "queued", "in_progress", "requested", "waiting", "expected"}
     signals: dict[str, list[tuple[str, datetime | None]]] = {}
     latest_runs: dict[str, dict] = {}
     runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
@@ -1178,12 +1183,9 @@ def _check_signals(
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
             latest_runs[cr["name"]] = cr
     for name, cr in latest_runs.items():
-        signals[name] = [
-            (
-                cr.get("conclusion") or cr.get("status") or "unknown",
-                readiness_timestamp(cr.get("completed_at") or cr.get("started_at")),
-            )
-        ]
+        state = cr.get("conclusion") or cr.get("status") or "unknown"
+        timestamp = cr.get("started_at" if state in pending else "completed_at")
+        signals[name] = [(state, readiness_timestamp(timestamp))]
     latest_status: dict[str, dict] = {}
     for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status)
@@ -1195,7 +1197,6 @@ def _check_signals(
         name: _aggregate_signal([state for state, _ in values])
         for name, values in signals.items()
     }
-    pending = {"pending", "queued", "in_progress", "requested", "waiting", "expected"}
     stale = tuple(name for name, values in signals.items() if review_at
                   and states[name] not in pending and states[name] != "success"
                   and all(at and at < review_at for state, at in values
