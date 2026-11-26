@@ -30,11 +30,14 @@ Never weaken assertions, delete coverage or broaden retries/timeouts without
 support that the old oracle was wrong. Never change product to mask infrastructure
 failure. Diagnosis-only commissions stop before implementation.
 
-For bulk GitHub REST reads, use the Loop Zero App on repositories it can access.
-Pass the token from `$HOME/.config/loopzero/app-token` in `GH_TOKEN`. Keep it out
-of arguments and logs. Check `/rate_limit` first and bound pages and per-run
-lookups. If App access or quota is unavailable, narrow the audit before using
-the shared user credential.
+For bulk GitHub REST reads on App-covered repositories, run
+`audit_token=$("$HOME/.config/loopzero/app-token")` once per batch. Require a
+successful, nonempty token and use `GH_HOST=github.com GH_TOKEN="$audit_token" gh api ...`.
+Keep the token out of arguments, logs, and the parent environment. Check
+`/rate_limit` with that credential. Start with one page and lookups for at most
+10 runs. Expand only as needed and stop if response headers show quota exhausted.
+An App 404 may mean missing repository access. Use a smaller, bounded sample
+if the audit needs the shared user credential.
 
 Use synthetic/local data first; redact secrets, database URLs, personal data and
 user content from evidence. Instrumentation needs authority, safe output and
