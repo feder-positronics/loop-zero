@@ -932,7 +932,7 @@ def _repost_prefix(result: ReviewResult) -> str:
 
 def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
                     publisher: str, token: str) -> tuple[bool, list[dict]]:
-    with github.bounded_reads(time.monotonic() + 30, token=token):
+    with github.bounded_reads(time.monotonic() + 30, token=token, retry=True):
         reviews = _pr_reviews(config.repo, pr.number)
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
