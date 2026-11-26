@@ -521,11 +521,11 @@ The receipt fingerprint also binds the base SHA when reuse
 is configured, so advancing the base invalidates a pass at the same task head.
 With explicit `--config`, reuse can fall back to the recorded task base if the
 remote ref is absent. Without either base, local stages run fresh.
-The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
-when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
+The `"*"` entry adds shared inputs to listed commands. For unlisted commands it
+supplies a key only when `"*"` includes `"."` (the whole tree).
 Consumers own complete input declarations.
-Reuse only successful keyed stages from this worktree's clean receipt or
-checkpoint. Dirty trees run fresh. A tracked receipt is never eligible for reuse.
+For individual stage reuse, use only successful keyed results from this worktree's
+clean receipt or checkpoint. Dirty trees run fresh. A tracked receipt is ineligible.
 Receipts that use saved stage results bind the current head and check settings.
 For delegated checks, both the receipt and the stage key bind the runner's launch
 path, resolved executable path and executable bytes. Unavailable runner identity
