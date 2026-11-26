@@ -28,11 +28,16 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    green checks and gets its own timeout message (exit 3).
    Green can precede CI scheduling. After two minutes with only missing checks
    and none pending, inspect scheduling, triggers and permissions, then retry.
-6. After step 5 exits 0, run `(cd <worktree> && loopzero merge --wait)` from
-   the repository root; the subshell avoids leaving the shell inside a deleted
-   worktree. Merge rechecks readiness, uses the configured strategy, verifies
-   the landed SHA, and deletes branch/worktree. A cleanup warning still means
-   the merge landed; follow the next step it names. A queue initially enqueues;
+6. After step 5 exits 0, run from a durable directory such as `/tmp`
+   using the absolute path to the task worktree.
+
+   ```sh
+   (cd "/absolute/path/to/task-worktree" && loopzero merge --wait)
+   ```
+
+   Merge rechecks readiness, uses the configured strategy, verifies the landed
+   SHA, and deletes the branch and worktree. If cleanup warns, the merge landed.
+   Follow the recovery step it names. A queue initially enqueues;
    `--wait` covers readiness, landing and cleanup within the same budget.
    Enqueueing without `--wait` returns 0 without cleanup.
 
@@ -234,15 +239,8 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.
-  After a rollback across #732, confirm an already-published Claude review with
-  the publishing CLI revision or a newer compatible one. See
+  See
   [setup and rollback](../SETUP.md#connect-your-agent).
-
-A native structured fatal startup event reporting that Code Mode cannot spawn
-its host invalidates the attempt even if the process exits zero and emits a
-parseable verdict. It consumes no new budget and must not be published, merged
-with chunks or replayed from a saved result. Quoted diagnostic text and absence
-of tool calls alone do not invalidate a review.
 
 [Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
 

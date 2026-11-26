@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from functools import partial
+from functools import partial, wraps
 from pathlib import Path
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
@@ -377,9 +377,9 @@ def _lock_task_state(wt: Path) -> Iterator[None]:
         os.close(fd)
 
 
-def _save_report(wt: Path, report: CheckReport) -> None:
+def _save_report(wt: Path, report: CheckReport) -> str | None:
+    """Publish the receipt or return the current HEAD if the result is stale."""
     path = wt / CHECKS_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "head": report.head,
         "dirty": report.dirty,
@@ -389,7 +389,12 @@ def _save_report(wt: Path, report: CheckReport) -> None:
     }
     if report.settings_sha256 is not None:
         payload["settings_sha256"] = report.settings_sha256
-    _write_json_atomically(path, payload)
+    with _lock_task_state(wt):
+        current_head = worktree.head(wt)
+        if report.head != current_head:
+            return current_head
+        _write_json_atomically(path, payload)
+    return None
 
 
 def _write_json_atomically(path: Path, payload: dict) -> None:
@@ -627,12 +632,11 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "that cache.",
                     file=sys.stderr,
                 )
-    current_head = worktree.head(wt)
-    if report.head != current_head:
+    current_head = _save_report(wt, report)
+    if current_head is not None:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
               file=sys.stderr)
         return 1
-    _save_report(wt, report)
     if report.ok and not report.dirty:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
@@ -720,8 +724,26 @@ def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.P
         raise
 
 
-def cmd_review(args: argparse.Namespace) -> int:
-    wt, config = _context(args, pin_checks=True)
+def _lock_review(run_review: Callable[[argparse.Namespace, Path, Config], int]):
+    @wraps(run_review)
+    def locked(args: argparse.Namespace) -> int:
+        wt, config = _context(args, pin_checks=True)
+        git_dir = _git(wt, "rev-parse", "--absolute-git-dir")
+        fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise CliError("review already running in this worktree") from exc
+            return run_review(args, wt, config)
+        finally:
+            os.close(fd)
+
+    return locked
+
+
+@_lock_review
+def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
@@ -1164,7 +1186,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
         print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
-                                     shown=readiness.reasons if kicked else (), args=args)
+                                     shown=readiness.reasons if kicked else (), args=args,
+                                     initial=None if kicked else readiness)
         if waited is None:
             return 3
         pr, readiness, kicked = waited
@@ -1251,12 +1274,12 @@ def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Ite
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
-    allow_merged: bool = False,
+    allow_merged: bool = False, initial: github.Readiness | None = None,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     started = time.monotonic() if started is None else started
     if timeout == 0:
         return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                shown=shown, args=args, allow_merged=allow_merged)
+                                shown=shown, args=args, allow_merged=allow_merged, initial=initial)
     deadline = started + timeout
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr)
@@ -1265,7 +1288,8 @@ def _wait_with_deadline(
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
             waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged)
+                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged,
+                                      initial=initial)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1297,6 +1321,7 @@ def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
     args: argparse.Namespace | None = None, bounded: bool = False, allow_merged: bool = False,
+    initial: github.Readiness | None = None,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     """Poll the same head until it settles, omitting readiness for an allowed merge."""
     grace_started = time.monotonic()
@@ -1304,11 +1329,15 @@ def _wait_for_checks(
     current = pr
     stale_notice = False
     for _ in _poll_until(started, timeout, bounded=bounded):
-        current = github.pr_view(config.repo, pr.number)
-        _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
-        if allow_merged and current.state == "MERGED":
-            return current, None, kicked
-        readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
+        if initial is not None:
+            readiness = initial
+            initial = None
+        else:
+            current = github.pr_view(config.repo, pr.number)
+            _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
+            if allow_merged and current.state == "MERGED":
+                return current, None, kicked
+            readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
             print("marked ready; " + "; ".join(readiness.reasons))
@@ -1527,7 +1556,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
-                                     args=args, allow_merged=True)
+                                     args=args, allow_merged=True, initial=readiness)
         if waited is None:
             return 3
         pr, readiness, _ = waited
