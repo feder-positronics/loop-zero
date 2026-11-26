@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import codecs
 import errno
-import subprocess
 import re
 import stat
 import tempfile
-import threading
 from pathlib import Path
 from uuid import uuid4
 
-from loopzero._proc import build_env, run
+from loopzero._proc import run
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 EXCLUDES = (".worktrees/", ".loopzero/")
@@ -54,11 +51,17 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(cwd: Path, *args: str, timeout: float = 120, preserve_whitespace: bool = False) -> str:
+def _git(
+    cwd: Path, *args: str, timeout: float = 120,
+    preserve_whitespace: bool = False, preserve_newlines: bool = False,
+) -> str:
     argv = ("git", *args)
-    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
+    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
+               preserve_newlines=preserve_newlines)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
+    if preserve_newlines:
+        return done.stdout
     return done.stdout.removesuffix("\n") if preserve_whitespace else done.stdout.strip()
 
 
@@ -133,8 +136,9 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
+    base_ref = f"refs/remotes/origin/{base_branch}"
     try:
-        _git(repo_root, "fetch", "--quiet", "origin", f"refs/heads/{base_branch}")
+        _git(repo_root, "fetch", "--quiet", "origin", f"+refs/heads/{base_branch}:{base_ref}")
     except GitError:
         if "origin" not in _git(repo_root, "remote").splitlines():
             raise WorktreeError(
@@ -143,8 +147,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
                 "with `git remote rename <name> origin`."
             ) from None
         raise
-    base_ref = f"origin/{base_branch}"
-    base = _git(repo_root, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+    base = _git(repo_root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
     if existing:
         existing_head = _resumable_head(repo_root, wt, branch)
         if existing_head is None:
@@ -152,7 +155,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         if existing_head != base:
             raise WorktreeError(
                 f"cannot resume start at {wt}: existing HEAD {existing_head} does not match "
-                f"{base_ref} at {base}; run loopzero start with a new slug"
+                f"origin/{base_branch} at {base}; run loopzero start with a new slug"
             )
     _ensure_excludes(repo_root)
     if not existing:
@@ -246,99 +249,12 @@ def is_dirty(wt: Path) -> bool:
     return bool(_git(Path(wt), "status", "--porcelain", "--untracked-files=all"))
 
 
-def _git_bytes(wt: Path, *args: str, stdin: bytes | None = None) -> bytes:
-    """Git output as bytes: text mode would turn a bare CR into a line break."""
-    argv = ("git", *args)
-    try:
-        done = subprocess.run(argv, cwd=wt, env=build_env(GIT_ENV), input=stdin,
-                              capture_output=True, timeout=120, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise GitError(argv, "timed out") from exc
-    if done.returncode != 0:
-        raise GitError(argv, done.stderr.decode(errors="replace"))
-    return done.stdout
-
-
-def diff_since(wt: Path, sha: str) -> str:
-    """The reviewer's diff from ``sha`` to HEAD, which the reviewed files cannot hide.
-
-    Every file is diffed as text, whatever its attributes or NUL bytes, without diff
-    drivers. A file whose content is not UTF-8 is replaced by its header and size.
-    """
-    wt = Path(wt)
-    patch = _git_bytes(wt, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
-                       "--full-index", "--ignore-submodules=none", "--submodule=short", sha, "HEAD")
-    blocks = [block for block in re.split(rb"(?m)^(?=diff --git )", patch) if block]
-    # Classify each file by its own content (HEAD, or the base when deleted), not its patch.
-    sides = [_content_side(block) for block in blocks]
-    blobs = [side[0] for side in sides if side]
-    sizes = _non_utf8_sizes(wt, blobs) if blobs else {}
-    parts = []
-    for block, side in zip(blocks, sides, strict=True):
-        if side and side[0] in sizes:
-            first = block.partition(b"\n")[0].decode("utf-8", "replace")
-            parts.append(f"{first}\ncontent not shown: not UTF-8 text, "
-                         f"{sizes[side[0]]} bytes at {side[1]}\n")
-        else:
-            parts.append(block.decode("utf-8", "replace"))
-    return "".join(parts).removesuffix("\n")  # only the final newline; line content stays
-
-
-def _content_side(block: bytes) -> tuple[str, str] | None:
-    # Full object IDs: an abbreviated one could resolve as a ref name instead.
-    index = re.search(rb"(?m)^index ([0-9a-f]{40}(?:[0-9a-f]{24})?)\.\.([0-9a-f]{40}(?:[0-9a-f]{24})?)(?= |$)",
-                      block.partition(b"\n@@")[0])
-    if not index:
-        return None  # rename or mode change only: no content changed
-    old, new = (side.decode() for side in index.groups())
-    return (old, "the reviewed base") if not new.strip("0") else (new, "HEAD")
-
-
-def _non_utf8_sizes(wt: Path, blobs: list[str]) -> dict[str, int]:
-    """Sizes of the given blobs whose content is not UTF-8: one Git call, bounded reads."""
-    argv = ("git", "cat-file", "--batch")
-    sizes = {}
-    with subprocess.Popen(argv, cwd=wt, env=build_env(GIT_ENV), stdin=subprocess.PIPE,
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
-        deadline = threading.Timer(120, proc.kill)  # a stalled read then ends in EOF below
-        deadline.start()
-        try:
-            for blob in dict.fromkeys(blobs):
-                proc.stdin.write(f"{blob}\n".encode())
-                proc.stdin.flush()
-                fields = proc.stdout.readline().split()
-                if fields[1:] == [b"missing"]:  # e.g. a submodule commit not fetched here
-                    continue
-                if len(fields) != 3:
-                    raise GitError(argv, f"no usable response for {blob}")
-                size = int(fields[2])
-                utf8 = _stream_is_utf8(proc.stdout, size, argv)
-                if proc.stdout.read(1) != b"\n":
-                    raise GitError(argv, f"truncated response for {blob}")
-                if fields[1] == b"blob" and not utf8:
-                    sizes[blob] = size
-        except (OSError, ValueError) as exc:
-            raise GitError(argv, str(exc)) from exc
-        finally:
-            deadline.cancel()
-            proc.stdin.close()
-            proc.kill()
-    return sizes
-
-
-def _stream_is_utf8(stream, size: int, argv: tuple[str, ...]) -> bool:
-    decoder, valid = codecs.getincrementaldecoder("utf-8")(), True
-    while size:
-        chunk = stream.read(min(size, 1 << 16))
-        if not chunk:
-            raise GitError(argv, "object content ended early")
-        size -= len(chunk)
-        try:
-            decoder.decode(chunk, final=not size)
-        except UnicodeDecodeError:
-            valid = False
-            decoder = codecs.getincrementaldecoder("latin-1")()  # keep draining, stop checking
-    return valid
+def diff_since(wt: Path, sha: str) -> bytes:
+    # Show every file as text, whatever attributes or NUL bytes the reviewed head adds,
+    # without diff drivers, and keep submodule pointers even if .gitmodules ignores them.
+    diff = _git(Path(wt), "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                "--ignore-submodules=none", "--submodule=short", sha, "HEAD", preserve_newlines=True)
+    return diff.encode("utf-8", errors="surrogateescape")
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:

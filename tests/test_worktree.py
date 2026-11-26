@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import worktree
+from loopzero import runners, worktree
 from loopzero.runners import split_diff
 from tests.conftest import git
 
@@ -52,9 +52,9 @@ def test_branch_refuses_detached_head(repo: Path) -> None:
 
 
 @pytest.mark.parametrize("branch", [None, "feature/ci+release"])
-def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None) -> None:
-    if branch:
-        git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None, monkeypatch) -> None:
+    side = branch or "side"
+    git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{side}")
     upstream = commit_on_origin(repo, "feature.txt")
     if branch:
         checkout = repo.parent / "single-branch"
@@ -62,6 +62,14 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
         assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
         repo = checkout
+    invoke = worktree._git
+    def interleave(path, *args, **kwargs):
+        result = invoke(path, *args, **kwargs)
+        if args[0] == "fetch":
+            git(path, "fetch", "-q", "origin", f"refs/heads/{side}")
+        return result
+
+    monkeypatch.setattr(worktree, "_git", interleave)
     wt = worktree.start(repo, "my-task", "main")
     assert wt == repo / ".worktrees" / "my-task"
     assert (wt / "feature.txt").exists(), "fetched origin/main before branching"
@@ -207,30 +215,15 @@ def _commit_files(repo: Path, files: dict[str, bytes | None]) -> str:
 
 
 def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path) -> None:
-    base = _commit_files(git_repo, {"attr.py": b"old\n", "nul.py": b"old\n", "was_latin1.txt": b"caf\xe9\n",
-                                    "far.bin": b"\xff" + b"line\n" * 40})
+    base = _commit_files(git_repo, {"attr.py": b"old\n", "nul.py": b"old\n"})
     git(git_repo, "update-index", "--add", "--cacheinfo", f"160000,{base},a-sub")
     _commit_files(git_repo, {
         ".gitattributes": b"attr.py -diff\nnul.py binary\n", "attr.py": b"new = 'attr hunk'\n",
         "nul.py": b"new = 'nul hunk'\x00\n", "image.png": b"\x89PNG\r\n\x1a\n\x00\xff\xfe",
-        "was_latin1.txt": "café \u00a0\n".encode(), "far.bin": b"\xff" + b"line\n" * 39 + b"changed\n",
-        "deleted file mode 100644": b"\xff\xfe", "r\u00e9sum\u00e9.bin": b"\xff",
         ".gitmodules": b'[submodule "a-sub"]\n\tpath = a-sub\n\tignore = all\n'})
     diff = worktree.diff_since(git_repo, base)
-    assert "Binary files" not in diff and f"+Subproject commit {base}" in diff and "+new = 'attr hunk'" in diff
-    assert "+new = 'nul hunk'\x00" in diff and "+café \u00a0" in diff.split("\n")  # untrimmed, old side not UTF-8
-    for header, size in (("a/image.png b/image.png", 11), ("a/far.bin b/far.bin", 204),
-                         ('"a/r\\303\\251sum\\303\\251.bin" "b/r\\303\\251sum\\303\\251.bin"', 1)):
-        assert f"diff --git {header}\ncontent not shown: not UTF-8 text, {size} bytes at HEAD\n" in diff
-    notice = "diff --git a/deleted file mode 100644 b/deleted file mode 100644\ncontent not shown"
-    assert notice in "".join(split_diff(diff, 400))
-
-
-def test_blob_classification_fails_closed_and_keeps_full_ids(git_repo: Path, monkeypatch) -> None:
-    assert worktree._content_side(b"index " + b"a" * 64 + b".." + b"b" * 64 + b" 100644") == ("b" * 64, "HEAD")
-    monkeypatch.setattr(worktree.subprocess, "Popen", lambda _, real=subprocess.Popen, **kw: real(["true"], **kw))
-    with pytest.raises(worktree.GitError, match="no usable response"):
-        worktree._non_utf8_sizes(git_repo, ["b" * 40])
+    assert b"Binary files" not in diff and f"+Subproject commit {base}".encode() in diff
+    assert b"+new = 'attr hunk'" in diff and b"+new = 'nul hunk'\x00" in diff and b"+\x89PNG\r" in diff
 
 
 def test_split_diff_summarizes_only_files_git_reports_deleted(git_repo: Path) -> None:
@@ -238,7 +231,7 @@ def test_split_diff_summarizes_only_files_git_reports_deleted(git_repo: Path) ->
     _commit_files(git_repo, {"gone.py": None, "padded.py": b"new = 'padded hunk'\n++ /dev/null\n" + b"x\n" * 300,
                              "carriage.py": b"new \rdiff --git a/carriage.py b/carriage.py\rdeleted file mode 100644\r"
                              + b"y\n" * 300})
-    joined = "".join(split_diff(worktree.diff_since(git_repo, base), 1_000))
+    joined = "".join(split_diff(runners.render_patch(worktree.diff_since(git_repo, base)), 1_000))
     assert "+++ /dev/null" in joined and "+new = 'padded hunk'" in joined and "+new \r" in joined
     assert "gone.py: deleted, 1 lines" in joined and joined.count(": deleted, ") == 1
 
@@ -254,9 +247,9 @@ def test_dirty_head_and_diff(repo: Path) -> None:
     assert not worktree.is_dirty(wt)
     assert worktree.head(wt) != base
     diff = worktree.diff_since(wt, base)
-    assert "+print(1)" in diff and "new.py" in diff
+    assert b"+print(1)" in diff and b"new.py" in diff
     (wt / "new.py").write_text("print(2)\n")
-    assert "print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
+    assert b"print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
     assert worktree.is_dirty(wt)
 
 
