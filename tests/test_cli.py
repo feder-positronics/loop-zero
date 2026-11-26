@@ -4018,13 +4018,13 @@ THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": Tru
 def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, outcome) -> None:
     sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
     finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
-    listing = threads_json(finding_pr)
+    listing = threads_json({**finding_pr, "path": "src/Łódź.py"})
     gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
                listing if outcome == "remaining" else threads_json())
     gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
     title = r"\u0141\xf3d\u017a" if outcome == "refreshed" else "Łódź"
     code, out, err = run(capsys, "resolve")
-    assert (code, err) == (0, "") and out == f"0b9b59e7  important  src/a.py:3  {title}\n"
+    assert (code, err) == (0, "") and out == f"0b9b59e7  important  src/{title}.py:3  {title}\n"
     assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
     assert out.splitlines()[0] == f"resolved 0b9b59e7: {title}"
