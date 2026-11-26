@@ -18,7 +18,7 @@ from urllib.parse import quote
 import pytest
 
 from loopzero import cli, config, github, mergify
-from loopzero._proc import Completed, build_env
+from loopzero._proc import Completed, ProcTimeout, build_env
 from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
 from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
@@ -3102,6 +3102,19 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> Non
     assert wt.exists()
 
 
+def lose_native_merge_reply(monkeypatch):
+    original = github._gh
+
+    def transport(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if args[:2] == ("pr", "merge"):
+            raise ProcTimeout("lost native merge reply", "")
+        return result
+
+    monkeypatch.setattr(github, "_gh", transport)
+
+
+@pytest.mark.parametrize("lost_reply", [False, True])
 @pytest.mark.parametrize("branch,changed", [
     ("lz/t1", False),
     ("t3/archive-review-receipts", False),
@@ -3110,13 +3123,15 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> Non
     ("lz/t1", True),
 ])
 def test_merge_prints_sha_and_cleans_up(
-    wt: Path, repo: Path, gh: FakeGh, capsys, changed, head, branch
+    wt: Path, repo: Path, gh: FakeGh, capsys, changed, head, branch, monkeypatch, lost_reply
 ) -> None:
     git(wt, "branch", "-m", branch)
     arm_approved_ready_pr(gh, head, wt, isDraft=False, branch=branch)
     gh.respond("pr merge", "")
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head='f' * 40 if changed else head_of(wt), sha='c' * 40))
     gh.respond("api -X", "")
+    if lost_reply:
+        lose_native_merge_reply(monkeypatch)
     code, out, err = run(capsys, "merge")
     out = without_accepted_receipt(out)
     if changed:
@@ -3746,12 +3761,15 @@ def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
-def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys, head) -> None:
+@pytest.mark.parametrize("lost_reply", [False, True])
+def test_merge_queued_prints_and_keeps_worktree(wt, gh, capsys, head, monkeypatch, lost_reply):
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond("pr merge", "")
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=head_of(wt), sha=None))
     gh.respond("api graphql", threads_json(),
-               {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}})
+               {"data": {"repository": {"pullRequest": {"isInMergeQueue": True, "headRefOid": head}}}})
+    if lost_reply:
+        lose_native_merge_reply(monkeypatch)
     code, out, err = run(capsys, "merge")
     assert (code, err) == (0, "")
     assert "queued for merge into main" in out and out.endswith(
@@ -3877,7 +3895,7 @@ def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
                      merge_json(state="MERGED", head=head, sha="e" * 40) if landed else open_pr]
     gh.append(f"api repos/{REPO}/pulls/7", *snapshots)
     def queue(value: bool) -> dict:
-        return {"data": {"repository": {"pullRequest": {"isInMergeQueue": value}}}}
+        return {"data": {"repository": {"pullRequest": {"isInMergeQueue": value, "headRefOid": head}}}}
     ejected = outcome in {"ejected", "landed-on-ejection"}
     gh.respond("api graphql", threads_json(), queue(True), queue(not ejected))
     gh.respond("api -X", "")

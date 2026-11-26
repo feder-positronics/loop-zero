@@ -1308,7 +1308,7 @@ def mark_ready(repo: str, number: int) -> None:
 
 _QUEUE_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name)"
-    "{pullRequest(number:$number){isInMergeQueue autoMergeRequest{enabledAt}}}}"
+    "{pullRequest(number:$number){headRefOid isInMergeQueue autoMergeRequest{enabledAt}}}}"
 )
 
 
@@ -1340,7 +1340,7 @@ def merged_sha(
     raise GhError(argv, "PR closed without a verified merge or invalid merge evidence")
 
 
-def merge_pending(repo: str, number: int) -> bool:
+def merge_pending(repo: str, number: int, head_sha: str) -> bool:
     """True when GitHub holds the PR for merging: queued, or accepted as an auto-merge
     request that it moves into the queue shortly after (observed ~1 minute, #180)."""
     owner, name = repo.split("/", 1)
@@ -1359,6 +1359,8 @@ def merge_pending(repo: str, number: int) -> bool:
         raise MergeFailed(("gh", "api", "graphql"),
                           f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
                           f"Check the PR's queue or merge state before retrying.\n{str(exc)[-300:]}") from exc
+    if pr.get("headRefOid") != head_sha:
+        raise MergeFailed(("gh", *argv), "PR head changed or unavailable during queue verification")
     return queued or bool(auto)
 
 
@@ -1375,16 +1377,19 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     argv = (
         "pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha,
     )
+    if strategy == "queue" and merge_pending(repo, number, head_sha):
+        return None
+    write_error = None
     try:
         _gh(*argv, timeout=300)
-    except GhError as exc:
-        raise MergeFailed(exc.command, exc.tail) from exc
+    except (GhError, ProcTimeout, OSError) as exc:
+        write_error = exc
     sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
     queue_error = None
     try:
-        if merge_pending(repo, number):
+        if merge_pending(repo, number, head_sha):
             return None
     except MergeFailed as exc:
         queue_error = exc
@@ -1394,7 +1399,8 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         return sha
     if queue_error:
         raise queue_error
-    raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
+    detail = f": {write_error}" if write_error else ""
+    raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued{detail}")
 
 
 def _remote_branch_head(endpoint: str) -> str | None:
