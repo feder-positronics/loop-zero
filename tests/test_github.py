@@ -1239,7 +1239,7 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining
     with github.bounded_reads(github.time.monotonic() + budget, retry=True), pytest.raises(github.GhError) as info:
         github.pr_for_branch(REPO, "lz/x")
     error = str(info.value)
-    assert hint in error
+    assert hint in error and error.split(" failed: ", 1)[1].startswith("Rate limited:")  # Retry time first.
     assert info.value.rate_reset == (1795640594 if remaining == "0" else None)
     if remaining:
         assert "X-RateLimit-Resource: core" in error

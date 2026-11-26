@@ -72,11 +72,14 @@ class GhError(Exception):
                  token: str = "", guidance: str = "", confirmed_rate_limit: bool = False,
                  rate_reset: int | None = None) -> None:
         self.command = tuple(_redact_tokens(arg, token) for arg in command)
-        self.tail = _redact_tokens(tail, token) + guidance
+        body = _redact_tokens(tail, token)
+        self.tail = body + guidance
         self.confirmed_rate_limit = confirmed_rate_limit
         self.rate_reset = rate_reset
         command_text = _redact_tokens(" ".join(command), token)
-        super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
+        # A rate limit leads with its retry time, ahead of the cut response body.
+        shown = f"{guidance.strip()}\n{body.strip()[-600:]}" if "Rate limited:" in guidance else self.tail.strip()[-600:]
+        super().__init__(f"{command_text} failed: {shown.strip()}")
 
 
 class GhUnavailable(GhError):
@@ -453,7 +456,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     elif remaining is not None or retry_seconds or retry_date:
         delay = f"{retry_after} s" if retry_seconds else retry_after if retry_date else "~60 s"
         guidance = f"\nRate limited: short-window limit: retry after {delay}."
-    return "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None) + guidance
+    return guidance + "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None)
 
 
 def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:
@@ -833,7 +836,7 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         prefix = first + "\n" + header + (separator + rest if separator else "")
         _, span = runners.leading_review_block(prefix)
         if len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
-            raise runners.RunnerBadOutput("codex: oversized leading machine block; HOLD")
+            raise runners.RunnerBadOutput("codex: oversized leading machine block; rerun loopzero review")
     severities = [f.severity for f in result.findings]
     summary = ", ".join(f"{severities.count(s)} {s}" for s in ("critical", "important", "suggestion"))
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"

@@ -3142,7 +3142,8 @@ def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, hea
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
 @pytest.mark.parametrize("condition,reason", [
-    *((case, "run loopzero check at this head") for case in ("missing", "during-gates", "transient")),
+    *((case, "run loopzero check at this head (no receipt at .loopzero/checks.json)")
+      for case in ("missing", "during-gates", "transient")),
     ("head", "check receipt is for aaaaaaaaaaaa."),
     ("failed", "check receipt records a failed stage."), ("dirty", "check receipt was recorded in a dirty worktree."),
     ("plan", "check receipt's plan differs from the trusted workflow."),

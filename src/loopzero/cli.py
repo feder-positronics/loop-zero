@@ -349,7 +349,7 @@ def _check_report_problem(
     report: CheckReport | None, config: Config, head: str, *, require_pass: bool = True,
 ) -> str | None:
     if report is None:
-        return "run loopzero check at this head"
+        return f"run loopzero check at this head (no receipt at {CHECKS_FILE})"
     if report.head != head:
         return f"check receipt is for {report.head[:12]}. Run `loopzero check` at {head[:12]}."
     if report.dirty:
@@ -839,7 +839,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             )
     try:
         if not _matches_publication(result, publication_context):
-            raise CliError("native publication context changed; HOLD")
+            raise CliError("native publication context changed during review; rerun loopzero review")
     except runners.RunnerBadOutput:
         _save_review(wt, result)
         raise

@@ -720,7 +720,7 @@ def _codex_header(value):
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     header = CODEX_HEADER + base64.urlsafe_b64encode(encoded).decode().rstrip("=") + " -->"
     if len(header.encode()) > CODEX_HEADER_LIMIT:
-        raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes; HOLD")
+        raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes; rerun loopzero review")
     return header
 
 
