@@ -57,6 +57,9 @@ def replay(
         key = response_key(argv)
         responses = compat.get(key)
         if responses is None:
+            # Legacy scenarios exercise the list fallback for an absent remote branch.
+            if argv[0] == "api" and "/branches/" in key:
+                return 1, "", "gh: Branch not found (HTTP 404)\n"
             return 97, "", f"fake gh: no response for {key}\n"
         index = sum(1 for call in log[:-1] if response_key(call["argv"]) == key)
         resp = responses[min(index, len(responses) - 1)]
