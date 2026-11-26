@@ -572,6 +572,30 @@ def test_provider_deadline_covers_http_error_body(helper, monkeypatch):
     with pytest.raises(TimeoutError, match="provider HTTP request timed out"):
         helper._http(request, timeout=1)
 
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_account_staging_preserves_colliding_path(helper, tmp_path, symlink):
+    path = helper.STATE / "status.json"
+    staged = path.with_name(f"{path.name}.{helper.os.getpid()}.{helper.threading.get_ident()}.tmp")
+    target = tmp_path / "unrelated" if symlink else staged
+    target.write_text("preserve")
+    if symlink:
+        staged.symlink_to(target)
+    helper.write_private(path, "{}")
+    assert path.read_text() == "{}" and target.read_text() == "preserve"
+
+
+def test_account_lock_preserves_existing_file_and_rejects_symlink(helper):
+    lock = helper.STATE / ".lock"
+    lock.write_text("preserve")
+    with helper._locked(lock.name):
+        assert lock.read_text() == "preserve"
+    (helper.STATE / ".codex-sync.lock").symlink_to(lock)
+    with pytest.raises(OSError), helper._locked(".codex-sync.lock"):
+        pytest.fail("redirected lock opened")
+    assert lock.read_text() == "preserve"
+
+
 @pytest.mark.parametrize("outcome", ["published", "copy failed"])
 def test_account_env_moves_shared_entry_across_devices(helper, monkeypatch, outcome):
     if not Path("/dev/shm").is_dir() or Path("/dev/shm").stat().st_dev == helper.STATE.stat().st_dev:
@@ -582,7 +606,6 @@ def test_account_env_moves_shared_entry_across_devices(helper, monkeypatch, outc
     copy = helper.shutil.copy2
     with tempfile.TemporaryDirectory(dir="/dev/shm") as main:
         monkeypatch.setattr(helper, "CODEX_MAIN", Path(main))
-        target = Path(main) / entry.name
         def stage(src, dst, **kwargs):
             copy(src, dst, **kwargs)
             if outcome == "copy failed":
@@ -594,4 +617,4 @@ def test_account_env_moves_shared_entry_across_devices(helper, monkeypatch, outc
         else:
             helper.account_env("codex", "extra")
         assert entry.read_text() == "original" and entry.is_symlink() == (outcome == "published")
-        assert list(Path(main).iterdir()) == ([] if outcome == "copy failed" else [target])
+        assert list(Path(main).iterdir()) == ([] if outcome == "copy failed" else [Path(main) / entry.name])

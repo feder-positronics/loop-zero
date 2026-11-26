@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ import pytest
 from loopzero import github, hosted
 from loopzero.candidate import CandidateError, CandidateRaceError
 from tests import test_github as fixtures
+from tests.conftest import git
 from tests.test_candidate import event as candidate_event
 from tests.test_candidate import payloads as candidate_payloads
 from tests.test_candidate import status as candidate_status
@@ -106,6 +108,58 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     assert all(s["context"] == "Loop-zero Eligibility" for s in statuses)
     assert status != "success" or sum(c["argv"][1] != "graphql" for c in publisher.calls) <= 5
     assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
+
+
+@pytest.mark.parametrize("candidate", [False, True])
+@pytest.mark.parametrize("change", ["exact", "ordinary", "clean merge"])
+def test_hosted_review_coverage_after_source_head_changes(
+    publisher, git_repo, monkeypatch, candidate, change,
+):
+    git(git_repo, "switch", "-qc", "source")
+    git(git_repo, "commit", "-qm", "reviewed source", "--allow-empty")
+    reviewed = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "switch", "-q", "main")
+    git(git_repo, "commit", "-qm", "base advance", "--allow-empty")
+    base = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "switch", "-q", "source")
+    if change == "ordinary":
+        git(git_repo, "commit", "-qm", "unreviewed source", "--allow-empty")
+    elif change == "clean merge":
+        git(git_repo, "merge", "-q", "--no-edit", "main")
+    head = git(git_repo, "rev-parse", "HEAD").strip()
+    source = fixtures.rest_pr_json(pr_json(headRefOid=head))
+    source["base"]["sha"] = base
+    publisher.respond(f"api repos/{REPO}/pulls/7", source)
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [{
+        "state": "COMMENTED", "commit_id": reviewed, "user": {"login": "trusted-publisher"},
+        "body": f"<!-- loopzero:review v=1 head={reviewed} kind=primary source=model -->\n"
+                "loopzero primary review by claude: **approve** (0 critical, 0 important, 0 suggestion)",
+    }])
+    publisher.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": "ahead"})
+    monkeypatch.setattr(hosted.candidate_mod, "fetched_git",
+                        lambda *_: nullcontext(partial(git, git_repo)))
+
+    target = head
+    if candidate:
+        target = HEAD
+        Path("event.json").write_text(json.dumps({
+            "action": "opened", "pull_request": {"number": 9, "head": {"sha": target}},
+        }))
+        publisher.respond(f"api repos/{REPO}/pulls/9", fixtures.rest_pr_json(
+            pr_json(number=9, headRefOid=target), branch="mergify/merge-queue/main",
+        ))
+        monkeypatch.setattr(hosted.candidate_mod, "attest_candidate",
+                            lambda _event, *, source_policy, **_: source_policy(7, source))
+    publisher.respond(f"api repos/{REPO}/statuses/{target}", {})
+
+    if change == "ordinary" and candidate:
+        with pytest.raises(hosted.LoopZeroError, match="no review recorded"):
+            hosted.main()
+    else:
+        assert hosted.main() == 0
+    states = [json.loads(call["--input"])["state"] for call in publisher.calls if "--input" in call]
+    assert states == ["pending", ("failure" if candidate else "pending")
+                      if change == "ordinary" else "success"]
 
 
 def test_merged_source_refresh_publishes_nothing(publisher):
