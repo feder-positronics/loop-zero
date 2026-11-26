@@ -519,10 +519,14 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
     return prefix + content.lstrip("\n")
 
 
-def _update_pr_checks(wt: Path, head: str, config: Config, pr: github.PR) -> None:
-    body = _pr_body(wt, head, pr.body)
-    if body != (pr.body or "").replace("\r\n", "\n"):
-        github.update_body(config.repo, pr.number, body)
+def _update_pr_checks(wt: Path, head: str, config: Config, branch: str) -> None:
+    with _lock_task_state(wt):
+        live = github.pr_for_branch(config.repo, branch)
+        if live is None or live.state != "OPEN" or live.head_sha != head:
+            return
+        body = _pr_body(wt, head, live.body)
+        if body != live.body.replace("\r\n", "\n"):
+            github.update_body(config.repo, live.number, body)
 
 
 _REQUIRED_TASK_LINES = ("Context", "Problem", "Goal")
@@ -566,9 +570,7 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         if upstream.exit_code != 0:
             return
         branch, head = worktree.branch(wt), worktree.head(wt)
-        pr = github.pr_for_branch(config.repo, branch)
-        if pr is not None and pr.state == "OPEN" and pr.head_sha == head:
-            _update_pr_checks(wt, head, config, pr)
+        _update_pr_checks(wt, head, config, branch)
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
@@ -659,7 +661,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
             f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
             "run `loopzero start <new-task-slug>` for a new task"
         )
-    existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
+    existing = _sync_task_narrative(wt, pr.body) if pr is not None else None
     body = _pr_body(wt, head, existing)
     force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
     push = ["push", "-u", "origin"]
@@ -675,8 +677,13 @@ def cmd_pr(args: argparse.Namespace) -> int:
     push.append(branch)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
-        if body != (pr.body or "").replace("\r\n", "\n"):
-            github.update_body(config.repo, pr.number, body)
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            if live.state != "OPEN":
+                raise CliError(f"PR #{pr.number} closed during publication")
+            body = _pr_body(wt, head, _sync_task_narrative(wt, live.body))
+            if body != live.body.replace("\r\n", "\n"):
+                github.update_body(config.repo, pr.number, body)
     else:
         pr = github.create_draft_pr(
             config.repo, branch, config.base_branch, _pr_title(wt, branch), body
@@ -853,8 +860,9 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
-        live = github.pr_view(config.repo, pr.number)
-        github.update_body(config.repo, pr.number, _append_review(live.body, result))
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            github.update_body(config.repo, pr.number, _append_review(live.body, result))
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
