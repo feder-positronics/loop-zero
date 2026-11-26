@@ -469,6 +469,24 @@ def test_post_review_reroutes_findings_outside_diff(gh: FakeGh) -> None:
     assert "Nit off diff" in payload["body"]
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: str) -> None:
+    path = "src/a.py"
+    patch = f"@@ -1 +1,2 @@\n-old\n+left{separator}right\n+second\n"
+    arm_review(gh, files=[{"filename": path, "patch": patch}])
+    findings = (
+        Finding("important", path, 2, "In diff", ""),
+        Finding("critical", path, 3, "Outside diff", ""),
+    )
+
+    github.post_review(REPO, 7, HEAD, review(findings=findings))
+
+    assert github._right_lines(patch) == ({1, 2}, 1)
+    comments = comments_posted(gh)
+    assert [(c["path"], c["line"]) for c in comments] == [(path, 2), (path, 1)]
+    assert "Reviewer location src/a.py:3 is not in the diff" in comments[1]["body"]
+
+
 def test_post_review_anchor_skips_files_without_hunks(gh: FakeGh) -> None:
     arm_review(gh, files=[{"filename": "img.png"},
                           {"filename": "src/d.py", "patch": "@@ -3,0 +4,2 @@\n+p\n+q"}])
