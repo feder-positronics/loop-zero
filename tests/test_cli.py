@@ -1259,11 +1259,11 @@ def test_pr_refuses_to_overwrite_a_pr_head_it_has_never_seen(
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == pushed
 
 
-def test_version_names_the_installed_revision(capsys) -> None:
-    with pytest.raises(SystemExit) as stop:
-        cli.main(["--version"])
-    out = capsys.readouterr().out
-    assert stop.value.code == 0 and re.fullmatch(r"loopzero \S+ .+\n", out), out
+@pytest.mark.parametrize("flag, pattern", [("--version", r"loopzero \S+ .+\n\Z"), ("--help", r"usage: loopzero ")])
+def test_cli_info_leaves_delivery_backends_unloaded(flag, pattern):
+    done = subprocess.run([sys.executable, "-X", "importtime", "-m", "loopzero.cli", flag], capture_output=True, text=True)
+    assert done.returncode == 0 and re.match(pattern, done.stdout), done
+    assert not re.search(r"loopzero\.(github|mergify|runners|sandbox)\b", done.stderr)
 
 
 def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
