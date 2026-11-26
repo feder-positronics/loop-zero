@@ -16,7 +16,9 @@ As an unattended worker, follow [the worker role's blocker route](../../../docs/
 
 Before the first code edit, record observable criteria in task Acceptance and
 freeze them. Change Acceptance only with a recorded reason in Notes, before
-implementing the change. For changes touching guards, auth, permissions,
+implementing the change. For an authorized retarget, make `.loopzero/task.md`
+and the PR description agree on Acceptance before the next review.
+For changes touching guards, auth, permissions,
 sessions, secrets or trust boundaries, record a short design pass in Notes
 before the first code edit: threats, invariants and chosen approach.
 When deduplicating tests, list their distinct assertions before editing,
