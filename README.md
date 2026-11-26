@@ -22,7 +22,7 @@ ownership and the contributor routine that keeps documentation current.
 
 | Command | What it does |
 | --- | --- |
-| `loopzero start <slug>` | Create a worktree and branch from base; write the Context/Problem/Goal task template. |
+| `loopzero start <slug>` | Create a worktree and branch from base; write the Goal/Problem/Context task template. |
 | `loopzero check` | Run trusted-base checks with local bwrap. |
 | `loopzero pr` | Push and open a draft PR from the task file, with its Validation section rendered. |
 | `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. Exits 0 on approval, 5 on changes requested. |

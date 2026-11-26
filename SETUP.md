@@ -343,7 +343,7 @@ that base and creates the task worktree from it.
 
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
-$EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
+$EDITOR .loopzero/task.md             # fill Goal, Problem, Context and Acceptance
 ```
 
 Make and commit a change in the task worktree, then run `loopzero check` there.
