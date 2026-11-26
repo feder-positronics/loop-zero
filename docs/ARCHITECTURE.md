@@ -76,8 +76,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    source sandbox. It inventories Git object stores only when alternates may be
    present. Its simple-command preflight catches missing local scripts,
    prepares recognized uv dependency groups offline in that sandbox and prints
-   progress before each command, metadata-only stage heartbeats every 30 seconds
-   (including silent children), and exit code/duration immediately after each stage.
+   progress before each command, a metadata-only heartbeat after 30 seconds and every
+   five minutes thereafter, and exit code/duration immediately after each stage.
    Heartbeats stop on completion or cancellation and never supply a verdict.
    Local stages drain merged child output and retain a bounded diagnostic tail.
    Trusted-base commands remain authoritative;
