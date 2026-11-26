@@ -5,11 +5,13 @@ import itertools
 import json
 import os
 import resource
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import traceback
 from contextlib import ExitStack
 from dataclasses import replace
@@ -108,9 +110,10 @@ def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
 
 @pytest.mark.parametrize("command,exit_code,line_count,start,end", [
     ("for i in $(seq 1 50); do echo $i; done; echo err >&2", 0, 40, "12", "err"),
-    ("""python3 -c 'print("x" * 16777216 + " Ω end")'""", 0, 1, "x", " Ω end"),
+    ("""python3 -c 'print("x" * 20000 + " Ω end")'""", 0, 1, "x", " Ω end"),
+    ("""python3 -c 'print("terminal line" + "\\n" * 20_000)'""", 0, 1, "terminal line", "terminal line"),
     ("./" * 8_200 + "absent/file", 1, 1, "", "otherwise restore the required file."),
-], ids=["lines", "oversized-line", "missing-file"])
+], ids=["lines", "oversized-line", "trailing-newlines", "missing-file"])
 def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, command, exit_code, line_count, start, end):
     (result,) = sandbox.run_checks(make_config(checks=(command,)), git_repo).results
     lines = result.tail.splitlines()
@@ -231,26 +234,50 @@ def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
 
 
 def inject_check_timeout(monkeypatch, output, before_timeout=None):
-    communicate = subprocess.Popen.communicate
+    def read_output_tail(process, limit, timeout):
+        if before_timeout is not None:
+            before_timeout()
+        raise subprocess.TimeoutExpired(process.args, timeout, output=output[-limit:])
 
-    def communicate_with_timeout(process, input=None, timeout=None):
-        if tuple(process.args[-6:-1]) == sandbox.CHECK_SHELL:
-            if before_timeout is not None:
-                before_timeout()
-            raise subprocess.TimeoutExpired(process.args, timeout, output=output)
-        return communicate(process, input, timeout)
-
-    monkeypatch.setattr(subprocess.Popen, "communicate", communicate_with_timeout)
+    monkeypatch.setattr(sandbox._proc, "_read_output_tail", read_output_tail)
 
 
-def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
-    inject_check_timeout(monkeypatch, b"x" * 20_000 + b"partial")
+def test_verbose_stage_bounds_parent_memory(git_repo):
+    command = shlex.join([sys.executable, "-c", """
+import os
+import sys
+
+block = b"x" * (1024 * 1024)
+for _ in range(50):
+    sys.stdout.buffer.write(block)
+sys.stdout.flush()
+os.write(1, b"\\r\\nlast stdout\\r\\n")
+os.write(2, "final Ω diagnostic\\r\\n".encode())
+sys.exit(7)
+"""])
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        baseline, _ = tracemalloc.get_traced_memory()
+        result = sandbox._run_one(make_config(), git_repo, [], command, 30)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.exit_code == 7
+    assert result.tail.endswith("\nlast stdout\nfinal Ω diagnostic")
+    assert len(result.tail.encode()) == 16 * 1024
+    assert peak - baseline < 4 * 1024 * 1024
+
+
+def test_timeout_is_recorded_with_drained_output(git_repo, bwrap_log):
+    command = "printf '%20000s\\n' ''; echo last diagnostic >&2; exec sleep 30"
     report = sandbox.run_checks(
-        make_config(checks=("echo partial", "echo after")), git_repo, timeout=0.3
+        make_config(checks=(command, "echo after")), git_repo, timeout=1
     )
-    (first,) = report.results
-    assert (first.exit_code, len(first.tail.encode("utf-8"))) == (sandbox.TIMEOUT_EXIT, 16 * 1024)
-    assert "partial\n[loopzero] timed out" in first.tail and not report.ok
+    (result,) = report.results
+    assert result.exit_code == sandbox.TIMEOUT_EXIT and not report.ok
+    assert result.tail.endswith("\nlast diagnostic\n\n[loopzero] timed out after 1s")
+    assert len(result.tail.encode()) == 16 * 1024
 
 
 def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, monkeypatch):
