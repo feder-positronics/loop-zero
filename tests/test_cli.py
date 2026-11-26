@@ -889,8 +889,16 @@ def test_pr_pushes_and_creates_draft(
 
 @pytest.mark.parametrize("refresh", [False, True])
 def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, refresh):
-    command = ("git ls-remote 'https://x-access-token:ghs_FAKE0123@example.invalid/repo.git' "
-               "&& curl -H 'Authorization: Bearer opaque-fake-header' https://example.invalid/")
+    command = (
+        "git ls-remote 'https://x-access-token:ghs_FAKE0123@example.invalid/repo.git' "
+        "&& curl -H 'Authorization: Bearer opaque-fake-header' https://example.invalid/ "
+        r"&& curl -H Authorization:\ Bot\ opaque-fake-header https://example.invalid/ "
+        """&& curl -d '{"Authorization": "Bearer opaque-fake-header"}' https://example.invalid/ """
+        r'''&& curl -d "{\"Authorization\": \"Bearer opaque-fake-header\"}" https://example.invalid/ '''
+        """&& python -c "request(headers={'Authorization': 'Basic opaque-fake-header'})" """
+        """&& curl -H 'Authorization: Digest username="fake-user", response="opaque-fake-header"' """
+        "https://example.invalid/"
+    )
     private = tmp_path / "private.toml"
     private.write_text(WORKFLOW.replace(json.dumps("echo ok"), json.dumps(command)))
     cfg = config.load(private)
@@ -912,7 +920,12 @@ def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, 
     body = json.loads(gh.calls[-1]["--input"])["body"]
     assert "ghs_FAKE0123" not in body and "opaque-fake-header" not in body
     assert "git ls-remote 'https://[REDACTED]@example.invalid/repo.git'" in body
-    assert "curl -H 'Authorization: [REDACTED]' https://example.invalid/`: exit 7" in body
+    assert "curl -H 'Authorization: [REDACTED]' https://example.invalid/" in body
+    assert "curl -H Authorization:[REDACTED] https://example.invalid/" in body
+    assert """curl -d '{"Authorization": "[REDACTED]"}' https://example.invalid/""" in body
+    assert r'''curl -d "{\"Authorization\": \"[REDACTED]\"}" https://example.invalid/''' in body
+    assert """python -c "request(headers={'Authorization': '[REDACTED]'})" """ in body
+    assert "'Authorization: [REDACTED]' https://example.invalid/`: exit 7" in body
     assert f"Recorded for `{head[:12]}`" in body and "(unverified" not in body
     assert "- `test -f README.md`: exit 0" in body
     assert cli._load_report(wt).results == results

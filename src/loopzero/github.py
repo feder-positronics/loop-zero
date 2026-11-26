@@ -198,8 +198,10 @@ def _api_path(args: tuple[str, ...]) -> str:
 
 def redact_credentials(value: str) -> str:
     value = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@", value)
+    value = re.sub(r"""(?i)(\bauthorization(?:\\?['"])?[ \t]*:[ \t]*)(\\?['"])(?:(?!\2)(?:\\.|[^\\\r\n]))+\2""",
+                   r"\1\2[REDACTED]\2", value)
     return re.sub(r"""(?i)((?P<quote>['"])?\bauthorization[ \t]*:[ \t]*)"""
-                  r"""(?(quote)(?:(?!(?P=quote))[^\r\n])+|(?:(?:basic|bearer|token)\s+)?[^\s'"`]+)""",
+                  r"""(?(quote)(?:\\.|(?!(?P=quote))[^\\\r\n])+|(?:[a-z][\w-]*[ \t]+)?(?:\\.|[^\\\s'"`])+)""",
                   r"\1[REDACTED]", value)
 
 
