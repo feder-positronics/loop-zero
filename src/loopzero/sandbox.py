@@ -149,7 +149,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                                                    "Runner requires a clean worktree"),))
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config, worktree, base=base)
-    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and settings_sha256 and not dirty else {}
+    previous = _previous(worktree, settings_sha256) if config.inputs and base and settings_sha256 and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -229,9 +229,7 @@ def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
         checkpoint(replace(report, results=(*report.results, *unvisited, incomplete)))
 
 
-def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
-    if _git(config, worktree, "ls-files", "--", ".loopzero"):
-        return {}
+def _previous(worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
     try:
         data = json.loads(read_local_state(worktree, "checks.json"))
         if (data["dirty"] is not False or not isinstance(data["head"], str)
@@ -249,7 +247,7 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str,
                     source if isinstance(source, str) else data["head"],
                 )
         return previous
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (OSError, WorktreeError, ValueError, KeyError, TypeError, AttributeError):
         return {}
 
 

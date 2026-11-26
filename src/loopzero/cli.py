@@ -9,11 +9,11 @@ import hashlib
 import importlib.metadata
 import io
 import json
-import os
 import math
-import shlex
+import os
 import random
 import re
+import shlex
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -372,15 +372,10 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
 
 def _save_report(wt: Path, report: CheckReport) -> str | None:
     """Publish the receipt or return the current HEAD if the result is stale."""
-    payload = {
-        "head": report.head,
-        "dirty": report.dirty,
-        "results": [{k: v for k, v in dataclasses.asdict(result).items()
-                     if k not in {"input_key", "reused_from"} or v is not None}
-                    for result in report.results],
-    }
-    if report.settings_sha256 is not None:
-        payload["settings_sha256"] = report.settings_sha256
+    payload = {key: value for key, value in dataclasses.asdict(report).items() if value is not None}
+    payload["results"] = [
+        {key: value for key, value in result.items() if value is not None} for result in payload["results"]
+    ]
     return worktree.write_local_state(
         wt, CHECKS_FILE.name, json.dumps(payload, indent=2) + "\n", expected_head=report.head,
     )
@@ -1117,7 +1112,6 @@ def _pr_readiness(
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
-    worktree.local_state_files(wt, CHECKS_FILE.name)
     pr = _require_pr(config, branch, allow_merged=allow_merged)
     _require_pushed(pr, head)
     if pr.state == "MERGED":

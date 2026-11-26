@@ -106,28 +106,21 @@ def _local_state_directory(wt: Path, *, create: bool = False):
 
 
 def _regular_state(wt: Path, fd: int, name: str) -> bool:
-    try:
-        mode = os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode
-    except FileNotFoundError:
-        return False
-    if not stat.S_ISREG(mode):
-        raise WorktreeError(f"local state file is not regular or is a symbolic link: {wt / '.loopzero' / name}")
-    return True
+    with suppress(FileNotFoundError):
+        if not stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+            raise WorktreeError(f"local state file is not regular or is a symbolic link: {wt / '.loopzero' / name}")
+        return True
+    return False
 
 
 def local_state_files(wt: Path, *names: str) -> tuple[bool, ...]:
-    """Validate the state directory and report which requested files exist."""
-    try:
-        with _local_state_directory(wt) as fd:
-            return tuple(_regular_state(wt, fd, name) for name in names)
-    except FileNotFoundError:
-        return (False,) * len(names)
+    with suppress(FileNotFoundError), _local_state_directory(wt) as fd:
+        return tuple(_regular_state(wt, fd, name) for name in names)
+    return (False,) * len(names)
 
 
 def read_local_state(wt: Path, name: str) -> str:
     with _local_state_directory(wt) as fd:
-        if not _regular_state(wt, fd, name):
-            raise FileNotFoundError(wt / ".loopzero" / name)
         file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         with os.fdopen(file_fd, encoding="utf-8") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -142,8 +135,7 @@ def write_local_state(
     with _local_state_directory(wt, create=True) as fd:
         if expected_head is not None:
             fcntl.flock(fd, fcntl.LOCK_EX)
-            current_head = head(wt)
-            if current_head != expected_head:
+            if (current_head := head(wt)) != expected_head:
                 return current_head
         _regular_state(wt, fd, name)
         if private:
