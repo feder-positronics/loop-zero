@@ -8,11 +8,12 @@ import os
 import selectors
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .types import LoopZeroError
@@ -146,6 +147,14 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float) -
     return suffix
 
 
+def run_git_paths(argv: Sequence[str], *, cwd: Path, env_allowlist: Sequence[str], timeout: float,
+                  extra_env: Mapping[str, str] | None = None) -> Completed:
+    """Read Git path records, removing the final LF from line-terminated output."""
+    done = run(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout, extra_env=extra_env,
+               preserve_newlines=True, encoding=sys.getfilesystemencoding())
+    return replace(done, stdout=done.stdout.removesuffix("\n"))
+
+
 def run(
     argv: Sequence[str],
     *,
@@ -159,6 +168,7 @@ def run(
     preserve_newlines: bool = False,
     tail_chars: int | None = None,
     graceful_interrupt: bool = False,
+    pass_fds: tuple[int, ...] = (),
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
 
@@ -179,21 +189,15 @@ def run(
     stdin = input.encode(raw_encoding) if preserve_newlines and input is not None else input
     try:
         with subprocess.Popen(
-            argv,
-            cwd=str(cwd),
-            env=build_env(env_allowlist, extra_env),
-            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
+            argv, cwd=str(cwd), env=build_env(env_allowlist, extra_env),
+            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
-            encoding=None if preserve_newlines else encoding,
-            errors=None if preserve_newlines else "replace",
-            start_new_session=os.name == "posix",
+            encoding=None if preserve_newlines else encoding, errors=None if preserve_newlines else "replace",
+            pass_fds=pass_fds, start_new_session=os.name == "posix",
         ) as proc:
             try:
-                if tail_chars is None:
-                    stdout, stderr = proc.communicate(stdin, timeout=timeout)
-                else:
-                    stdout, stderr = _read_output_tail(proc, tail_chars, timeout), ""
+                stdout, stderr = (proc.communicate(stdin, timeout=timeout) if tail_chars is None
+                                  else (_read_output_tail(proc, tail_chars, timeout), ""))
             except BaseException:
                 try:
                     if graceful_interrupt and os.name == "posix":
@@ -217,19 +221,10 @@ def run(
         out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
         elapsed = time.monotonic() - started
-        raise ProcTimeout(
-            f"{' '.join(argv)}: timed out after {timeout:g}s\n{tail(out)}",
-            out,
-            stderr=err or "",
-            duration_s=elapsed,
-        ) from exc
+        message = f"{' '.join(argv)}: timed out after {timeout:g}s\n{tail(out)}"
+        raise ProcTimeout(message, out, stderr=err or "", duration_s=elapsed) from exc
     if isinstance(stdout, bytes):
         stdout = stdout.decode(raw_encoding, errors="surrogateescape")
     if isinstance(stderr, bytes):
         stderr = stderr.decode(raw_encoding, errors="replace")
-    return Completed(
-        exit_code=proc.returncode,
-        stdout=stdout or "",
-        stderr=stderr or "",
-        duration_s=time.monotonic() - started,
-    )
+    return Completed(proc.returncode, stdout or "", stderr or "", time.monotonic() - started)

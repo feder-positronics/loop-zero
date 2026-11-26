@@ -24,6 +24,7 @@ def isolate_github_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 @pytest.fixture(autouse=True)
 def no_host_github_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     isolate_github_auth(tmp_path, monkeypatch)
+    monkeypatch.setattr(github, "PR_LOCK_DIR", tmp_path / "pr-locks")
 
 
 for _role in ("AUTHOR", "COMMITTER"):
