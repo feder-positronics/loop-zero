@@ -533,13 +533,14 @@ def test_silent_stage_reports_live_metadata_then_completion(
 
     events, _, status, wait_for_heartbeat = heartbeat_log
     monkeypatch.setenv("LZ_KEEP", "credential-value")
-    monkeypatch.setenv("AUDIT_TOKEN", "p1n")
+    monkeypatch.setenv("AUDIT_TOKEN", "p1n-secret")
+    monkeypatch.setenv("AUTH_ENABLED", "1")
     monkeypatch.setenv("RUST_BACKTRACE", "1")
     command = ('test -z "$LZ_KEEP" || echo "$LZ_KEEP"; echo "$AUDIT_TOKEN"; '
-               'echo "tests/test_example.py:12: $RUST_BACKTRACE $NODE_ENV $DJANGO_DEBUG" >&2; '
+               'echo "tests/test_example.py:12: $RUST_BACKTRACE $NODE_ENV $DJANGO_DEBUG $CHECK_PYTHON $AUTH_ENABLED" >&2; '
                f'exit {exit_code}')
-    cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN", "RUST_BACKTRACE"),
-                      env=(("NODE_ENV", "test"), ("DJANGO_DEBUG", "true")))
+    cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN", "AUTH_ENABLED", "RUST_BACKTRACE"),
+                      env=(("NODE_ENV", "test"), ("DJANGO_DEBUG", "true"), ("CHECK_PYTHON", "/opt/cpython-3.14/bin/python3.14")))
     run_one = sandbox._run_one
 
     def run_stage(config, worktree, prefix, stage_command, timeout):
@@ -550,7 +551,7 @@ def test_silent_stage_reports_live_metadata_then_completion(
     monkeypatch.setattr(sandbox, "_run_one", run_stage)
     report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
     assert report.results[0].exit_code == exit_code
-    assert report.results[0].tail == "[REDACTED]\ntests/test_example.py:12: 1 test true"
+    assert report.results[0].tail == "[REDACTED]\ntests/test_example.py:12: 1 test true /opt/cpython-3.14/bin/python3.14 1"
     statuses = [event for event in events if event not in cfg.checks]
     heartbeats = [event for event in statuses if "running" in event]
     assert heartbeats and all(re.fullmatch(
@@ -717,11 +718,37 @@ def cache_check(git_repo, receipt_path):
     return cache
 
 
+SERVICE_KEY = "sk-live-0123456789abcdefghijklmnopqrstuv"
+
+
+def _run_secret_stage(monkeypatch, tmp_path, output: str) -> str:
+    def fake_bwrap(*_args, tail_chars, **_kwargs):
+        return sandbox._proc.Completed(1, output[-tail_chars:], "", 0.1)
+
+    monkeypatch.setattr(sandbox, "_run_bwrap", fake_bwrap)
+    cfg = make_config(env_allowlist=("PATH", "SERVICE_KEY"))
+    return sandbox._run_one(cfg, tmp_path, ["--"], "true", 5).tail
+
+
+def test_check_tail_redacts_secret_split_by_output_limit(monkeypatch, tmp_path):
+    monkeypatch.setenv("SERVICE_KEY", SERVICE_KEY)
+    tail = _run_secret_stage(monkeypatch, tmp_path, (SERVICE_KEY + "-" * 10) * 1000)
+    assert "[REDACTED]" in tail and tail.replace("[REDACTED]", "").strip("-") == ""
+
+
+def test_check_tail_redacts_secret_forwarded_with_surrounding_whitespace(monkeypatch, tmp_path):
+    monkeypatch.setenv("SERVICE_KEY", f" {SERVICE_KEY}\n")
+    tail = _run_secret_stage(monkeypatch, tmp_path, f"HTTP 401 for Bearer {SERVICE_KEY} (request 7)")
+    assert tail == "HTTP 401 for Bearer [REDACTED] (request 7)"
+
+
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy', 'grant'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change, cache_check, receipt_path):
-    cfg = make_config(checks=('echo one', 'echo two'), env=(('AUDIT_TOKEN', 'fake-cached-token'), ('NODE_ENV', 'test')),
+    monkeypatch.setenv('AUDIT_TOKEN', 'fake-cached-token')
+    cfg = make_config(checks=('echo one', 'echo two'), env=(('NODE_ENV', 'test'),),
+                      env_allowlist=('PATH', 'HOME', 'LZ_KEEP', 'AUDIT_TOKEN'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     if change == 'grant':
         cfg = replace(cfg, env_allowlist=(*cfg.env_allowlist, "HEAVY_SLOT_GRANTED_CORES"))
