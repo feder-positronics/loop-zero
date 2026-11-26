@@ -259,7 +259,7 @@ def test_api_get_retries_transient_reads(monkeypatch, failure):
 def test_api_get_classifies_terminal_transport_failure(monkeypatch, reason, expected_sleeps):
     sleeps = []
 
-    def fail(_request):
+    def fail(_request, _timeout):
         raise urllib.error.URLError(reason)
 
     monkeypatch.setattr(mergify, "_open", fail)
