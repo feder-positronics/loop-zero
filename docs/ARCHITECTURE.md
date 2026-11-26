@@ -121,7 +121,11 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
    target branch and required CI. The receipt must record a clean passing run
-   at that head with the current commands and check settings digest. A settings
+   at that head with the current commands and check settings digest. Ready and
+   merge validate the PR, head and hold before checking the local receipt.
+   An invalid receipt stops the command before it fetches remote readiness
+   evidence. Writes to advance readiness or merging recheck the receipt.
+   Status continues to collect all readiness diagnostics. A settings
    change or an older receipt without the digest requires a fresh check. The
    digest covers execution and stage reuse settings without recording raw
    environment values. For local sandbox receipts it omits inherited `PATH`,
