@@ -1119,13 +1119,44 @@ def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, .
             "-f", f"ref={base}", "-f", f"inputs[pr]={number}")
 
 
-def refresh_eligibility(repo: str, number: int, base: str) -> None:
-    args = eligibility_dispatch_args(repo, number, base)
+def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bool:
+    query = f"event=workflow_dispatch&branch={quote(base, safe='')}&created={quote('>=' + since, safe='')}&per_page=100"
+    data = api_get(f"repos/{repo}/actions/workflows/eligibility.yml/runs?{query}")
+    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+    complete = isinstance(runs, list) and data.get("total_count") == len(runs)
+    identified = [run.get("display_title") if isinstance(run, dict) else None for run in runs] if complete else []
+    if f"Refresh eligibility for PR #{number}" in identified:
+        return True
+    if not complete or any(not isinstance(name, str) or not re.fullmatch(r"Refresh eligibility for PR #[0-9]+", name) for name in identified):
+        raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
+    return False
+
+
+def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...]) -> None:
+    args = eligibility_dispatch_args(repo, pr.number, base)
+    since = datetime.fromtimestamp(time.time(), UTC).isoformat(timespec="seconds")
     try:
-        _gh(*args)
+        try:
+            _gh(*args)
+        except (GhUnavailable, ProcTimeout) as exc:
+            if isinstance(exc, GhUnavailable) and not _transient_error(exc.tail, False):
+                raise
+            _retry_sleep(RETRY_DELAY)
+            current = pr_for_branch(repo, branch, open_only=True)
+            if current is None or (current.number, current.head_sha, current.base_ref) != (
+                pr.number, pr.head_sha, pr.base_ref,
+            ):
+                raise GhError(("refresh Loop-zero Eligibility",), "the PR or head changed after resolution") from exc
+            if _eligibility_dispatched(repo, pr.number, base, since):
+                return
+            if open_blocking_findings(repo, pr.number, None, publishers):
+                raise GhError(("refresh Loop-zero Eligibility",), "blocking findings appeared after resolution") from exc
+            _gh(*args)
     except (GhError, ProcTimeout, OSError) as exc:
         retry = shlex.join(("gh", *args))
-        raise GhError(("refresh Loop-zero Eligibility",), f"{exc}\nRun manually: {retry}") from exc
+        raise GhError(("refresh Loop-zero Eligibility",),
+                      f"Finding on PR #{pr.number} is resolved. {exc}\n"
+                      f"Verify the PR head, remaining findings and recent runs before retrying: {retry}") from exc
 
 
 def open_blocking_findings(
