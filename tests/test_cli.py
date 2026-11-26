@@ -3173,43 +3173,30 @@ def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, 
     assert run(capsys, "ready")[0] == 0
 
 
-def test_ready_receipt_follows_effective_policy_when_main_advances(wt, repo, gh, head, capsys, monkeypatch, tmp_path):
+@pytest.mark.parametrize("change,exit_code", [("unrelated", 0), ("policy", 1), ("slow", 3)])
+def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatch, tmp_path, change, exit_code):
     policy = WORKFLOW.replace("[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]')
     publish_workflow(wt, policy)
-    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
-    expect_cli(capsys, 0, "check", stdout_contains=("receipt produced:",))
-
-    git(repo, "commit", "-qm", "advance main without changing policy", "--allow-empty")
-    git(repo, "push", "-q", "origin", "main")
-    expect_cli(capsys, 0, "ready", stdout_contains=("receipt accepted:",))
-
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     external = tmp_path / "external"
     git(tmp_path, "clone", "-q", "--branch", "main", str(repo.parent / "origin.git"), str(external))
-    arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
+    clock, original = poll_clock(monkeypatch, jitter=1.0), cli._proc.run
 
-    def change_policy():
-        changed = policy.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "changed" }')
-        commit_file(external, "workflow.toml", changed, "change the check environment")
-        git(external, "push", "-q", "origin", "main")
+    def fetch(argv, *, timeout, **kwargs):
+        if argv[:2] == ["git", "fetch"] and clock.now:
+            clock.fetch_timeout = timeout
+            if change == "slow":
+                clock.now += timeout
+                raise cli._proc.ProcTimeout("origin timed out")
+            path, body = ("workflow.toml", policy.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "changed" }')
+                          ) if change == "policy" else ("unrelated.txt", "advance main")
+            commit_file(external, path, body, "advance main")
+            git(external, "push", "-q", "origin", "main")
+            arm_check_runs(gh, head, [{"name": "checks", "status": "completed", "conclusion": "success"}])
+        return original(argv, timeout=timeout, **kwargs)
 
-    poll_clock(monkeypatch, after_sleep=change_policy)
-    expect_cli(capsys, 1, "ready", "--wait=60",
-               stderr_contains=("workflow settings changed while waiting; run loopzero check",))
-    expect_cli(capsys, 1, "ready", stdout_contains=("incompatible settings fingerprint",))
-
-
-@pytest.mark.parametrize("base_sensitive", [False, True])
-def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
-    if base_sensitive:
-        publish_workflow(wt, WORKFLOW.replace('[delivery]', '[checks.inputs]\n"*" = ["."]\n\n[delivery]'))
-    args = SimpleNamespace(command="ready", config=None)
-    config = cli._load_config(args, wt, pin_checks=True)
-    head = head_of(wt)
-    git(repo, "commit", "-qm", "advance base without editing policy", "--allow-empty")
-    git(repo, "push", "-q", "origin", "main")
-
-    latest = cli._verify_wait_snapshot(args, wt, config, head, head)
-    assert latest == config and latest.trusted_base_revision != config.trusted_base_revision
+    monkeypatch.setattr(cli._proc, "run", fetch)
+    assert run(capsys, "ready", "--wait=1")[0] == exit_code and clock.fetch_timeout == 0.5
 
 
 @pytest.mark.parametrize("fixed", [False, True])

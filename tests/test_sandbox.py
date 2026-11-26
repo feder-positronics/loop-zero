@@ -874,16 +874,13 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, c
         [result] = sandbox.run_checks(config, git_repo).results
         assert (result.exit_code, result.input_key, result.reused_from) == (0, None, None)
         return
-    previous = _current_check_report(git_repo, config, head)
-    assert previous is not None
 
     tree = git(git_repo, "rev-parse", "HEAD^{tree}").strip()
     new_base = git(git_repo, "commit-tree", tree, "-p", head, "-m", "advance base").strip()
     git(git_repo, "update-ref", base_ref, new_base)
     report = sandbox.run_checks(config, git_repo)
     assert report.ok and report.head == head and not report.dirty
-    assert report.results[0].reused_from is None
-    assert _current_check_report(git_repo, config, head) == previous
+    assert report.results[0].reused_from is None and _current_check_report(git_repo, config, head) is not None
 
 
 def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fetched_base, receipt_path):

@@ -131,7 +131,7 @@ def _load_config(
     if args.config:
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
-    config = config_mod.load_trusted(root, previous=previous, refresh=refresh)
+    config = config_mod.load_trusted(root, previous=previous, refresh=refresh, read_timeout=github._read_timeout)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
@@ -1443,7 +1443,9 @@ def _wait_with_deadline(
         with github.bounded_reads(deadline, token=None, retry=True):
             waited = wait(bounded=True)
             reported_timeout = waited is None
-    except github.ReadDeadline:
+    except (github.ReadDeadline, _proc.ProcTimeout) as exc:
+        if isinstance(exc, _proc.ProcTimeout) and time.monotonic() < deadline:
+            raise
         if not reported_timeout:
             _print_check_wait_timeout(pr, args)
         return None
@@ -1471,9 +1473,8 @@ def _verify_wait_snapshot(
     latest = _load_config(args, wt, pin_checks=True, previous=previous or config, refresh=True)
     if latest == config:
         return latest
-    if _current_check_report(wt, latest, head) is None:
-        raise CliError("workflow settings changed while waiting; run loopzero check and retry")
-    raise CliError("workflow settings changed while waiting; retry with the current settings")
+    retry = "retry with the current settings" if _current_check_report(wt, latest, head) else "run loopzero check and retry"
+    raise CliError(f"workflow settings changed while waiting; {retry}")
 
 
 def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> None:

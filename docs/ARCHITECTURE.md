@@ -46,7 +46,7 @@ The CLI also writes a head-bound checks receipt and saved review output in
 receipts have the restricted retention requirement described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
 review evidence using trusted base configuration. Local readiness and merge fetch
-the configured origin base before loading its publisher policy. Waiters refresh
+the configured origin base before loading its publisher policy. Source-check waiters refresh
 the trusted policy on each poll. A base advance requires a new receipt only
 when it changes the effective check settings.
 Losing local artifacts may require rerunning checks or review, and never creates
@@ -124,7 +124,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    run in a different host environment. Explicit settings, delegated runner
    environments, and stage reuse keys still bind these values. A receipt for
    delegated or input-keyed checks binds the configured base branch. Only the
-   stage reuse key binds the exact base revision. Waiters check for policy
+   stage reuse key binds the exact base revision. Source-check waiters check for policy
    changes on every poll.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
