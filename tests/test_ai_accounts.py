@@ -397,9 +397,10 @@ def test_codex_json_and_text_share_each_existing_window(helper, monkeypatch, cap
         return
     week = {'used_percent': 96, 'limit_window_seconds': 604800, 'reset_at': 1794384770}
     short = {'used_percent': 99, 'limit_window_seconds': 18000, 'reset_at': short_reset} if short_reset else None
-    data = {'rate_limit': {'primary_window': short or week, 'secondary_window': week if short else None}, 'model_usage': {'m': {'available': True}}}
+    data = {'rate_limit': {'primary_window': short or week, 'secondary_window': week if short else None}, 'model_usage': {'m': {'available': True}, 'partial': {}}}
     monkeypatch.setattr(helper, '_http', lambda req: (200, {}, json.dumps(data).encode()))
     result = helper.check_codex('c2')
+    assert result['models'] == {'m': True} and result['models_unknown'] == ['partial']
     assert result['next_reset'] == 1794384770
     status = {'checked_at': 10000, 'providers': {'codex': {'active': 'c2', 'accounts': {'c2': result}}}}
     helper.write_private(helper.STATE / 'status.json', json.dumps(status))
