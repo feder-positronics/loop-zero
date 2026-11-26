@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -28,8 +29,8 @@ def pr_list_key(branch: str = "lz/t1", state: str = "open") -> str:
     return (f"api repos/{REPO}/pulls?state={state}&head={head}"
             "&sort=created&direction=desc&per_page=1")
 
-def branch_history_key(page: int = 1) -> str:
-    head = quote(f"{REPO.split('/')[0]}:lz/t1", safe="")
+def branch_history_key(page: int = 1, *, branch: str = "lz/t1") -> str:
+    head = quote(f"{REPO.split('/')[0]}:{branch}", safe="")
     return (f"api repos/{REPO}/pulls?state=closed&head={head}"
             f"&sort=created&direction=desc&per_page=100&page={page}")
 
@@ -694,13 +695,12 @@ def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
         github.pr_for_branch(REPO, "lz/x")
 
 
-def test_api_get_and_login_helpers(gh: FakeGh) -> None:
-    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
-    gh.respond("api repos/acme/widgets", {"default_branch": "main"})
-    assert github.api_get("repos/acme/widgets") == {"default_branch": "main"}
-    assert gh.argv(0) == ["api", "repos/acme/widgets", "--include"]
-    assert github.login() == "bot-user"
-    gh.respond("api graphql viewer", {"data": {"viewer": {}}})
+def test_api_get_and_login_helpers(gh: FakeGh, monkeypatch) -> None:
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "ascii")
+    gh.respond("api graphql viewer", '{"data":{"viewer":{"login":"Łódź"}}}', {"data": {"viewer": {}}})
+    gh.respond("api repos/acme/widgets", '{"default_branch":"Łódź"}')
+    assert (github.api_get("repos/acme/widgets"), gh.argv(0)) == ({"default_branch": "Łódź"}, ["api", "repos/acme/widgets", "--include"])
+    assert github.login() == "Łódź"
     with pytest.raises(github.GhError, match="no login"):
         github.login()
 
