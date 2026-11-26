@@ -628,9 +628,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     worktree.local_state_files(wt, CHECKS_FILE.name)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
-    before = _receipt_stat(wt / CHECKS_FILE)
+    before = _receipt_inode(wt / CHECKS_FILE)
     with worktree.lock_local_state(wt) as fd:
-        if (_receipt_stat(wt / CHECKS_FILE) != before
+        if (_receipt_inode(wt / CHECKS_FILE) != before
                 and (report := _current_check_report(wt, config, worktree.head(wt))) is not None
                 and not worktree.is_dirty(wt) and sandbox.check_inputs_match(config, wt, report)):
             _print_receipt(wt, report, "reused")
@@ -644,9 +644,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         return _finish_check(wt, config, report, fd)
 
 
-def _receipt_stat(path: Path) -> os.stat_result | None:
+def _receipt_inode(path: Path) -> int | None:
     try:
-        return path.lstat()
+        return path.lstat().st_ino
     except FileNotFoundError:
         return None
 
