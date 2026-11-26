@@ -10,9 +10,8 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    problem, context, acceptance, base SHA. Write the PR, like any issue or
    design doc you write, for the project owner under [Reporting](#reporting).
 2. Implement, commit, then `loopzero check`: run `workflow.toml`
-   `[checks].commands` in the sandbox. Its exit code is the verdict. For a long
-   check under a [provider-portable handoff](../docs/DELEGATION.md#provider-portable-handoff),
-   open the draft in step 3 before starting the check.
+   `[checks].commands` in the sandbox. Open the draft before a long check under a
+   [provider-portable handoff](../docs/DELEGATION.md#provider-portable-handoff).
 3. `loopzero pr` pushes and opens a **draft** PR from the task text plus
    generated Validation checks. Later calls sync narrative, preserving live
    Validation, Review and extra sections; `check` refreshes only its checks
@@ -286,6 +285,12 @@ meta-directives; reviewers load no instruction files or skills from the reviewed
 Fail closed on missing tools and command errors, preserve the failing command
 and output tail, and keep a short, safe detail about the cause or stage when
 operator-facing code wraps an error. Stop on terminal failures or quota errors.
+`check` exits 0 when stages pass, including local dirty runs that cannot satisfy
+readiness. Exit 1 can mean a failed stage, a discarded or unverified result, or
+a command error. Read the diagnostic and verify the receipt before classifying
+the failure. Exit 2 covers invalid arguments and sandbox unavailability in
+`check` or fresh `review`.
+
 Exit 3 means waiting or timeout. Review exits 4 when independent review is
 unavailable and 5 when changes are requested. Interruption exits 130.
 
