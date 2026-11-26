@@ -35,6 +35,7 @@ from tests.test_github import (
     pr_json,
     pr_list_key,
     rest_pr_json,
+    thread as review_thread,
     threads_json,
 )
 from tests.test_runners import (
@@ -1911,24 +1912,40 @@ def conflict_merge(wt, repo):
     return reviewed
 
 
-@pytest.mark.parametrize("verified", [True, False])
-def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isolated_git, verified):
-    reviewed = conflict_merge(wt, repo)
-    (wt / ".gitmodules").write_text('[submodule "dep"]\npath = dep\nurl = ../dep\nignore = all\n')
-    git(wt, "add", ".gitmodules")
-    git(wt, "update-index", "--add", "--cacheinfo", f"160000,{reviewed},dep")
-    commit_file(wt, "topic.py", "topic = 2\n", "topic repair")
-    history = [rev(reviewed, "primary")]
+@pytest.mark.parametrize("case", ["verified", "unverified", "second parent", "rewritten"])
+def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isolated_git, case):
+    if case == "second parent":
+        reviewed = head_of(wt)
+        git(wt, "reset", "--hard", "main")
+        git(wt, "commit", "--allow-empty", "-qm", "independent branch work")
+        git(wt, "merge", "--no-edit", reviewed)
+        base = reviewed
+    elif case == "rewritten":
+        base = reviewed = head_of(wt)
+        git(wt, "commit", "--amend", "-qm", "rewritten feature")
+    else:
+        reviewed = conflict_merge(wt, repo)
+        (wt / ".gitmodules").write_text('[submodule "dep"]\npath = dep\nurl = ../dep\nignore = all\n')
+        git(wt, "add", ".gitmodules")
+        git(wt, "update-index", "--add", "--cacheinfo", f"160000,{reviewed},dep")
+        commit_file(wt, "topic.py", "topic = 2\n", "topic repair")
+        base = git(repo, "rev-parse", "main" if case == "verified" else "main^").strip()
+    state = "CHANGES_REQUESTED" if case == "second parent" else "APPROVED"
+    history = [rev(reviewed, "primary", state=state)]
     head = prepare_review(wt, gh, fake_bin, history=history)
     detail = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
-    detail["base"]["sha"] = git(repo, "rev-parse", "main" if verified else "main^").strip()
+    detail["base"]["sha"] = base
     gh.respond(f"api repos/{REPO}/pulls/7", detail)
-
     code, _, err = run(capsys, "review")
-
-    if not verified:
-        assert code == 1 and not (fake_bin / "claude.stdin").exists()
-        assert "could not verify merge history" in err and "including resolution edits" in err
+    if case != "verified":
+        assert code == 1 and not list(fake_bin.glob("*.stdin"))
+        if case == "rewritten":
+            assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
+            assert "git reflog" in err and "open a new PR" in err
+            assert "run `loopzero pr`, then `loopzero review` before merging main" in err
+        else:
+            assert f"{reviewed[:12]} must be on the first-parent history" in err
+            assert "including resolution edits" in err and "git reset --hard" not in err
         return
     assert code == 0, err
     header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)
@@ -1938,34 +1955,12 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
     posted = posted_review(gh)
     assert posted["commit_id"] == head and marker(head, "delta") in posted["body"]
 
-    exact = rev(head, "delta")
-    exact["body"] = posted["body"]
+    exact = rev(head, "delta") | {"body": posted["body"]}
     for reviews, ready in ((history, False), ([*history, exact], True)):
         arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=reviews, isDraft=False)
         gh.respond(f"api repos/{REPO}/pulls/7", detail)
         assert run(capsys, "ready")[0] == (0 if ready else 1)
         assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is ready
-
-
-def test_review_delta_replays_fixes_when_reviewed_head_is_second_parent(
-    wt: Path, gh: FakeGh, fake_bin: Path, capsys, isolated_git
-) -> None:
-    reviewed = head_of(wt)
-    git(wt, "reset", "--hard", "main")
-    git(wt, "commit", "-q", "--allow-empty", "-m", "independent branch work")
-    git(wt, "merge", "-q", "--no-edit", reviewed)
-    head = prepare_review(wt, gh, fake_bin, history=[rev(reviewed, "primary", state="CHANGES_REQUESTED")])
-    detail = rest_pr_json(pr_json(headRefOid=head))
-    detail["base"]["sha"] = reviewed  # Even a verified base parent cannot substitute for the first parent.
-    gh.respond(f"api repos/{REPO}/pulls/7", detail)
-    _fake_codex(fake_bin, json.dumps(APPROVE))
-
-    _, err = expect_cli(capsys, 1, "review")
-    assert f"{reviewed[:12]} must be on the first-parent history" in err
-    assert f"on the reviewed head {reviewed[:12]}, including resolution edits" in err
-    assert "git reset --hard" not in err
-    assert not (fake_bin / "claude.stdin").exists()
-    assert not (fake_bin / "codex.stdin").exists()
 
 
 @pytest.mark.parametrize("case", [
@@ -1999,10 +1994,8 @@ def test_review_extra_delta_after_base_conflict(wt, repo, gh, fake_bin, capsys, 
     history = [rev(primary, "primary"), rev(reviewed, "delta", state="COMMENTED")]
     history[-1]["body"] = github.review_payload(REPO, 7, reviewed, previous, marker(reviewed, "delta"))["body"]
     head = prepare_review(wt, gh, fake_bin, history=history)
-    thread = {"isResolved": False, "isOutdated": True, "path": "README.md", "line": 1,
-              "comments": {"nodes": [{"author": {"login": LOGIN},
-                                      "body": f"<!-- loopzero:finding v=1 severity=important head={reviewed} id=0b9b59e7 -->"}]}}
-    readiness = {"threads": (thread,)} if case == "blocking" else {}
+    finding = f"<!-- loopzero:finding v=1 severity=important head={reviewed} id=0b9b59e7 -->"
+    readiness = {"threads": (review_thread(finding, author=LOGIN, outdated=True),)} if case == "blocking" else {}
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=history, readiness=readiness, isDraft=False)
     detail = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
     detail["base"]["sha"] = base
@@ -2040,16 +2033,6 @@ def test_review_extra_delta_after_base_conflict(wt, repo, gh, fake_bin, capsys, 
     code, _, err = run(capsys, "review")
     assert code == 1 and "review cap reached" in err
 
-
-def test_review_delta_refuses_rewritten_primary(wt, gh, fake_bin, capsys):
-    reviewed = head_of(wt)
-    git(wt, "commit", "--amend", "-q", "-m", "rewritten feature")
-    prepare_review(wt, gh, fake_bin, history=[rev(reviewed, "primary")])
-    code, out, err = run(capsys, "review")
-    assert code == 1 and not out and not (fake_bin / "claude.stdin").exists()
-    assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
-    assert "git reflog" in err and "open a new PR" in err
-    assert "run `loopzero pr`, then `loopzero review` before merging main" in err
 
 
 def test_review_appends_line_after_existing_review(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
@@ -2338,11 +2321,11 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
 
 @pytest.mark.parametrize("reposted", [False, True], ids=["published", "reposted"])
 @pytest.mark.parametrize("kind,state,verdict,comparison,resolved,ready,history", [
-    ("primary", "APPROVED", "approve", "ahead", True, True, "clean"),
+    *[(kind, "APPROVED", "approve", "ahead", True, history == "clean", history)
+      for kind in ("primary", "delta") for history in ("clean", "own commit", "altered merge", "missing history")],
+    *[(kind, "APPROVED", "approve", comparison, resolved, False, "clean")
+      for kind in ("primary", "delta") for comparison, resolved in (("ahead", False), ("diverged", True))],
     ("primary", "COMMENTED", "approve", "ahead", True, True, "clean"),
-    ("primary", "APPROVED", "approve", "ahead", True, False, "own commit"),
-    ("primary", "APPROVED", "approve", "ahead", True, False, "altered merge"),
-    ("primary", "APPROVED", "approve", "ahead", True, False, "missing history"),
     ("primary", "CHANGES_REQUESTED", "request_changes", "ahead", True, True, "clean"),
     ("primary", "CHANGES_REQUESTED", "approve", "ahead", True, False, "clean"),
     ("primary", "COMMENTED", "request_changes", "ahead", True, True, "clean"),
@@ -2351,15 +2334,7 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
     ("primary", "COMMENTED", "request_changes", "ahead", True, False, "altered merge"),
     ("primary", "APPROVED", "request_changes", "ahead", True, False, "clean"),
     ("primary", "COMMENTED", "unknown", "ahead", True, False, "clean"),
-    ("primary", "APPROVED", "approve", "diverged", True, False, "clean"),
-    ("primary", "APPROVED", "approve", "ahead", False, False, "clean"),
-    ("delta", "APPROVED", "approve", "ahead", True, True, "clean"),
-    ("delta", "APPROVED", "approve", "ahead", True, False, "own commit"),
-    ("delta", "APPROVED", "approve", "ahead", True, False, "altered merge"),
-    ("delta", "APPROVED", "approve", "ahead", True, False, "missing history"),
-    ("delta", "APPROVED", "approve", "ahead", False, False, "clean"),
     ("delta", "APPROVED", "approve", "exact", False, True, "clean"),
-    ("delta", "APPROVED", "approve", "diverged", True, False, "clean"),
 ])
 def test_ready_after_reviewed_head(
     wt, gh, capsys, monkeypatch, isolated_git, replay_gh,
@@ -2386,8 +2361,9 @@ def test_ready_after_reviewed_head(
                           provenance={"session_ids": ["test-session"]})
     prefix = cli._repost_prefix(result) if reposted else marker(anchor, kind)
     review["body"] = github.review_payload(REPO, 7, anchor, result, prefix)["body"]
-    thread = {"isResolved": resolved, "isOutdated": True, "path": "feature.py", "line": 1,
-              "comments": {"nodes": [{"author": {"login": LOGIN}, "body": f"<!-- loopzero:finding v=1 severity={"critical" if comparison == "exact" else "important"} head={reviewed} id=0b9b59e7 -->"}]}}
+    severity = "critical" if comparison == "exact" else "important"
+    finding = f"<!-- loopzero:finding v=1 severity={severity} head={reviewed} id=0b9b59e7 -->"
+    thread = review_thread(finding, resolved=resolved, author=LOGIN, outdated=True)
     reviews = [rev("f" * 40, "primary"), review] if kind == "delta" else [review]
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=reviews,
                                       readiness={"threads": (thread,)}, isDraft=False)
