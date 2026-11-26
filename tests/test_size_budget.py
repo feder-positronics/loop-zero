@@ -41,7 +41,7 @@ def _branchy(name: str, branches: int) -> str:
 
 @pytest.mark.parametrize("failure", [None, "deleted", "show"])
 def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_tool, failure):
-    source = git_repo / "src/loopzero" / ("a.py" if failure else "é space\nname.py")
+    source = git_repo / "src/loopzero" / ("a.py" if failure else os.fsdecode(b"\xc3\xa9 space\nname.py"))
     source.parent.mkdir(parents=True)
     source.write_text("one\ntwo\n")
     source.with_name("z.py").write_text("three\n")
