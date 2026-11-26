@@ -265,6 +265,24 @@ def test_publication_recovery_ignores_markers_quoted_on_other_commits(wt: Path, 
     assert cli._confirm_review(wt, config, pr, result, LOGIN, [other]) is False
 
 
+@pytest.mark.parametrize("changed, publisher", [
+    ({"headRefOid": "b" * 40}, LOGIN),
+    ({"state": "CLOSED"}, LOGIN),
+    ({"baseRefName": "release"}, LOGIN),
+    ({}, "untrusted-publisher"),
+])
+def test_publication_recovery_rechecks_pr_and_publisher(wt, gh, head, changed, publisher):
+    config = replace(cli.config_mod.load(wt / "workflow.toml"), review_publishers=(LOGIN,))
+    result = ReviewResult("claude", head, "primary", "approve", (), "raw", provenance={"session_ids": ["session"]})
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    gh.respond_pr_view(pr_json(**({"headRefOid": head} | changed)))
+    reviews = [] if changed else [rev(head, "primary")]
+    error = "PR changed during publication recovery" if changed else "publication is revoked, pending or untrusted"
+
+    with pytest.raises(cli.CliError, match=error):
+        cli._confirm_review(wt, config, pr, result, publisher, reviews)
+
+
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
         login: str = LOGIN, verdict: str = "approve") -> dict:
     """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""
