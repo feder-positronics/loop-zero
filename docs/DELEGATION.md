@@ -113,12 +113,12 @@ a successful send alone does not prove delivery.
 A schedule firing or a relayed go-ahead grants no new authority.
 
 - **Coordinator:** owns one repository's delivery, main health and shared
-  delivery infrastructure; drains ready backlog toward the current goal, routes
+  delivery infrastructure; drains startable backlog toward the current goal, routes
   incidents and dispatches workers and reviews. May delegate routine dispatch
   and integration to named executors; it keeps main health, merge-authority holds,
   shared delivery infrastructure and production observation. Reports to
   the decisions owner. Its reconstruction from live remote state includes open
-  PRs whose PR owner session has ended: at each dispatch pass it adopts each or names a
+  PRs whose [PR owner](../core/CONTRACT.md#the-six-steps) session has ended: at each dispatch pass it adopts each or names a
   next-action owner.
 - **Decisions owner:** the only role that takes the human owner's orders and
   asks the owner decisions; the status thread only reports to the owner.
@@ -218,10 +218,11 @@ does not prove a release-head regression. Required hosted checks and the
 `loopzero ready`/`merge` tool checks stay strict; use the documented
 [owner queue route](../core/CONTRACT.md#blockers) for its three local-receipt reasons.
 Exclude a known non-critical shared-gate failure the change did not cause,
-after checking no required check is involved, on its second strike in 7 days
+after checking no protected check (one the consumer designates as protected,
+such as a release or deployment check) is involved, on its second strike in 7 days
 or when it also fails on main, then diagnose; name the exact test/signature,
 evidence, issue, agent owner, fixed calendar expiry and exit criterion. Expiry
-never blocks or re-admits; required checks are excluded only under a
+never blocks or re-admits; protected checks are excluded only under a
 reserved-class hold; a new test blocks only its own PR until the consumer's
 main-run proof. Change and review any exclusion in the owning consumer;
 loop-zero has no advisory stages. Prefer fixing; one logged retry in place is
@@ -334,7 +335,7 @@ formatters and parallel tests) acquires one only while it runs.
 Host slot counts, load thresholds and quota guards belong in host policy.
 Tune dispatch from useful output, startable work supply, review/test wait, rework
 and merge service; reduce new commissions when downstream work piles up.
-Commission whole ready outcomes; do not slice an outcome to occupy an idle
+Commission whole startable outcomes; do not slice an outcome to occupy an idle
 worker, and sequence tasks likely to edit the same files.
 Give every addressable issue a next-action owner or a named dependency. Work on
 the current bottleneck gets dispatch and shared test slots first; other running

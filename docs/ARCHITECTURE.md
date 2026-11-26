@@ -154,7 +154,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    that requested changes also requires resolved findings at the reviewed head.
    For check runs with the same name, the latest run (by run ID, then start
    time) decides; a retry supersedes a failure only when it starts after that
-   failure completed. After its own draft-to-ready write, `ready --wait`
+   failure completed. After its own write taking the PR out of draft, `ready --wait`
    revalidates through the same waiter, policy refresh and original deadline.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in

@@ -21,9 +21,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    default from a family independent of the writers, on the exact head and posts
    one GitHub review with inline findings. Approval exits 0, changes requested 5.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
-   passes. A PR blocked only by missing or skipped checks or pending
-   mergeability also leaves draft but is not ready yet; without a wait that
-   exits 3. Both waiters use `--wait[=SECONDS]` (default 1800) on the same
+   passes. A PR whose only blockers are missing or skipped required checks
+   (with or without pending mergeability) also leaves draft but is not ready
+   yet; without a wait that exits 3. Both waiters use `--wait[=SECONDS]` (default 1800) on the same
    head. Zero can take a PR out of draft or enqueue. Mergeability can time out (exit 3)
    with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`.
    Green can precede CI scheduling. After two minutes of missing checks with
@@ -49,7 +49,8 @@ worktree, verify the merge in GitHub. Never yield (end the turn while
 something is pending) waiting for a notice that
 may already have fired. Notifications never replace the waiter.
 Before yielding, record head, last exit code, awaited event and next command
-in one PR comment per PR owner. Post on first yield; update the existing comment ID
+in one PR comment per PR owner (the session delivering the PR, or the
+coordinator once it adopts it). Post on first yield; update the existing comment ID
 with the full replacement Markdown from `body_file` on later yields:
 `gh api --method PATCH "repos/$owner/$repo/issues/comments/$comment_id" -f "body=$(cat "$body_file")"`.
 Post separately only for a human request, blocker, stall or final
@@ -92,7 +93,7 @@ lock on who may change production) and spending beyond
 current accounts. A reserved class carries a `hold` label plus one issue comment
 naming the hazard and end condition for the
 [decisions owner](../docs/DELEGATION.md#team-roles) (or human owner) to resolve.
-No separate per-PR go-ahead to merge, mark ready or queue; no hold renewal. Merge-authority
+No separate per-PR go-ahead to merge, take out of draft or queue; no hold renewal. Merge-authority
 holds also block the owner queue route below.
 
 ## Blockers
@@ -108,7 +109,7 @@ holds also block the owner queue route below.
   primary also requires resolution of its blocking findings.
 - A target other than configured `repo.base`.
 - `BEHIND`, unless configured Mergify integration is verified
-  source-preserving (it lands the authored commits unchanged). Its queue
+  source-preserving (advancing the base never rewrites the queued PR head). Its queue
   candidate, the temporary branch the merge queue builds and tests, preserves
   authored-head review across base movement. Source edits need fresh checks and eligible review.
 - GitHub reports `UNKNOWN` mergeability for an open PR. Local waiters can
@@ -128,8 +129,7 @@ can edit/resolve evidence; branch protection and CI enforce these blockers.
 **Owner queue route.** The merge queue's required checks are the evidence. A PR
 covered by a review eligible under [Review budget](#review-budget) and green on
 required hosted checks, with no other readiness blockers above and no
-merge-authority hold, is taken out of draft and queued by its PR owner: the
-session delivering it, or the coordinator once it adopts the PR. Because the
+merge-authority hold, is taken out of draft and queued by its PR owner. Because the
 queue enforces required integration checks, when only the local check receipt is
 not green the PR owner states ONE reason in a PR comment, then takes the PR out
 of draft and queues it directly in GitHub:
@@ -167,8 +167,9 @@ may use the infra-only route above.
 Finish planned base updates before starting checks. Wait for an identical check
 already queued or running at the same head and fingerprint. Before a fallback
 check on a published head, run `loopzero ready` and reuse any receipt it accepts.
-Whoever integrates the head (the worker, or its parent when the brief assigns
-parent verification) runs each full local check once and records its command,
+The session the brief assigns verification to (the worker, or under parent
+verification the parent or the integration executor it names) runs each full
+local check once and records its command,
 exact head SHA, environment fingerprint (for `loopzero check`, the settings
 fingerprint in its check receipt; for other suites, as consumer AGENTS.md/docs
 define it), result, time and log path. Workers, reviewers and coordinators

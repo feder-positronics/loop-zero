@@ -44,7 +44,8 @@ flowchart TD
     J -->|none can run| I["Report the blocker to whoever commissioned the PR"]
 ```
 
-See the contract's [review budget](../core/CONTRACT.md#review-budget).
+See the contract's [review budget](../core/CONTRACT.md#review-budget). The PR
+owner is defined in [The six steps](../core/CONTRACT.md#the-six-steps).
 
 ## 3. Who does what
 
