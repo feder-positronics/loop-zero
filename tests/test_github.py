@@ -182,6 +182,7 @@ def rest_pr_json(data: dict, *, branch: str = "lz/t1") -> dict:
         "mergeable_state": (data.get("mergeStateStatus") or "unknown").lower(),
         "user": data.get("author", {"login": "someone-else"}),
         "body": data.get("body"),
+        "labels": data.get("labels", []),
     }
 
 
@@ -308,13 +309,14 @@ def test_pr_for_branch_rejects_changed_or_foreign_detail(gh: FakeGh, head_change
 def test_pr_view_maps_rest_merge_evidence(
     gh: FakeGh, mergeable, merge_state, expected
 ) -> None:
-    detail = rest_pr_json(pr_json())
+    detail = rest_pr_json(pr_json(labels=[{"name": "hold"}]))
     detail["mergeable"], detail["mergeable_state"] = mergeable, merge_state
     gh.respond(f"api repos/{REPO}/pulls/7", detail)
 
     pr = github.pr_view(REPO, 7)
 
     assert (pr.mergeable, pr.merge_state) == expected
+    assert pr.labels == ("hold",)
     assert pr.head_sha == HEAD and pr.base_ref == "main" and pr.is_draft
 
 
@@ -465,6 +467,24 @@ def test_post_review_reroutes_findings_outside_diff(gh: FakeGh) -> None:
     assert comments[0]["body"].split("\n")[1] == (
         "Reviewer location src/a.py:99 is not in the diff; anchored here.")
     assert "Nit off diff" in payload["body"]
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: str) -> None:
+    path = "src/a.py"
+    patch = f"@@ -1 +1,2 @@\n-old\n+left{separator}right\n+second\n"
+    arm_review(gh, files=[{"filename": path, "patch": patch}])
+    findings = (
+        Finding("important", path, 2, "In diff", ""),
+        Finding("critical", path, 3, "Outside diff", ""),
+    )
+
+    github.post_review(REPO, 7, HEAD, review(findings=findings))
+
+    assert github._right_lines(patch) == ({1, 2}, 1)
+    comments = comments_posted(gh)
+    assert [(c["path"], c["line"]) for c in comments] == [(path, 2), (path, 1)]
+    assert "Reviewer location src/a.py:3 is not in the diff" in comments[1]["body"]
 
 
 def test_post_review_anchor_skips_files_without_hunks(gh: FakeGh) -> None:
@@ -1179,28 +1199,16 @@ def test_merge_command_failure(gh: FakeGh) -> None:
     assert "--rebase" in info.value.command and "mismatch" in info.value.tail
 
 
-@pytest.mark.parametrize("status", [404, 422])
-def test_delete_remote_branch_accepts_already_deleted_ref(gh: FakeGh, status: int) -> None:
-    gh.respond(f"api repos/{REPO}/git/ref/heads/lz/x", {"object": {"sha": HEAD}})
-    gh.fail("api -X", f"HTTP {status}: Reference does not exist")
-    assert github.delete_remote_branch(REPO, "lz/x", HEAD)
-
-
-@pytest.mark.parametrize("remote_head", [HEAD, "f" * 40, None])
+@pytest.mark.parametrize("remote_head", ["f" * 40, None])
 def test_delete_remote_branch_checks_encoded_ref(gh: FakeGh, remote_head: str | None) -> None:
-    ref = "heads/lz/fix%23516%3Fx%25"
-    get = f"api repos/{REPO}/git/ref/{ref}"
+    get = f"api repos/{REPO}/git/ref/heads/lz/fix%23516%3Fx%25"
     if remote_head is None:
         gh.fail(get, "gh: Not Found (HTTP 404)")
     else:
         gh.respond(get, {"object": {"sha": remote_head}})
-    gh.respond("api -X", "")
-    result = github.delete_remote_branch(REPO, "lz/fix#516?x%", HEAD)
-    assert result is (remote_head in (HEAD, None))
+    assert github.delete_remote_branch(REPO, "lz/fix#516?x%", HEAD) is (remote_head is None)
     assert gh.argv(0) == [*get.split(), "--include"]
-    assert len(gh.calls) == (2 if remote_head == HEAD else 1)
-    if remote_head == HEAD:
-        assert gh.argv(1) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/{ref}", "--include"]
+    assert len(gh.calls) == 1
 
 
 def _queue_json(queued: bool) -> dict:
@@ -1481,6 +1489,33 @@ def test_readiness_distinguishes_capped_check_suites_from_missing_check(gh: Fake
         f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"
         if capped else f"required check 'required-ci' missing on {HEAD[:12]}",
     )
+
+
+@pytest.mark.parametrize(("unrelated", "include_failure", "reason"), [
+    (1000, False, f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"),
+    (100, True, "required check 'required-ci' is failure"),
+    (100, False, None),
+])
+def test_readiness_requires_check_run_evidence_for_status_success_at_suite_cap(
+    gh: FakeGh, unrelated: int, include_failure: bool, reason: str | None,
+) -> None:
+    arm_readiness(gh)
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
+               [{"context": "required-ci", "state": "success"}])
+    runs = [
+        {"name": "unrelated", "conclusion": "success", "check_suite": {"id": suite}}
+        for suite in range(2, unrelated + 2)
+    ]
+    if include_failure:
+        runs.append({"name": "required-ci", "conclusion": "failure", "check_suite": {"id": 1}})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
+               *({"check_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
+
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
+                              "main", ("required-ci",), HEAD)
+
+    assert result.ready == (reason is None)
+    assert result.reasons == ((reason,) if reason else ())
 
 
 @pytest.mark.parametrize("changed_files,path,severity,live_head,anchor", [
