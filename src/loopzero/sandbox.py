@@ -253,6 +253,9 @@ def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = N
     settings = _execution_settings(config, base)
     if config.check_runner and settings["runner_executable"] is None:
         return None
+    if not config.check_runner and "HEAVY_SLOT_GRANTED_CORES" not in config.env:
+        # The inherited local worker limit is transient. Stage reuse still binds it.
+        settings["environment"].pop("HEAVY_SLOT_GRANTED_CORES", None)
     payload = [settings, config.inputs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
