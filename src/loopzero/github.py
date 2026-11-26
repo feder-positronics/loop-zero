@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from itertools import pairwise
+from itertools import chain, islice, pairwise
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -663,25 +663,19 @@ def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> t
     if sha is None:
         return "", []
 
-    matches: list[dict] = []
-    for page in range(1, 101):
-        endpoint = f"repos/{repo}/commits/{sha}/pulls?per_page={PAGE}&page={page}"
-        try:
-            rows = api_get(endpoint)
-        except GhError as exc:
-            # A local head can be unpushed. Let the branch fallback find its actual PR.
-            missing_commit = re.search(r"\bHTTP 404\b", exc.tail) or (
-                f"No commit found for SHA: {sha}" in exc.tail and re.search(r"\bHTTP 422\b", exc.tail)
-            )
-            if head_sha is not None and page == 1 and missing_commit:
-                return endpoint, []
-            raise
-        if not isinstance(rows, list) or len(rows) > PAGE:
-            raise GhError(("gh", "api", endpoint), "invalid commit PR page")
-        matches.extend(row for row in rows if _matches_commit_pr(row, repo, branch, endpoint))
-        if len(rows) < PAGE:
-            return endpoint, matches
-    raise GhError(("gh", "api", endpoint), "commit PRs exceed 100 pages")
+    endpoint = f"repos/{repo}/commits/{sha}/pulls"
+    rows = _iter_paged(endpoint)
+    try:
+        first = list(islice(rows, 1))  # the first request
+    except GhError as exc:
+        # A local head can be unpushed. Let the branch fallback find its actual PR.
+        missing_commit = re.search(r"\bHTTP 404\b", exc.tail) or (
+            f"No commit found for SHA: {sha}" in exc.tail and re.search(r"\bHTTP 422\b", exc.tail)
+        )
+        if head_sha is not None and missing_commit:
+            return endpoint, []
+        raise
+    return endpoint, [row for row in chain(first, rows) if _matches_commit_pr(row, repo, branch, endpoint)]
 
 
 def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state: str) -> PR:

@@ -41,7 +41,7 @@ def replay(
         # Legacy scenarios exercise the list fallback for an absent remote branch.
         if argv[0] == "api" and "/branches/" in key:
             return 1, "", "gh: Branch not found (HTTP 404)\n"
-        if argv[0] == "api" and "/commits/" in key and "/pulls?" in key:
+        if argv[0] == "api" and "/commits/" in key and key.endswith("/pulls"):
             sha = key.split("/commits/", 1)[1].split("/", 1)[0]
             return 1, "", f"gh: No commit found for SHA: {sha} (HTTP 422)\n"
         return 97, "", f"fake gh: no response for {key}\n"
