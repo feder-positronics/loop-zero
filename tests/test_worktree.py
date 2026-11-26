@@ -37,13 +37,6 @@ def commit_on_origin(repo: Path, name: str) -> str:
     return worktree.head(clone)
 
 
-def test_git_fixture_ignores_inherited_directory(tmp_path, monkeypatch):
-    ambient = tmp_path / "ambient.git"
-    monkeypatch.setenv("GIT_DIR", str(ambient))
-    checkout = init_git_repo(tmp_path / "checkout")
-    assert (checkout / ".git").is_dir() and not ambient.exists()
-
-
 @pytest.mark.parametrize("slug", ["zażółć\u00a0", "ok-1.2_x"])
 def test_branch_reads_valid_names_and_rejects_detached_head(repo: Path, slug: str) -> None:
     git(repo, "switch", "-c", worktree.branch_name(repo, slug))

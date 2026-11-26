@@ -30,6 +30,10 @@ class MergifyError(LoopZeroError):
     """Authentication, transport, or response failure from Mergify."""
 
 
+class MergifyUnavailable(MergifyError):
+    """Transient Mergify lookup failure after retry or budget exhaustion."""
+
+
 @dataclass(frozen=True)
 class Membership:
     candidate_number: int | None = None
@@ -139,15 +143,17 @@ def _read_queue(request: urllib.request.Request, deadline: float | None) -> obje
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
             detail = f"Mergify queue transport failed: {reason}"
             transient = not isinstance(reason, ssl.SSLCertVerificationError)
-        if not retry or not transient:
+        if not transient:
             raise MergifyError(detail)
+        if not retry:
+            raise MergifyUnavailable(detail)
         delay = max(2.0, wait or 0.0)
         remaining = github.read_timeout() if deadline is not None else github.read_timeout(5.0)
         if delay >= remaining:
             if wait is None:
                 _retry_sleep(remaining)
                 github.read_timeout(0)
-            raise MergifyError(f"{detail}; retry delay exceeds the wait budget")
+            raise MergifyUnavailable(f"{detail}; retry delay exceeds the wait budget")
         _retry_sleep(delay)
         github.read_timeout(0)
         retry = False

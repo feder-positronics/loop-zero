@@ -1,5 +1,5 @@
 # loop-zero configuration. Copy to workflow.toml at the repository root.
-# Every key below is read by `loopzero`; there are no other config files.
+# Every key below is read by `loopzero`.
 
 [repo]
 # GitHub repository in owner/name form. Used for every `gh` call.
@@ -63,7 +63,7 @@ reviewers = ["claude", "codex"]
 # When omitted, loop-zero mounts the selected binary's resolved directory;
 # inside native state roots, only the executable file is mounted instead.
 # Explicit paths must not overlap native auth/state or private reviewer state.
-# Claude installations may need their npm or bun prefix listed here.
+# Codex installations may need their npm or bun prefix listed here.
 # reviewer_ro_paths = ["/home/<you>/.local/share/npm", "/home/<you>/.bun"]
 
 # Optional per-family defaults. `--model` and `--effort` override these for one run;
@@ -82,5 +82,5 @@ reviewers = ["claude", "codex"]
 # Unlisted commands reuse only when "*" includes "." (the whole tree).
 # A partial "*" adds shared tooling only to listed commands. CI/merge-queue runs fresh.
 # [checks.inputs]
-# "uv run pytest -q" = ["src/**", "tests/**"]
+# "uv run --group dev pytest -q" = ["src/**", "tests/**"]
 # "*" = ["uv.lock", "pyproject.toml"]

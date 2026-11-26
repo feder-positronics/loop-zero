@@ -3,6 +3,7 @@ import json
 import signal
 import subprocess
 import sys
+import urllib.error
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
@@ -115,6 +116,19 @@ def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case
     if status == "pending":
         expected = github.MERGEABILITY_PENDING if blocker == "unknown" else "Awaiting trusted review of current source head"
         assert statuses[-1]["description"] == expected
+
+
+@pytest.mark.parametrize("change,reason", [
+    ({"headRefOid": "b" * 40}, "source changed during eligibility refresh"),
+    ({"mergeable": "UNKNOWN"}, github.MERGEABILITY_PENDING),
+])
+def test_live_eligibility_rejects_changes_during_refresh(publisher, change, reason):
+    publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json()),
+                      fixtures.rest_pr_json(pr_json(**change)))
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [approval()])
+    readiness = hosted.eligibility.evaluate(REPO, 7, HEAD, "main", ("trusted-publisher",))
+    assert not readiness.ready
+    assert readiness.reasons == (reason,)
 
 
 @pytest.mark.parametrize("phase,expected", [("evaluate", "failure"), ("publish", "success")])
@@ -254,7 +268,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
                            '{"message":"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ"}', "exit": 1}
         endpoint = pr if error == "before" else f"{reviews}&page=1"
         publisher.respond(endpoint, fault, [approval()] if error == "recover" else fault)
-        check_source(publisher, states, exit_code=int(error == "before"))
+        check_source(publisher, states, exit_code=int(error != "recover"))
         assert sleeps == [5]
         assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error != "recover")
         return
@@ -287,7 +301,8 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
-    ("interrupt", KeyboardInterrupt, ""), ("api", None, ""),
+    ("interrupt", KeyboardInterrupt, ""), ("api", None, ""), ("mergify", None, ""),
+    ("mergify_auth", hosted.mergify.MergifyError, "HTTP 401"),
     ("manual", hosted.LoopZeroError, "pull_request_target creation"), ("metadata", None, ""),
     ("stale", hosted.LoopZeroError, "head is no longer current"),
     ("untrusted", CandidateError, "head event was not sent"),
@@ -344,12 +359,21 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     if case not in {"valid", "trunk", "hold"}:
         monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
-    monkeypatch.setattr("loopzero.mergify.api_get", lambda repo, suffix: candidate_status()
-                        if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
+    http_codes = {"mergify": 503, "mergify_auth": 401}
+    if case in http_codes:
+        def fail_request(request):
+            raise urllib.error.HTTPError(request.full_url, http_codes[case], "", {}, None)
+
+        monkeypatch.setenv("MERGIFY_API_KEY", "synthetic-key")
+        monkeypatch.setattr(hosted.mergify, "_open", fail_request)
+        monkeypatch.setattr(hosted.mergify, "_retry_sleep", lambda _: None)
+    else:
+        monkeypatch.setattr(hosted.mergify, "api_get", lambda repo, suffix: candidate_status()
+                            if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     with pytest.raises(error, match=message or None) if error else nullcontext():
-        assert hosted.main() == 0
+        assert hosted.main() == int(case in {"api", "mergify"})
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
-              "manual": [], "metadata": [], "stale": []}
+              "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":

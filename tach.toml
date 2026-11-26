@@ -1,5 +1,5 @@
 # Module dependency boundaries for loop-zero; enforced by `tach check`.
-# Mirrors the layered architecture in docs/REWRITE-SPEC.md.
+# Module responsibilities live in docs/REWRITE-SPEC.md.
 source_roots = ["src"]
 exact = true
 forbid_circular_dependencies = true
@@ -84,7 +84,7 @@ depends_on = [
 
 [[modules]]
 path = "loopzero._cli_args"
-depends_on = []
+depends_on = ["loopzero"]
 
 [[modules]]
 path = "loopzero._cli_entry"

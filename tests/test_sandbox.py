@@ -23,6 +23,7 @@ from unittest.mock import Mock
 import pytest
 
 from loopzero import cli, sandbox
+from tests.conftest import bwrap_argv
 from loopzero.cli import _current_check_report, _save_report
 from loopzero.types import Config, ResourceLimits
 
@@ -73,16 +74,20 @@ def make_config(**overrides) -> Config:
     return Config(**(defaults | overrides))
 
 
+@pytest.mark.parametrize("inputs,expected", [
+    ({}, "93d09d9b25849bd98e9f24f82ca2aa26dee49b6f683c07fd2797a4998401f6df"),
+    ({"echo hello": (".",)}, "7c7a6b12ef710f9ef79c882d268e1e8879f97e85a7319771cb3800e2eb17e60c")])
+def test_settings_fingerprint_is_stable_across_releases(inputs, expected):
+    # A changed digest makes ready refuse every receipt written by the previous release.
+    config = make_config(env_allowlist=Config.env_allowlist, inputs=inputs)
+    assert sandbox.settings_fingerprint(config) == expected
+
+
 @pytest.fixture
 def bwrap_log(fake_tool, tmp_path) -> Path:
     log = tmp_path / "bwrap.argv"
     fake_tool("bwrap", FAKE_BWRAP.format(log=log))
     return log
-
-
-def argv_of(log: Path) -> list[str]:
-    """argv of the last bwrap invocation (the probe runs first, checks overwrite it)."""
-    return log.read_text().splitlines()
 
 
 def test_report_head_and_results(git_repo, bwrap_log):
@@ -156,7 +161,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch, limited):
     monkeypatch.setenv("LZ_DROP", "dropped")
     values = 'printf "%s\\n" "$PATH" "$LZ_KEEP" "${LZ_DROP-unset}" "$UV_CACHE_DIR" "$PYTHONDONTWRITEBYTECODE"'
     (result,) = sandbox.run_checks(make_config(checks=(values,), **options), git_repo).results
-    argv = argv_of(bwrap_log)
+    argv = bwrap_argv(bwrap_log)
     head, tail = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
     for flag in ("--die-with-parent", "--new-session", "--unshare-all", "--clearenv"):
         assert flag in head
@@ -196,7 +201,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch, limited):
 @pytest.mark.parametrize("checks", [(), ("echo hello",)], ids=["probe", "stage"])
 def test_network_binds_resolv_conf_after_run_tmpfs(git_repo, bwrap_log, checks):
     sandbox.run_checks(make_config(checks=checks, network=True), git_repo)
-    argv = argv_of(bwrap_log)
+    argv = bwrap_argv(bwrap_log)
     if not checks:
         assert argv[argv.index("--") + 1 :] == ["true"]
     assert argv.index("--unshare-all") < argv.index("--share-net") < argv.index("--clearenv")
@@ -223,7 +228,7 @@ def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch
         checks=('printf "%s\\n" "$UV_CACHE_DIR" "$RUFF_CACHE_DIR"',),
     )
     (result,) = sandbox.run_checks(cfg, git_repo).results
-    argv = argv_of(bwrap_log)
+    argv = bwrap_argv(bwrap_log)
     assert _pairs(argv, "--ro-bind-try") == [(str(extra),) * 2]
     assert _pairs(argv, "--bind-try") == [(str(cache),) * 2]
     assert len(_pairs(argv, "--bind")) == 1  # only HOME; no scratch
@@ -279,7 +284,7 @@ def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
     linked = tmp_path / "linked"
     git(git_repo, "worktree", "add", "-q", str(linked), "-b", "feature")
     sandbox.run_checks(make_config(), linked)
-    binds = _pairs(argv_of(bwrap_log), "--ro-bind")
+    binds = _pairs(bwrap_argv(bwrap_log), "--ro-bind")
     common = (git_repo / ".git").resolve()
     assert binds[-2:] == [(str(linked.resolve()),) * 2, (str(common),) * 2]
 
@@ -308,8 +313,8 @@ def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypat
     diagnosis = str(caught.value)
     if denied:
         assert "namespace creation failed" in diagnosis and "exit 1" in diagnosis
-        assert "No permissions to create new namespace" not in diagnosis
-        assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in diagnosis
+        assert "No permissions to create new namespace" in diagnosis
+        assert "ask the host operator to allow user namespaces for bwrap" in diagnosis
     else:
         assert "bwrap binary missing" in diagnosis and "sudo apt install bubblewrap" in diagnosis
 
@@ -358,7 +363,7 @@ def _real_bwrap_works() -> bool:
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
 class TestRealSandbox:
-    @pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode", "resolved"))
+    @pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode"))
     def test_real_sandbox_rejects_hidden_git_alternates_before_checks(self, git_repo, tmp_path, layout):
         shared = tmp_path / "shared"
         git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
@@ -384,7 +389,7 @@ class TestRealSandbox:
         started = []
 
         with pytest.raises(sandbox.SandboxUnavailable) as failure:
-            sandbox.run_checks(config, worktree, progress=started.append, _resolved=layout == "resolved")
+            sandbox.run_checks(config, worktree, progress=started.append)
 
         assert started == []
         message = str(failure.value)
@@ -749,7 +754,11 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
         monkeypatch.delenv("HEAVY_SLOT_GRANTED_CORES")
         assert _current_check_report(git_repo, cfg, fetched_base) is not None
     elif change == 'version':
-        monkeypatch.setattr(sandbox, '__version__', 'new')
+        dist = Mock(version="2.0.0a0")
+        monkeypatch.setattr("importlib.metadata.distribution", lambda _name: dist)
+        dist.read_text.return_value = json.dumps({"vcs_info": {"commit_id": "a" * 40}})
+        cache_check(cfg, clean=True)
+        dist.read_text.return_value = json.dumps({"vcs_info": {"commit_id": "b" * 40}})
     else:
         data = json.loads(receipt_path.read_text())
         if change in {'failed', 'boolean_exit_code'}:
@@ -923,54 +932,3 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     assert report.results[0].exit_code == 7
     assert 'stage-ran' in report.results[0].tail
     assert not report.results[0].reused_from
-
-
-def test_input_key_and_receipt_distinguish_runners(git_repo, fetched_base, tmp_path, monkeypatch):
-    paths = (tmp_path / "runner-a", tmp_path / "runner-b")
-    keys, receipts = set(), set()
-    local = make_config(inputs={"echo one": ("*.md",)})
-    keys.add(sandbox._input_key(local, git_repo, "echo one", fetched_base))
-    for path in paths:
-        path.touch()
-        monkeypatch.setattr(sandbox.shutil, "which", lambda _, resolved=path: str(resolved))
-        runner = replace(local, check_runner=("runner",), env_allowlist=())
-        keys.add(sandbox._input_key(runner, git_repo, "echo one", fetched_base))
-        receipts.add(sandbox.settings_fingerprint(runner))
-    assert None not in keys | receipts
-    assert len(keys) == 3 and len(receipts) == 2
-
-
-@pytest.mark.parametrize("change", ["target", "content"])
-def test_runner_upgrade_invalidates_pass(git_repo, fetched_base, tmp_path, change, cache_check):
-    def write_runner(path, exit_code):
-        path.write_text(
-            f"#!{sys.executable}\n"
-            "import json, sys\n"
-            "frame = json.load(sys.stdin)\n"
-            "del frame['env']\n"
-            f"frame.update(exit_code={exit_code}, duration_s=0, not_started=False, tail='')\n"
-            "print(json.dumps(frame))\n"
-        )
-        path.chmod(0o755)
-
-    runner = tmp_path / "runner"
-    original = tmp_path / "runner-a"
-    write_runner(original, 0)
-    runner.symlink_to(original)
-    config = make_config(check_runner=(str(runner),), inputs={"echo hello": (".",)})
-    report = cache_check(config, verify_reuse=True)
-    assert _current_check_report(git_repo, config, report.head)
-
-    if change == "target":
-        replacement = tmp_path / "runner-b"
-        write_runner(replacement, 17)
-        new_link = tmp_path / "runner-new"
-        new_link.symlink_to(replacement)
-        new_link.replace(runner)
-    else:
-        write_runner(original, 17)
-
-    assert _current_check_report(git_repo, config, report.head) is None
-    result = sandbox.run_checks(config, git_repo).results[0]
-    assert result.exit_code == 17
-    assert not result.reused_from

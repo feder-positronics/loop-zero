@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Review a frozen code diff against acceptance criteria and emit JSON for loopzero review.
+description: Advisory review of a frozen code diff against acceptance criteria, returning JSON findings; `loopzero review` does not load it.
 ---
 
 # Code Review
@@ -47,14 +47,9 @@ Return exactly one JSON object, with no surrounding text:
 }
 ```
 
-Include all five finding fields. `verdict` is `approve` or `request_changes`;
+Include all five finding fields; `path` and `line` may be `null` when no precise
+location exists. `verdict` is `approve` or `request_changes`;
 severity is `critical`, `important`, or `suggestion`, per
 [the contract](../../CONTRACT.md#findings).
 Any blocking finding requires `request_changes`; otherwise approve, with
 suggestions or an empty list.
-
-Anchor findings precisely. `path` and `line` may be `null` when no precise
-location exists. `loopzero review` anchors unlocated blocking findings on a
-commentable diff line. If none exists, as in a binary-only PR, publication fails
-with `PR has no diff hunks`. Keep the verdict and report the publication error to
-the delivery owner.
