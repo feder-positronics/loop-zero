@@ -498,6 +498,9 @@ def test_account_lock_timeout_leaves_files_untouched(helper, monkeypatch):
         auth = {"tokens": {"account_id": name, "access_token": "expiring"}}
         helper.write_private(helper.codex_home(name) / "auth.json", json.dumps(auth))
     helper.set_active("codex", "main")
+    status = helper.STATE / "status.json"
+    cooldown = {"exhausted": {helper.identity("codex", "main") + ":model": helper.now() + 300}}
+    helper.write_private(status, json.dumps(cooldown))
     for key in (*helper.EXPLICIT_ROUTES["codex"], "CODEX_HOME"):
         monkeypatch.delenv(key, raising=False)
     elapsed = 0.0
@@ -523,6 +526,7 @@ def test_account_lock_timeout_leaves_files_untouched(helper, monkeypatch):
         helper.fcntl.flock(holder, helper.fcntl.LOCK_EX)
         operations = (
             lambda: helper.check(quiet=True),
+            lambda: helper.launch("codex", "model", {}),
             lambda: helper.cmd_add("codex", "new"),
             lambda: helper.cmd_pinned_exec("codex", helper.identity("codex", "b"), ["unused"]),
             lambda: helper.exhausted("codex", helper.identity("codex", "main"), "model", retry_env={}),
@@ -530,11 +534,11 @@ def test_account_lock_timeout_leaves_files_untouched(helper, monkeypatch):
         for operation in operations:
             with pytest.raises(helper.AccountLockTimeout, match=r"\.codex-sync\.lock is busy"):
                 operation()
-    assert elapsed == 300
+    assert elapsed == 360
     assert not helper.codex_home("new").exists()
     assert helper.active("codex") == "main"
     assert helper.active("claude") == "a"
-    assert not (helper.STATE / "status.json").exists()
+    assert json.loads(status.read_text()) == cooldown
 
     acquire = helper._locked
     home_lock_entries = []
@@ -549,3 +553,6 @@ def test_account_lock_timeout_leaves_files_untouched(helper, monkeypatch):
     monkeypatch.setattr(helper, "check_codex", lambda _: {"tier": -1})
     helper.check(quiet=True)
     assert home_lock_entries == [".codex-sync.lock"]
+    helper.set_active("codex", "b")
+    assert helper.with_accounts("codex,codex", {})["CODEX_HOME"] == str(helper.codex_home("b"))
+    assert home_lock_entries == [".codex-sync.lock"] * 2

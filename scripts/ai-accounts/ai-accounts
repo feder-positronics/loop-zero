@@ -269,7 +269,7 @@ def with_accounts(providers: str, base: dict[str, str],
                   selected: dict[str, str | None] | None = None) -> dict[str, str]:
     """Rebind verified managed inheritance; caller credentials and billing always win."""
     env = dict(base)
-    for provider in providers.split(","):
+    for provider in dict.fromkeys(providers.split(",")):
         if provider not in PROVIDERS:
             continue
         credential = "CLAUDE_CODE_OAUTH_TOKEN" if provider == "claude" else "CODEX_HOME"
@@ -919,7 +919,8 @@ def launch(provider: str, model: str, env: dict[str, str]) -> dict:
         return result("unsupported")
     if caller_credentials(provider, env) or not STATE.is_dir() or not accounts(provider):
         return result("unmanaged")
-    with _locked(".lock"):
+    home_lock = _locked(".codex-sync.lock") if provider == "codex" else nullcontext()
+    with _locked(".lock"), home_lock:
         try:
             status = json.loads((STATE / "status.json").read_text())
         except (OSError, ValueError):
