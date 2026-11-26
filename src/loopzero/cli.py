@@ -326,6 +326,10 @@ def _check_report_problem(
         return f"check receipt is missing its settings fingerprint. {recovery}"
     if report.settings_sha256 != sandbox.settings_fingerprint(config, wt):
         return f"check receipt has an incompatible settings fingerprint. {recovery}"
+    if not sandbox.receipt_inputs_match(config, wt, report):
+        return ("declared input keys changed or are unavailable; run loopzero check at this head. "
+                "If keys remain unavailable, ensure the check base is available and "
+                "declared paths select only readable regular files.")
     return None
 
 

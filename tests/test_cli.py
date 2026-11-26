@@ -3128,6 +3128,41 @@ def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, 
     assert run(capsys, "ready")[0] == 0
 
 
+@pytest.mark.parametrize("keyable", [True, False])
+def test_ready_and_merge_reject_receipt_after_clean_checkout_rewrites_input(
+    wt, gh, capsys, tmp_path, keyable,
+):
+    path = wt / "feature.py"
+    if not keyable:
+        (wt / "link").symlink_to(path.name)
+        git(wt, "add", "link")
+        git(wt, "commit", "-qm", "add tracked symlink")
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    command = """python3 -c 'from pathlib import Path; exit(13 in Path("feature.py").read_bytes())'"""
+    inputs = f'{json.dumps(command)} = ["feature.py"]' if keyable else '"*" = ["."]'
+    settings = tmp_path / "workflow.toml"
+    settings.write_text(WORKFLOW.replace('"echo ok"', json.dumps(command)).replace(
+        "[delivery]", f'[checks.inputs]\n{inputs}\n\n[delivery]',
+    ))
+    args = ("--config", str(settings))
+    assert run(capsys, *args, "check")[0] == 0
+    code, out, _ = run(capsys, *args, "ready")
+    assert code == (0 if keyable else 1)
+    if not keyable:
+        assert "declared paths select only readable regular files" in out
+
+    git(wt, "config", "core.autocrlf", "true")
+    path.unlink()
+    git(wt, "checkout-index", "-u", "--", path.name)
+    assert b"\r\n" in path.read_bytes()
+    assert head_of(wt) == head and not git(wt, "status", "--porcelain")
+    for action in ("ready", "merge"):
+        code, out, err = run(capsys, *args, action)
+        assert code == 1 and "run loopzero check at this head" in out + err
+    assert run(capsys, *args, "check")[0] == 1
+
+
 @pytest.mark.parametrize("base_sensitive", [False, True])
 def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     if base_sensitive:
