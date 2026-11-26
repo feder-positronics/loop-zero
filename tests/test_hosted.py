@@ -89,7 +89,8 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     if blocker == "conflict":
         publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(mergeable="CONFLICTING")))
     if blocker == "important":
-        publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding")))
+        publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding",
+                                                                         author="trusted-publisher")))
     assert hosted.main() == (1 if status == "failure" else 0)
     statuses = [json.loads(c["--input"]) for c in publisher.calls if "--input" in c]
     assert ([s["state"] for s in statuses] == ["pending", status]

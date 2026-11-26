@@ -502,10 +502,13 @@ def _codex_repository_skill_overrides(cwd: Path) -> list[str]:
 
 def _repository_skill_paths(cwd: Path) -> set[str]:
     tree, paths, seen = cwd.resolve(), set(), set()
-    pending = [cwd / ".agents" / "skills", cwd / ".codex" / "skills"]
+    roots = (cwd / ".agents", cwd / ".codex")
+    pending = list(roots)
     while pending:
         path = pending.pop()
-        if not os.path.lexists(path):
+        try:
+            path.lstat()
+        except FileNotFoundError:
             continue
         # Strict: a looping or dangling link fails closed; Codex might resolve it elsewhere.
         real = path.resolve(strict=True)
@@ -514,6 +517,9 @@ def _repository_skill_paths(cwd: Path) -> set[str]:
         if not real.is_dir():
             if path.name == "SKILL.md":
                 paths.add(str(real))
+            continue
+        if path in roots:
+            pending.append(path / "skills")
             continue
         if real in seen:
             continue
