@@ -158,6 +158,14 @@ def _review_policy(kind: str, *, split: bool) -> str:
     )
 
 
+def render_patch(patch: bytes) -> str:
+    """Keep UTF-8 patches exact. Escape invalid bytes and literal backslashes otherwise."""
+    try:
+        return patch.decode("utf-8")
+    except UnicodeDecodeError:
+        return patch.replace(b"\\", b"\\\\").decode("utf-8", errors="backslashreplace")
+
+
 def build_prompt(*, kind: str, head: str, task_text: str, diff: str,
                  chunk: tuple[int, int] | None = None) -> str:
     """Frame exact review material without putting fixed reviewer policy on stdin."""
@@ -223,6 +231,11 @@ def _extract_json_object(text: str) -> object:
         if start < 0 or end <= start:
             raise
         return json.loads(stripped[start : end + 1])
+
+
+def _claude_payload(envelope: dict) -> object:
+    payload = envelope.get("structured_output")
+    return _extract_json_object(str(envelope.get("result", ""))) if payload is None else payload
 
 
 def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str) -> ReviewResult:
@@ -940,22 +953,16 @@ def _codex_evidence(result):
             or sum(e.get("type") == "turn.completed" for e in events) != 1
         ):
             raise RunnerBadOutput("codex: incomplete/mixed native terminal evidence")
-        final = [
-            e.get("item", {}).get("text")
-            for e in events
-            if e.get("type") == "item.completed"
-            and isinstance(e.get("item"), dict)
-            and e["item"].get("type") == "agent_message"
-        ]
-        if not final or _evidence_json(final[-1]) != _evidence_json(envelope["final_message"]):
-            raise RunnerBadOutput("codex: native final verdict is missing")
-        last_message = max(
-            i
+        messages = [
+            (i, e["item"].get("text"))
             for i, e in enumerate(events)
             if e.get("type") == "item.completed"
             and isinstance(e.get("item"), dict)
             and e["item"].get("type") == "agent_message"
-        )
+        ]
+        if not messages or _evidence_json(messages[-1][1]) != _evidence_json(envelope["final_message"]):
+            raise RunnerBadOutput("codex: native final verdict is missing")
+        last_message = messages[-1][0]
         if any(
             e.get("type") == "item.completed"
             and e.get("item", {}).get("type") == "command_execution"
@@ -1169,12 +1176,10 @@ def _review_claude(
         if _looks_too_long(text) or _looks_too_long(raw):
             raise RunnerPromptTooLong("claude: prompt is too long", _tail(raw))
         raise RunnerBadOutput(f"claude: {envelope.get('subtype', 'error')}", _tail(raw))
-    payload = envelope.get("structured_output")
-    if payload is None:
-        try:
-            payload = _extract_json_object(str(envelope.get("result", "")))
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise RunnerBadOutput("claude: result text is not JSON", _tail(raw)) from exc
+    try:
+        payload = _claude_payload(envelope)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RunnerBadOutput("claude: result text is not JSON", _tail(raw)) from exc
     usage = envelope.get("modelUsage")
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
     reported_model = ", ".join(models) or None
@@ -1317,11 +1322,10 @@ def review_with(
     """Run one review of ``diff`` at ``head`` with the given model family."""
     if family not in REVIEWER_FAMILIES:
         raise ValueError(f"unknown reviewer family {family!r}; expected one of {REVIEWER_FAMILIES}")
-    if kind not in ("primary", "delta"):
-        raise ValueError(f"unknown review kind {kind!r}; expected 'primary' or 'delta'")
+    policy = _review_policy(kind, split=chunk is not None)
     prompt = build_prompt(kind=kind, head=head, task_text=task_text, diff=diff, chunk=chunk)
     adapter = _review_claude if family == "claude" else _review_codex
-    policy, extra = _review_policy(kind, split=chunk is not None), {}
+    extra = {}
     if family == "codex" and review_context is not None:
         context = {**review_context, "cwd": str(cwd.resolve()), "index": chunk[0] if chunk else 1,
                    "chunks": chunk[1] if chunk else 1, "requested": {"model": model, "effort": effort},
@@ -1481,22 +1485,16 @@ def validate_runner_result(result: ReviewResult) -> bool:
             and all(item.get("subtype", "success") == "success" for item in envelopes)
             and all(not item.get("is_error") for item in envelopes)
             and all(isinstance(item, dict) for item in usages)
-            and all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in costs)
-            and all(
-                isinstance(item, (int, float)) and not isinstance(item, bool)
-                for item in durations
-            )
+            and all(isinstance(item, (int, float)) and not isinstance(item, bool)
+                    for item in costs + durations)
             and provenance.get("usage") == expected_usage
             and provenance.get("total_cost_usd") == sum(costs)
             and provenance.get("duration_api_ms") == sum(durations)
         )
-        payloads = [item.get("structured_output") for item in envelopes]
-        for index, payload in enumerate(payloads):
-            if payload is None:
-                try:
-                    payloads[index] = _extract_json_object(str(envelopes[index].get("result", "")))
-                except (json.JSONDecodeError, ValueError):
-                    return False
+        try:
+            payloads = [_claude_payload(item) for item in envelopes]
+        except (json.JSONDecodeError, ValueError):
+            return False
     elif result.family == "codex":
         envelope_sessions = [item.get("session_id") for item in envelopes]
         usages = [item.get("token_usage") for item in envelopes]

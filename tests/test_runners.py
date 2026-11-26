@@ -29,6 +29,7 @@ from loopzero.runners import (
     build_prompt,
     codex_evidence,
     merge_reviews,
+    render_patch,
     review_with,
     split_diff,
 )
@@ -1209,7 +1210,7 @@ def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str) -> N
     base = git(git_repo, "rev-parse", "HEAD").strip()
     git(git_repo, "rm", "--", name)
     git(git_repo, "commit", "-qm", "delete file")
-    diff = worktree.diff_since(git_repo, base)
+    diff = render_patch(worktree.diff_since(git_repo, base))
 
     chunks = split_diff(diff, 4096)
 
