@@ -58,12 +58,13 @@ Waits observe immediately, then use 30/60/120-second intervals with up to 10%
 earlier jitter, bounded by the timeout. Each readiness observation rechecks
 reviews and findings. Mergify waits use REST for source-head guards, merge
 observation, queue comments, PR lookup/detail and draft creation; native GitHub
-queue membership and review threads use GraphQL. With `ready --wait`, a failed or
-cancelled required Actions check may trigger a lookup for a newer active run on
-that head; fine-grained tokens need Actions read permission.
+queue membership and review threads use GraphQL. When a required Actions check
+is missing, failed or cancelled, waiters can look for an active workflow on
+that head. Fine-grained tokens need Actions read permission.
 
-Quota handling follows the contract's [failure rules](core/CONTRACT.md#failure):
-a GitHub rate-limit error stops the command without retry. REST and GraphQL have
+Quota handling follows the contract's [failure rules](core/CONTRACT.md#failure).
+Reads can honor a short `Retry-After`, and active waiters can resume after a
+verified reset within their deadline. REST and GraphQL have
 separate primary budgets, shared by all sessions of one user. For an explicit
 primary GraphQL limit, loopzero may make one bounded diagnostic query for a
 verified reset time; it does not preflight requests or infer GraphQL capacity
@@ -113,12 +114,8 @@ Settings and semantics the example does not spell out:
 
 ## What it deliberately does not do
 
-- No ledger, evidence store or run log. The PR is the record.
-- No scheduler or daemon. Every command is invoked by you or your agent.
 - No dashboard. `loopzero status` and GitHub are the UI.
-- No compatibility mode. There is one procedure, the current one.
-- No signed evidence or attestations. Checks exit zero or they do not.
-- No waivers or override files. Fix the finding or resolve the thread with a
+- Fix the finding or resolve the thread with a
   reason.
 - Reviews run with network access because the model CLIs require it. The
   sandbox limits what they can read, but cannot limit what allowed data they send.
