@@ -318,11 +318,7 @@ verdict before publication. Standalone evaluation performs its own PR reads.
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Hosted attestation uses the trusted workflow's base branch for candidate and
 source targets, queue status and integration tree verification.
-When delivery uses the existing size checker, local readiness and new Mergify
-requests evaluate a temporary integration with the freshly fetched target. The
-target supplies the checker and baseline. Existing requests continue to the
-queue wait path. Readiness and new queue requests without an admission deadline can project an
-advisory budget after a single known chain of queued predecessors.
+The size budget runs only as a sandboxed check stage and in queue candidate CI.
 A candidate lineage read that finds zero or several live batch matches is
 reread within the current attempt, under a shared deadline. Separately,
 candidate attestation restarts as a complete fresh attempt, inside its own
