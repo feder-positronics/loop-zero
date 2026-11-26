@@ -193,7 +193,7 @@ def _build(data: dict[str, Any]) -> Config:
         )
         review[family] = ReviewConfig(table.get("model"), table.get("effort"), allowed)
 
-    commands = _strings("checks.commands", checks.get("commands", []))
+    commands = _commands(checks.get("commands", []))
     kwargs: dict[str, Any] = {}
     if "runner" in checks:
         runner = _strings("checks.runner", checks["runner"])
@@ -270,6 +270,13 @@ def _reject_unknown(where: str, table: dict[str, Any], allowed: Any) -> None:
     unknown = sorted(set(table) - set(allowed))
     if unknown:
         raise ConfigError(f"unknown key(s) in {where}: {', '.join(unknown)}")
+
+
+def _commands(value: list[Any]) -> tuple[str, ...]:
+    commands = _strings("checks.commands", value)
+    if any(not command.strip() for command in commands):
+        raise ConfigError("checks.commands entries must each be a nonblank command")
+    return commands
 
 
 def _strings(label: str, value: list[Any]) -> tuple[str, ...]:

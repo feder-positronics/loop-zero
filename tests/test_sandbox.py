@@ -771,6 +771,43 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
+@pytest.mark.parametrize("case", ["typo", "empty", "dirty", "no_base"])
+def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case):
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    command = 'test "$(cat README.md)" = hello'
+    paths = () if case == "empty" else ("ipnut.txt",)
+    config = make_config(checks=(command,), inputs={command: paths})
+    first = sandbox.run_checks(config, git_repo)
+    assert first.ok
+    _save_report(git_repo, first)
+    (git_repo / "README.md").write_text("fail\n")
+    if case != "dirty":
+        git(git_repo, "commit", "-qam", "change actual input")
+    if case == "no_base":
+        git(git_repo, "update-ref", "-d", "refs/remotes/origin/main")
+
+    result = sandbox.run_checks(config, git_repo, status=(messages := []).append)
+    assert result.results[0].exit_code == 1
+    assert any("workflow.toml: checks.inputs" in message and repr(paths) in message
+               for message in messages)
+
+
+@pytest.mark.parametrize("path", [":(bogus)README.md", "README\0.md", "README.md"])
+def test_input_diagnostic_failure_does_not_block_dirty_check(
+    git_repo, bwrap_log, fetched_base, monkeypatch, path,
+):
+    if path == "README.md":
+        def timed_out(*args):
+            raise sandbox._proc.ProcTimeout("input lookup timed out")
+
+        monkeypatch.setattr(sandbox, "_input_blobs", timed_out)
+    (git_repo / "README.md").write_text("dirty\n")
+    command = 'test "$(cat README.md)" = dirty'
+    config = make_config(checks=(command,), inputs={command: (path,)})
+    report = sandbox.run_checks(config, git_repo, status=lambda _: None)
+    assert report.ok and report.dirty and report.results[0].command == command
+
+
 def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base):
     (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
     path = git_repo / "README.md"
