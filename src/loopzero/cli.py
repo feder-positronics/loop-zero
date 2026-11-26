@@ -1401,11 +1401,13 @@ def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness
 
 
 def _poll_until(
-    started: float, timeout: float, *, bounded: bool = False, initial_read_time: float = 0.0,
+    started: float, timeout: float, *, bounded: bool = False,
+    initial_read_time: float = 0.0, admitted: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
     delay = WAIT_INTERVAL
     longest_read = initial_read_time
     while True:
+        was_admitted = admitted is not None and admitted()
         read_started = time.monotonic()
         yield  # Observe immediately, including --wait=0.
         now = time.monotonic()
@@ -1413,6 +1415,8 @@ def _poll_until(
         remaining = timeout - (now - started)
         if remaining <= 0:
             return
+        if admitted is not None and not was_admitted and admitted():
+            delay = WAIT_INTERVAL
         pause = delay * random.uniform(0.9, 1.0)
         if bounded and remaining <= pause:
             # Poll late enough to see a settled check while reserving time to read it.
@@ -1670,7 +1674,8 @@ def _wait_for_mergify(
     state = None
     deferred_landing_read = False
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
-    for _ in _poll_until(started, timeout):
+    polls = _poll_until(started, timeout, admitted=lambda: confirmed)
+    for _ in polls:
         sha = _landed(config, pr, closed)
         if sha:
             return sha
