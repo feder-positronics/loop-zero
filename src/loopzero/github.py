@@ -1404,7 +1404,7 @@ def mark_ready(repo: str, number: int) -> None:
 
 _QUEUE_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name)"
-    "{pullRequest(number:$number){isInMergeQueue autoMergeRequest{enabledAt}}}}"
+    "{pullRequest(number:$number){headRefOid isInMergeQueue autoMergeRequest{enabledAt}}}}"
 )
 
 
@@ -1435,7 +1435,7 @@ def merged_sha(
     raise error(argv, "PR closed without a verified merge or invalid merge evidence")
 
 
-def merge_pending(repo: str, number: int) -> bool:
+def merge_pending(repo: str, number: int, head_sha: str) -> bool:
     """True when GitHub holds the PR for merging: queued, or accepted as an auto-merge
     request that it moves into the queue shortly after (observed ~1 minute, #180)."""
     args = _pull_query(repo, number, _QUEUE_QUERY)
@@ -1451,6 +1451,8 @@ def merge_pending(repo: str, number: int) -> bool:
         raise MergeFailed(("gh", "api", "graphql"),
                           f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
                           f"Check the PR's queue or merge state before retrying.\n{str(exc)[-300:]}") from exc
+    if pr.get("headRefOid") != head_sha:
+        raise MergeFailed(("gh", *args), "PR head changed or unavailable during queue verification")
     return queued or bool(auto)
 
 
@@ -1469,19 +1471,26 @@ def merge(
     argv = (
         "pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha,
     )
+    def observation():
+        return (bounded_reads(observation_deadline, token=None, retry=True)
+                if observation_deadline is not None else nullcontext())
+
+    if strategy == "queue":
+        with observation():
+            if merge_pending(repo, number, head_sha):
+                return None
+    write_error = None
     try:
         _gh(*argv, timeout=300)
-    except GhError as exc:
-        raise MergeFailed(exc.command, exc.tail) from exc
+    except (GhError, ProcTimeout, OSError) as exc:
+        write_error = exc
     # A synchronous merge already in flight still needs verification and cleanup.
     if strategy != "queue" and (sha := merged_sha(repo, number, expected_head=head_sha)):
         return sha
-    budget = (bounded_reads(observation_deadline, token=None, retry=True)
-              if observation_deadline is not None else nullcontext())
     sha = None
     try:
-        with budget:
-            sha = _verify_merge_request(repo, number, head_sha, argv, observe_landing=strategy == "queue")
+        with observation():
+            sha = _verify_merge_request(repo, number, head_sha, argv, write_error, observe_landing=strategy == "queue")
     except ReadDeadline:
         if sha is None:
             raise
@@ -1489,7 +1498,8 @@ def merge(
 
 
 def _verify_merge_request(
-    repo: str, number: int, head_sha: str, argv: tuple[str, ...], *, observe_landing: bool,
+    repo: str, number: int, head_sha: str, argv: tuple[str, ...], write_error: Exception | None, *,
+    observe_landing: bool,
 ) -> str | None:
     if observe_landing:
         sha = merged_sha(repo, number, expected_head=head_sha)
@@ -1498,7 +1508,7 @@ def _verify_merge_request(
             return sha
     queue_error = None
     try:
-        if merge_pending(repo, number):
+        if merge_pending(repo, number, head_sha):
             return None
     except MergeFailed as exc:
         queue_error = exc
@@ -1509,7 +1519,8 @@ def _verify_merge_request(
         return sha
     if queue_error:
         raise queue_error
-    raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
+    detail = f": {write_error}" if write_error else ""
+    raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued{detail}")
 
 
 def _remote_branch_head(endpoint: str) -> str | None:

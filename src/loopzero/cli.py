@@ -1606,7 +1606,7 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
             sha = _landed(config, pr, closed)
             if sha:
                 return sha
-            if not github.merge_pending(config.repo, pr.number):
+            if not github.merge_pending(config.repo, pr.number, pr.head_sha):
                 sha = _landed(config, pr, closed)
                 if sha:
                     return sha

@@ -16,7 +16,9 @@ import shlex
 import shutil
 import stat
 import sys
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import replace
+from itertools import groupby
 from pathlib import Path
 
 from loopzero import _proc, sandbox
@@ -43,16 +45,14 @@ _AUTH_FAILURE = re.compile(
 )
 
 REVIEW_SCHEMA: dict[str, object] = {
-    "type": "object",
-    "additionalProperties": False,
+    "type": "object", "additionalProperties": False,
     "required": ["verdict", "findings"],
     "properties": {
         "verdict": {"type": "string", "enum": ["approve", "request_changes"]},
         "findings": {
             "type": "array",
             "items": {
-                "type": "object",
-                "additionalProperties": False,
+                "type": "object", "additionalProperties": False,
                 "required": ["severity", "path", "line", "title", "body"],
                 "properties": {
                     "severity": {"type": "string", "enum": list(SEVERITIES)},
@@ -171,6 +171,16 @@ def _tail(text: str) -> str:
     return text[-TAIL_CHARS:]
 
 
+def _auth_failure(family: str, diagnostic: str) -> RunnerAuthFailed:
+    names = CLAUDE_AUTH_ENV if family == "claude" else CODEX_AUTH_ENV
+    env = _proc.build_env(names)
+    values = {variant for value in env.values() if value for variant in (value, json.dumps(value)[1:-1])}
+    patterns = [*map(re.escape, sorted(values, key=len, reverse=True)), r"\bsk-[A-Za-z0-9_-]{8,}",
+                r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"]
+    diagnostic = re.sub("|".join(patterns), "[REDACTED]", diagnostic)
+    return RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(diagnostic)}")
+
+
 def _looks_like_auth_failure(text: str) -> bool:
     return _AUTH_FAILURE.search(text) is not None
 
@@ -270,7 +280,7 @@ def _run(
             with contextlib.suppress(json.JSONDecodeError, ValueError):
                 envelope = _extract_json_object(done.stdout)
         if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(combined):
-            raise RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(combined)}")
+            raise _auth_failure(family, combined)
         if _subscription_exhausted(combined, envelope):
             raise RunnerUsageLimit(f"{family}: usage limit reached", _tail(combined))
         if _looks_too_long(combined):
@@ -464,12 +474,13 @@ def _codex_repository_skill_overrides(cwd: Path) -> list[str]:
             f"{{path={json.dumps(path, ensure_ascii=False).replace(chr(127), '\\u007f')},enabled=false}}"
             for path in sorted(paths)
         )
-        size = len(f"skills.config=[{entries}]".encode())
+        override = f"skills.config=[{entries}]"
+        size = len(override.encode())
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise RunnerBadOutput(f"codex: cannot list repository skills to disable: {exc}") from exc
     if size > CODEX_SKILL_OVERRIDE_LIMIT:
         raise RunnerBadOutput(f"codex: {len(paths)} repository skills are too many to disable")
-    return ["-c", f"skills.config=[{entries}]"] if paths else []
+    return ["-c", override] if paths else []
 
 
 def _repository_skill_paths(cwd: Path) -> set[str]:
@@ -489,16 +500,13 @@ def _repository_skill_paths(cwd: Path) -> set[str]:
         if not real.is_dir():
             if path.name == "SKILL.md":
                 paths.add(str(real))
-            continue
-        if path in roots:
+        elif path in roots:
             pending.append(path / "skills")
-            continue
-        if real in seen:
-            continue
-        seen.add(real)
-        with os.scandir(real) as entries:
-            pending.extend(path / entry.name for entry in entries
-                           if entry.is_symlink() or entry.is_dir() or entry.name == "SKILL.md")
+        elif real not in seen:
+            seen.add(real)
+            with os.scandir(real) as entries:
+                pending.extend(path / entry.name for entry in entries
+                               if entry.is_symlink() or entry.is_dir() or entry.name == "SKILL.md")
     return paths
 
 
@@ -536,9 +544,8 @@ def _settings(value: object) -> dict[str, str | None]:
     return {key: _setting(fields.get(key)) for key in ("model", "effort")}
 
 
-def _read_envelopes(raw, loads=json.loads):
-    decoded = loads(raw)
-    return decoded if isinstance(decoded, list) else [decoded]
+def _read_envelopes(raw: str, loads: Callable[[str], object] = json.loads) -> list[object]:
+    return decoded if isinstance(decoded := loads(raw), list) else [decoded]
 
 
 def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None]]]:
@@ -573,9 +580,7 @@ def codex_fatal_startup(envelope: object) -> bool:
     if not isinstance(envelope, dict) or envelope.get("type") != "codex_exec_result":
         return False
     events = envelope.get("events", ())
-    if not isinstance(events, (list, tuple)):
-        return False
-    for event in events:
+    for event in events if isinstance(events, (list, tuple)) else ():
         if not isinstance(event, dict):
             continue
         item = event.get("item", {})
@@ -642,24 +647,19 @@ def _valid_codex_evidence(value):
     }
     if not isinstance(value, dict) or set(value) != fields:
         return False
-    if (type(value["version"]) is not int or value["version"] != 1
-        or value["family"] != "codex"
-        or not isinstance(value["repo"], str)
-        or len(value["repo"]) > 256
+    if (
+        type(value["version"]) is not int or value["version"] != 1 or value["family"] != "codex"
+        or not isinstance(value["repo"], str) or len(value["repo"]) > 256
         or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value["repo"])
-        or not _bounded_int(value["pr"])
-        or not _hex(value["head"], 40)
+        or not _bounded_int(value["pr"]) or not _hex(value["head"], 40)
         or value["kind"] not in {"primary", "delta"}
-        or not isinstance(value["publisher"], str)
-        or len(value["publisher"]) > 128
+        or not isinstance(value["publisher"], str) or len(value["publisher"]) > 128
         or not re.fullmatch(r"[A-Za-z0-9_.-]+(?:\[bot\])?", value["publisher"])
         or value["receipt"] != f".loopzero/review-{value['head'][:12]}-{value['kind']}.json"
-        or not _hex(value["raw_sha256"], 64)
-        or not _bounded_int(value["raw_bytes"])
-        or type(value["complete"]) is not bool
-        or not _bounded_int(value["chunk_count"])
-        or not isinstance(value["calls"], list)
-        or len(value["calls"]) != value["chunk_count"]):
+        or not _hex(value["raw_sha256"], 64) or not _bounded_int(value["raw_bytes"])
+        or type(value["complete"]) is not bool or not _bounded_int(value["chunk_count"])
+        or not isinstance(value["calls"], list) or len(value["calls"]) != value["chunk_count"]
+    ):
         return False
     sessions, ranges = set(), set()
     for index, call in enumerate(value["calls"], 1):
@@ -668,13 +668,13 @@ def _valid_codex_evidence(value):
         settings_keys = ("requested", "reported", "configured") if "configured" in call else ("requested", "reported")
         event_keys = ("head_event", "diff_event") if call.get("inspection") == "verified" else ()
         keys = {"index", "session", "fatal", "inspection", "base", "diff_sha256", *settings_keys, *event_keys}
-        if (set(call) != keys or not _bounded_int(call["index"]) or call["index"] != index
-            or not _identifier(call["session"])
-            or call["session"] in sessions
+        if (
+            set(call) != keys or not _bounded_int(call["index"]) or call["index"] != index
+            or not _identifier(call["session"]) or call["session"] in sessions
             or call["fatal"] not in {"present", "absent", "unknown"}
             or call["inspection"] not in {"verified", "unknown"}
-            or not _hex(call["base"], 40)
-            or not _hex(call["diff_sha256"], 64)):
+            or not _hex(call["base"], 40) or not _hex(call["diff_sha256"], 64)
+        ):
             return False
         sessions.add(call["session"])
         ranges.add((call["base"], call["diff_sha256"]))
@@ -960,10 +960,10 @@ def _codex_rollout_settings(home: Path, session_id: str) -> dict:
         paths = list((home / ".codex/sessions").glob(f"*/*/*/rollout-*-{session_id}.jsonl"))
         if len(paths) != 1 or not paths[0].resolve().is_relative_to(home.resolve()):
             return unknown
-        snapshot = _codex_final_file(paths[0], max_bytes=8 * 1024 * 1024)
-        if snapshot["status"] != "complete":
+        snapshot = _read_codex_file(paths[0], max_bytes=8 * 1024 * 1024)
+        if snapshot is None:
             return unknown
-        records = [json.loads(line) for line in base64.b64decode(snapshot["bytes_base64"]).decode("utf-8").splitlines()]
+        records = [json.loads(line) for line in snapshot.decode("utf-8").splitlines()]
         if any(not isinstance(record, dict) for record in records):
             return unknown
         metadata = [record.get("payload") for record in records if record.get("type") == "session_meta"]
@@ -973,10 +973,8 @@ def _codex_rollout_settings(home: Path, session_id: str) -> dict:
         version = metadata[0].get("cli_version")
         if not isinstance(version, str) or not version.strip():
             return unknown
-        contexts = [record.get("payload") for record in records if record.get("type") == "turn_context"]
-        if not contexts or any(not isinstance(context, dict) for context in contexts):
-            return unknown
-        claims = [_settings(context) for context in contexts]
+        claims = [_settings(record.get("payload")) for record in records
+                  if record.get("type") == "turn_context"] or [unknown]
         return claims[0] if all(claims[0].values()) and all(claim == claims[0] for claim in claims) else unknown
     except (OSError, ValueError, TypeError):
         return unknown
@@ -1050,13 +1048,13 @@ def _review_claude(
     if not isinstance(envelope, dict):
         raise RunnerMalformedOutput("claude: result envelope is not an object", _tail(raw))
     if _claude_envelope_auth_failure(envelope):
-        raise RunnerAuthFailed(f"claude: CLI is not authenticated\n{_tail(raw)}")
+        raise _auth_failure("claude", raw)
     if envelope.get("is_error") and _subscription_exhausted(raw, envelope):
         raise RunnerUsageLimit("claude: usage limit reached", _tail(raw))
     if envelope.get("is_error") or envelope.get("subtype", "success") != "success":
         text = str(envelope.get("result", ""))
         if _looks_like_auth_failure(text):
-            raise RunnerAuthFailed(f"claude: CLI is not authenticated\n{_tail(text)}")
+            raise _auth_failure("claude", text)
         if _looks_too_long(text) or _looks_too_long(raw):
             raise RunnerPromptTooLong("claude: prompt is too long", _tail(raw))
         raise RunnerBadOutput(f"claude: {envelope.get('subtype', 'error')}", _tail(raw))
@@ -1077,37 +1075,35 @@ def _review_claude(
     )
 
 
-def _codex_final_file(path: Path, *, max_bytes: int | None = None) -> dict:
-    """Bound a no-follow snapshot to the initial size of an owned regular file."""
+def _read_codex_file(path: Path, *, max_bytes: int | None = None) -> bytes | None:
+    """Read an owned regular file without following links. Missing files are empty."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return {"status": "absent"}
-    except OSError as exc:
-        return {"status": "unreadable", "error_type": type(exc).__name__}
+        return b""
+    except OSError:
+        return None
     data = bytearray()
-    status, error = "complete", None
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1:
-            return {"status": "unreadable", "error_type": "NotOwnedRegularFile"}
+            return None
         if max_bytes is not None and before.st_size > max_bytes:
-            return {"status": "unreadable", "error_type": "FileTooLarge"}
+            return None
         while len(data) < before.st_size:
             block = os.read(fd, min(65536, before.st_size - len(data)))
             if not block:
                 break
             data.extend(block)
         after = os.fstat(fd)
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(data) != after.st_size:
-            status = "partial"
-    except (OSError, MemoryError) as exc:
-        status, error = "partial" if data else "unreadable", type(exc).__name__
+        if ((before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
+                or len(data) != after.st_size):
+            return None
+    except (OSError, MemoryError):
+        return None
     finally:
         os.close(fd)
-    return {"status": status, "error_type": error, "byte_count": len(data),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "bytes_base64": base64.b64encode(data).decode("ascii")}
+    return bytes(data)
 
 
 def _review_codex(
@@ -1149,10 +1145,9 @@ def _review_codex(
             env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
             family="codex",
         )
-        final = _codex_final_file(last_file)
-        if final["status"] not in ("complete", "absent"):
+        message_bytes = _read_codex_file(last_file)
+        if message_bytes is None:
             raise RunnerMalformedOutput("codex: final message file could not be read completely")
-        message_bytes = base64.b64decode(final.get("bytes_base64", ""))
         try:
             message = message_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -1183,12 +1178,7 @@ def _review_codex(
 
 def review_with(
     family: str,
-    *,
-    cwd: Path,
-    head: str,
-    kind: str,
-    diff: str,
-    task_text: str,
+    *, cwd: Path, head: str, kind: str, diff: str, task_text: str,
     reviewer_ro_paths: tuple[str, ...] = (),
     timeout: int = 900,
     model: str | None = None,
@@ -1264,17 +1254,17 @@ def split_diff(diff: str, budget: int) -> list[str]:
     blocks = [diff[start:end] for start, end in zip(starts, [*starts[1:], len(diff)], strict=False)] or [diff]
     if len(diff.encode()) > budget:
         blocks = [_summarize_deleted(block) for block in blocks]
-    pieces = [piece for block in blocks for piece in _split_bytes(block, budget)]
-    chunks: list[str] = []
-    current = ""
+    return _pack_bytes((piece for block in blocks for piece in _split_bytes(block, budget)), budget) or [""]
+
+
+def _pack_bytes(pieces: Iterable[str], budget: int) -> list[str]:
+    chunks, current = [], ""
     for piece in pieces:
-        candidate = current + piece
-        if current and len(candidate.encode()) > budget:
+        if current and len((current + piece).encode()) > budget:
             chunks.append(current)
-            current = piece
-        else:
-            current = candidate
-    if current or not chunks:
+            current = ""
+        current += piece
+    if current:
         chunks.append(current)
     return chunks
 
@@ -1292,17 +1282,16 @@ def _summarize_deleted(block: str) -> str:
     return f"{header}\n{path}: deleted, {deleted} lines\n"
 
 
-def _split_bytes(text: str, budget: int) -> list[str]:
+def _split_bytes(text: str, budget: int) -> Iterator[str]:
     if len(text.encode()) <= budget:
-        return [text]
-    pieces: list[str] = []
-    current = ""
-    for line in text.splitlines(keepends=True):
-        encoded = line.encode()
-        if len(encoded) > budget:
-            if current:
-                pieces.append(current)
-                current = ""
+        yield text
+        return
+    lines = ((line, line.encode()) for line in text.splitlines(keepends=True))
+    for oversized, group in groupby(lines, key=lambda item: len(item[1]) > budget):
+        if not oversized:
+            yield from _pack_bytes((line for line, _ in group), budget)
+            continue
+        for _, encoded in group:
             start = 0
             while start < len(encoded):
                 cut = min(len(encoded), start + budget)
@@ -1310,16 +1299,8 @@ def _split_bytes(text: str, budget: int) -> list[str]:
                     cut -= 1
                 if cut <= start:
                     raise ValueError("diff chunk budget cannot fit one UTF-8 character")
-                pieces.append(encoded[start:cut].decode())
+                yield encoded[start:cut].decode()
                 start = cut
-        elif current and len((current + line).encode()) > budget:
-            pieces.append(current)
-            current = line
-        else:
-            current += line
-    if current:
-        pieces.append(current)
-    return pieces
 
 
 def _validated_payloads(family, envelopes, provenance, sessions):
@@ -1327,9 +1308,8 @@ def _validated_payloads(family, envelopes, provenance, sessions):
         return None
     usage_key = "usage" if family == "claude" else "token_usage"
     usages = [item.get(usage_key) for item in envelopes]
-    if not all(isinstance(item, dict) for item in usages):
-        return None
-    if provenance.get(usage_key) != (usages[0] if len(usages) == 1 else usages):
+    if (not all(isinstance(item, dict) for item in usages)
+            or provenance.get(usage_key) != (usages[0] if len(usages) == 1 else usages)):
         return None
     try:
         if family == "claude" and _valid_claude_envelopes(envelopes, provenance):

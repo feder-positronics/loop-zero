@@ -2247,6 +2247,21 @@ def test_review_observes_new_codex_version_in_saved_receipt(
     assert result.provenance["cli_version"] == version
 
 
+def test_review_redacts_native_authentication_diagnostics(wt, gh, fake_tool, capsys, monkeypatch, head):
+    arm_empty_primary_review_history(gh, head)
+    for family, env in (("claude", "ANTHROPIC_API_KEY"), ("codex", "OPENAI_API_KEY")):
+        monkeypatch.setenv(env, f"opaque-fake-{family}-credential")
+        fake_tool(family, "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
+                  f'printf "Not logged in with %s (server echoed sk-FakeToken0123)\\n" "${env}" >&2\nexit 1\n')
+    code, _, err = run(capsys, "review")
+    assert code == 4
+    assert err.count("Not logged in with [REDACTED] (server echoed [REDACTED])") == 2
+    assert "opaque-fake-" not in err and "sk-FakeToken0123" not in err
+    for family, remedy in (("claude", "claude auth login"), ("codex", "codex login")):
+        assert f"{family}: CLI is not authenticated" in err
+        assert f"Fix: run `{remedy}`." in err
+
+
 @pytest.mark.parametrize("save", [True, False])
 def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monkeypatch, capsys, save):
     prepare_review(wt, gh, fake_bin)
@@ -3280,15 +3295,30 @@ def test_open_finding_blocks_delivery(wt, gh, capsys, head, command, conclusion,
     assert all(c["argv"][:2] != ["pr", command] for c in gh.calls)
 
 
+def lose_native_merge_reply(monkeypatch):
+    original = github._gh
+
+    def transport(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if args[:2] == ("pr", "merge"):
+            raise github.ProcTimeout("lost native merge reply", "")
+        return result
+
+    monkeypatch.setattr(github, "_gh", transport)
+
+
+@pytest.mark.parametrize("lost_reply", [False, True])
 @pytest.mark.parametrize("branch,changed", [
     *((branch, False) for branch in TASK_BRANCHES), ("lz/t1", True),
 ])
 def test_merge_prints_sha_and_cleans_up(
-    wt: Path, repo: Path, gh: FakeGh, capsys, changed, head, branch
+    wt: Path, repo: Path, gh: FakeGh, capsys, changed, head, branch, monkeypatch, lost_reply
 ) -> None:
     git(wt, "branch", "-m", branch)
     arm_squash_merge(gh, head, wt, merge_json(state='MERGED', head='f' * 40 if changed else head_of(wt), sha='c' * 40), branch=branch)
     gh.respond("api -X", "")
+    if lost_reply:
+        lose_native_merge_reply(monkeypatch)
     code, out, err = run(capsys, "merge")
     out = without_accepted_receipt(out)
     if changed:
@@ -3856,13 +3886,16 @@ def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
         assert not err and f"PR #7 was already merged as {'e' * 12}" in out and out.endswith("e" * 40 + "\n")
 
 
-def native_queue(queued):
-    return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued}}}}
+def native_queue(queued, head):
+    return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued, "headRefOid": head}}}}
 
 
-def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_squash_merge(gh, head, wt, merge_json(state='OPEN', head=head_of(wt), sha=None))
-    gh.respond("api graphql", threads_json(), native_queue(True))
+@pytest.mark.parametrize("lost_reply", [False, True])
+def test_merge_queued_prints_and_keeps_worktree(wt, gh, capsys, head, monkeypatch, lost_reply):
+    arm_squash_merge(gh, head, wt, merge_json(state='OPEN', head=head, sha=None))
+    gh.respond("api graphql", threads_json(), native_queue(True, head))
+    if lost_reply:
+        lose_native_merge_reply(monkeypatch)
     expect_cli(capsys, 0, "merge", stderr="", stdout_contains=("queued for merge into main",),
                stdout_endswith="next: loopzero merge --wait follows the queue, verifies and cleans up\n")
     assert wt.exists()
@@ -3992,7 +4025,7 @@ def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
                      merge_json(state="MERGED", head=head, sha="e" * 40) if landed else open_pr]
     gh.append(f"api repos/{REPO}/pulls/7", *snapshots)
     ejected = outcome in {"ejected", "landed-on-ejection"}
-    gh.respond("api graphql", threads_json(), native_queue(True), native_queue(not ejected))
+    gh.respond("api graphql", threads_json(), native_queue(True, head), native_queue(not ejected, head))
     gh.respond("api -X", "")
     poll_clock(monkeypatch, jitter=1.0)
     wait = 0 if ejected else 60
@@ -4760,8 +4793,7 @@ def test_merge_queue_landing_within_budget(
     monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(cli, "_sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     gh.respond("pr merge", "")
-    gh.respond("api graphql", threads_json(),
-               {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}})
+    gh.respond("api graphql", threads_json(), native_queue(False, head), native_queue(True, head))
 
     def landing(argv, *, timeout, **kwargs):
         nonlocal in_queue
