@@ -108,7 +108,14 @@ def repo(git_seed: Path, tmp_path: Path, fake_tool, monkeypatch, request: pytest
     shutil.copytree(git_seed / seed_checkout, checkout)
     origin = shutil.copytree(git_seed / "origin.git", tmp_path / "origin.git")
     git(checkout, "remote", "set-url", "origin", str(origin))
-    run_command = github.run
+    run_command, git_command = github.run, cli._git
+
+    def local_push_url(cwd, *args, **kwargs):
+        output = git_command(cwd, *args, **kwargs)
+        if args == ("remote", "get-url", "--push", "--all", "origin"):
+            return "\n".join(f"https://github.com/{REPO}.git" if url == str(origin) else url
+                             for url in output.splitlines())
+        return output
 
     def local_transport(argv, **kwargs):
         if argv[0] == "git" and "push" in argv:
@@ -120,6 +127,7 @@ def repo(git_seed: Path, tmp_path: Path, fake_tool, monkeypatch, request: pytest
         return run_command(argv, **kwargs)
 
     monkeypatch.setattr(github, "run", local_transport)
+    monkeypatch.setattr(cli, "_git", local_push_url)
     fake_tool("bwrap", FAKE_BWRAP.format(log=tmp_path / "bwrap.argv"))
     return checkout
 
@@ -1194,16 +1202,20 @@ def test_pr_aborts_on_missing_remote_head(wt, gh, fake_tool, tmp_path, capsys):
     assert all("--method" not in call["argv"] for call in gh.calls)
 
 
-@pytest.mark.parametrize("hook_fails", [False, True])
+@pytest.mark.parametrize("case", ["rewrite", "hook-fails", "wrong-destination"])
 def test_pr_uses_lease_for_rewritten_open_pr(
-    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, hook_fails: bool
+    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, case: str
 ) -> None:
     old = head_of(wt)
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     git(wt, "reset", "-q", "--soft", "HEAD~1")
     git(wt, "commit", "-q", "-m", "rebased feature")
     head = head_of(wt)
-    if hook_fails:
+    origin, other = repo.parent / "origin.git", tmp_path / "other.git"
+    if case == "wrong-destination":
+        shutil.copytree(origin, other)
+        git(wt, "remote", "set-url", "--push", "origin", str(other))
+    if case == "hook-fails":
         hook = fake_tool("pre-push", "echo 'lint failed in widget.py' >&2\nexit 1\n")
         git(wt, "config", "core.hooksPath", str(hook.parent))
     pushes = trace_pushes(fake_tool, tmp_path)
@@ -1212,7 +1224,12 @@ def test_pr_uses_lease_for_rewritten_open_pr(
 
     code, out, err = run(capsys, "pr")
 
-    if hook_fails:
+    if case == "wrong-destination":
+        assert (code, out) == (1, "") and "origin push URL does not target" in err
+        assert not pushes.exists()
+        assert all(git(remote, "rev-parse", "refs/heads/lz/t1").strip() == old for remote in (origin, other))
+        return
+    if case == "hook-fails":
         assert (code, out) == (1, "") and "lint failed in widget.py" in err
         assert "remote moved" not in err and all("PATCH" not in call["argv"] for call in gh.calls)
     else:
@@ -1220,11 +1237,12 @@ def test_pr_uses_lease_for_rewritten_open_pr(
     assert pushes.read_text().strip() == (
         f"push -u origin --porcelain --force-with-lease=lz/t1:{old} lz/t1"
     )
-    assert git(repo.parent / "origin.git", "rev-parse", "refs/heads/lz/t1").strip() == (old if hook_fails else head)
+    assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == (old if case == "hook-fails" else head)
 
 
+@pytest.mark.parametrize("shared_object", [False, True])
 def test_pr_reports_rejected_lease_without_overwriting_remote(
-    wt: Path, repo: Path, gh: FakeGh, tmp_path: Path, capsys
+    wt: Path, repo: Path, gh: FakeGh, tmp_path: Path, capsys, shared_object: bool
 ) -> None:
     old = head_of(wt)
     origin = repo.parent / "origin.git"
@@ -1237,11 +1255,14 @@ def test_pr_reports_rejected_lease_without_overwriting_remote(
     commit_file(mover, "remote.txt", "moved\n", "remote move")
     git(mover, "push", "-q", "origin", "lz/t1")
     moved = git(origin, "rev-parse", "refs/heads/lz/t1").strip()
-    gh.respond_pr_list([pr_json(headRefOid=old)])
+    if shared_object:
+        git(repo, "fetch", "-q", "origin", "lz/t1")
+    gh.respond_pr_list([pr_json(headRefOid=moved if shared_object else old)])
 
     code, out, err = run(capsys, "pr")
 
-    assert code == 1 and out == "" and "remote moved" in err
+    diagnostic = "absent from this task branch's history" if shared_object else "remote moved"
+    assert code == 1 and out == "" and diagnostic in err
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == moved
 
 
