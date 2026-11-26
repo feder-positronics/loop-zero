@@ -1956,6 +1956,15 @@ def test_current_dismissed_review_names_recovery(kind, head):
         cli._decide_kind([*previous, cli.Marker(head, kind, "DISMISSED")], head)
 
 
+def test_empty_non_merge_delta_keeps_blocking_findings(wt, monkeypatch):
+    since = head_of(wt)
+    git(wt, "commit", "--allow-empty", "-qm", "empty fix")
+    monkeypatch.setattr(cli.github, "login", lambda **_: LOGIN)
+    monkeypatch.setattr(cli.github, "open_blocking_findings", lambda *_: ["open finding"])
+    with pytest.raises(cli.CliError, match="empty delta leaves blocking findings open"):
+        cli._delta_patch(wt, cli.config_mod.load_trusted(wt), since, head_of(wt), 7)
+
+
 def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
     first = head_of(wt)
     commit_file(wt, "second.py", "x = 2\n", "second")
@@ -4742,8 +4751,10 @@ def test_review_discloses_fallback_for_all_contributing_families(wt, gh, fake_bi
         if lineage == "two-head-trailers":
             git(wt, "commit", "--amend", "-qm", f"patch\n\n{codex}\n{claude}")
         else:
-            if lineage == "delta":
+            if lineage == "delta":  # A real repair; an empty delta cannot clear blocking findings.
                 history = [rev(head_of(wt), "primary", state="CHANGES_REQUESTED", verdict="request_changes")]
+                (wt / "repair.py").write_text("fixed = True\n")
+                git(wt, "add", "repair.py")
             git(wt, "commit", "--allow-empty", "-qm", f"repair\n\n{claude}")
         _fake_codex(fake_bin, json.dumps(APPROVE))
     head = prepare_review(wt, gh, fake_bin, history=history)

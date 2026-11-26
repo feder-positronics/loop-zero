@@ -1042,20 +1042,21 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
             f"run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR"
         )
     if not worktree.merges_since(wt, since):
-        return worktree.diff_since(wt, since)
-    patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
-             if number is not None else None)
-    if patch is None:
-        raise CliError(
-            f"could not verify merge history: {since[:12]} must be on the first-parent history and "
-            f"merged parents must come from {config.base_branch}. Save your work, then replay the fixes "
-            f"on the reviewed head {since[:12]}, including resolution edits. Push with `loopzero pr` "
-            "and run `loopzero review`, or open a new PR"
-        )
-    if not patch and github.open_blocking_findings(
+        patch = worktree.diff_since(wt, since)  # Empty after an empty commit or a reverted change.
+    else:
+        patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
+                 if number is not None else None)
+        if patch is None:
+            raise CliError(
+                f"could not verify merge history: {since[:12]} must be on the first-parent history and "
+                f"merged parents must come from {config.base_branch}. Save your work, then replay the fixes "
+                f"on the reviewed head {since[:12]}, including resolution edits. Push with `loopzero pr` "
+                "and run `loopzero review`, or open a new PR"
+            )
+    if not patch and number is not None and github.open_blocking_findings(
         config.repo, number, None, config.review_publishers or (github.login(),),
     ):
-        raise CliError("empty base-merge delta leaves blocking findings open. Run `loopzero resolve` "
+        raise CliError("empty delta leaves blocking findings open. Run `loopzero resolve` "
                        "to list them, then address them before readiness.")
     return patch
 
