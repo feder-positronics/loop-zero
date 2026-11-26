@@ -365,7 +365,7 @@ def _require_no_ignored_user_files(wt: Path) -> None:
     for path in ignored.split("\0")[:-1]:
         if (
             (path in {".loopzero/task.md", ".loopzero/checks.json"}
-             or re.fullmatch(r"\.loopzero/review-[0-9a-f]{12}-(primary|delta)\.json", path))
+             or re.fullmatch(r"\.loopzero/review(?:er-output)?-[0-9a-f]{12}-(primary|delta)\.json", path))
             and not (wt / path).is_symlink()
         ):
             continue
