@@ -86,6 +86,51 @@ def assert_single_publication(gh, fake_bin):
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
 
+@pytest.mark.parametrize("override", [None, "pr", "head", "raw", "bytes", "effort"])
+def test_plain_review_surfaces_receipt_after_interruption_before_post(
+    wt, gh, fake_bin, monkeypatch, capsys, override,
+):
+    head = support.prepare_review(wt, gh, fake_bin)
+    reviewer = fake_bin / "claude"
+    reviewer.write_text(reviewer.read_text().replace(
+        "#!/bin/sh\n", f'#!/bin/sh\nprintf "run\\n" >> "{fake_bin}/claude.runs"\n'))
+    original = github.post_review
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(github, "post_review", interrupt)
+    assert run(capsys, "review")[0] == 130
+    monkeypatch.setattr(github, "post_review", original)
+
+    path = cli._review_file(wt, head, "primary")
+    saved = path.read_bytes()
+    if override in {"pr", "head", "raw"}:
+        payload = json.loads(saved)
+        if override == "pr":
+            payload["publication"]["number"] = 999
+        else:
+            payload[override] = "invalid"
+        path.write_text(json.dumps(payload))
+    if override == "bytes":
+        path.write_bytes(b"\xff")
+    args = ["--effort", "high"] if override == "effort" else []
+    code, _out, err = run(capsys, "review", *args)
+
+    if override is None:
+        assert code == 1 and "loopzero review --repost" in err
+        assert path.read_bytes() == saved
+        assert not any("--input" in c for c in gh.calls)
+        assert run(capsys, "review", "--repost")[0] == 0
+        assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
+        assert sum(
+            c["argv"][1] == support.post_key().split()[1] and "--input" in c for c in gh.calls
+        ) == 1
+    else:
+        assert code == 0, err
+        assert (fake_bin / "claude.runs").read_text().splitlines() == ["run", "run"]
+
+
 @pytest.mark.parametrize("kind", ["primary", "delta"])
 @pytest.mark.parametrize("verdict", [0, 5])
 @pytest.mark.parametrize("interrupted", [False, True, "timeout"])
