@@ -632,3 +632,28 @@ def test_account_env_moves_shared_entry_across_devices(helper, monkeypatch, outc
             helper.account_env("codex", "extra")
         assert entry.read_text() == "original" and entry.is_symlink() == (outcome == "published")
         assert list(Path(main).iterdir()) == ([] if outcome == "copy failed" else [Path(main) / entry.name])
+
+
+@pytest.mark.parametrize("unsupported", [None, "ENOSYS", "EINVAL"])
+def test_sync_preserves_a_shared_directory_created_during_promotion(helper, monkeypatch, unsupported):
+    home = helper.codex_home("extra")
+    home.mkdir(parents=True)
+    helper.CODEX_MAIN.mkdir()
+    source = home / "sessions"
+    source.mkdir()
+    (source / "old").write_text("keep local")
+    (home / "notes").write_text("promote")
+    rename = helper._rename_noreplace
+
+    def create_destination(entry, target):
+        if entry == source:
+            target.mkdir()
+            if unsupported:
+                raise OSError(getattr(helper.errno, unsupported), "no-replace unsupported")
+        rename(entry, target)
+
+    monkeypatch.setattr(helper, "_rename_noreplace", create_destination)
+    helper.sync_codex_home(home)
+    assert (source / "old").read_text() == "keep local"
+    assert list((helper.CODEX_MAIN / "sessions").iterdir()) == []
+    assert (home / "notes").is_symlink() and (home / "notes").read_text() == "promote"
