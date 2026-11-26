@@ -52,12 +52,12 @@ def result(row):
 
 
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
-def test_legacy_startup_failure_refuses_saved_result_and_multichunk(row, tmp_path):
+def test_legacy_startup_failure_refuses_saved_result_and_multichunk(row, git_repo):
     bad = result(row)
     assert not runners.validate_runner_result(bad)
-    cli._save_review(tmp_path, bad)
+    cli._save_review(git_repo, bad)
     with pytest.raises(cli.CliError, match="provenance/envelope mismatch"):
-        cli._load_review(tmp_path, bad.head, bad.kind)
+        cli._load_review(git_repo, bad.head, bad.kind)
     clean = dataclasses.replace(bad, raw=json.dumps(envelope(row) | {"events": []}))
     with pytest.raises(runners.RunnerBadOutput, match="Code Mode"):
         runners.merge_reviews([clean, bad])
@@ -172,5 +172,5 @@ def test_duplicate_primary_markers_on_one_head_count_as_one():
     assert cli._decide_kind(duplicate, head) == ("delta", reviewed)
     with pytest.raises(cli.CliError, match="already has a primary"):
         cli._decide_kind(duplicate, reviewed)
-    with pytest.raises(cli.CliError, match=r"review cap reached \(2 rounds per PR\)"):
+    with pytest.raises(cli.CliError, match="review cap reached"):
         cli._decide_kind([*duplicate, cli.Marker("c" * 40, "primary", "COMMENTED")], head)

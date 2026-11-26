@@ -7,7 +7,7 @@ import os
 def replay(
     argv: list[str], calls: str, scenario: str, cwd: str, token: str | None,
 ) -> tuple[int, str, str]:
-    record = {"argv": argv, "token": token}
+    record = dict(argv=argv, token=token, config=[os.getenv(k) for k in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME")])
     input_files = {}
     for flag in ("--input", "--body-file"):
         if flag in argv:

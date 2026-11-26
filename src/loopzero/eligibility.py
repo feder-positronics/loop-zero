@@ -9,6 +9,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from time import sleep
 
@@ -54,10 +55,9 @@ def review_projection(review: dict, head: str, repo: str, number: int):
     if not positions:
         return False, None
     try:
-        if positions != [1] or len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
-            return True, None
-        if len(block) > 2 and (len(block) != 3 or not re.fullmatch(
-                r"<!-- loopzero:adjudication v=1 replaces=[0-9]+(?:,[0-9]+)* target=" + head + r" -->", block[2])):
+        if (positions != [1] or len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT
+                or (len(block) > 2 and (len(block) != 3 or not re.fullmatch(
+                    r"<!-- loopzero:adjudication v=1 replaces=[0-9]+(?:,[0-9]+)* target=" + head + r" -->", block[2])))):
             return True, None
         marker = REVIEW_MARKER_RE.fullmatch(block[0])
         evidence = runners.decode_codex_evidence(block[1])
@@ -96,36 +96,73 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     return latest if verdict else None
 
 
-def _clean_base_merges(repo: str, number: int, reviewed: str, head: str, base_branch: str) -> bool:
-    """Prove each intervening first-parent commit is an unmodified merge from the base."""
+def _verified_merge(git: Callable[..., str], merge: str, first: str, second: str,
+                    base: str, *, clean: bool) -> bool:
+    git("merge-base", "--is-ancestor", second, base)
+    merge_bases = git("merge-base", "--all", first, second).splitlines()
+    # A shallow root outside the known merge bases could hide another base.
+    if git("rev-list", "--max-parents=0", first, second, "--not", *merge_bases):
+        return False
+    return not clean or git("merge-tree", "--write-tree", first, second) == git("rev-parse", f"{merge}^{{tree}}")
+
+
+def _verified_base_chain(git: Callable[..., str], reviewed: str, head: str, base: str, *,
+                         clean: bool, conflict_only: bool) -> bool:
+    cursor, conflict = head, False
+    row_lengths = {3} if clean or conflict_only else {2, 3}
+    for row in git("rev-list", "--first-parent", "--parents", f"{reviewed}..{head}").splitlines():
+        commits = row.split()
+        if len(commits) not in row_lengths or commits[0] != cursor:
+            return False
+        cursor = commits[1]
+        if len(commits) == 2:
+            continue
+        if not _verified_merge(git, *commits, base, clean=clean):
+            return False
+        if conflict_only and not conflict:
+            conflict = git("merge-tree", "--write-tree", *commits[1:], merge_conflict_status=True) == "1"
+    return cursor == reviewed and (conflict or not conflict_only)
+
+
+def base_merge_material(
+    repo: str, number: int, reviewed: str, head: str, base_branch: str, *, clean: bool, conflict_only: bool = False,
+) -> bytes | None:
+    """Return a verified delta patch, or empty bytes for proven clean inheritance."""
     try:
         pr = github.api_get(f"repos/{repo}/pulls/{number}")
         base = pr["base"]["sha"]
         if (pr["head"]["sha"] != head or pr["base"]["ref"] != base_branch
                 or not re.fullmatch(r"[0-9a-f]{40}", base)):
-            return False
+            return None
         with candidate.fetched_git(repo, [reviewed, head, base]) as git:
-            history = git("rev-list", "--first-parent", "--parents", f"{reviewed}..{head}")
-            cursor = head
-            for row in history.splitlines():
-                commits = row.split()
-                if len(commits) != 3 or commits[0] != cursor:
-                    return False
-                merge, first, second = commits
-                git("merge-base", "--is-ancestor", second, base)
-                merge_bases = git("merge-base", "--all", first, second).splitlines()
-                # A shallow root outside the known merge bases could hide another base.
-                if git("rev-list", "--max-parents=0", first, second, "--not", *merge_bases):
-                    return False
-                tree = git("merge-tree", "--write-tree", first, second)
-                if tree != git("rev-parse", f"{merge}^{{tree}}"):
-                    return False
-                cursor = first
-            return cursor == reviewed
+            if not _verified_base_chain(git, reviewed, head, base, clean=clean, conflict_only=conflict_only):
+                return None
+            if clean:
+                return b""
+            patch = git("log", "--first-parent", "--reverse", "--remerge-diff", "-p", "--format=",
+                        "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                        "--ignore-submodules=none", "--submodule=short",
+                        f"{reviewed}..{head}", preserve_newlines=True)
+            return patch.encode("utf-8", errors="surrogateescape")
     except github.GhUnavailable:
         raise
     except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError):
-        return False
+        return None
+
+
+def _summary_verdict(body: str, kind: str) -> str:
+    # Read the publisher's summary before model prose can quote either verdict.
+    _, machine_block = runners.leading_review_block(body)
+    summary, _, rest = body[len(machine_block):].lstrip().partition("\n")
+    if summary.startswith(("Reposted from runner session: ", "Reposted from runner sessions: ")):
+        summary = rest.partition("\n")[0]
+    return summary.partition(": **")[2] if summary.startswith(f"loopzero {kind} review by ") else ""
+
+
+def approved_delta(reviews: list[dict], head: str, publishers: tuple[str, ...], *, repo: str, number: int) -> bool:
+    review = eligible_review(reviews, head, publishers, repo=repo, number=number)
+    return bool(review and review["state"] in {"APPROVED", "COMMENTED"}
+                and _summary_verdict(review["body"], "delta").startswith("approve** ("))
 
 
 def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
@@ -144,28 +181,25 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
         return None
     if marker[2] == "primary":
-        _, machine_block = runners.leading_review_block(latest["body"])
-        # App reviews use COMMENTED for either verdict. Read the publisher's
-        # summary before model prose, which can quote either verdict.
-        summary, _, rest = latest["body"][len(machine_block):].lstrip().partition("\n")
-        if summary.startswith(("Reposted from runner session: ", "Reposted from runner sessions: ")):
-            summary = rest.partition("\n")[0]
-        if not summary.startswith("loopzero primary review by "):
-            return None
-        verdict = summary.partition(": **")[2]
+        verdict = _summary_verdict(latest["body"], "primary")
         state = latest.get("state")
         if verdict.startswith("request_changes** (") and state in {"CHANGES_REQUESTED", "COMMENTED"}:
             if github.open_blocking_findings(repo, number, reviewed, publishers):
                 return None
         elif not (verdict.startswith("approve** (") and state in {"APPROVED", "COMMENTED"}):
             return None
-    if not _clean_base_merges(repo, number, reviewed, head, base_branch):
+    if base_merge_material(repo, number, reviewed, head, base_branch, clean=True) is None:
         return None
     return latest
 
 
-def _source_snapshot(repo: str, number: int, head: str) -> github.PR:
-    pr = github.pr_view(repo, number)
+def source_fingerprint(pr: github.PR) -> tuple[object, ...]:
+    return (pr.number, pr.head_sha, pr.base_ref, pr.state, pr.mergeable == "CONFLICTING",
+            github.merge_hold(pr.number, pr.labels))
+
+
+def source_snapshot(repo: str, number: int, head: str, pr: github.PR | None = None) -> github.PR:
+    pr = pr if pr is not None else github.pr_view(repo, number)
     for delay in (2, 4, 8):
         if pr.head_sha != head or github.mergeability_blocker(pr) != github.MERGEABILITY_PENDING:
             break
@@ -175,12 +209,12 @@ def _source_snapshot(repo: str, number: int, head: str) -> github.PR:
 
 
 def evaluate(repo: str, number: int, head: str, base: str,
-             publishers: tuple[str, ...]) -> github.Readiness:
-    """Re-fetch reviews and threads; no local receipts, CI identity or source execution."""
+             publishers: tuple[str, ...], *, snapshot: github.PR | None = None) -> github.Readiness:
+    """Evaluate live review evidence. Callers supplying a snapshot own the final source check."""
     if not publishers or not re.fullmatch(r"[0-9a-f]{40}", head):
         raise LoopZeroError("eligibility requires trusted publishers and a full source SHA")
-    pr = _source_snapshot(repo, number, head)
-    if pr.head_sha != head:
+    pr = snapshot if snapshot is not None else source_snapshot(repo, number, head)
+    if pr.number != number or pr.head_sha != head:
         return github.Readiness(False, ("source head changed; refresh eligibility",))
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
@@ -201,10 +235,10 @@ def evaluate(repo: str, number: int, head: str, base: str,
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head,
                               publishers=publishers)
-    current = github.pr_view(repo, number)
-    if current.head_sha != head:
-        return github.Readiness(False, ("source head changed during eligibility refresh",))
-    if result.ready and (blocker := github.mergeability_blocker(current)):
+    current = github.pr_view(repo, number) if snapshot is None else pr
+    if snapshot is None and source_fingerprint(current) != source_fingerprint(pr):
+        return github.Readiness(False, ("source changed during eligibility refresh",))
+    if snapshot is None and result.ready and (blocker := github.mergeability_blocker(current)):
         return github.Readiness(False, (blocker,))
     return result
 
