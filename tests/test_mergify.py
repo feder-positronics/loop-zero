@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
+import ssl
 import subprocess
 import sys
+import traceback
 import urllib.error
 import urllib.request
 
@@ -13,50 +16,63 @@ import pytest
 from loopzero import mergify
 
 
-class Response(io.BytesIO):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.close()
+def response(payload: object) -> io.BytesIO:
+    return io.BytesIO(json.dumps(payload).encode())
 
 
-def response(payload: object) -> Response:
-    return Response(json.dumps(payload).encode())
+
+@pytest.mark.parametrize(("operation", "args"), [
+    (mergify.api_get, ("acme/widgets", "/merge-queue/status")),
+    (mergify.dequeue, ("acme/widgets", 7)),
+])
+def test_malformed_authorization_is_not_logged(monkeypatch, operation, args):
+    fake_key = "synthetic-mergify-key"
+    monkeypatch.setenv("MERGIFY_API_KEY", fake_key + "\nsecond-line")
+    monkeypatch.setattr(urllib.request, "getproxies", dict)
+    monkeypatch.setattr(mergify, "_retry_sleep", lambda _delay: None)
+
+    def reject_network(_connection):
+        pytest.fail("invalid Authorization header reached the network")
+
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", reject_network)
+    with pytest.raises(mergify.MergifyError, match="invalid URL or header") as failure:
+        operation(*args)
+    assert fake_key not in "".join(traceback.format_exception(failure.value))
 
 
-def test_membership_uses_bearer_and_validates_queue(monkeypatch):
+@pytest.fixture
+def request_log(monkeypatch):
     monkeypatch.setenv("MERGIFY_API_KEY", "secret")
     seen = []
 
-    def open_(request):
-        seen.append(request)
-        return response({
-            "number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 2,
-        })
+    def install(payload=None, *, status=None):
+        def open_(request):
+            seen.append(request)
+            if status:
+                raise urllib.error.HTTPError(request.full_url, status, "test response", {}, None)
+            return response(payload)
+        monkeypatch.setattr(mergify, "_open", open_)
+        return seen
 
-    monkeypatch.setattr(mergify, "_open", open_)
+    return install
+
+
+def test_membership_uses_bearer_and_validates_queue(request_log):
+    seen = request_log({"number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 2})
     assert mergify.membership("acme/widgets", 7, "main") == mergify.Membership()
     assert seen[0].full_url == "https://api.mergify.com/v1/repos/acme/widgets/merge-queue/pull/7"
     assert seen[0].headers["Authorization"] == "Bearer secret"
     assert seen[0].headers["User-agent"] == "loopzero"
 
 
-def test_membership_maps_404_only_to_absent(monkeypatch):
-    monkeypatch.setenv("MERGIFY_API_KEY", "secret")
-
-    def missing(request):
-        raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, None)
-
-    monkeypatch.setattr(mergify, "_open", missing)
-    assert mergify.membership("acme/widgets", 7, "main") is None
-
-    def forbidden(request):
-        raise urllib.error.HTTPError(request.full_url, 403, "forbidden", {}, None)
-
-    monkeypatch.setattr(mergify, "_open", forbidden)
-    with pytest.raises(mergify.MergifyError, match="HTTP 403"):
-        mergify.membership("acme/widgets", 7, "main")
+@pytest.mark.parametrize("status", [404, 403])
+def test_membership_maps_404_only_to_absent(request_log, status):
+    request_log(status=status)
+    if status == 404:
+        assert mergify.membership("acme/widgets", 7, "main") is None
+    else:
+        with pytest.raises(mergify.MergifyError, match="HTTP 403"):
+            mergify.membership("acme/widgets", 7, "main")
 
 
 def test_api_get_rejects_paths_outside_repository():
@@ -66,15 +82,8 @@ def test_api_get_rejects_paths_outside_repository():
         mergify.api_get("acme/widgets", "/../other")
 
 
-def test_dequeue_posts_to_documented_endpoint(monkeypatch):
-    monkeypatch.setenv("MERGIFY_API_KEY", "secret")
-    seen = []
-
-    def open_(request):  # a transient failure must not repeat the write
-        seen.append(request)
-        raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
-
-    monkeypatch.setattr(mergify, "_open", open_)
+def test_dequeue_posts_to_documented_endpoint(request_log):
+    seen = request_log(status=503)  # a transient failure must not repeat the write
     with pytest.raises(mergify.MergifyError):
         mergify.dequeue("acme/widgets", 7)
     assert (len(seen), seen[0].method, seen[0].full_url.endswith("/pull/7/dequeue")) == (1, "POST", True)
@@ -82,11 +91,12 @@ def test_dequeue_posts_to_documented_endpoint(monkeypatch):
 
 @pytest.fixture
 def queue_api(monkeypatch):
-    monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix: (
-        {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status") else
-        {"configuration": [{"name": "main", "config": {"allow_inplace_checks": True}}]}
-    ))
-    def github_config(text, *, default="main", changed=False):
+    def github_config(text, *, default="main", changed=False, file_overrides=None, queues=True, inplace=True):
+        rows = [{"name": "main", "config": {"allow_inplace_checks": inplace}}] if queues else []
+        monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix: (
+            {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status")
+            else {"configuration": rows}
+        ))
         reads = 0
         def get(path):
             nonlocal reads
@@ -95,7 +105,7 @@ def queue_api(monkeypatch):
             assert path == "repos/acme/widgets/contents/.mergify.yml?ref=refs%2Fheads%2Fmain"
             reads += 1
             return {"type": "file", "encoding": "base64", "sha": str(reads if changed else 1)*40,
-                    "content": base64.b64encode(text.encode()).decode()}
+                    "content": base64.b64encode(text.encode()).decode(), **(file_overrides or {})}
         monkeypatch.setattr(mergify.github, "api_get", get)
     return github_config
 
@@ -104,13 +114,7 @@ SAFE_CONFIG = "merge_queue: {mode: serial, max_parallel_checks: 3}\nqueue_rules:
 ONE_CHECK = SAFE_CONFIG.replace("checks: 3", "checks: 1")  # in place unless batches are explicit
 
 
-@pytest.mark.parametrize("text", [SAFE_CONFIG, ONE_CHECK.replace("main}", "main, batch_size: 8}")])
-def test_configured_accepts_documented_speculation_despite_raw_inplace_default(queue_api, text):
-    queue_api(text)
-    assert mergify.configured("acme/widgets", "main", "main")
-
-
-@pytest.mark.parametrize("text", [
+UNSAFE_CONFIGS = [
     SAFE_CONFIG.replace("checks: 3", f"checks: {value}")
     for value in ["1", "0", "-1", "true", '"3"', "null"]
 ] + [
@@ -120,45 +124,24 @@ def test_configured_accepts_documented_speculation_despite_raw_inplace_default(q
     SAFE_CONFIG + "merge_queue: {max_parallel_checks: 1}\n",
     "[]", "!!python/object:object {}", "merge_queue: [",
 ] + [ONE_CHECK.replace("main}", r) for r in ["main, batch_size: 1}", "main, batch_size: true}",
-     'main, batch_size: "8"}', "main, batch_size: null}", "main}, {name: o, batch_size: 8}"]])
-def test_configured_rejects_unsafe_or_ambiguous_canonical_config(queue_api, text):
-    queue_api(text)
-    assert not mergify.configured("acme/widgets", "main", "main")
+     'main, batch_size: "8"}', "main, batch_size: null}", "main}, {name: o, batch_size: 8}"]]
 
 
-@pytest.mark.parametrize("options", [{"default": "other"}, {"changed": True}])
-def test_configured_rejects_wrong_default_branch_or_config_change(queue_api, options):
-    queue_api(SAFE_CONFIG, **options)
-    assert not mergify.configured("acme/widgets", "main", "main")
-
-
-def test_configured_still_requires_vendor_queue_identity(queue_api, monkeypatch):
-    queue_api(SAFE_CONFIG)
-    monkeypatch.setattr(mergify, "api_get", lambda *_: {"batches": [], "mode": "serial", "configuration": []})
-    assert not mergify.configured("acme/widgets", "main", "main")
-
-
-@pytest.mark.parametrize("field,value", [("encoding", "none"), ("type", "symlink"),
-                                        ("sha", None), ("sha", "z"*40), ("content", None), ("content", "!")])
-def test_configured_rejects_malformed_github_file(queue_api, monkeypatch, field, value):
-    queue_api(SAFE_CONFIG)
-    original = mergify.github.api_get
-    def malformed(path):
-        data = original(path)
-        if "/contents/" in path:
-            data[field] = value
-        return data
-    monkeypatch.setattr(mergify.github, "api_get", malformed)
-    assert not mergify.configured("acme/widgets", "main", "main")
-
-
-def test_legacy_false_does_not_license_single_check_source_updates(queue_api, monkeypatch):
-    queue_api(SAFE_CONFIG.replace("checks: 3", "checks: 1"))
-    monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix: (
-        {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status") else
-        {"configuration": [{"name": "main", "config": {"allow_inplace_checks": False}}]}
-    ))
-    assert not mergify.configured("acme/widgets", "main", "main")
+@pytest.mark.parametrize("text,options,accepted", [
+    (SAFE_CONFIG, {}, True),
+    (ONE_CHECK.replace("main}", "main, batch_size: 8}"), {}, True),
+    *((text, {}, False) for text in UNSAFE_CONFIGS),
+    (SAFE_CONFIG, {"default": "other"}, False),
+    (SAFE_CONFIG, {"changed": True}, False),
+    (SAFE_CONFIG, {"queues": False}, False),
+    (ONE_CHECK, {"inplace": False}, False),
+    *((SAFE_CONFIG, {"file_overrides": {key: value}}, False)
+      for key, value in (("encoding", "none"), ("type", "symlink"), ("sha", None),
+                         ("sha", "z" * 40), ("content", None), ("content", "!"))),
+])
+def test_configured_validates_canonical_github_config(queue_api, text, options, accepted):
+    queue_api(text, **options)
+    assert mergify.configured("acme/widgets", "main", "main") == accepted
 
 
 def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
@@ -250,3 +233,20 @@ def test_api_get_retries_transient_reads(monkeypatch, failure):
     monkeypatch.setattr(mergify, "_credential", lambda: "k")
     assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
     assert calls == ["GET", "GET"]
+
+@pytest.mark.parametrize("reason, expected_sleeps", [
+    ("DNS lookup failed", [2.0, 5.0]),
+    (ssl.SSLCertVerificationError("certificate verification failed"), []),
+])
+def test_api_get_classifies_terminal_transport_failure(monkeypatch, reason, expected_sleeps):
+    sleeps = []
+
+    def fail(_request):
+        raise urllib.error.URLError(reason)
+
+    monkeypatch.setattr(mergify, "_open", fail)
+    monkeypatch.setattr(mergify, "_retry_sleep", sleeps.append)
+    monkeypatch.setattr(mergify, "_credential", lambda: "k")
+    with pytest.raises(mergify.MergifyError, match="transport failed") as info:
+        mergify.api_get("acme/widgets", "/merge-queue/status")
+    assert str(reason) in str(info.value) and sleeps == expected_sleeps

@@ -1,8 +1,10 @@
 """Exercise the documentation check as a contributor/CI subprocess in real Git."""
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -81,7 +83,7 @@ def test_broken_local_link_fails_even_with_guide_update(git_repo, target):
 
 def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo):
     base = prepare(git_repo)
-    path = git_repo / "src/loopzero/cli.py"
+    path = git_repo / "src/loopzero/_cli_args.py"
     path.parent.mkdir(parents=True)
     path.write_text("def build_parser():\n    return 'public'\n\ndef _fix():\n    return 1\n")
     git(git_repo, "add", ".")
@@ -97,6 +99,26 @@ def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo):
 def test_missing_base_fails_closed(git_repo):
     prepare(git_repo)
     assert run(git_repo, "not-a-revision").returncode == 1
+
+
+@pytest.mark.parametrize("entry", ["architecture", "sdist"])
+def test_direct_git_timeout(tmp_path, monkeypatch, capsys, entry):
+    def stalled_git(argv, *, timeout, **kwargs):
+        assert timeout == 60
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr(subprocess, "run", stalled_git)
+    if entry == "architecture":
+        monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--links-only"])
+        assert runpy.run_path(str(SCRIPT))["main"]() == 1
+        assert "timed out" in capsys.readouterr().err
+    else:
+        monkeypatch.setitem(sys.modules, "hatchling.builders.hooks.plugin.interface",
+                            SimpleNamespace(BuildHookInterface=object))
+        hook = runpy.run_path(str(SCRIPT.parents[1] / "hatch_build.py"))["TrackedSdistFiles"]
+        (tmp_path / ".git").mkdir()
+        with pytest.raises(subprocess.TimeoutExpired):
+            hook.initialize(SimpleNamespace(root=tmp_path), "", {})
 
 
 def test_tach_enforces_module_boundaries(tmp_path):

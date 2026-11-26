@@ -39,7 +39,7 @@ depends_on = ["loopzero._proc", "loopzero.runners", "loopzero.types"]
 
 [[modules]]
 path = "loopzero.mergify"
-depends_on = ["loopzero.github", "loopzero.types"]
+depends_on = ["loopzero.candidate", "loopzero.github", "loopzero.types"]
 
 [[modules]]
 path = "loopzero.candidate"
@@ -69,6 +69,7 @@ depends_on = [
 [[modules]]
 path = "loopzero.cli"
 depends_on = [
+    "loopzero._cli_args",
     "loopzero._proc",
     "loopzero.config",
     "loopzero.eligibility",
@@ -79,3 +80,11 @@ depends_on = [
     "loopzero.types",
     "loopzero.worktree",
 ]
+
+[[modules]]
+path = "loopzero._cli_args"
+depends_on = []
+
+[[modules]]
+path = "loopzero._cli_entry"
+depends_on = ["loopzero._cli_args", "loopzero.cli"]

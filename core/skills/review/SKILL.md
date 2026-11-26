@@ -8,8 +8,8 @@ description: Assess a non-diff artifact, system, architecture, workflow, agent c
 Return a ranked, evidence-backed judgment at the requested altitude.
 Route diffs to [code-review](../code-review/SKILL.md), adding
 [security-review](../security-review/SKILL.md) for changed trust boundaries.
-For designs, read [design guidance](../write-design-doc/reference.md) and
-[design lenses](design-reference.md). Judge sufficiency for the
+For designs, start with [Design Contract](../write-design-doc/reference.md#design-contract)
+and [lenses](design-reference.md). Judge sufficiency for the
 next actor, respecting settled decisions unless their premises fail. Separate
 wording from material defects; do not demand detail irrelevant to that action.
 Return design findings in the response; publish to PR threads only when authorized.
