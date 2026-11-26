@@ -131,12 +131,13 @@ def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = Fals
     scope = _read_scope.set((deadline, token, retry))
     try:
         yield
-        _read_timeout(0)
+        read_timeout(0)
     finally:
         _read_scope.reset(scope)
 
 
-def _read_timeout(limit: float) -> float:
+def read_timeout(limit: float) -> float:
+    """Cap an I/O timeout or retry delay to the active read budget."""
     scope = _read_scope.get()
     if scope is None:
         return limit
@@ -269,7 +270,7 @@ def app_token() -> str:
         return ""
     minted = time.time()  # before the helper runs: a suspend mid-call still ages the token
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
@@ -316,19 +317,19 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout) if scope else timeout)
+                       timeout=read_timeout(timeout) if scope else timeout)
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
             if scope and scope[2]:
-                _read_timeout(timeout)
+                read_timeout(timeout)
             if delay is None or not retryable:
                 raise ProcTimeout(
                     _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
                     stderr=_redact_tokens(exc.stderr, selected), duration_s=exc.duration_s,
                 ) from None
-            _retry_sleep(_read_timeout(delay) if scope else delay)
+            _retry_sleep(read_timeout(delay) if scope else delay)
             continue
         status, headers, body = (_included_response(done.stdout) if rest_api or diagnostic_api
                                  else (None, {}, done.stdout))
@@ -344,7 +345,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhError(argv, tail, token=selected, guidance=guidance)
         if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
             break
-        _retry_sleep(_read_timeout(delay) if scope else delay)
+        _retry_sleep(read_timeout(delay) if scope else delay)
     if done.exit_code != 0:
         error_command = ("GitHub API request",) if diagnostic_api or patch_error else argv
         error_tail = (_api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
@@ -412,7 +413,7 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         query = "query { rateLimit { remaining resetAt } }"
         result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=cwd,
                      env_allowlist=GH_ENV, extra_env={"GH_TOKEN": token} if token else None,
-                     timeout=_read_timeout(10))
+                     timeout=read_timeout(10))
         if result.exit_code:
             return ""
         data = json.loads(result.stdout)
@@ -1349,7 +1350,7 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         "pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha,
     )
     try:
-        _gh(*argv, timeout=300)
+        _gh(*argv, timeout=read_timeout(300))
     except GhError as exc:
         raise MergeFailed(exc.command, exc.tail) from exc
     sha = merged_sha(repo, number, expected_head=head_sha)

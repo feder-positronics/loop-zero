@@ -72,7 +72,7 @@ _retry_sleep = time.sleep
 
 
 def _open(request: urllib.request.Request):
-    return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    return urllib.request.build_opener(_NoRedirect).open(request, timeout=github.read_timeout(30))
 
 
 def api_get(repo: str, suffix: str) -> object | None:
@@ -89,7 +89,9 @@ def api_get(repo: str, suffix: str) -> object | None:
     for delay in (2.0, 5.0, None):  # reads retry server errors, throttling and dropped reads
         try:
             with _open(request) as response:
-                return json.load(response)
+                payload = json.load(response)
+            github.read_timeout(0)
+            return payload
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None
@@ -98,7 +100,7 @@ def api_get(repo: str, suffix: str) -> object | None:
         except (OSError, ValueError, http.client.IncompleteRead) as exc:
             if delay is None:
                 raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
-        _retry_sleep(delay)
+        _retry_sleep(github.read_timeout(delay))
     return None
 
 

@@ -3859,7 +3859,7 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
 
     def membership(*_):
         reads_at_membership.append(len(gh.calls))
-        if sum(sleeps) == 60:
+        if sum(sleeps) == 30:
             gh.respond(" ".join(detail), merge_json(state="MERGED", head=head, sha="e" * 40))
         return mergify.Membership()
 
@@ -3873,11 +3873,11 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
     monkeypatch.setattr(cli.random, "uniform", lambda *_: 1.0)
     monkeypatch.setattr(cli, "_sleep", sleeps.append)
 
-    assert cli._wait_for_mergify(config, pr, 60, confirmed=True) == "e" * 40
+    assert cli._wait_for_mergify(config, pr, 90, confirmed=True) == "e" * 40
     assert sleeps == [30, 30]
-    assert configurations == [(REPO, "main", "main")] * 3
-    assert reads_at_membership == [1, 2, 3]
-    assert [c["argv"][:2] for c in gh.calls] == [detail] * 4
+    assert configurations == [(REPO, "main", "main")] * 2
+    assert reads_at_membership == [1, 2]
+    assert [c["argv"][:2] for c in gh.calls] == [detail] * 3
 
 
 @pytest.mark.parametrize("outcome,jitter", [
@@ -3954,9 +3954,9 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     if outcome == "worktree_removed":
         poll_until = cli._poll_until
 
-        def remove_worktree_then_poll(*args):
+        def remove_worktree_then_poll(*args, **kwargs):
             git(repo, "worktree", "remove", "--force", str(wt))
-            return poll_until(*args)
+            return poll_until(*args, **kwargs)
 
         monkeypatch.setattr(cli, "_poll_until", remove_worktree_then_poll)
     try:
@@ -3966,7 +3966,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
             monkeypatch.chdir(repo)
     if outcome == "timeout":
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
-        assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
+        assert sleeps == ([30, 60, 120, 20, 20] if jitter == 1 else [27, 54, 108, 30.5, 30.5])
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
@@ -4283,7 +4283,7 @@ def _closed_unmerged_wait(monkeypatch, reads, steps=0):
     monkeypatch.setattr(cli.github, "merged_sha", merged_sha)
     monkeypatch.setattr(cli.github, "merge_pending", lambda *_: True)
     ticks = iter(range(steps + 1))
-    monkeypatch.setattr(cli, "_poll_until", lambda *_: (None for _ in ticks))
+    monkeypatch.setattr(cli, "_poll_until", lambda *_, **_kwargs: (None for _ in ticks))
     config = SimpleNamespace(repo="o/r", base_branch="main")
     pr = github.PR(7, URL, "a" * 40, "main", False, "OPEN", "MERGEABLE")
     return cli._wait_for_merge(config, pr, 60)
@@ -4374,3 +4374,80 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert err == ""
         assert len(writes) == 1
         assert json.loads(writes[0]["--input"])["body"] == prose + suffix
+
+
+@pytest.mark.parametrize("wait, latency, expected", [(1, 3.0, 3), (1, 0.25, 0), (0, 0.0, 0)])
+def test_merge_queue_landing_within_budget(wt, gh, capsys, monkeypatch, head, replay_gh, wait, latency, expected):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    clock = [1000.0]
+    budgets = []
+    cleaned = []
+    in_queue = False
+    run_gh = github.run
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    gh.respond("pr merge", "")
+    gh.respond("api graphql", threads_json(),
+               {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}})
+
+    def landing(argv, *, timeout, **kwargs):
+        nonlocal in_queue
+        if argv[1:3] == ["pr", "merge"]:
+            in_queue = True
+        if in_queue and argv[1:3] == ["api", f"repos/{REPO}/pulls/7"]:
+            budgets.append(timeout)
+            if len(budgets) == 1:
+                return Completed(0, json.dumps(merge_json(state="OPEN", head=head)), "", 0.0)
+            clock[0] += latency
+            return Completed(0, json.dumps(merge_json(state="MERGED", head=head, sha="e" * 40)), "", latency)
+        return run_gh(argv, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(github, "run", landing)
+    monkeypatch.setattr(cli, "_cleanup_remote_refs", lambda *_: None)
+    monkeypatch.setattr(cli, "_cleanup", lambda *_: cleaned.append(True))
+
+    code, out, err = run(capsys, "merge", f"--wait={wait}")
+
+    assert (code, err, bool(cleaned)) == (expected, "", expected == 0)
+    assert budgets == [1.0 if wait else 120.0] * 2
+    assert ("timed out waiting for the merge queue" in out) is (expected == 3)
+
+
+def test_mergify_queue_retries_stop_at_merge_deadline(wt, gh, capsys, monkeypatch, replay_gh):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    clock = [1000.0]
+    budgets = []
+    sleeps = []
+    admitted = False
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
+    monkeypatch.setattr(mergify, "_credential", lambda: "test-key")
+
+    def membership(*_args):
+        nonlocal admitted
+        admitted = True
+        return mergify.Membership()
+
+    def configured(repo, *_args):
+        return not admitted or mergify.api_get(repo, "/merge-queue/status") is not None
+
+    def open_request(request, *, timeout):
+        budgets.append(timeout)
+        raise mergify.urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, None)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(mergify, "membership", membership)
+    monkeypatch.setattr(mergify, "configured", configured)
+    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request))
+    monkeypatch.setattr(mergify, "_retry_sleep", sleep)
+
+    code, out, err = run(capsys, "merge", "--wait=1")
+
+    assert (code, err) == (3, "")
+    assert budgets == [1.0] and sleeps == [1.0]
+    assert "timed out waiting for Mergify to land PR #7" in out
+    assert not any(call["argv"][:2] == ["api", f"repos/{REPO}/issues/7/comments"] for call in gh.calls)
