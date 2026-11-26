@@ -359,7 +359,7 @@ def _lock_task_state(wt: Path) -> Iterator[None]:
         os.close(fd)
 
 
-def _save_report(wt: Path, report: CheckReport, *, checkpoint: bool = False) -> str | None:
+def _save_report(wt: Path, report: CheckReport, *, checkpoint_checks: tuple[str, ...] | None = None) -> str | None:
     """Publish the receipt or return the current HEAD if the result is stale."""
     path = wt / CHECKS_FILE
     payload = {
@@ -375,9 +375,10 @@ def _save_report(wt: Path, report: CheckReport, *, checkpoint: bool = False) -> 
         current_head = worktree.head(wt)
         if report.head != current_head:
             return current_head
-        saved = _load_report(wt) if checkpoint else None
+        saved = _load_report(wt) if checkpoint_checks is not None else None
         if (saved is not None and saved.ok and not saved.dirty and saved.head == report.head
-                and saved.settings_sha256 == report.settings_sha256):
+                and saved.settings_sha256 == report.settings_sha256
+                and tuple(result.command for result in saved.results) == checkpoint_checks):
             return None
         _write_json_atomically(path, payload)
     return None
@@ -602,7 +603,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),
             status=lambda message: print(message, flush=True),
-            checkpoint=lambda partial: _save_report(wt, partial, checkpoint=True))
+            checkpoint=lambda partial: _save_report(wt, partial, checkpoint_checks=config.checks))
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2

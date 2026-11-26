@@ -4772,11 +4772,14 @@ def test_late_checkpoint_preserves_completed_pass(wt, head):
                          cli.sandbox.settings_fingerprint(cfg, wt))
     save = partial(cli._save_report, wt)
     checkpoint = cli.sandbox._checkpoint_success
-    checkpoint(partial(save, checkpoint=True), passed, {}, ())
+    checkpoint(partial(save, checkpoint_checks=cfg.checks), passed, {}, ())
     assert cli._load_report(wt).results[0].input_key == "key"
     save(passed)
-    checkpoint(partial(save, checkpoint=True), passed, {}, ())
+    checkpoint(partial(save, checkpoint_checks=cfg.checks), passed, {}, ())
     assert cli._current_check_report(wt, cfg, head) == passed
     failed = replace(passed, results=(replace(passed.results[0], exit_code=1),))
     save(failed)
     assert cli._load_report(wt) == failed
+    save(passed)
+    checkpoint(partial(save, checkpoint_checks=cfg.checks[:1]), replace(passed, results=passed.results[:1]), {}, ())
+    assert not cli._load_report(wt).ok
