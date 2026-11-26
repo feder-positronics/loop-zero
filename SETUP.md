@@ -74,6 +74,14 @@ symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
+Before resuming automated PR check refreshes or explicit PR resyncs after an
+upgrade, advance every PR-body writer to the selected CLI revision. For
+unverified receipt warnings, use a revision containing
+[3ff80bd9 (#1160)](https://github.com/feder-positronics/loop-zero/commit/3ff80bd91c92f12d557cead31776df40d4328097).
+Once the writers are updated, run `loopzero check` for the current head to
+replace old receipts. If you roll back across that fix, pause those writes before
+switching the CLI and resume them once the writers support the warning again.
+
 If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
 after GitHub may have accepted a Claude review, run `loopzero review --repost`
 with the publishing CLI revision or a newer compatible revision. The rollback
@@ -338,6 +346,29 @@ Afterward, `loopzero status` shows the next step and requires authenticated
 access to the configured GitHub repository even before a PR exists. See the
 [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) and
 [Blockers](core/CONTRACT.md#blockers) for the rest of the workflow.
+
+### Check receipts with remote execution
+
+Run the current `loopzero check` coordinator from the task worktree with
+the same effective settings used by `loopzero ready`. To execute stages
+remotely, configure an operator-trusted `[checks].runner` that implements the
+[stage protocol](docs/ARCHITECTURE.md#check-stage-runners). The local coordinator
+writes the receipt.
+
+Without a stage adapter, run the whole check locally. Use a local slot if the
+host requires one. On miki, run this from the task worktree.
+
+```sh
+HEAVY_SLOT_REMOTE_HOSTS="$HOME/.cache/intelflo-scratch/locks/no-remote-hosts.json" "$HOME/.cache/intelflo-scratch/locks/heavy-slot.sh" loopzero check
+```
+
+A whole-job remote worker writes its own receipt. Ready can use it only if it
+passes the existing checks for a clean, passing receipt at the exact head,
+with the current ordered commands and matching settings fingerprint. An older
+worker can omit the fingerprint. A current worker can produce a different
+fingerprint, for example when its inherited `PATH` differs. GitHub required
+CI supplies separate evidence. The [owner queue route](core/CONTRACT.md#blockers)
+applies only under its documented conditions.
 
 ## Removing an abandoned task worktree
 
