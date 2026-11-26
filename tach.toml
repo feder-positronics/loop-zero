@@ -58,6 +58,7 @@ depends_on = [
 [[modules]]
 path = "loopzero.hosted"
 depends_on = [
+    "loopzero._proc",
     "loopzero.candidate",
     "loopzero.config",
     "loopzero.eligibility",
