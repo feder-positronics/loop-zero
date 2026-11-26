@@ -559,10 +559,12 @@ the authoritative `checks.json` receipt. Checks lock the task state directory
 through execution and receipt publication. A waiter can reuse a newly published
 passing receipt when HEAD, settings and declared inputs match. Writers recheck
 HEAD and atomically replace the receipt from a synced sibling temporary file.
-Successful local keyed stages are checkpointed in the same receipt
-for reuse. Delegated results are published only after the check completes. A checkpoint cannot replace a clean pass for the same head and
-settings or satisfy readiness before final worktree validation. Completed
-failures still replace passes. Runners cannot select stages or mint receipts. Stage admission
+Successful local keyed stages are checkpointed in the same receipt for reuse.
+Their checkpoints preserve a clean pass for the same head, settings and
+commands. A reported failed stage replaces the receipt immediately. Successful
+delegated stages are published only with the final report. Final worktree
+validation is required before publishing a pass. Runners cannot select stages
+or mint receipts. Stage admission
 belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
