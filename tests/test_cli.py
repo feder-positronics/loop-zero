@@ -4719,6 +4719,25 @@ def test_wait_rechecks_closed_unmerged_pr(monkeypatch, final) -> None:
         assert _closed_unmerged_wait(monkeypatch, reads, steps=1) == final
 
 
+def test_task_state_lock_times_out_with_a_live_holder(git_repo, monkeypatch):
+    now = 0.0
+
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(cli.worktree, "time", SimpleNamespace(monotonic=lambda: now, sleep=advance))
+    with cli.worktree.lock_local_state(git_repo):
+        with (
+            pytest.raises(TimeoutError, match=r"task state is busy.*retry"),
+            cli.worktree.lock_local_state(git_repo),
+        ):
+            pytest.fail("contender acquired a held directory lock")
+        assert now == 60
+    with cli.worktree.lock_local_state(git_repo):
+        assert now == 60
+
+
 @pytest.mark.parametrize("redirected", [False, True])
 def test_checks_report_survives_failed_publication(git_repo, tmp_path, monkeypatch, redirected):
     path = git_repo / cli.CHECKS_FILE
