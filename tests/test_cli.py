@@ -2337,14 +2337,14 @@ def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, m
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_approved_pr_with_check_result(gh, head, wt, "failure", reviews=[])
-    arm_check_runs(gh, head, [{
-        "name": "checks", "status": "completed", "conclusion": "failure",
-        "check_suite": {"id": 10}}])
+    reviews = [rev("a" * 40, "primary"), rev("b" * 40, "delta", state="CHANGES_REQUESTED")]
+    arm_approved_pr_with_check_result(gh, head, wt, "failure", reviews=reviews)
+    arm_check_runs(gh, head, [{"name": "checks", "status": "completed", "conclusion": "failure",
+                              "check_suite": {"id": 10}}])
     code, out, _ = run(capsys, "ready")
     assert code == 1
     assert without_accepted_receipt(out).splitlines() == [
-        "not ready: no review recorded for the current head",
+        f"not ready: Both review rounds are spent (primary + delta) and {head[:12]} has no eligible review. Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused.",
         "not ready: required check 'checks' is failure",
     ]
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
