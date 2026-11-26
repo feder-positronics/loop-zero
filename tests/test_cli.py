@@ -49,6 +49,7 @@ from tests.test_sandbox import FAKE_BWRAP, inject_check_timeout
 
 REPO = "acme/widgets"
 URL = f"https://github.com/{REPO}/pull/7"
+FAILED_CHECK_HINT = f". Inspect {URL}/checks. Fix reproducible failures before retrying. Rerun the failed job only for a transient failure. Once green, run `loopzero ready --wait`."
 MERGIFY_QUEUE_FIXTURE = json.loads((Path(__file__).with_name("fixtures") / "mergify-queue.json").read_text())
 BRANCH_READ = branch_head_key().split()
 PR_LIST_READ = pr_list_key().split()
@@ -2345,7 +2346,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> No
     assert code == 1
     assert without_accepted_receipt(out).splitlines() == [
         "not ready: no review recorded for the current head",
-        "not ready: required check 'checks' is failure",
+        f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}",
     ]
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
@@ -2369,9 +2370,8 @@ def test_ready_uses_base_required_ci_when_worktree_empties_it(
 
     code, out, err = run(capsys, "ready")
 
-    out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
-    assert out == "not ready: required check 'checks' is failure\n"
+    assert without_accepted_receipt(out) == f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n"
 
 
 def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -2687,7 +2687,7 @@ def test_ready_wait_verdict(wt, gh, capsys, monkeypatch, head, wait, elapsed, co
 
     assert (code, err) == (expected, "")
     assert out.endswith({
-        0: f"ready: {URL}\n", 1: "not ready: required check 'checks' is failure\n",
+        0: f"ready: {URL}\n", 1: f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n",
         3: f"timed out waiting for required checks on {head[:12]}\n",
     }[expected])
 
@@ -2724,7 +2724,7 @@ def test_ready_wait_tracks_the_replacement_workflow(
         assert "timed out waiting for required checks" in out
     else:
         assert out.endswith(f"ready: {URL}\n" if expected == 0 else
-                            "not ready: required check 'checks' is failure\n")
+                            f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n")
 
 
 @pytest.mark.usefixtures("replay_gh")
@@ -2772,7 +2772,7 @@ def test_ready_wait_revalidates_its_ready_transition(
     assert sleeps == ([30.0, 5.0, 5.0] if replacement == "pending" else
                       [30.0, 5.0] if initial_pending else [30.0])
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
-                        "not ready: required check 'checks' is failure\n" if expected == 1 else
+                        f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n" if expected == 1 else
                         f"timed out waiting for required checks on {head[:12]}\n")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
@@ -2971,7 +2971,7 @@ def test_ready_wait_review_failure_freshness(
     )
     assert (code, err, bool(sleeps)) == (expected, "", waited)
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
-                        f"not ready: required check '{name}' is failure\n")
+                        f"not ready: required check '{name}' is failure{FAILED_CHECK_HINT}\n")
     assert (f"waiting: required check '{name}' is failure" in out) == waited
     assert out.count("predates the review; awaiting refresh") == int(
         waited and (age < 0 or age >= 120) and not pending
@@ -3256,14 +3256,14 @@ def test_ready_respects_latest_review_state(wt: Path, gh: FakeGh, capsys, state,
 def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_pr(gh, head, isDraft=False)
     gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt, threads=(
+    arm_readiness(gh, head, wt, conclusion="failure", threads=(
         {"isResolved": False, "isOutdated": False, "path": "feature.py", "line": 1,
          "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={head} -->"
                                          "\n**critical: Bad**"}]}},))
     code, out, err = run(capsys, "merge")
     out = without_accepted_receipt(out)
     assert code == 1 and out == ""
-    assert "not ready to merge: open critical finding at feature.py:1: Bad" in err
+    assert f"not ready to merge: open critical finding at feature.py:1: Bad; required check 'checks' is failure{FAILED_CHECK_HINT}" in err
     assert wt.exists()
 
 
