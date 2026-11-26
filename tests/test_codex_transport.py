@@ -128,7 +128,7 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, git_repo
     cli._save_review(git_repo, result)
     path = git_repo / evidence["receipt"]
     assert path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700
-    loaded = cli._load_review(git_repo, result.head, "primary")
+    loaded, _ = cli._load_review(git_repo, result.head, "primary")
     assert loaded.raw == result.raw and body(loaded) == rendered
     assert json.loads(path.read_text())["raw"] == result.raw
 
@@ -485,7 +485,7 @@ def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
         [row(legacy)], legacy.head, ("bot",), repo="acme/widgets", number=7
     )
     cli._save_review(git_repo, legacy)
-    assert cli._load_review(git_repo, legacy.head, "primary").raw == legacy.raw
+    assert cli._load_review(git_repo, legacy.head, "primary")[0].raw == legacy.raw
 
 
 @pytest.mark.parametrize("change", [
@@ -532,7 +532,7 @@ def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, git_rep
     assert value["raw_sha256"] == hashlib.sha256(changed.raw.encode()).hexdigest()
     assert value["raw_sha256"] != runners.codex_evidence(result)["raw_sha256"]
     cli._save_review(git_repo, changed)
-    loaded = cli._load_review(git_repo, changed.head, changed.kind)
+    loaded, _ = cli._load_review(git_repo, changed.head, changed.kind)
     assert loaded.raw == changed.raw and body(loaded) == body(changed)
 
 

@@ -321,9 +321,7 @@ def _check_report_matches(report: CheckReport, wt: Path, config: Config, head: s
 
 def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
     report = _load_report(wt)
-    if report is not None and report.ok and _check_report_matches(report, wt, config, head):
-        return report
-    return None
+    return report if report and report.ok and _check_report_matches(report, wt, config, head) else None
 
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
@@ -714,7 +712,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     if args.repost:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
         excluded = [family for family in config.reviewers if family in authors]
-        result = _load_review(wt, head, kind)
+        result, publication = _load_review(wt, head, kind)
         if result.fallback and result.family not in excluded:
             raise CliError(
                 f"saved review claims a same-family fallback, but {result.family} is not a configured "
@@ -729,7 +727,6 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
                 f"saved reviewer family {result.family} contributed to this PR lineage; "
                 "run without --repost to obtain an independent review"
             )
-        publication = json.loads(worktree.read_local_state(wt, _review_file(wt, head, kind).name)).get("publication")
         if publication is not None:
             if (not isinstance(publication, dict) or publication.get("repo") != config.repo
                     or publication.get("number") != pr.number
@@ -1038,26 +1035,19 @@ def _review_file(wt: Path, head: str, kind: str) -> Path:
 
 def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None) -> None:
     path = _review_file(wt, result.head, result.kind)
-    data = dataclasses.asdict(result)
-    if publication is not None:
-        data["publication"] = publication
+    data = dataclasses.asdict(result) | ({"publication": publication} if publication is not None else {})
     worktree.write_local_state(wt, path.name, json.dumps(data, indent=2) + "\n", private=True)
 
 
-def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
+def _load_review(wt: Path, head: str, kind: str) -> tuple[ReviewResult, object]:
     path = _review_file(wt, head, kind)
     try:
         data = json.loads(worktree.read_local_state(wt, path.name))
-    except FileNotFoundError:
-        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost") from None
-    except (json.JSONDecodeError, OSError) as exc:
-        raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
-    if not isinstance(data, dict):
-        raise CliError(f"{path} is not runner-produced: invalid saved review")
-    if data.get("head") != head:
-        raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
-    try:
-        data.pop("publication", None)
+        if not isinstance(data, dict):
+            raise ValueError("review receipt must be an object")
+        if data.get("head") != head:
+            raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
+        publication = data.pop("publication", None)
         if data.get("kind") != kind:
             raise ValueError("saved review kind mismatch")
         findings = tuple(Finding(**f) for f in data["findings"])
@@ -1067,11 +1057,13 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
             if data.pop(field, default) != default:
                 raise ValueError("retired paired review")
         result = ReviewResult(**{**data, "findings": findings})
-    except (KeyError, TypeError, ValueError) as exc:
+    except FileNotFoundError:
+        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost") from None
+    except (KeyError, OSError, TypeError, ValueError) as exc:
         raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
     if not runners.validate_runner_result(result):
         raise CliError(f"{path} is not runner-produced: provenance/envelope mismatch")
-    return result
+    return result, publication
 
 
 def _pr_readiness(

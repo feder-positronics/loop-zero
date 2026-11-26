@@ -1733,7 +1733,7 @@ def test_review_with_every_supported_family_authoring_uses_disclosed_fallback(
     reason = "every configured family contributed (claude, codex)"
     assert f"same-family fallback: {reason}" in err
     assert f"Same-family fallback: {reason}. Cross-family review is preferred." in posted_review(gh)["body"]
-    assert cli._load_review(wt, head, "primary").fallback == reason
+    assert cli._load_review(wt, head, "primary")[0].fallback == reason
 
 
 @pytest.mark.parametrize("family,configured,note,code,diagnostic,no_post", [
@@ -2049,7 +2049,7 @@ def test_review_observes_new_codex_version_in_saved_receipt(
     code, out, err = run(capsys, "review")
     assert code == 0 and "review by codex" in out
     assert "reviewer codex unavailable:" not in err
-    result = cli._load_review(wt, git(wt, "rev-parse", "HEAD").strip(), "primary")
+    result, _ = cli._load_review(wt, git(wt, "rev-parse", "HEAD").strip(), "primary")
     assert result.provenance["cli_version"] == version
 
 
