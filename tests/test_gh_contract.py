@@ -97,7 +97,7 @@ def offline_run(argv: list[str], tmp_path: Path, call: dict | None = None) -> st
     return done.stderr + "\n" + done.stdout
 
 
-def test_contract_capture_covers_all_github_operations(captured_argv: list[dict]) -> None:
+def test_contract_capture_covers_operations_with_rest_metadata(captured_argv: list[dict]) -> None:
     calls = [call["argv"] for call in captured_argv]
     assert {tuple(argv[:2]) for argv in calls} >= {
         ("pr", "ready"), ("pr", "merge"), ("api", "graphql"),
@@ -109,9 +109,6 @@ def test_contract_capture_covers_all_github_operations(captured_argv: list[dict]
     assert any("/check-runs" in argv[1] for argv in calls if argv[0] == "api")
     assert any("/statuses" in argv[1] for argv in calls if argv[0] == "api")
 
-
-def test_pr_metadata_uses_rest_without_graphql_fields(captured_argv: list[dict]) -> None:
-    calls = [call["argv"] for call in captured_argv]
     assert not any("--json" in argv for argv in calls)
     assert any("?state=open&head=acme%3Alz%2Fx" in argv[1] for argv in calls)
 

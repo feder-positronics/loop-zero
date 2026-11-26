@@ -6,15 +6,11 @@ from pathlib import Path
 SETUP = Path(__file__).resolve().parents[1] / "SETUP.md"
 
 
-def test_agent_skill_links_install_and_upgrade_without_gnu_mv(tmp_path):
+def test_agent_skill_links_install_and_upgrade_without_gnu_mv(tmp_path, fake_tool):
     home = tmp_path / "home"
     home.mkdir()
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    mv = bin_dir / "mv"
-    mv.write_text('#!/bin/sh\n[ "$1" != "-T" ] || exit 64\nexec /bin/mv "$@"\n')
-    mv.chmod(0o755)
-    env = dict(os.environ, HOME=str(home), PATH=f"{bin_dir}:{os.environ['PATH']}")
+    fake_tool("mv", '[ "$1" != "-T" ] || exit 64\nexec /bin/mv "$@"\n')
+    env = dict(os.environ, HOME=str(home))
     setup_block = next(
         block for block in re.findall(r"```sh\n(.*?)```", SETUP.read_text(), re.S)
         if block.startswith("CHECKOUT=")
