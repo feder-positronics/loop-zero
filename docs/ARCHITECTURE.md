@@ -64,6 +64,10 @@ verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
 
+Tests use disposable user and reviewer homes. Credential refresh tests bind
+only the synthetic files they create. The generic fake reviewer has no
+credential read or write behavior.
+
 Private review receipts and malformed output excerpts live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
 Outside the worktree the CLI keeps per-PR write locks in `~/.cache/loopzero/pr-locks`,
 runs the optional GitHub App token helper `~/.config/loopzero/app-token` (the
