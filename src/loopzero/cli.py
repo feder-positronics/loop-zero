@@ -1166,10 +1166,8 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
     name = None
     try:
         _repo_root(wt)
-        if worktree.head(wt) != pr.head_sha:
-            raise worktree.WorktreeError("local HEAD differs from merged PR head")
         name = worktree.branch(wt)
-        worktree.cleanup(wt)
+        worktree.cleanup(wt, pr.head_sha)
     except (worktree.WorktreeError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:

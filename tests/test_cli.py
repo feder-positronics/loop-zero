@@ -3494,7 +3494,7 @@ def test_merge_warns_when_cleanup_fails(wt, gh, capsys, monkeypatch, head, remov
     arm_squash_merge(gh, head, wt, merge_json(state="MERGED", head=head, sha="d" * 40))
     gh.respond("api -X", "")
 
-    def fail_cleanup(path):
+    def fail_cleanup(path, _expected_head):
         if removed:
             shutil.rmtree(path)
         raise cli.worktree.WorktreeError(error)
@@ -3513,11 +3513,9 @@ def test_cleanup_hints_name_branch_and_configured_repo_without_commands(
     branch = "lz/fix$version"
     monkeypatch.setattr(cli, "_repo_root", lambda _wt: tmp_path)
     monkeypatch.setattr(cli.worktree, "branch", lambda _wt: branch)
-    gone = tmp_path / "gone"
     monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
         cli.worktree.WorktreeError("cannot lock ref")))
-    monkeypatch.setattr(cli.worktree, "head", lambda _wt: "a" * 40)
-    cli._cleanup(gone, SimpleNamespace(head_sha="a" * 40))
+    cli._cleanup(tmp_path / "gone", SimpleNamespace(head_sha="a" * 40))
     assert capsys.readouterr().err.rstrip().endswith(
         "delete local branch 'lz/fix$version' if it still points at the merged head")
 
@@ -4648,17 +4646,19 @@ def test_dirty_check_does_not_claim_committed_receipt(wt, capsys):
     assert "receipt produced:" not in out
 
 
-@pytest.mark.parametrize("case", ["dirty", "unpushed"])
-def test_cleanup_preserves_local_work(wt, case, capsys):
+@pytest.mark.parametrize("case", ["dirty", "unpushed", "after-head-read"])
+def test_cleanup_preserves_local_work(wt, case, capsys, monkeypatch):
     pr = SimpleNamespace(head_sha=cli.worktree.head(wt))
     if case == "dirty":
         (wt / "untracked").write_text("keep me")
     else:
         git(wt, "commit", "--allow-empty", "-m", "local after merge")
+    if case == "after-head-read":
+        monkeypatch.setattr(cli.worktree, "head", lambda _wt: pr.head_sha)
     cli._cleanup(wt, pr)
     assert wt.exists()
-    err = capsys.readouterr().err
-    assert ("worktree is dirty" if case == "dirty" else "local HEAD differs") in err
+    diagnostic = {"dirty": "worktree is dirty", "unpushed": "local HEAD differs", "after-head-read": "but expected"}
+    assert diagnostic[case] in capsys.readouterr().err
 
 
 def _closed_unmerged_wait(monkeypatch, reads, steps=0):
@@ -4714,26 +4714,26 @@ def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
     assert list(path.parent.iterdir()) == [path]
 
 
-def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head):
+@pytest.mark.parametrize("moved", [False, True])
+def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head, moved):
     (wt / ".loopzero" / "review-existing.json").write_text("{broken")
     arm_pr(gh, head, isDraft=False, state="MERGED")
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="c" * 40))
-    ref = f"api repos/{REPO}/git/ref/heads/lz/t1"
-    gh.fail(ref, "gh: Not Found (HTTP 404)")
-
+    gh.fail(f"api repos/{REPO}/git/ref/heads/lz/t1", "gh: Not Found (HTTP 404)")
     original = cli.worktree._git
+    advanced = git(wt, "commit-tree", f"{head}^{{tree}}", "-p", head, "-m", "newer").strip()
 
     def cleanup_git(cwd, *args, **kwargs):
-        result = original(cwd, *args, **kwargs)
-        if args[1:3] == ("worktree", "remove"):
-            git(repo, "branch", "-D", "lz/t1")
-        return result
+        if args[1:3] == ("update-ref", "--no-deref"):
+            update = ("update-ref", "refs/heads/lz/t1", advanced) if moved else ("branch", "-D", "lz/t1")
+            git(repo, *update)
+        return original(cwd, *args, **kwargs)
 
     monkeypatch.setattr(cli.worktree, "_git", cleanup_git)
     code, out, err = run(capsys, "merge")
-    assert code == 0 and "was already merged" in out and err == ""
-    assert not wt.exists()
-    assert not git(repo, "branch", "--list", "lz/t1")
+    assert code == 0 and "was already merged" in out and not wt.exists()
+    assert ("but expected" in err) if moved else err == ""
+    assert git(repo, "branch", "--list", "lz/t1", "--format=%(objectname)").strip() == (advanced if moved else "")
     assert not any(call["argv"][:2] == ["api", "-X"] for call in gh.calls)
 
 

@@ -269,7 +269,8 @@ Git configuration so URL rewrites cannot change its destination.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal
-requires a clean worktree at the merged PR head.
+holds a Git ref lock to keep the clean worktree at the merged PR head during
+removal, then deletes the branch only if it still points at that head.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and latest ordering. It cannot recompute private raw or defeat a
 coherent forgery by a trusted publisher/editor; native claims do not attest the
