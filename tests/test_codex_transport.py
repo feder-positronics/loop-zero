@@ -83,6 +83,13 @@ def row(result, rendered=None):
     }
 
 
+@pytest.fixture
+def published_native(native):
+    result = native[0]()
+    rendered = body(result)
+    return result, rendered, rendered.splitlines()[1]
+
+
 def projection(result, rendered=None):
     return eligibility.review_projection(row(result, rendered), result.head, "acme/widgets", 7)
 
@@ -282,10 +289,8 @@ def update_evidence(value, path, replacement):
     (("complete",), False),
     (("calls", 0, "fatal"), "present"),
 ])
-def test_invalid_latest_evidence_cannot_revive_older_approval(native, path, replacement):
-    result = native[0]()
-    rendered = body(result)
-    line = rendered.splitlines()[1]
+def test_invalid_latest_evidence_cannot_revive_older_approval(published_native, path, replacement):
+    result, rendered, line = published_native
     value = runners.decode_codex_evidence(line)
     update_evidence(value, path, replacement)
     latest = row(result, rendered.replace(line, packed(value)))
@@ -295,10 +300,8 @@ def test_invalid_latest_evidence_cannot_revive_older_approval(native, path, repl
 @pytest.mark.parametrize("mutation", [
     "duplicate_header", "before_marker", "after_prose", "noncanonical", "duplicate_key", "oversized",
 ])
-def test_strict_transport_and_no_older_approval_revival(native, mutation):
-    result = native[0]()
-    rendered = body(result)
-    line = rendered.splitlines()[1]
+def test_strict_transport_and_no_older_approval_revival(published_native, mutation):
+    result, rendered, line = published_native
     if mutation == "duplicate_header":
         changed = rendered.replace(line, line + "\n" + line)
     elif mutation == "before_marker":
@@ -343,9 +346,9 @@ def test_overflow_is_hold_without_silent_chunk_truncation(native):
 
 @pytest.mark.parametrize("source", ["pair", "pair-repost"])
 @pytest.mark.parametrize("include_evidence", [False, True])
-def test_retired_pair_marker_cannot_pass_eligibility(native, source, include_evidence):
-    result = native[0]()
-    lines = body(result).splitlines()
+def test_retired_pair_marker_cannot_pass_eligibility(published_native, source, include_evidence):
+    result, rendered, _ = published_native
+    lines = rendered.splitlines()
     lines[0] = cli.review_marker(result.head, "primary", source)
     if not include_evidence:
         del lines[1]
@@ -436,13 +439,12 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
 
 
 @pytest.mark.parametrize("location", ["provenance", "model_prose", "model_fence"])
-def test_saved_or_model_supplied_summary_cannot_grant_inspection(native, location):
-    result = native[0]()
+def test_saved_or_model_supplied_summary_cannot_grant_inspection(published_native, location):
+    result, _, forged = published_native
     data = json.loads(result.raw)
     data["events"] = [
         e for e in data["events"] if e.get("item", {}).get("type") != "command_execution"
     ]
-    forged = runners.encode_codex_evidence(runners.codex_evidence(result))
     if location == "provenance":
         result = dataclasses.replace(
             result, provenance={**result.provenance, "codex_evidence": {"inspection": "verified"}}
@@ -491,10 +493,8 @@ def test_legacy_toolfree_remains_unknown_without_projection(tmp_path):
     "fence", "wrong_adjudication", "unknown_leading", "whitespace_json",
     "oversized_model", "oversized_effort", "invalid_event_offset",
 ])
-def test_leading_block_is_anchored_and_schema_complete(native, change):
-    result = native[0]()
-    rendered = body(result)
-    line = rendered.splitlines()[1]
+def test_leading_block_is_anchored_and_schema_complete(published_native, change):
+    result, rendered, line = published_native
     value = runners.decode_codex_evidence(line)
     if change == "fence":
         modified = rendered.replace(line + "\n", "") + "\n```\n" + line + "\n```"
@@ -577,39 +577,32 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
     assert public == proof
 
 
-def test_entire_leading_block_budget_includes_adjudication(native, monkeypatch):
-    result = native[0]()
-    marker = cli.review_marker(result.head, result.kind)
-    header = runners.encode_codex_evidence(runners.codex_evidence(result))
-    suffix = "\n<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
-    limit = len((marker + "\n" + header).encode())
-    oversized = marker + "\n" + header + suffix + "\n**approve**"
-    monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", limit)
-    assert projection(result, oversized) == (True, None)
-    with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):
-        github._review_body(result, [], marker + suffix)
-
-
-@pytest.mark.parametrize(
-    "separator",
-    ["\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
-)
-@pytest.mark.parametrize("overflow", [0, 1, 2])
-def test_raw_leading_utf8_span_at_limit_and_overflow(native, separator, overflow):
+@pytest.mark.parametrize("separator,overflow,tightened", [
+    *((separator, overflow, False)
+      for separator in ("\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+      for overflow in (0, 1, 2)),
+    pytest.param("\n", 1, True, id="adjudication-counts-toward-tightened-budget"),
+])
+def test_raw_leading_utf8_span_at_limit_and_overflow(native, separator, overflow, tightened, monkeypatch):
     result = native[0]()
     marker = cli.review_marker(result.head, result.kind)
     header = runners.encode_codex_evidence(runners.codex_evidence(result))
     adjudication = "<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
     span = separator.join((marker, header, adjudication))
-    padding = 8192 + overflow - len(span.encode("utf-8"))
-    padded = marker[:-3] + " " * padding + marker[-3:]
-    span = separator.join((padded, header, adjudication))
-    assert len(span.encode("utf-8")) == 8192 + overflow
+    padded = marker
+    if tightened:
+        monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", len((marker + "\n" + header).encode()))
+    else:
+        padding = 8192 + overflow - len(span.encode("utf-8"))
+        padded = marker[:-3] + " " * padding + marker[-3:]
+        span = separator.join((padded, header, adjudication))
+        assert len(span.encode("utf-8")) == 8192 + overflow
     rendered = span + separator + "**approve**"
     present, evidence = projection(result, rendered)
     assert present and (evidence is not None) is (overflow == 0)
-    latest = eligible(row(result), row(result, rendered))
-    assert (latest is not None) is (overflow == 0)
+    if not tightened:
+        latest = eligible(row(result), row(result, rendered))
+        assert (latest is not None) is (overflow == 0)
     if separator == "\n":  # Publication stays LF; readers count every accepted separator verbatim.
         if overflow:
             with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):

@@ -148,17 +148,16 @@ def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
     assert exclude.read_text().count(".worktrees/") == 1
 
 
-def test_start_refuses_existing_branch(repo: Path) -> None:
-    git(repo, "branch", "lz/dup")
-    with pytest.raises(worktree.WorktreeError, match="branch already exists"):
+@pytest.mark.parametrize("collision", ["branch", "directory"])
+def test_start_refuses_existing_target(repo: Path, collision: str) -> None:
+    target = repo / ".worktrees" / "dup"
+    if collision == "branch":
+        git(repo, "branch", "lz/dup")
+    else:
+        target.mkdir(parents=True)
+    with pytest.raises(worktree.WorktreeError, match=f"{collision} already exists"):
         worktree.start(repo, "dup", "main")
-    assert not (repo / ".worktrees" / "dup").exists()
-
-
-def test_start_refuses_existing_directory(repo: Path) -> None:
-    (repo / ".worktrees" / "dup").mkdir(parents=True)
-    with pytest.raises(worktree.WorktreeError, match="directory already exists"):
-        worktree.start(repo, "dup", "main")
+    assert target.exists() == (collision == "directory")
 
 
 @pytest.mark.parametrize("slug", ["../escape", "a/b", "bad..name", "trail.lock", "sp ace", ""])
@@ -238,17 +237,17 @@ def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
 
-def test_cleanup_refuses_dirty(repo: Path) -> None:
-    wt = worktree.start(repo, "dirty", "main")
-    (wt / "scratch.txt").write_text("x")
-    with pytest.raises(worktree.WorktreeError, match="dirty"):
-        worktree.cleanup(wt)
-    assert wt.exists() and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
-
-
-def test_cleanup_missing_worktree(repo: Path) -> None:
-    with pytest.raises(worktree.WorktreeError, match="no such worktree"):
-        worktree.cleanup(repo / ".worktrees" / "ghost")
+@pytest.mark.parametrize("dirty", [True, False], ids=["dirty", "missing"])
+def test_cleanup_refuses_invalid_worktree(repo: Path, dirty: bool) -> None:
+    slug = "dirty" if dirty else "ghost"
+    target = repo / ".worktrees" / slug
+    if dirty:
+        assert worktree.start(repo, slug, "main") == target
+        (target / "scratch.txt").write_text("x")
+    with pytest.raises(worktree.WorktreeError, match="dirty" if dirty else "no such worktree"):
+        worktree.cleanup(target)
+    if dirty:
+        assert target.exists() and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
 @pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])

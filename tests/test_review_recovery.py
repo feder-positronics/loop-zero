@@ -14,6 +14,7 @@ from tests.test_cli import (
     LOGIN,
     REPO,
     arm_pr,
+    expect_cli,
     head_of,
     rev,
     reviews_key,
@@ -176,8 +177,7 @@ def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
     else:
         saved["publication"][change] = "wrong"
     path.write_text(json.dumps(saved))
-    code, _out, err = run(capsys, "review", "--repost")
-    assert code == (5 if change == "login" else 1), err
+    expect_cli(capsys, 5 if change == "login" else 1, "review", "--repost")
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
 
@@ -281,17 +281,15 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
             f"**approve** (0 critical, 0 important, 0 suggestion){chunks}\n\n"
             f"<details><summary>Raw reviewer output</summary>\n\n```\n{transcript}\n```\n</details>")
     arm_published_review(gh, head, body)
-    code, _out, err = run(capsys, "review", "--repost")
-    assert code == (0 if metadata == "legacy" else 1), err
+    expect_cli(capsys, 0 if metadata == "legacy" else 1, "review", "--repost")
     assert_single_publication(gh, fake_bin)
     if metadata == "legacy":
         mixed = body.partition("\n\n<details>")[0] + (
             "\n\nNative Claude output is retained in the restricted local review receipt."
         )
-        arm_published_review(gh, head, mixed)
-        assert run(capsys, "review", "--repost")[0] == 1
-        arm_published_review(gh, head, body + "changed")
-        assert run(capsys, "review", "--repost")[0] == 1
+        for altered_body in (mixed, body + "changed"):
+            arm_published_review(gh, head, altered_body)
+            expect_cli(capsys, 1, "review", "--repost")
         arm_published_review(gh, head, body)
         gh.respond(REVIEW_COMMENTS, [
             {"path": "feature.py", "line": 1, "side": "RIGHT", "body": "changed finding",
@@ -310,8 +308,7 @@ def test_optional_settings_cannot_block_explicit_repost(
     path.write_text(json.dumps(saved))
     gh.respond(reviews_key(), [])
     monkeypatch.setattr(github, "_api", original)
-    code, _out, err = run(capsys, "review", "--repost")
-    assert code == 0, err
+    expect_cli(capsys, 0, "review", "--repost")
     body = support.posted_review(gh)["body"]
     assert "CLI-reported model unknown (effort unknown)" in body and "forged" not in body
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
@@ -377,8 +374,7 @@ def test_repost_confirms_historical_claude_publication(
         assert run(capsys, "review", "--repost")[0] == 1
         saved["provenance"].pop("configured_settings")
         path.write_text(json.dumps(saved))
-    code, out, err = run(capsys, "review", "--repost")
-    assert code == 0, err
+    out, err = expect_cli(capsys, 0, "review", "--repost")
     assert saved["raw"] not in out + err
     if publication == "pre-configured":
         arm_published_review(gh, head, body + "changed")
@@ -418,8 +414,7 @@ def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkey
         pytest.fail("repost launched a reviewer")
 
     monkeypatch.setattr(cli.runners, "review_with", unexpected_launch)
-    code, _, err = run(capsys, "review", "--repost")
-    assert code == int(altered), err
+    _, err = expect_cli(capsys, int(altered), "review", "--repost")
     if altered:
         assert "conflicting or ambiguous review publication" in err
     assert all("--input" not in call for call in gh.calls)
