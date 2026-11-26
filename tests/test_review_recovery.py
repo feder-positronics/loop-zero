@@ -104,7 +104,7 @@ def assert_single_publication(gh, fake_bin, *, allow_body_update=False):
 
 @pytest.mark.parametrize("override", [None, "pr", "head", "raw", "bytes", "effort"])
 def test_plain_review_surfaces_receipt_after_interruption_before_post(
-    wt, gh, fake_bin, monkeypatch, capsys, override,
+    replay_gh, wt, gh, fake_bin, monkeypatch, capsys, override,
 ):
     head = support.prepare_review(wt, gh, fake_bin)
     record_claude_runs(fake_bin)
@@ -217,7 +217,7 @@ def test_recovery_requires_exact_live_publication(
 
 @pytest.mark.parametrize("change", ["login", "raw", "repo", "publisher", "number"])
 def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
-    wt, gh, fake_bin, monkeypatch, capsys, change,
+    replay_gh, wt, gh, fake_bin, monkeypatch, capsys, change,
 ):
     head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5, interrupted=True)
     assert run(capsys, "review")[0] == 130
@@ -236,7 +236,7 @@ def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
 
 @pytest.mark.parametrize("change", ["revoked", "deadline", "read_timeout"])
 def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
-    wt, gh, fake_bin, monkeypatch, capsys, change,
+    replay_gh, wt, gh, fake_bin, monkeypatch, capsys, change,
 ):
     lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5)
     original, monotonic = github.api_get, github.time.monotonic
@@ -258,7 +258,7 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
 
-def test_repost_recovers_review_with_redacted_findings(wt, gh, fake_bin, monkeypatch, capsys):
+def test_repost_recovers_review_with_redacted_findings(replay_gh, wt, gh, fake_bin, monkeypatch, capsys):
     title = "Rotate sk-ant-FAKE0123"
     findings = [
         {"severity": "important", "path": "feature.py", "line": 1,
@@ -280,7 +280,7 @@ def test_repost_recovers_review_with_redacted_findings(wt, gh, fake_bin, monkeyp
     assert_single_publication(gh, fake_bin)
 
 
-def test_interrupted_explicit_repost_recovers_repost_body(wt, gh, fake_bin, monkeypatch, capsys):
+def test_interrupted_explicit_repost_recovers_repost_body(replay_gh, wt, gh, fake_bin, monkeypatch, capsys):
     head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=5, interrupted=True)
     original = github._api
     def rejected(endpoint, payload, **kwargs):
@@ -373,7 +373,7 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
 
 @pytest.mark.parametrize("optional", ["junk", [], [{"model": "request"}] * 5])
 def test_optional_settings_cannot_block_explicit_repost(
-    interrupted_receipt, gh, fake_bin, monkeypatch, capsys, optional,
+    replay_gh, interrupted_receipt, gh, fake_bin, monkeypatch, capsys, optional,
 ):
     _, path, saved, original = interrupted_receipt
     saved["provenance"]["requested_settings"] = optional
@@ -389,7 +389,7 @@ def test_optional_settings_cannot_block_explicit_repost(
 
 @pytest.mark.parametrize("published", [True, False])
 def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
-    wt, gh, fake_bin, fake_tool, monkeypatch, capsys, published,
+    replay_gh, wt, gh, fake_bin, fake_tool, monkeypatch, capsys, published,
 ):
     legacy = "independent reviewers failed: codex: /home/u/secret: boom"
     git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
@@ -417,7 +417,7 @@ def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
 
 @pytest.mark.parametrize("publication", ["pre-configured", "transcript", "summary"])
 def test_repost_confirms_historical_claude_publication(
-    interrupted_receipt, gh, fake_bin, capsys, publication,
+    replay_gh, interrupted_receipt, gh, fake_bin, capsys, publication,
 ):
     head, path, saved, _ = interrupted_receipt
     request = saved["provenance"]["requested_settings"][0]
@@ -450,7 +450,7 @@ def test_repost_confirms_historical_claude_publication(
 
 
 @pytest.mark.parametrize("altered", [False, True])
-def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkeypatch, altered):
+def test_repost_confirms_pre_configured_codex_publication(replay_gh, wt, gh, capsys, monkeypatch, altered):
     head = head_of(wt)
     arm_pr(gh, head)
     result = support._native_codex_result(head, repo=REPO, publisher=LOGIN, cwd=str(wt))
