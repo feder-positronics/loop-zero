@@ -6,6 +6,7 @@ import errno
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -62,10 +63,11 @@ def _git(
 ) -> str:
     argv = ("git", *args)
     done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-               preserve_newlines=preserve_newlines)
+               preserve_newlines=preserve_newlines or preserve_whitespace,
+               encoding=sys.getfilesystemencoding() if preserve_whitespace else None)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
-    if preserve_newlines:
+    if preserve_newlines and not preserve_whitespace:
         return done.stdout
     return done.stdout.removesuffix("\n") if preserve_whitespace else done.stdout.strip()
 
