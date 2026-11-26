@@ -9,6 +9,7 @@ import re
 import shlex
 import tempfile
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -27,9 +28,8 @@ APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
 MARKER_RE = re.compile(
-    r"<!--\s*loopzero:finding\s+(?:v=(?P<version>1)\s+)?"
-    r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"
-    r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
+    r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
+    r"head=(?P<head>[0-9a-f]{40}) id=(?P<id>[0-9a-f]{8}) -->"
 )
 PAGE = 100
 PR_FILE_LIMIT = 3_000
@@ -49,7 +49,9 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id isResolved isOutdated path line
-          comments(first: 1) { nodes { body } pageInfo { hasNextPage endCursor } }
+          comments(first: 1) {
+            nodes { body author { __typename login } } pageInfo { hasNextPage endCursor }
+          }
         }
       }
     }
@@ -196,6 +198,15 @@ def _api_path(args: tuple[str, ...]) -> str:
     return "/" + path.lstrip("/")
 
 
+def redact_credentials(value: str) -> str:
+    value = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@", value)
+    value = re.sub(r"""(?i)(\bauthorization(?:\\?['"])?[ \t]*:[ \t]*)(\\?['"])(?:(?!\2)(?:\\.|[^\\\r\n]))+\2""",
+                   r"\1\2[REDACTED]\2", value)
+    return re.sub(r"""(?i)((?P<quote>['"])?\bauthorization[ \t]*:[ \t]*)"""
+                  r"""(?(quote)(?:\\.|(?!(?P=quote))[^\\\r\n])+|(?:[a-z][\w-]*[ \t]+)?(?:\\.|[^\\\s'"`])+)""",
+                  r"\1[REDACTED]", value)
+
+
 def _redact_tokens(value: str, token: str = "") -> str:
     for secret in (token, os.environ.get("GH_TOKEN", ""),
                    os.environ.get("GITHUB_TOKEN", "")):
@@ -256,10 +267,18 @@ def _read_only(args: tuple[str, ...]) -> bool:
     return False
 
 
+def _app_token_clock() -> float | None:
+    """Read elapsed time including suspend, when the OS provides it."""
+    if (clock := getattr(time, "CLOCK_BOOTTIME", None)) is not None:
+        with suppress(OSError):
+            return time.clock_gettime(clock)
+    return None
+
+
 def _cached_app_token() -> str:
-    # Installation tokens expire one hour after minting by wall clock, suspend included.
     token, minted = _app_token_cache
-    return token if token and 0 <= time.time() - minted < 3000 else ""
+    now = _app_token_clock() if token else None
+    return token if now is not None and 0 <= now - minted < 3000 else ""
 
 
 def app_token() -> str:
@@ -268,14 +287,17 @@ def app_token() -> str:
         return token
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
-    minted = time.time()  # before the helper runs: a suspend mid-call still ages the token
+    minted = _app_token_clock()  # before minting so a suspend mid-call ages the token
     try:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
-    _app_token_cache = (result.stdout.strip(), minted)
+    token = result.stdout.strip()
+    if minted is None:
+        return token  # no suspend-aware clock, so use this token only for this call
+    _app_token_cache = (token, minted)
     return _cached_app_token()
 
 
@@ -440,9 +462,8 @@ def _gh_json(*args: str, token: str | None = None) -> object:
                       token=token or "") from None
 
 
-def _paged(endpoint: str, key: str = "check_runs") -> list:
-    """Collect a list endpoint page by page until a short page."""
-    items: list = []
+def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
+    """Yield validated rows until the last page."""
     page = 1
     while True:
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
@@ -451,10 +472,14 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
             chunk = chunk.get(key)
         if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
-        items += chunk
+        yield from chunk
         if len(chunk) < PAGE:
-            return items
+            return
         page += 1
+
+
+def _paged(endpoint: str, key: str = "check_runs") -> list:
+    return list(_iter_paged(endpoint, key))
 
 
 def _with_file(content: str) -> Path:
@@ -498,7 +523,10 @@ def _api(endpoint: str, payload: dict, method: str = "POST",
         path.unlink(missing_ok=True)
 
 
-MERGE_HOLD_MESSAGE = "has a merge-authority hold; ask the decisions owner to release it"
+def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
+    if "hold" in labels:
+        return f"PR #{number} has a merge-authority hold; ask the decisions owner to release it"
+    return None
 
 
 def _pr_labels(data: dict) -> tuple[str, ...]:
@@ -827,21 +855,12 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     return lines, first_added
 
 
-def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: list[dict],
-                                findings: tuple[Finding, ...]) -> None:
-    paths = {entry["filename"] for entry in entries}
-    missing = next(
-        (finding.path for finding in findings
-         if finding.severity in BLOCKING and finding.path and finding.path not in paths),
-        None,
-    )
-    if missing is None:
-        return
+def _require_complete_file_list(repo: str, number: int, head_sha: str, count: int, missing: str) -> None:
     pr, detail = _pr_detail(repo, number)
     request = ("gh", "api", f"repos/{repo}/pulls/{number}/files")
     if pr.head_sha != head_sha:
         raise GhError(request, f"PR #{number} head moved from {head_sha[:12]} to {pr.head_sha[:12]}; rerun review")
-    if detail.get("changed_files") != len(paths):
+    if detail.get("changed_files") != count:
         raise GhError(request,
                       f"cannot place finding on PR #{number} at {missing!r}: "
                       f"GitHub's {PR_FILE_LIMIT:,}-file limit prevents verifying the complete file list")
@@ -849,20 +868,26 @@ def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: 
 
 def _diff_map(repo: str, number: int, head_sha: str,
               findings: tuple[Finding, ...]) -> tuple[dict[str, set[int]], dict | None]:
-    """Commentable lines per path, plus the anchor (first file with a hunk, first added line)."""
-    entries = _paged(f"repos/{repo}/pulls/{number}/files")
-    if len(entries) >= PR_FILE_LIMIT:
-        _require_complete_file_list(repo, number, head_sha, entries, findings)
+    blocking = tuple(f for f in findings if f.severity in BLOCKING)
+    remaining = {f.path for f in findings if f.path and (f.line or f.severity in BLOCKING)}
     commentable: dict[str, set[int]] = {}
     anchor: dict | None = None
-    for entry in entries:
+    rows = _iter_paged(f"repos/{repo}/pulls/{number}/files") if remaining or blocking else ()
+    count = 0
+    for entry in rows:
+        count += 1
+        path = entry["filename"]
         lines, first_added = _right_lines(entry.get("patch") or "")
-        if not lines:
-            continue
-        commentable[entry["filename"]] = lines
-        if anchor is None:
+        commentable[path] = lines
+        if lines and anchor is None:
             line = first_added if first_added is not None else min(lines)
-            anchor = {"path": entry["filename"], "line": line, "side": "RIGHT"}
+            anchor = {"path": path, "line": line, "side": "RIGHT"}
+        remaining.discard(path)
+        if not remaining and (not blocking or anchor is not None):
+            return commentable, anchor
+    missing = next((f.path for f in blocking if f.path in remaining), None)
+    if missing is not None and count >= PR_FILE_LIMIT:
+        _require_complete_file_list(repo, number, head_sha, len(commentable), missing)
     return commentable, anchor
 
 
@@ -875,8 +900,7 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
 def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
                     formats: list[tuple[str, ReviewSettingsLayout, bool]]) -> list[dict]:
     """Place findings once for all exact body formats used in read-back."""
-    commentable, anchor = (_diff_map(repo, number, head_sha, result.findings)
-                           if result.findings else ({}, None))
+    commentable, anchor = _diff_map(repo, number, head_sha, result.findings)
     comments: list[dict] = []
     loose: list[Finding] = []
     for f in result.findings:
@@ -942,22 +966,29 @@ def _title_of(text: str) -> str:
     return re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
 
 
-def _parse_thread(node: dict, current_head: str | None) -> Finding | None:
+def _thread_marker(node: dict, publishers: tuple[str, ...]) -> re.Match[str] | None:
+    """The v=1 marker opening a thread's first comment, if a review publisher wrote it."""
     comments = node.get("comments", {}).get("nodes") or []
     if not comments:
         return None
-    first = comments[0]
-    body = first.get("body") or ""
-    match = MARKER_RE.search(body)
+    author = comments[0].get("author") or {}
+    login = str(author.get("login") or "")
+    # GraphQL names an App's bot account without REST's "[bot]" suffix.
+    if author.get("__typename") == "Bot":
+        login += "[bot]"
+    if not login or login.casefold() not in {p.casefold() for p in publishers}:
+        return None
+    # The publisher writes the marker as the whole first line, exactly as finding_marker does.
+    return MARKER_RE.fullmatch((comments[0].get("body") or "").partition("\n")[0])
+
+
+def _parse_thread(node: dict, current_head: str | None,
+                  publishers: tuple[str, ...]) -> Finding | None:
+    match = _thread_marker(node, publishers)
     if not match or match.group("severity") not in BLOCKING:
         return None
-    version = match.group("version")
+    body = node["comments"]["nodes"][0]["body"]
     marker_head = match.group("head")
-    marker_id = match.group("id")
-    if version and (not marker_head or not marker_id):
-        return None
-    if not version and marker_id:
-        return None
     if current_head is not None and marker_head != current_head and node.get("isOutdated"):
         return None
     severity = match.group("severity")
@@ -975,12 +1006,13 @@ _RESOLVE_MUTATION = (
 )
 
 
-def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
+def open_findings(repo: str, number: int,
+                  publishers: tuple[str, ...]) -> list[tuple[str, str, Finding]]:
     """(marker id, thread id, finding) for every unresolved blocking thread, any head."""
     return [
-        (MARKER_RE.search(node["comments"]["nodes"][0]["body"]).group("id") or node["id"], node["id"], f)
+        (_thread_marker(node, publishers).group("id"), node["id"], f)
         for node in _unresolved_threads(repo, number)
-        if (f := _parse_thread(node, None))
+        if (f := _parse_thread(node, None, publishers))
     ]
 
 
@@ -1014,16 +1046,16 @@ def _has_thread_reply(node: dict, reply: str) -> bool:
     return False
 
 
-def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Finding:
+def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
+                    publishers: tuple[str, ...]) -> Finding:
     """Reply to a blocking finding, or resume an identical resolution."""
     threads = _review_threads(repo, number, include_resolved=True)
     for node in sorted(threads, key=lambda node: bool(node.get("isResolved"))):
-        finding = _parse_thread(node, None)
+        finding = _parse_thread(node, None, publishers)
         if finding is None:
             continue
-        marker = MARKER_RE.search(node["comments"]["nodes"][0]["body"])
         thread_id = node["id"]
-        if (marker.group("id") or thread_id) != finding_id:
+        if _thread_marker(node, publishers).group("id") != finding_id:
             continue
         confirmed = _has_thread_reply(node, reply)
         if node.get("isResolved"):
@@ -1070,15 +1102,17 @@ def refresh_eligibility(repo: str, number: int, base: str) -> None:
 
 
 def open_blocking_findings(
-    repo: str, number: int, current_head: str | None = None
+    repo: str, number: int, current_head: str | None, publishers: tuple[str, ...],
 ) -> list[Finding]:
-    """Findings from unresolved review threads whose first comment carries a blocking marker.
+    """Findings from unresolved review threads whose first comment opens with a blocking marker.
 
-    Only explicit critical and important markers block. When `current_head` is supplied, an
-    outdated thread is ignored unless its marker names that head.
+    Only critical and important v=1 markers on the first line of a comment written by a
+    review publisher block. When `current_head` is supplied, an outdated thread is ignored
+    unless its marker names that head.
     """
     return [
-        f for node in _unresolved_threads(repo, number) if (f := _parse_thread(node, current_head))
+        f for node in _unresolved_threads(repo, number)
+        if (f := _parse_thread(node, current_head, publishers))
     ]
 
 
@@ -1171,7 +1205,7 @@ def _check_signals(
             continue
         if workflows is None:
             workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
-        if _has_active_replacement(cr, workflows, head_sha):
+        if _has_active_replacement(repo, cr, workflows, head_sha):
             superseded.append(name)
     capped = _check_suites_at_limit(runs)
     _discard_unverified_successes(states, latest_status.keys() - latest_runs.keys(), capped)
@@ -1201,11 +1235,15 @@ def _missing_check_reason(name: str, head_sha: str, capped: bool) -> str:
     return f"required check '{name}' missing on {head_sha[:12]}"
 
 
-def _has_active_replacement(check: dict, workflows: list[dict], head_sha: str) -> bool:
+def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_sha: str) -> bool:
     """A producer can be superseded only by its own workflow on the same head."""
     suite_id = check["check_suite"]["id"]
-    producer = next((workflow for workflow in workflows if workflow.get("check_suite_id") == suite_id
-                     and workflow.get("head_sha") == head_sha), None)
+    def find_producer(runs: list[dict]) -> dict | None:
+        return next((run for run in runs if run.get("check_suite_id") == suite_id
+                     and run.get("head_sha") == head_sha), None)
+    producer = find_producer(workflows)
+    if producer is None and len(workflows) >= 1_000 and type(suite_id) is int:
+        producer = find_producer(_paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
     if producer is None or not producer.get("workflow_id"):
         return False
     created = producer.get("created_at")
@@ -1241,6 +1279,16 @@ def _aggregate_signal(states: list[str]) -> str:
     return failures[0] if failures else "pending"
 
 
+def behind_reason(pr: PR, reviewed_head: str | None) -> str:
+    if reviewed_head != pr.head_sha:
+        return f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+    return (
+        f"PR #{pr.number} is behind {pr.base_ref}. Finish any pending delta review, then run "
+        f"`git fetch origin {shlex.quote(pr.base_ref)}`, "
+        f"`git merge {shlex.quote(f'origin/{pr.base_ref}')}`, `loopzero check` and `loopzero pr` before retrying readiness."
+    )
+
+
 def readiness(
     repo: str,
     pr: PR,
@@ -1252,6 +1300,7 @@ def readiness(
     review_grace: bool = False,
     workflow_wait: bool = False,
     stale_verdict_grace: bool = False,
+    publishers: tuple[str, ...],
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
     reasons: list[str] = []
@@ -1262,12 +1311,13 @@ def readiness(
     if pr.mergeable == "CONFLICTING":
         reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
     if pr.merge_state == "BEHIND" and not allow_behind:
-        reasons.append(f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks")
+        reasons.append(behind_reason(pr, reviewed_head))
     if not reviewed_head:
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha):
+    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha,
+                                    publishers):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
     checks, stale, stale_verdicts, capped = (_check_signals(
@@ -1328,8 +1378,8 @@ def merged_sha(
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
             return sha
     elif not view["merged"] and view.get("state") == "open":
-        if check_hold and "hold" in _pr_labels(view):
-            raise GhError(argv, f"PR #{number} {MERGE_HOLD_MESSAGE}")
+        if check_hold and (hold := merge_hold(number, _pr_labels(view))):
+            raise GhError(argv, hold)
         return None  # An open PR's merge_commit_sha is only a test merge.
     if not view["merged"] and view.get("state") == "closed":
         raise ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")
@@ -1445,6 +1495,14 @@ def commit_status(repo: str, head: str, context: str, state: str, description: s
                 "Push a fresh head and obtain review evidence for it before refreshing eligibility."
             ) from exc
         raise
+
+
+def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
+    statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
+    latest = next((row for row in statuses if row.get("context") == context), {})
+    creator = latest.get("creator")
+    return (isinstance(creator, dict) and creator.get("login") == "github-actions[bot]"
+            and (latest.get("state"), latest.get("description")) == (state, description))
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:

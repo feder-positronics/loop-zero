@@ -33,7 +33,9 @@ local-receipt exceptions. Merge authority permits merging by default outside
 reserved classes.
 
 Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
-reviews, finding threads, check statuses and merge state. CI and branch protection
+reviews, finding threads, check statuses and merge state. Within a task worktree,
+PR body writers lock the state directory from the live read through the update.
+CI and branch protection
 provide the hosted enforcement. Readiness is a checklist over these sources,
 not a tamper-proof security boundary: repository writers can edit PR evidence,
 and branch protection remains essential.
@@ -62,7 +64,8 @@ a new persistent store.
 
 ## Delivery and feedback
 
-The [CLI](../src/loopzero/cli.py) implements the contract's
+The [console entry point](../src/loopzero/_cli_entry.py) parses arguments before
+loading the delivery [commands](../src/loopzero/cli.py), which implement the contract's
 [six steps](../core/CONTRACT.md#the-six-steps):
 
 1. `start` creates an isolated worktree and task branch from the configured base.
@@ -70,7 +73,8 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    worktree is clean, still at the remote base, and missing its task file.
 2. Implementation proves the owning behavior at the narrowest public seam;
    focused tests start early. `check` runs deterministic checks in a read-only
-   source sandbox. Its simple-command preflight catches missing local scripts,
+   source sandbox. It inventories Git object stores only when alternates may be
+   present. Its simple-command preflight catches missing local scripts,
    prepares recognized uv dependency groups offline in that sandbox and prints
    progress before each command, metadata-only stage heartbeats every 30 seconds
    (including silent children), and exit code/duration immediately after each stage.
@@ -82,8 +86,9 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
 3. Branch PR lookup starts with the remote head and GitHub's commit-to-PR
    endpoint. It matches the source branch and repository, then re-reads PR
-   detail. Other commands prefer open PRs, then the newest closed PR, with
-   pull-list fallback when the branch or a matching open PR is absent. Before pushing
+   detail. Lookup falls back to listing open PRs if the branch or matching open
+   PR is absent, then checks the newest closed PR when requested. Check refresh
+   is open-only. Before pushing
    or writing, `pr` requires a confirmed merge or a complete closed-history read
    through GitHub REST. A confirmed merge completes that branch even when a
    newer duplicate exists. If the head commit cannot prove completion, the
@@ -97,10 +102,12 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    which changes neither the selector nor the budget.
    The delta requires the reviewed commit on the current head's first-parent
    history and verifies merged parents against the live configured base. The
-   runner receives the full reviewed-to-current tree diff, including manual
-   merge resolutions.
+   runner receives topic patches in first-parent order and the difference
+   between each automatic remerge and its recorded tree. Isolated Git verifies
+   the history and builds the patch, excluding unrelated base changes.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
-   head or an eligible review covering an ancestor, blocking findings,
+   head or an eligible review covering an ancestor, blocking findings
+   (unresolved threads a review publisher opened with a head-bound marker line),
    target branch and required CI. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
@@ -115,6 +122,8 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    that requested changes also requires resolved findings at the reviewed head.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
+   Each poll resolves the trusted workflow ref, reusing parsed policy when the
+   branch and immutable revision match the preceding observation.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge
    admission checks readiness again. Missing-run diagnosis keeps its two-minute
@@ -157,11 +166,11 @@ For a Codex executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable and its existing sibling
 `codex-code-mode-host`, read-only. Neighboring history and configuration remain
 hidden; helper aliases into protected state and explicit state mounts fail closed.
-At native review launch the CLI pins checks, publishers and
-`delivery.reviewer_ro_paths` to one remote PR-base revision. A missing remote ref
-or workflow blocks launch. Bootstrap requires an explicit `--config`, which
-still undergoes validation. Reposts and other commands retain their fallback
-policy. Runners validate the complete mount plan against private review state and
+Check, review, ready, merge, and status use the workflow at one remote-tracking
+delivery revision selected by the workflow at Git's local `origin/HEAD`.
+Missing trusted refs or workflows block these commands. An explicit
+`--config` supplies validated policy for bootstrap or operator overrides.
+Runners validate the complete mount plan against private review state and
 known standard/custom native state roots. Existing file-backed auth mounts remain
 explicit exceptions. Claude's environment routes are `ANTHROPIC_API_KEY` and
 `CLAUDE_CODE_OAUTH_TOKEN`: a nonempty value (whitespace included) is forwarded
@@ -183,16 +192,28 @@ The R3 runner separates fixed reviewer policy from supplied material
 inside the existing runner adapters. A fixed ASCII paragraph and validated scope
 enter Claude's append-system-prompt or Codex's developer_instructions override;
 commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
-that header, a newline and the exact raw diff without trimming task or diff text.
+that header, a newline and the Git patch, including carriage returns and the
+final newline. UTF-8 patches are supplied verbatim. For other patches, the
+prompt escapes invalid bytes and literal backslashes so the changes stay
+visible. The native inspection digest always binds the original Git bytes. Git forces
+text hunks for every file (overriding `-diff`, `binary` and NUL detection) and
+runs no external diff command or text conversion, so changed lines stay visible.
+Chunked review summarizes only files whose Git header reports a deletion.
 The runner probes the selected Codex binary with `--version` and records its
 stdout in runner provenance and the saved review receipt. A failed probe uses
 RunnerBadOutput and existing family fallback before model input. Successful
 probe output is accepted across CLI releases. Unsupported Claude options follow
 existing native failure handling.
-Native defaults, repository AGENTS.md/CLAUDE.md processing and read-only tools
-remain enabled. Repository instructions remain a native authority surface, so
-structural transport tests do not prove injection immunity, reviewer quality or
-backend identity.
+Native defaults and read-only tools remain enabled. Neither reviewer loads
+instructions from the reviewed head, which the PR controls: Claude runs with
+`--setting-sources ""`, and Codex runs with `project_doc_max_bytes=0` (no
+AGENTS.md or AGENTS.override.md) and a `skills.config` entry disabling every
+skill under the checkout's `.agents/skills` and `.codex/skills`; a skill
+directory linking outside the checkout, or more skills than one argument can
+disable, fails the attempt before launch. Repository
+conventions reach reviewers only as evidence or through
+`delivery.reviewer_ro_paths` from the pinned base. Structural transport tests do
+not prove injection immunity, reviewer quality or backend identity.
 The [dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
 owns the implementation history, native comparison results and their limits.
 
@@ -266,7 +287,7 @@ Git configuration so URL rewrites cannot change its destination.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal
-requires a clean worktree at the merged PR head.
+requires a clean worktree at the merged PR head with no ignored user files.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and latest ordering. It cannot recompute private raw or defeat a
 coherent forgery by a trusted publisher/editor; native claims do not attest the
@@ -284,6 +305,9 @@ review publication; the existing reviewer selector and delivery gates still appl
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
+Local readiness and hosted source and candidate eligibility reject PRs with
+merge-authority holds. Adding or removing a hold refreshes source eligibility
+even when the head stays the same. Merge admission rechecks the live hold.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
@@ -496,10 +520,17 @@ either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.
-Only this worktree's clean passing keyed receipt is eligible; dirty trees run
-fresh. A tracked receipt is never eligible for reuse.
+Reuse only successful keyed stages from this worktree's clean receipt or
+checkpoint. Dirty trees run fresh. A tracked receipt is never eligible for reuse.
 Receipts that use saved stage results bind the current head and check settings.
 For delegated checks, both the receipt and the stage key bind the runner's launch
 path, resolved executable path and executable bytes. Unavailable runner identity
 prevents receipt reuse.
+
+A worker running the entire check is itself the coordinator and writes a
+receipt with its own effective settings. Transferring it preserves the
+fingerprint, if present. Local readiness applies the same receipt predicate
+as for any other coordinator. See [check receipts with remote execution](../SETUP.md#check-receipts-with-remote-execution)
+for the operator route.
+
 CI and merge-queue candidates run fresh without a local worktree receipt.

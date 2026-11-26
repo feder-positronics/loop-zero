@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import sandbox
+from loopzero import runners, sandbox, worktree
 from loopzero.runners import (
     REVIEW_SCHEMA,
     RunnerAuthFailed,
@@ -29,6 +29,7 @@ from loopzero.runners import (
     build_prompt,
     codex_evidence,
     merge_reviews,
+    render_patch,
     review_with,
     split_diff,
 )
@@ -113,8 +114,17 @@ def _bwrap_argv(log: Path) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def fake_bwrap(fake_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"):
+def fake_bwrap(fake_tool, tmp_path: Path, tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Keep reviewer state outside tmp_path, which many tests mount as the checkout.
+    home = tmp_path_factory.mktemp("reviewer-home")
+    monkeypatch.setenv("HOME", str(home))
+    for name in (
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        *runners.CLAUDE_AUTH_ENV,
+        *runners.CODEX_AUTH_ENV,
+    ):
         monkeypatch.delenv(name, raising=False)
     log = tmp_path / "review-bwrap.argv"
     fake_tool("bwrap", FAKE_BWRAP.format(log=log))
@@ -230,6 +240,14 @@ def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
             "result": json.dumps(payload), "structured_output": payload,
             "session_id": "claude-session-123", "usage": {"input_tokens": 10},
             "total_cost_usd": 0.01, "duration_api_ms": 25, **extra}
+
+
+def replace_codex_events(script: Path, events, *, prepend=False) -> None:
+    text = script.read_text()
+    start = text.index("echo '{\"type\":\"thread.started\"")
+    lines = "\n".join(json.dumps(event) for event in events)
+    suffix = text[start:] if prepend else "exit 0\n"
+    script.write_text(text[:start] + f"printf '%s\\n' {shlex.quote(lines)}\n" + suffix)
 
 
 def _fake_review(bin_dir, family):
@@ -640,13 +658,23 @@ def test_linked_worktree_and_git_directory_are_read_only(
     assert (str(common),) * 2 in binds
 
 
-def test_claude_request_changes_escalates_verdict(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_claude(fake_bin, _claude_envelope(CHANGES))
-    result = _review("claude", tmp_path)
+@pytest.mark.parametrize("family", ["claude", "codex"])
+def test_review_escalates_verdict_with_blocking_finding(fake_bin, tmp_path, family):
+    if family == "claude":
+        _fake_claude(fake_bin, _claude_envelope(CHANGES))
+    else:
+        _fake_codex(fake_bin, json.dumps(CHANGES), stderr="model: fallback")
+
+    result = _review(family, tmp_path)
+
     assert result.verdict == "request_changes"
-    assert [f.severity for f in result.findings] == ["important", "suggestion"]
-    assert result.findings[0].path == "a.py" and result.findings[0].line == 3
-    assert result.findings[1].path is None and result.findings[1].line is None
+    assert [(f.severity, f.path, f.line) for f in result.findings] == [
+        ("important", "a.py", 3), ("suggestion", None, None),
+    ]
+    if family == "codex":
+        assert result.model == "fallback"
+        assert json.loads(result.raw)["session_id"] == "codex-session-123"
+        assert result.provenance["token_usage"]["input_tokens"] == 123
 
 
 def test_claude_falls_back_to_result_text(fake_bin: Path, tmp_path: Path) -> None:
@@ -762,30 +790,25 @@ def test_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: P
     assert result.verdict == "approve" and result.findings[0].title == "Handle 401 Unauthorized"
 
 
-def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_claude(fake_bin, "boom", exit_code=2)
-    with pytest.raises(RunnerBadOutput, match="exited 2"):
-        _review("claude", tmp_path)
-
-
-@pytest.mark.parametrize("family,phrase,error", [
-    ("claude", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit),
-    ("codex", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit),
-    ("codex", "Error: Not logged in. Run codex login first.", RunnerAuthFailed),
-    ("claude", "Prompt is too long", RunnerPromptTooLong),
-    ("claude", "prompt is too long", RunnerPromptTooLong),
-    ("codex", "context_length_exceeded", RunnerPromptTooLong),
-    ("codex", "maximum context length exceeded", RunnerPromptTooLong),
-    ("codex", 'data: {"input_error_code":"input_too_large"}', RunnerPromptTooLong),
-    ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit),
-    ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit),
+@pytest.mark.parametrize("family,phrase,error,exit_code", [
+    ("claude", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit, 1),
+    ("codex", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit, 1),
+    ("codex", "Error: Not logged in. Run codex login first.", RunnerAuthFailed, 1),
+    ("claude", "Prompt is too long", RunnerPromptTooLong, 1),
+    ("claude", "prompt is too long", RunnerPromptTooLong, 1),
+    ("codex", "context_length_exceeded", RunnerPromptTooLong, 1),
+    ("codex", "maximum context length exceeded", RunnerPromptTooLong, 1),
+    ("codex", 'data: {"input_error_code":"input_too_large"}', RunnerPromptTooLong, 1),
+    ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit, 1),
+    ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit, 1),
+    ("claude", "boom", RunnerBadOutput, 2),
 ])
-def test_provider_errors_are_typed(fake_bin: Path, tmp_path: Path, family, phrase, error) -> None:
+def test_provider_errors_are_typed(fake_bin: Path, tmp_path: Path, family, phrase, error, exit_code) -> None:
     if family == "claude":
-        _fake_claude(fake_bin, phrase, exit_code=1)
+        _fake_claude(fake_bin, phrase, exit_code=exit_code)
     else:
-        _fake_codex(fake_bin, "", exit_code=1, stderr=phrase)
-    with pytest.raises(error):
+        _fake_codex(fake_bin, "", exit_code=exit_code, stderr=phrase)
+    with pytest.raises(error, match="exited 2" if exit_code == 2 else None):
         _review(family, tmp_path)
 
 
@@ -1081,6 +1104,85 @@ def test_bwrap_unavailable_fails_closed(fake_bin, tmp_path, monkeypatch, fake_to
 # ----------------------------------------------------------------- codex
 
 
+def _plant_skills(repo: Path) -> None:
+    for skill in (repo / ".agents/skills/a/b", repo / ".agents/skills/e\x7f", repo / ".codex/skills/c", repo / "docs/d"):
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: planted\ndescription: planted\n---\n")
+    (repo / ".agents/skills/linked").symlink_to(repo / "docs/d")
+    (repo / ".agents/skills/loop").symlink_to(repo / ".agents/skills")
+
+
+def test_codex_ignores_repository_instructions_and_skills(repo, fake_bin: Path, fake_bwrap: Path) -> None:
+    _plant_skills(repo)
+    (repo / "AGENTS.md").write_text("planted")
+    _fake_review(fake_bin, "codex")
+    _review("codex", repo)
+    argv = _argv(fake_bin, "codex")
+    assert "project_doc_max_bytes=0" in argv
+    (override,) = [a for a in argv if a.startswith("skills.config=")]
+    disabled = tomllib.loads(override)["skills"]["config"]
+    real = repo.resolve()
+    assert disabled == [{"path": str(path), "enabled": False} for path in (
+        real / ".agents/skills/a/b/SKILL.md", real / ".agents/skills/e\x7f/SKILL.md", real / ".codex/skills/c/SKILL.md",
+        real / "docs/d/SKILL.md",
+    )]
+
+
+def _logging_codex(fake_tool, fake_bin: Path) -> Path:
+    """A fake Codex that records every call, version and help probes included."""
+    fake_tool("codex", f'echo "$@" >> "{fake_bin}/codex.calls"\nexit 1\n')
+    return fake_bin / "codex.calls"
+
+
+@pytest.mark.parametrize("link", [".codex/skills/host", ".agents/skills"])
+def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
+    repo, fake_bin: Path, fake_tool, fake_bwrap: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, link: str,
+) -> None:
+    outside = tmp_path / "outside"
+    (outside / "skill").mkdir(parents=True)
+    (outside / "skill/SKILL.md").write_text("---\nname: host\ndescription: host\n---\n")
+    (repo / link).parent.mkdir(parents=True, exist_ok=True)
+    (repo / link).symlink_to(outside)
+    scanned = []
+    real_scandir = os.scandir
+    def spy(path=".", *rest):
+        if not isinstance(path, int):
+            scanned.append(Path(path))
+        return real_scandir(path, *rest)
+    monkeypatch.setattr("loopzero.runners.os.scandir", spy)
+    calls = _logging_codex(fake_tool, fake_bin)
+    with pytest.raises(RunnerBadOutput, match="links outside the checkout"):
+        _review("codex", repo)
+    assert not any(p.resolve().is_relative_to(outside.resolve()) for p in scanned)
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize("plant", [
+    "too_many", "loop", "undecodable", "dangling", "root_loop:.agents/skills", "root_loop:.codex/skills"])
+def test_codex_skill_lists_it_cannot_disable_fail_before_any_codex_call(
+    repo, fake_bin: Path, fake_tool, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, plant: str,
+) -> None:
+    if plant == "too_many":
+        _plant_skills(repo)
+        monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
+    elif plant in ("loop", "dangling"):
+        (repo / ".agents/skills").mkdir(parents=True)
+        (repo / ".agents/skills/x").symlink_to("x" if plant == "loop" else "/nonexistent/skills")
+    elif plant.startswith("root_loop:"):
+        root = repo / plant.partition(":")[2]
+        root.parent.mkdir(parents=True)
+        root.symlink_to(root.name)
+    else:
+        skill = repo / ".codex/skills" / os.fsdecode(b"\xff")
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: x\ndescription: x\n---\n")
+    calls = _logging_codex(fake_tool, fake_bin)
+    with pytest.raises(RunnerBadOutput, match=r"too many to disable|cannot list repository skills"):
+        _review("codex", repo)
+    assert not calls.exists()
+
+
 def test_codex_approve(repo,
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1104,6 +1206,7 @@ def test_codex_approve(repo,
     assert "--ignore-user-config" in argv
     assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" not in argv
     assert "mcp_servers={}" in argv
+    assert "project_doc_max_bytes=0" in argv and not any(a.startswith("skills.") for a in argv)
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()
     assert isolated != str(configured) and "loopzero-review-home-" in isolated
@@ -1119,15 +1222,6 @@ def test_codex_approve(repo,
     command = sandbox_argv[sandbox_argv.index("--") + 1 :]
     assert command[command.index("--output-schema") + 1] == f"{SANDBOX_HOME}/schema.json"
     assert command[command.index("--output-last-message") + 1] == f"{SANDBOX_HOME}/last.json"
-
-
-def test_codex_request_changes(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_codex(fake_bin, json.dumps(CHANGES), stderr="model: fallback")
-    result = _review("codex", tmp_path)
-    assert result.verdict == "request_changes" and len(result.findings) == 2
-    assert result.model == "fallback"
-    assert json.loads(result.raw)["session_id"] == "codex-session-123"
-    assert result.provenance["token_usage"]["input_tokens"] == 123
 
 
 def test_unknown_family_and_kind(tmp_path: Path) -> None:
@@ -1155,14 +1249,14 @@ def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) 
         _review("codex", tmp_path)
 
 
-def test_timeout_becomes_bad_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bin: Path, fake_bwrap: Path
-) -> None:
-    from loopzero import _proc, runners
+@pytest.mark.parametrize(("has_stderr", "size"), [(True, 0), (True, 3000), (False, 3000)])
+def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap, has_stderr, size):
     from loopzero.cli import _review_failure
 
     def timeout(*args, **kwargs):
-        raise _proc.ProcTimeout("timed out", "partial reviewer output", stderr="x" * 3000 + "waiting for proxy")
+        diagnostic = "connecting\r" + "界" * size + "waiting for proxy"
+        stdout, stderr = ("partial reviewer output", diagnostic) if has_stderr else (diagnostic, "")
+        raise runners._proc.ProcTimeout("timed out", stdout, stderr=stderr)
 
     _fake_claude(fake_bin, {})
     monkeypatch.setattr(runners, "_git_dirs", lambda cwd, env: (cwd, cwd))
@@ -1170,10 +1264,16 @@ def test_timeout_becomes_bad_output(
     monkeypatch.setattr(runners._proc, "run", timeout)
     with pytest.raises(RunnerBadOutput, match="timed out") as info:
         _review("claude", tmp_path)
-    assert "partial reviewer output" in info.value.tail
     reason, detail, fallback = _review_failure("claude", info.value)
     assert reason.startswith("claude: timed out after ") and detail.endswith("waiting for proxy")
-    assert len(detail.splitlines()[-1]) <= runners.TAIL_CHARS and "waiting for proxy" not in fallback
+    assert "partial reviewer output" not in info.value.tail and "waiting for proxy" not in fallback
+    assert len(detail.encode()) < 450 and ("…" in detail) == bool(size)
+
+
+def test_inspection_accepts_the_reviewer_patch_command() -> None:
+    command = (f"git -C /repo diff --no-color --no-ext-diff --no-textconv --text "
+               f"--ignore-submodules=none --submodule=short {'a' * 40} {'b' * 40}")
+    assert runners._inspection_commands(command, "/repo") == [("diff", "a" * 40, "b" * 40)]
 
 
 def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
@@ -1186,6 +1286,25 @@ def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
     chunks = split_diff(deleted + added, 100)
     assert all(len(chunk.encode()) <= 100 for chunk in chunks)
     assert any("gone.py: deleted, 3 lines" in chunk for chunk in chunks)
+
+
+@pytest.mark.parametrize("name", ["zażółć gęślą.txt", "gone with spaces.txt", "gone.txt"])
+def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str) -> None:
+    git(git_repo, "config", "core.quotePath", "true")
+    path = git_repo / name
+    path.write_text("deleted line\n" * 600)
+    git(git_repo, "add", "--", name)
+    git(git_repo, "commit", "-qm", "add file")
+    base = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "rm", "--", name)
+    git(git_repo, "commit", "-qm", "delete file")
+    diff = render_patch(worktree.diff_since(git_repo, base))
+
+    chunks = split_diff(diff, 4096)
+
+    assert all(len(chunk.encode()) <= 4096 for chunk in chunks)
+    assert any(f"{name}: deleted, 600 lines" in chunk for chunk in chunks)
+    assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
 
 
 # ----------------------------------------------------------------- family detection

@@ -21,6 +21,17 @@ from tests.test_cli import (
 )
 
 gh, git_seed, repo, wt = support.gh, support.git_seed, support.repo, support.wt
+replay_gh = support.replay_gh
+REVIEW_COMMENTS = f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1"
+
+
+def published_review(head, body, *, state="COMMENTED"):
+    return {"id": 17, "commit_id": head, "body": body,
+            "state": state, "user": {"login": LOGIN}}
+
+
+def arm_published_review(gh, head, body, *, state="COMMENTED"):
+    gh.respond(reviews_key(), [published_review(head, body, state=state)])
 
 
 def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=False,
@@ -40,15 +51,14 @@ def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=Fals
     def transport(endpoint, payload, **kwargs):
         response = original(endpoint, payload, **kwargs)
         if endpoint.endswith("/reviews"):
-            review = {"id": 17, "commit_id": head, "body": payload["body"],
-                      "state": "COMMENTED", "user": {"login": LOGIN}}
+            review = published_review(head, payload["body"])
             comments = [{**c, "commit_id": head, "user": {"login": LOGIN},
                          "pull_request_review_id": 17} for c in payload["comments"]]
             rows = [*history, review]
             if mutate:
                 mutate(rows, comments)
             gh.respond(reviews_key(), rows)
-            gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1",
+            gh.respond(REVIEW_COMMENTS,
                        comments)
             if interrupted:
                 raise KeyboardInterrupt
@@ -79,7 +89,7 @@ def assert_single_publication(gh, fake_bin):
 @pytest.mark.parametrize("verdict", [0, 5])
 @pytest.mark.parametrize("interrupted", [False, True, "timeout"])
 def test_accepted_publication_recovers_saved_verdict(
-    wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, interrupted,
+    wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, interrupted, replay_gh,
 ):
     lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict,
                interrupted=interrupted is True, timeout=interrupted == "timeout")
@@ -93,9 +103,7 @@ def test_accepted_publication_recovers_saved_verdict(
     assert code == verdict, err
     assert out.splitlines()[-1].startswith(f"{kind} review by claude")
     assert interrupted is True or out.startswith("reviewer paths pinned to origin/main@")
-    assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
-    writes = [c for c in gh.calls if "--input" in c]
-    assert len(writes) == 1, "confirmed recovery must not write again, including the PR body"
+    assert_single_publication(gh, fake_bin)
     if verdict == 5:
         files = ["api", f"repos/{REPO}/pulls/7/files"]
         assert sum(call["argv"][:2] == files for call in gh.calls) == 2
@@ -106,7 +114,7 @@ def test_accepted_publication_recovers_saved_verdict(
                                      "head", "comment_page", "kind", "wrong_head"])
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_recovery_requires_exact_live_publication(
-    wt, gh, fake_bin, monkeypatch, capsys, change, interrupted,
+    wt, gh, fake_bin, monkeypatch, capsys, change, interrupted, replay_gh,
 ):
     def mutate(rows, comments):
         if change == "body":
@@ -240,7 +248,7 @@ def test_recovery_transport_caps_request_time_and_does_not_retry(monkeypatch, fa
     ("null", "single"), ("empty", "single"), ("malformed", "single"),
 ])
 def test_historical_publication_recovery_is_exact_and_legacy_only(
-    interrupted_receipt, gh, fake_bin, capsys, metadata, source, shape,
+    replay_gh, interrupted_receipt, gh, fake_bin, capsys, metadata, source, shape,
 ):
     head, path, saved, _ = interrupted_receipt
     envelope = json.loads(saved["raw"])
@@ -273,8 +281,7 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
             f"model {saved['model'] or 'unknown'}{effort}, {saved['duration_s']:.1f}s: "
             f"**approve** (0 critical, 0 important, 0 suggestion){chunks}\n\n"
             f"<details><summary>Raw reviewer output</summary>\n\n```\n{transcript}\n```\n</details>")
-    gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": body,
-                               "state": "COMMENTED", "user": {"login": LOGIN}}])
+    arm_published_review(gh, head, body)
     code, _out, err = run(capsys, "review", "--repost")
     assert code == (0 if metadata == "legacy" else 1), err
     assert_single_publication(gh, fake_bin)
@@ -282,15 +289,12 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
         mixed = body.partition("\n\n<details>")[0] + (
             "\n\nNative Claude output is retained in the restricted local review receipt."
         )
-        gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": mixed,
-                                   "state": "COMMENTED", "user": {"login": LOGIN}}])
+        arm_published_review(gh, head, mixed)
         assert run(capsys, "review", "--repost")[0] == 1
-        gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": body + "changed",
-                                   "state": "COMMENTED", "user": {"login": LOGIN}}])
+        arm_published_review(gh, head, body + "changed")
         assert run(capsys, "review", "--repost")[0] == 1
-        gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": body,
-                                   "state": "COMMENTED", "user": {"login": LOGIN}}])
-        gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1", [
+        arm_published_review(gh, head, body)
+        gh.respond(REVIEW_COMMENTS, [
             {"path": "feature.py", "line": 1, "side": "RIGHT", "body": "changed finding",
              "commit_id": head, "pull_request_review_id": 17, "user": {"login": LOGIN}},
         ])
@@ -368,8 +372,7 @@ def test_repost_confirms_historical_claude_publication(
         body += "\n\nNative Claude output is retained in the restricted local review receipt."
     else:
         body += f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{saved['raw']}\n```\n</details>"
-    row = {"id": 17, "commit_id": head, "body": body, "state": "COMMENTED", "user": {"login": LOGIN}}
-    gh.respond(reviews_key(), [row])
+    arm_published_review(gh, head, body)
     if publication == "pre-configured":
         assert "configured_settings" in saved["provenance"]
         assert run(capsys, "review", "--repost")[0] == 1
@@ -379,7 +382,7 @@ def test_repost_confirms_historical_claude_publication(
     assert code == 0, err
     assert saved["raw"] not in out + err
     if publication == "pre-configured":
-        gh.respond(reviews_key(), [{**row, "body": body + "changed"}])
+        arm_published_review(gh, head, body + "changed")
         assert run(capsys, "review", "--repost")[0] == 1
     assert_single_publication(gh, fake_bin)
 
@@ -409,10 +412,8 @@ def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkey
     )
     if altered:
         body += "changed"
-    gh.respond(reviews_key(), [
-        {"id": 17, "commit_id": head, "body": body, "state": "APPROVED", "user": {"login": LOGIN}},
-    ])
-    gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1", [])
+    arm_published_review(gh, head, body, state="APPROVED")
+    gh.respond(REVIEW_COMMENTS, [])
 
     def unexpected_launch(*args, **kwargs):
         pytest.fail("repost launched a reviewer")

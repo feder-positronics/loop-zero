@@ -15,6 +15,8 @@ from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from select import select
+from threading import Event, current_thread
+from unittest.mock import Mock
 
 import pytest
 
@@ -319,18 +321,20 @@ def test_probe_timeout_reports_only_the_timeout(git_repo, monkeypatch):
     assert info.value.__suppress_context__
 
 
-def test_alternate_probe_timeout_traceback_omits_process_diagnostics(git_repo, monkeypatch):
-    def timed_out(*args, **kwargs):
-        raise sandbox._proc.ProcTimeout("private alternate probe diagnostic")
-
-    monkeypatch.setattr(sandbox, "_git", lambda *_: "alternate: /tmp/objects\n")
-    monkeypatch.setattr(sandbox._proc, "run", timed_out)
+def test_alternate_probe_skips_default_inventory_and_honors_override(git_repo, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sandbox, "_git", lambda *args: calls.append(args) or "alternate: /tmp/objects\n")
+    monkeypatch.setattr(sandbox._proc, "run", Mock(side_effect=sandbox._proc.ProcTimeout("private alternate probe diagnostic")))
+    cfg = make_config(env_allowlist=("GIT_ALTERNATE_OBJECT_DIRECTORIES",))
+    monkeypatch.delenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", raising=False)
+    prefix, common = ["bwrap", "--"], git_repo / ".git"
+    sandbox._preflight_alternates(cfg, git_repo, prefix, common)
+    assert not calls
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/objects")
     with pytest.raises(sandbox.SandboxUnavailable, match="Git alternate visibility probe timed out") as info:
-        sandbox._preflight_alternates(make_config(), git_repo, ["bwrap", "--"])
-
+        sandbox._preflight_alternates(cfg, git_repo, prefix, common)
     rendered = "".join(traceback.format_exception(info.value))
-    assert "private alternate probe diagnostic" not in rendered
-    assert "Create a standalone clone" in rendered
+    assert "private alternate probe diagnostic" not in rendered and "Create a standalone clone" in rendered
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):
@@ -358,9 +362,7 @@ def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_
     objects = git_repo / ".git/objects"
     worktree = shared
     if layout == "relative":
-        (shared / ".git/objects/info/alternates").write_text(
-            os.path.relpath(objects, shared / ".git/objects") + "\n"
-        )
+        (shared / ".git/objects/info/alternates").write_text(os.path.relpath(objects, shared / ".git/objects") + "\n")
     elif layout == "linked":
         worktree = tmp_path / "linked"
         git(shared, "worktree", "add", "-q", "-b", "linked", str(worktree))
@@ -374,9 +376,8 @@ def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_
         objects = tmp_path / ("zażółć" if layout == "unicode" else "alternate objects; $(false)")
         shutil.copytree(git_repo / ".git/objects", objects)
         (shared / ".git/objects/info/alternates").write_text(str(objects) + "\n")
-    config = make_config(checks=("echo first-stage",))
-    if layout == "transitive":
-        config = make_config(checks=config.checks, sandbox_ro=(str(shared / ".git/objects"),))
+    visible_stores = (str(shared / ".git/objects"),) if layout == "transitive" else ()
+    config = make_config(checks=("echo first-stage",), sandbox_ro=visible_stores)
     started = []
 
     with pytest.raises(sandbox.SandboxUnavailable) as failure:
@@ -512,15 +513,32 @@ def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
     return [(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == flag]
 
 
+@pytest.fixture
+def heartbeat_log(monkeypatch):
+    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
+    observed, events, reporters = Event(), [], set()
+
+    def status(message):
+        events.append(message)
+        if ": running " in message:
+            reporters.add(current_thread())
+            observed.set()
+        else:
+            assert reporters and all(not reporter.is_alive() for reporter in reporters)
+
+    def wait():
+        assert observed.wait(5), "no running heartbeat"
+
+    return events, reporters, status, wait
+
+
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_silent_stage_reports_live_metadata_then_completion(
-    git_repo, bwrap_log, monkeypatch, exit_code
+    git_repo, bwrap_log, monkeypatch, heartbeat_log, exit_code
 ):
     import re
-    import threading
 
-    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
-    observed, events, reporters = threading.Event(), [], set()
+    events, _, status, wait_for_heartbeat = heartbeat_log
     monkeypatch.setenv("LZ_KEEP", "credential-value")
     command = f'echo "$LZ_KEEP"; echo private-stderr >&2; exit {exit_code}'
     cfg = make_config(checks=(command, "echo next"))
@@ -528,16 +546,8 @@ def test_silent_stage_reports_live_metadata_then_completion(
 
     def run_stage(config, worktree, prefix, stage_command, timeout):
         if stage_command == command:
-            assert observed.wait(5), "no running heartbeat for first stage"
+            wait_for_heartbeat()
         return run_one(config, worktree, prefix, stage_command, timeout)
-
-    def status(event):
-        events.append(event)
-        if "running" in event:
-            reporters.add(threading.current_thread())
-            observed.set()
-        else:
-            assert all(not reporter.is_alive() for reporter in reporters)
 
     monkeypatch.setattr(sandbox, "_run_one", run_stage)
     report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
@@ -574,23 +584,8 @@ def test_early_failure_reports_actual_exit_without_heartbeat(git_repo, bwrap_log
     assert not report.ok
 
 
-def test_timeout_stops_heartbeat_and_retains_failure_tail(git_repo, bwrap_log, monkeypatch):
-    import threading
-
-    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
-    observed, events, reporters = threading.Event(), [], []
-
-    def status(message):
-        events.append(message)
-        if message.startswith("stage 1/2: running"):
-            reporters.append(threading.current_thread())
-            observed.set()
-        else:
-            assert reporters and all(not reporter.is_alive() for reporter in reporters)
-
-    def wait_for_heartbeat():
-        assert observed.wait(5), "no running heartbeat before timeout"
-
+def test_timeout_stops_heartbeat_and_retains_failure_tail(git_repo, bwrap_log, monkeypatch, heartbeat_log):
+    events, _, status, wait_for_heartbeat = heartbeat_log
     inject_check_timeout(monkeypatch, b"private\n", wait_for_heartbeat)
     report = sandbox.run_checks(
         make_config(checks=("echo private", "echo never")), git_repo,
@@ -603,22 +598,14 @@ def test_timeout_stops_heartbeat_and_retains_failure_tail(git_repo, bwrap_log, m
     assert report.results[0].tail == "private\n\n[loopzero] timed out after 0.2s"
 
 
-def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_log, monkeypatch):
-    import threading
-    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
-    observed, events, reporters = threading.Event(), [], []
-
-    def heartbeat(message):
-        events.append(message)
-        reporters.append(threading.current_thread())
-        observed.set()
-
+def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_log, monkeypatch, heartbeat_log):
+    events, reporters, status, wait_for_heartbeat = heartbeat_log
     def cancel(*args):
-        assert observed.wait(5), "no running heartbeat before cancellation"
+        wait_for_heartbeat()
         raise KeyboardInterrupt
     monkeypatch.setattr(sandbox, "_run_one", cancel)
     with pytest.raises(KeyboardInterrupt):
-        sandbox.run_checks(make_config(), git_repo, status=heartbeat)
+        sandbox.run_checks(make_config(), git_repo, status=status)
     assert events and all("running" in event for event in events)
     assert all(not reporter.is_alive() for reporter in reporters)
 
@@ -635,34 +622,28 @@ from pathlib import Path
 from tests.test_sandbox import _save_report, make_config, sandbox
 
 mode = sys.argv[1]
+def interrupt():
+    print(mode, flush=True)
+    signal.raise_signal(signal.SIGTERM)
+
+def interrupt_after(call):
+    def wrapped(*args, **kwargs):
+        result = call(*args, **kwargs)
+        interrupt()
+        return result
+    return wrapped
+
 if mode == "creation":
-    mkdtemp = tempfile.mkdtemp
-
-    def create(*args, **kwargs):
-        path = mkdtemp(*args, **kwargs)
-        print("creation", flush=True)
-        signal.raise_signal(signal.SIGTERM)
-        return path
-
-    tempfile.mkdtemp = create
-
-if mode == "removal":
+    tempfile.mkdtemp = interrupt_after(tempfile.mkdtemp)
+elif mode == "removal":
     rmtree = shutil.rmtree
-
     def remove(path, **kwargs):
-        print("removal", flush=True)
-        signal.raise_signal(signal.SIGTERM)
+        interrupt()
         rmtree(path, **kwargs)
-
     shutil.rmtree = remove
-
-if mode == "dispatch":
+elif mode == "dispatch":
     class Callbacks(deque):
-        def pop(self):
-            callback = super().pop()
-            print("dispatch", flush=True)
-            signal.raise_signal(signal.SIGTERM)
-            return callback
+        pop = interrupt_after(deque.pop)
 
     class Stack(ExitStack):
         def __init__(self):
@@ -720,6 +701,25 @@ def fetched_base(git_repo):
     return head
 
 
+@pytest.fixture
+def cache_check(git_repo):
+    exclude = git_repo / ".git/info/exclude"
+    with exclude.open("a") as stream:
+        stream.write("\n.loopzero/\n")
+
+    def cache(config, *, clean=False, verify_reuse=False):
+        report = sandbox.run_checks(config, git_repo)
+        assert report.ok
+        if clean:
+            assert not report.dirty
+        _save_report(git_repo, report)
+        if verify_reuse:
+            assert sandbox.run_checks(config, git_repo).results[0].reused_from == report.head
+        return report
+
+    return cache
+
+
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy'])
@@ -771,16 +771,46 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
-def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base):
-    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+@pytest.mark.parametrize("case", ["typo", "empty", "dirty", "no_base"])
+def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case, cache_check):
+    command = 'test "$(cat README.md)" = hello'
+    paths = () if case == "empty" else ("ipnut.txt",)
+    config = make_config(checks=(command,), inputs={command: paths})
+    cache_check(config)
+    (git_repo / "README.md").write_text("fail\n")
+    if case != "dirty":
+        git(git_repo, "commit", "-qam", "change actual input")
+    if case == "no_base":
+        git(git_repo, "update-ref", "-d", "refs/remotes/origin/main")
+
+    result = sandbox.run_checks(config, git_repo, status=(messages := []).append)
+    assert result.results[0].exit_code == 1
+    assert any("workflow.toml: checks.inputs" in message and repr(paths) in message
+               for message in messages)
+
+
+@pytest.mark.parametrize("path", [":(bogus)README.md", "README\0.md", "README.md"])
+def test_input_diagnostic_failure_does_not_block_dirty_check(
+    git_repo, bwrap_log, fetched_base, monkeypatch, path,
+):
+    if path == "README.md":
+        def timed_out(*args):
+            raise sandbox._proc.ProcTimeout("input lookup timed out")
+
+        monkeypatch.setattr(sandbox, "_input_blobs", timed_out)
+    (git_repo / "README.md").write_text("dirty\n")
+    command = 'test "$(cat README.md)" = dirty'
+    config = make_config(checks=(command,), inputs={command: (path,)})
+    report = sandbox.run_checks(config, git_repo, status=lambda _: None)
+    assert report.ok and report.dirty and report.results[0].command == command
+
+
+def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base, cache_check):
     path = git_repo / "README.md"
     command = "python3 -c 'from pathlib import Path; exit(13 in Path(\"README.md\").read_bytes())'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
     assert path.read_bytes() == b"hello\n"
-    report = sandbox.run_checks(config, git_repo)
-    assert report.ok and not report.dirty
-    _save_report(git_repo, report)
-    assert sandbox.run_checks(config, git_repo).results[0].reused_from == fetched_base
+    assert cache_check(config, clean=True, verify_reuse=True).head == fetched_base
 
     git(git_repo, "config", "core.autocrlf", "true")
     path.unlink()
@@ -840,15 +870,12 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
 
 
 @pytest.mark.parametrize("error", [errno.E2BIG, errno.ENOENT])
-def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkeypatch, error):
+def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkeypatch, error, cache_check):
     command = "echo stage ran"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
-    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
-    original = sandbox.run_checks(config, git_repo)
-    assert original.ok and not original.dirty
+    original = cache_check(config, clean=True, verify_reuse=True)
     assert original.results[0].input_key
-    _save_report(git_repo, original)
-    assert sandbox.run_checks(config, git_repo).results[0].reused_from == fetched_base
+    assert original.head == fetched_base
 
     run = sandbox._proc.run
 
@@ -875,12 +902,9 @@ def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkey
     assert saved.get("input_key") is None and saved.get("reused_from") is None
 
 
-def test_local_checks_run_fresh_without_a_base(git_repo, bwrap_log):
-    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+def test_local_checks_run_fresh_without_a_base(git_repo, bwrap_log, cache_check):
     config = make_config(inputs={"*": (".",)})
-    first = sandbox.run_checks(config, git_repo)
-    assert first.ok
-    _save_report(git_repo, first)
+    cache_check(config)
 
     second = sandbox.run_checks(config, git_repo)
     assert second.ok
@@ -947,7 +971,7 @@ def test_receipt_settings_distinguish_runner_paths(git_repo, monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize("change", ["target", "content"])
-def test_runner_upgrade_invalidates_pass(git_repo, fetched_base, tmp_path, change):
+def test_runner_upgrade_invalidates_pass(git_repo, fetched_base, tmp_path, change, cache_check):
     def write_runner(path, exit_code):
         path.write_text(
             f"#!{sys.executable}\n"
@@ -959,15 +983,12 @@ def test_runner_upgrade_invalidates_pass(git_repo, fetched_base, tmp_path, chang
         )
         path.chmod(0o755)
 
-    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
     runner = tmp_path / "runner"
     original = tmp_path / "runner-a"
     write_runner(original, 0)
     runner.symlink_to(original)
     config = make_config(check_runner=(str(runner),), inputs={"echo hello": (".",)})
-    report = sandbox.run_checks(config, git_repo)
-    assert report.ok
-    _save_report(git_repo, report)
+    report = cache_check(config)
     assert _current_check_report(git_repo, config, report.head)
     assert sandbox.run_checks(config, git_repo).results[0].reused_from == report.head
 

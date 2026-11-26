@@ -11,8 +11,8 @@ It exists for people and coding agents who ship many small PRs and want the
 same discipline on every one of them: checks run in a sandbox with read-only
 Git metadata and no network by default, a reviewer reads the exact head (from a
 different family by default, subject to the contract's bounded owner-approved
-contributor-review exception), and a PR merges only when the head is unchanged since review, no
-blocking finding is open and required CI is green. The full rules fit in
+contributor-review exception), and a PR needs an eligible review, resolved
+blocking findings and green required CI to merge. The full rules fit in
 [core/CONTRACT.md](core/CONTRACT.md).
 
 The [architecture guide](docs/ARCHITECTURE.md) explains current boundaries,
@@ -31,9 +31,8 @@ ownership and the contributor routine that keeps documentation current.
 
 For a picture of the whole flow, see the [workflow diagrams](docs/WORKFLOW.md).
 
-`loopzero status` prints where the current branch is in that sequence. It
-requires authenticated access to the configured GitHub repository even before
-a PR exists.
+`loopzero status` reports the branch stage and can exit 0 with `ready: no`.
+It requires authenticated GitHub access even before a PR exists.
 `loopzero resolve` lists the open blocking findings with their ids;
 `loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
 
@@ -48,8 +47,8 @@ GitHub; keep acceptance changes in both task.md and the PR by rerunning `pr`.
 
 Review publication records duration and distinguishes requested model/effort from
 CLI-reported claims, which are not backend attestation; saved artifacts preserve
-them for `--repost`. The full transcript stays in `.loopzero/review-<head>-<kind>.json`;
-`loopzero review --repost` uses it without rerunning the model.
+them in `.loopzero/review-<head12>-<kind>.json`. `loopzero review --repost` uses
+the saved review without a model call and rejects `--model` and `--effort`.
 
 Waits observe immediately, then use 30/60/120-second intervals with up to 10%
 earlier jitter, bounded by the timeout. Each readiness observation rechecks

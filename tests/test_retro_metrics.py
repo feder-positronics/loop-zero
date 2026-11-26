@@ -15,7 +15,8 @@ def issue(number, created, closed=None, reason=None):
 
 
 @pytest.fixture
-def sources(tmp_path, monkeypatch):
+def sources(tmp_path, monkeypatch, request):
+    commit_rows, commit_total = getattr(request, "param", (1, 1))
     merged = issue(1, "2026-05-26T06:00:00Z", SINCE)
     at_end = issue(2, SINCE, END)
     p0 = issue(4, "2026-05-23T12:00:00Z")
@@ -41,7 +42,8 @@ def sources(tmp_path, monkeypatch):
             {"event": "commented", "created_at": END},
         ],
         "issues/5/timeline": [pull_ref],
-        "pulls/3/commits": [{"commit": {"committer": {"date": "2026-05-28T21:00:00Z"}}}],
+        "pulls/3": {"commits": commit_total},
+        "pulls/3/commits": [{"commit": {"committer": {"date": "2026-05-28T21:00:00Z"}}}] * commit_rows,
         "issues/3/comments": [],
     }
     calls = []
@@ -68,20 +70,21 @@ def sources(tmp_path, monkeypatch):
                     raise subprocess.CalledProcessError(1, argv)
                 path = label
             data = rows[path]
+            if path == "pulls/3/commits":
+                offset = (int(query.rsplit("=", 1)[1]) - 1) * 100
+                data = data[offset:offset + 100]
         return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
 
     monkeypatch.setattr(retro_metrics.subprocess, "run", collect)
     ledger = tmp_path / "receipts.jsonl"
     base = {"event": "job", "command_class": "loopzero-check"}
-    records = [
-        dict(base, outcome="ok", exit_code=0, end_utc="2026-04-30T00:00:00Z"),
-        dict(base, outcome="ok", exit_code=0, end_utc=SINCE),
-        dict(base, outcome="ok", exit_code=0, end_utc=SINCE),
-        dict(base, outcome="fail", exit_code=1, end_utc="2026-05-28T01:00:00Z"),
-        dict(base, outcome="cancelled", exit_code=143, end_utc="2026-05-28T02:00:00Z"),
-        dict(base, outcome="ok", exit_code=0, end_utc=END),
+    outcomes = [
+        ("ok", 0, "2026-04-30T00:00:00Z"), ("ok", 0, SINCE), ("ok", 0, SINCE),
+        ("fail", 1, "2026-05-28T01:00:00Z"), ("cancelled", 143, "2026-05-28T02:00:00Z"),
+        ("ok", 0, END),
     ]
-    ledger.write_text("".join(json.dumps(row) + "\n" for row in records))
+    ledger.write_text("".join(json.dumps(dict(base, outcome=outcome, exit_code=code, end_utc=end)) + "\n"
+                              for outcome, code, end in outcomes))
     return calls, [
         "--repo", REPO, "--since", SINCE, "--until", END,
         "--label-outcome", "outcomes", "--label-order", "orders", "--label-p0", "p0",
@@ -145,6 +148,13 @@ def test_weekly_sample_reserves_controls_and_deduplicates_stalled_order():
     assert [item["number"] for item in sample["items"][2:]] == [8, 7, 1, 2, 3, 4]
 
 
+def assert_replay(args, calls, capsys, live):
+    count = len(calls)
+    assert retro_metrics.main(args) == 0
+    assert capsys.readouterr() == live
+    assert len(calls) == count
+
+
 def test_weekly_report_uses_stall_threshold_without_running_other_alerts(sources, capsys):
     calls, args = sources
     args = [*args, "--stall-hours", "12", "--dead-owner", "coordinator"]
@@ -153,10 +163,7 @@ def test_weekly_report_uses_stall_threshold_without_running_other_alerts(sources
     report = json.loads(live.out)
     assert {"kind": "stalled_p0", "number": 4} in report["weekly_sample"]["items"]
     assert all(alert["kind"] == "unknown" for alert in report["alerts"])
-    count = len(calls)
-    assert retro_metrics.main(args) == 0
-    assert capsys.readouterr() == live
-    assert len(calls) == count
+    assert_replay(args, calls, capsys, live)
 
 
 def test_alerts_find_stalled_order_and_dead_owner(sources, capsys):
@@ -172,10 +179,7 @@ def test_alerts_find_stalled_order_and_dead_owner(sources, capsys):
         {"kind": "stalled_p0", "issue": 4, "last_activity": "2026-05-28T06:00:00Z", "hours": 18},
         {"kind": "dead_owner", "owner": "coordinator"},
     ]
-    count = len(calls)
-    assert retro_metrics.main([*args, *options]) == 0
-    assert capsys.readouterr() == live
-    assert len(calls) == count
+    assert_replay([*args, *options], calls, capsys, live)
 
 
 def test_missing_and_failed_sources_do_not_report_zero(sources, capsys):
@@ -196,3 +200,22 @@ def test_invalid_band_is_usage_error(capsys):
         retro_metrics.main(["--repo", REPO, "--until", END, "--band", "merges", "3", "2"])
     assert exc.value.code == 2
     assert "ordered limits" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("sources", "detail_reads", "stalled"), [
+    ((101, None), 0, True),
+    ((250, 250), 1, True),
+    ((250, 251), 1, False),
+    ((250, None), 1, False),
+], indirect=["sources"])
+def test_stalled_issue_checks_linked_pr_commit_count_at_limit(sources, detail_reads, stalled, capsys):
+    calls, args = sources
+    options = ["--alerts", "--stall-hours", "1"]
+    assert retro_metrics.main([*args, *options, "--record"]) == 0
+    live = capsys.readouterr()
+    alerts = json.loads(live.out)["alerts"]
+    assert any(a["kind"] == "stalled_p0" and a["issue"] == 5 for a in alerts) == stalled
+    assert any(a.get("source") == "p0/#5/activity" for a in alerts) == (not stalled)
+    assert sum(call[-1] == f"repos/{REPO}/pulls/3" for call in calls) == detail_reads
+
+    assert_replay([*args, *options], calls, capsys, live)

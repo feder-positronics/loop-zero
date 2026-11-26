@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
-from tests.conftest import git
+from tests.conftest import commit_file, git
 
 
 @pytest.fixture
@@ -29,9 +29,7 @@ def commit_on_origin(repo: Path, name: str) -> str:
     """Advance origin/main from a scratch clone so `start` has to fetch to see it."""
     clone = repo.parent / f"clone-{name}"
     git(repo, "clone", "-q", str(repo.parent / "origin.git"), str(clone))
-    (clone / name).write_text(name)
-    git(clone, "add", name)
-    git(clone, "commit", "-q", "-m", name)
+    commit_file(clone, name, name, name)
     git(clone, "push", "-q", "origin", "main")
     return git(clone, "rev-parse", "HEAD").strip()
 
@@ -51,9 +49,9 @@ def test_branch_refuses_detached_head(repo: Path) -> None:
 
 
 @pytest.mark.parametrize("branch", [None, "feature/ci+release"])
-def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None) -> None:
-    if branch:
-        git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None, monkeypatch) -> None:
+    side = branch or "side"
+    git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{side}")
     upstream = commit_on_origin(repo, "feature.txt")
     if branch:
         checkout = repo.parent / "single-branch"
@@ -61,6 +59,14 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
         assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
         repo = checkout
+    invoke = worktree._git
+    def interleave(path, *args, **kwargs):
+        result = invoke(path, *args, **kwargs)
+        if args[0] == "fetch":
+            git(path, "fetch", "-q", "origin", f"refs/heads/{side}")
+        return result
+
+    monkeypatch.setattr(worktree, "_git", interleave)
     wt = worktree.start(repo, "my-task", "main")
     assert wt == repo / ".worktrees" / "my-task"
     assert (wt / "feature.txt").exists(), "fetched origin/main before branching"
@@ -127,13 +133,11 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
 
 def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
     exclude = repo / ".git" / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text("*.log")  # no trailing newline on purpose
     old_inode = exclude.stat().st_ino
     wt = worktree.start(repo, "t1", "main")
     assert exclude.stat().st_ino != old_inode
-    lines = exclude.read_text().splitlines()
-    assert lines == ["*.log", ".worktrees/", ".loopzero/"]
+    assert exclude.read_text().splitlines() == ["*.log", ".worktrees/", ".loopzero/"]
     assert not worktree.is_dirty(wt), "fresh worktree with task.md is clean"
     assert git(repo, "status", "--porcelain") == ""
     installed = exclude.stat()
@@ -197,6 +201,37 @@ def test_start_reports_git_failure_with_command(repo: Path) -> None:
     assert info.value.tail
 
 
+def _commit_files(repo: Path, files: dict[str, bytes | None]) -> str:
+    for name, content in files.items():
+        (repo / name).write_bytes(content) if content is not None else (repo / name).unlink()
+    git(repo, "add", "-A", "--", *files)
+    git(repo, "commit", "-q", "-m", "change")
+    return git(repo, "rev-parse", "HEAD").strip()
+
+
+def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path) -> None:
+    base = _commit_files(git_repo, {"attr.py": b"old\n", "nul.py": b"old\n"})
+    git(git_repo, "update-index", "--add", "--cacheinfo", f"160000,{base},a-sub")
+    _commit_files(git_repo, {
+        ".gitattributes": b"attr.py -diff\nnul.py binary\n", "attr.py": b"new = 'attr hunk'\n",
+        "nul.py": b"new = 'nul hunk'\x00\n", "image.png": b"\x89PNG\r\n\x1a\n\x00\xff\xfe",
+        ".gitmodules": b'[submodule "a-sub"]\n\tpath = a-sub\n\tignore = all\n'})
+    diff = worktree.diff_since(git_repo, base)
+    assert b"Binary files" not in diff and f"+Subproject commit {base}".encode() in diff
+    assert b"+new = 'attr hunk'" in diff and b"+new = 'nul hunk'\x00" in diff and b"+\x89PNG\r" in diff
+
+
+def test_split_diff_summarizes_only_files_git_reports_deleted(git_repo: Path) -> None:
+    from loopzero.runners import render_patch, split_diff  # keeps the shared import block untouched
+    base = _commit_files(git_repo, {"gone.py": b"old\n", "padded.py": b"old\n", "carriage.py": b"old\n"})
+    _commit_files(git_repo, {"gone.py": None, "padded.py": b"new = 'padded hunk'\n++ /dev/null\n" + b"x\n" * 300,
+                             "carriage.py": b"new \rdiff --git a/carriage.py b/carriage.py\rdeleted file mode 100644\r"
+                             + b"y\n" * 300})
+    joined = "".join(split_diff(render_patch(worktree.diff_since(git_repo, base)), 1_000))
+    assert "+++ /dev/null" in joined and "+new = 'padded hunk'" in joined and "+new \r" in joined
+    assert "gone.py: deleted, 1 lines" in joined and joined.count(": deleted, ") == 1
+
+
 def test_dirty_head_and_diff(repo: Path) -> None:
     wt = worktree.start(repo, "work", "main")
     base = worktree.base_sha(wt)
@@ -208,9 +243,9 @@ def test_dirty_head_and_diff(repo: Path) -> None:
     assert not worktree.is_dirty(wt)
     assert worktree.head(wt) != base
     diff = worktree.diff_since(wt, base)
-    assert "+print(1)" in diff and "new.py" in diff
+    assert b"+print(1)" in diff and b"new.py" in diff
     (wt / "new.py").write_text("print(2)\n")
-    assert "print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
+    assert b"print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
     assert worktree.is_dirty(wt)
 
 
@@ -232,12 +267,14 @@ def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
 
-def test_cleanup_refuses_dirty(repo: Path) -> None:
+@pytest.mark.parametrize("file", ["scratch.txt", "local.env", ".loopzero/user-notes.md"])
+def test_cleanup_preserves_user_files(repo: Path, file: str) -> None:
+    (repo / ".git/info/exclude").write_text("local.env\n")
     wt = worktree.start(repo, "dirty", "main")
-    (wt / "scratch.txt").write_text("x")
-    with pytest.raises(worktree.WorktreeError, match="dirty"):
+    (wt / file).write_text("x")
+    with pytest.raises(worktree.WorktreeError, match="worktree is dirty" if file == "scratch.txt" else "ignored file"):
         worktree.cleanup(wt)
-    assert wt.exists() and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
+    assert (wt / file).read_text() == "x" and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
 def test_cleanup_missing_worktree(repo: Path) -> None:
