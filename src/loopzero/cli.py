@@ -310,6 +310,7 @@ def _readiness_precheck(wt: Path, config: Config, pr: github.PR, head: str, diag
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False, diagnostics: bool = False,
+    mergify_deadline: float | None = None,
 ) -> github.Readiness:
     if problem := _readiness_precheck(wt, config, pr, head, diagnostics):
         return github.Readiness(False, (problem,))
@@ -342,7 +343,7 @@ def _readiness(
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
         behind = github.behind_reason(pr, head if review else None)
         reasons = result.reasons
-        if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
+        if mergify.configured(config.repo, config.base_branch, config.mergify_queue or "", mergify_deadline):
             reasons = tuple(reason for reason in reasons if reason != behind)
         else:
             reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
@@ -1189,7 +1190,8 @@ def _load_review(
 
 
 def _pr_readiness(
-    wt: Path, config: Config, branch: str, *, allow_merged: bool = False, workflow_wait: bool = False
+    wt: Path, config: Config, branch: str, *, allow_merged: bool = False, workflow_wait: bool = False,
+    mergify_deadline: float | None = None,
 ) -> tuple[github.PR, github.Readiness | None]:
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
     head = worktree.head(wt)
@@ -1197,7 +1199,9 @@ def _pr_readiness(
     pr = _require_pr(config, branch, allow_merged=allow_merged, list_only=True)
     _require_pushed(pr, head)
     readiness = None if pr.state == "MERGED" else _readiness(
-        wt, config, pr, head, workflow_wait=workflow_wait, announce_receipt=True)
+        wt, config, pr, head, workflow_wait=workflow_wait, announce_receipt=True,
+        mergify_deadline=mergify_deadline,
+    )
     return pr, readiness
 
 
@@ -1497,7 +1501,8 @@ def _wait_for_checks(
             previous = _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha, previous)
             if allow_merged and current.state == "MERGED":
                 return current, None, kicked
-            readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
+            readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True,
+                                   mergify_deadline=started + timeout)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             _require_receipt(wt, config, current.head_sha)
             github.mark_ready(config.repo, pr.number)
@@ -1648,9 +1653,9 @@ def _wait_for_mergify(
         sha = _landed(config, pr, closed)
         if sha:
             return sha
-        if not mergify.configured(config.repo, config.base_branch, queue):
+        if not mergify.configured(config.repo, config.base_branch, queue, started + timeout):
             raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
-        state = mergify.membership(config.repo, pr.number, queue)
+        state = mergify.membership(config.repo, pr.number, queue, started + timeout)
         deferred_landing_read = confirmed and state is not None and not closed
         if not deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
@@ -1705,7 +1710,7 @@ def _merge_with_mergify(
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )
-    state = mergify.membership(config.repo, pr.number, queue)
+    state = mergify.membership(config.repo, pr.number, queue, deadline)
     if sha := github.merged_sha(
         config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
     ):
@@ -1744,12 +1749,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
         mergify.dequeue(config.repo, pr.number)
         print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
-    read_started = time.monotonic()
-    pr, readiness = _pr_readiness(
-        wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None
-    )
     started = time.monotonic()
     deadline = None if args.wait is None else started + args.wait
+    pr, readiness = _pr_readiness(
+        wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None, mergify_deadline=deadline,
+    )
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
     admit_by = deadline if args.wait else None
     if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
@@ -1757,7 +1761,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
                                      args=args, allow_merged=True, initial=readiness,
-                                     initial_read_time=started - read_started)
+                                     initial_read_time=time.monotonic() - started)
         if waited is None:
             return 3
         pr, readiness, _ = waited

@@ -2621,7 +2621,7 @@ def source_queue_api(gh, monkeypatch):
     })
     vendor_calls = []
 
-    def get(_repo, path):
+    def get(_repo, path, *_):
         vendor_calls.append(path)
         return {
             "/merge-queue/status?branch=main": {"batches": [], "mode": "serial"},
@@ -4304,7 +4304,7 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
 
     assert cli._wait_for_mergify(config, pr, 60 if confirmed else 360, confirmed=confirmed) == "e" * 40
     assert clock.sleeps == ([30, 30] if confirmed else [30, 60, 120, 30])
-    assert configurations == [(REPO, "main", "main")] * (3 if confirmed else 4)
+    assert configurations == [(REPO, "main", "main", 60 if confirmed else 360)] * (3 if confirmed else 4)
     assert reads_at_membership == ([1, 2, 3] if confirmed else [1, 4, 7, 10])
     assert sum(c["argv"][:2] == detail for c in gh.calls) == (4 if confirmed else 9)
     assert len(gh.calls) == (4 if confirmed else 12)
@@ -4355,9 +4355,8 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         snapshots.extend((merge_json(head=head), merge_json(state="MERGED", head="f" * 40, sha="e" * 40)))
     gh.append(f"api repos/{REPO}/pulls/7", *snapshots)
     configurations = []
-
-    def configured(*_):
-        configurations.append(True)
+    def configured(*args):
+        configurations.append(args[-1])
         if len(configurations) > 1:
             if outcome == "config_error":
                 raise mergify.MergifyError("configuration HTTP 503")
@@ -4404,6 +4403,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert queue_requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
+    assert all(deadline == (250 if outcome == "timeout" else 0) for deadline in configurations)
     if outcome.startswith("incompatible_"):
         assert reads == [True] * (2 if landed else 1)
         if not landed:
