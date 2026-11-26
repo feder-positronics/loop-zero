@@ -21,6 +21,7 @@ from tests.test_cli import (
 )
 
 gh, git_seed, repo, wt = support.gh, support.git_seed, support.repo, support.wt
+replay_gh = support.replay_gh
 REVIEW_COMMENTS = f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1"
 
 
@@ -88,7 +89,7 @@ def assert_single_publication(gh, fake_bin):
 @pytest.mark.parametrize("verdict", [0, 5])
 @pytest.mark.parametrize("interrupted", [False, True, "timeout"])
 def test_accepted_publication_recovers_saved_verdict(
-    wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, interrupted,
+    wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, interrupted, replay_gh,
 ):
     lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict,
                interrupted=interrupted is True, timeout=interrupted == "timeout")
@@ -113,7 +114,7 @@ def test_accepted_publication_recovers_saved_verdict(
                                      "head", "comment_page", "kind", "wrong_head"])
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_recovery_requires_exact_live_publication(
-    wt, gh, fake_bin, monkeypatch, capsys, change, interrupted,
+    wt, gh, fake_bin, monkeypatch, capsys, change, interrupted, replay_gh,
 ):
     def mutate(rows, comments):
         if change == "body":
@@ -247,7 +248,7 @@ def test_recovery_transport_retries_only_within_deadline(monkeypatch, failure, b
     ("null", "single"), ("empty", "single"), ("malformed", "single"),
 ])
 def test_historical_publication_recovery_is_exact_and_legacy_only(
-    interrupted_receipt, gh, fake_bin, capsys, metadata, source, shape,
+    replay_gh, interrupted_receipt, gh, fake_bin, capsys, metadata, source, shape,
 ):
     head, path, saved, _ = interrupted_receipt
     envelope = json.loads(saved["raw"])
