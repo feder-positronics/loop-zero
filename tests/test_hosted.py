@@ -287,7 +287,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
-    ("interrupt", KeyboardInterrupt, ""), ("api", None, ""),
+    ("interrupt", KeyboardInterrupt, ""), ("api", None, ""), ("mergify", None, ""),
     ("manual", hosted.LoopZeroError, "pull_request_target creation"), ("metadata", None, ""),
     ("stale", hosted.LoopZeroError, "head is no longer current"),
     ("untrusted", CandidateError, "head event was not sent"),
@@ -344,12 +344,17 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     if case not in {"valid", "trunk", "hold"}:
         monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
-    monkeypatch.setattr("loopzero.mergify.api_get", lambda repo, suffix: candidate_status()
-                        if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
+    def queue_status(repo, suffix):
+        assert (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}")
+        if case == "mergify":
+            raise hosted.mergify.MergifyError("HTTP 503")
+        return candidate_status()
+
+    monkeypatch.setattr(hosted.mergify, "api_get", queue_status)
     with pytest.raises(error, match=message or None) if error else nullcontext():
         assert hosted.main() == 0
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
-              "manual": [], "metadata": [], "stale": []}
+              "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":
