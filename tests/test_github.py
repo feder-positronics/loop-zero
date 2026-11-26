@@ -932,17 +932,17 @@ def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> N
 
 
 def arm_readiness(gh: FakeGh, *, threads=(), runs=None) -> None:
-    gh.respond("api graphql", threads_json(*threads))
     runs = {"checks": "success"} if runs is None else runs
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [
-        {"name": n, "status": "completed", "conclusion": c} for n, c in runs.items()]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    arm_workflow_check(gh, *(
+        {"name": name, "status": "completed", "conclusion": conclusion}
+        for name, conclusion in runs.items()
+    ), threads=threads)
 
 
-def arm_workflow_check(gh: FakeGh, check: dict, statuses: list[dict] | None = None) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [check]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", statuses or [])
+def arm_workflow_check(gh: FakeGh, *checks: dict, statuses=(), threads=()) -> None:
+    gh.respond("api graphql", threads_json(*threads))
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": list(checks)})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", list(statuses))
 
 
 def readiness(*, reviewed=HEAD, workflow_wait=False):
@@ -966,7 +966,8 @@ def replacement_run():
 
 
 def arm_workflow_runs(gh, *runs):
-    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": list(runs)})
+    pages = [{"workflow_runs": list(runs[i:i + 100])} for i in range(0, len(runs) + 1, 100)]
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", *pages)
 
 
 def test_readiness_ready(gh: FakeGh) -> None:
@@ -1065,7 +1066,7 @@ def test_readiness_waits_only_for_newer_active_producing_workflow(gh, failure, c
     ("2026-09-23T21:53:00Z", [{"context": "checks", "state": "failure"}], False),
 ], ids=["same-second-newer-run", "failing-commit-status"])
 def test_readiness_defers_only_replaceable_failure(gh: FakeGh, created_at, statuses, waitable):
-    arm_workflow_check(gh, failed_check(id=100), statuses)
+    arm_workflow_check(gh, failed_check(id=100), statuses=statuses)
     arm_workflow_runs(gh, producing_run(created_at=created_at), replacement_run())
     result = readiness(workflow_wait=True)
     assert result.reasons == ("required check 'checks' is failure",)
@@ -1100,12 +1101,7 @@ def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -
     arm_workflow_check(gh, failed_check())
     filler = [{"id": i + 100, "check_suite_id": i + 100, "workflow_id": 99,
                "head_sha": HEAD, "status": "completed"} for i in range(100)]
-    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
-               {"workflow_runs": filler},
-               {"workflow_runs": [
-                   producing_run(),
-                   replacement_run(),
-               ]})
+    arm_workflow_runs(gh, *filler, producing_run(), replacement_run())
     result = readiness(workflow_wait=True)
     assert result.waitable_failures == result.reasons
     pages = [c["argv"][-2] for c in gh.calls if "actions/runs" in c["argv"][1]]
@@ -1125,8 +1121,7 @@ def test_readiness_recovers_workflow_producer_at_search_limit(
         replacement_run() | replacement_fields,
         *(producing_run(id=i, check_suite_id=i, workflow_id=99) for i in range(100, 1099)),
     ]
-    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
-               *({"workflow_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
+    arm_workflow_runs(gh, *runs)
     gh.respond(f"api repos/{REPO}/actions/runs?check_suite_id=10",
                {"workflow_runs": [producing_run()]})
 
@@ -1184,18 +1179,10 @@ def test_mark_ready(gh: FakeGh) -> None:
     assert gh.argv(0) == ["pr", "ready", "7", "--repo", REPO]
 
 
-def test_merge_success_verifies_rest_landing(
-    gh: FakeGh,
-) -> None:
-    gh.expect(
-        ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
-    )
+def test_merge_success_verifies_rest_landing(gh: FakeGh) -> None:
+    gh.expect(["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD])
     gh.expect(["api", f"repos/{REPO}/pulls/7", "--include"], merge_json("MERGED", sha="c" * 40))
     assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
-    assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash",
-                          "--match-head-commit", HEAD]
-    assert "--delete-branch" not in gh.argv(0)
-    assert gh.argv(1) == ["api", f"repos/{REPO}/pulls/7", "--include"]
     gh.assert_complete()
 
 
@@ -1222,13 +1209,16 @@ def _queue_json(queued: bool) -> dict:
     return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued}}}}
 
 
+def arm_merge(gh: FakeGh, queue: dict, *details: dict) -> None:
+    gh.respond("pr merge", "")
+    gh.respond(f"api repos/{REPO}/pulls/7", *details)
+    gh.respond("api graphql", queue)
+
+
 @pytest.mark.parametrize("missing", [False, True])
 def test_merge_unverified(gh: FakeGh, missing: bool) -> None:
-    unmerged = merge_json(state='OPEN', head=HEAD, sha=None)
-    gh.respond("pr merge", "")
-    gh.respond(f"api repos/{REPO}/pulls/7", unmerged, unmerged)
     response = {"data": {"repository": {"pullRequest": None}}} if missing else _queue_json(False)
-    gh.respond("api graphql", response)
+    arm_merge(gh, response, merge_json(), merge_json())
     message = "GitHub queue lookup for PR #7: queue status could not be verified" if missing else "neither merged nor queued"
     with pytest.raises(github.MergeFailed, match=message):
         github.merge(REPO, 7, "merge", HEAD)
@@ -1237,22 +1227,17 @@ def test_merge_unverified(gh: FakeGh, missing: bool) -> None:
 
 @pytest.mark.parametrize("strategy,auto", [("squash", False), ("queue", False), ("queue", True)])
 def test_merge_queued_returns_none(gh: FakeGh, strategy, auto) -> None:
-    gh.respond("pr merge", "")
-    gh.respond(f"api repos/{REPO}/pulls/7", merge_json())
     accepted = _queue_json(not auto)
     if auto:
         accepted["data"]["repository"]["pullRequest"]["autoMergeRequest"] = {"enabledAt": "t"}
-    gh.respond("api graphql", accepted)
+    arm_merge(gh, accepted, merge_json())
     assert github.merge(REPO, 7, strategy, HEAD) is None
     assert ("--squash" in gh.argv(0)) == (strategy == "squash")
     assert "--queue" not in gh.argv(0)
 
 
 def test_merge_landed_between_reads_is_reported_merged(gh: FakeGh) -> None:
-    gh.respond("pr merge", "")
-    gh.respond(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=HEAD, sha=None),
-               merge_json(state='MERGED', head=HEAD, sha='d' * 40))
-    gh.respond("api graphql", _queue_json(False))
+    arm_merge(gh, _queue_json(False), merge_json(), merge_json(state="MERGED", sha="d" * 40))
     assert github.merge(REPO, 7, "squash", HEAD) == "d" * 40
 
 

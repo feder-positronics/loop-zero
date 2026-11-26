@@ -147,18 +147,12 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0) -> Path:
         f"""
         printf '%s\\0' "$@" > "{bin_dir}/claude.argv"
         cat > "{bin_dir}/claude.stdin"
-        case " $* " in
-          *" -p "*) ;; *) echo "missing -p" >&2; exit 64;;
-        esac
-        case " $* " in
-          *" --output-format json "*) ;; *) echo "missing --output-format json" >&2; exit 64;;
-        esac
-        case " $* " in
-          *" --permission-mode plan "*) ;; *) echo "missing --permission-mode plan" >&2; exit 64;;
-        esac
-        case " $* " in
-          *" --json-schema "*) ;; *) echo "missing --json-schema" >&2; exit 64;;
-        esac
+        for required in "-p" "--output-format json" "--permission-mode plan" "--json-schema"; do
+          case " $* " in
+            *" $required "*) ;;
+            *) echo "missing $required" >&2; exit 64;;
+          esac
+        done
         cat <<'JSON'
         {text}
         JSON
@@ -457,14 +451,10 @@ def test_claude_approve(
     assert (str(tmp_path.resolve()), str(tmp_path.resolve())) in _pairs(options, "--ro-bind")
     assert _pairs(options, "--ro-bind-try") == [(str(fake_bin.resolve()),) * 2]
     assert _pairs(options, "--bind")[0][1] == SANDBOX_HOME
+    raw_sandbox_argv = fake_bwrap.read_text().splitlines()
+    assert "sk-secret" not in raw_sandbox_argv and "ANTHROPIC_API_KEY" not in raw_sandbox_argv
+    assert "--clearenv" not in raw_sandbox_argv
 
-
-def test_reviewer_sandbox_binds_resolv_conf(
-    fake_bin: Path, tmp_path: Path, fake_bwrap: Path
-) -> None:
-    _fake_review(fake_bin, "claude")
-    _review("claude", tmp_path)
-    argv = _bwrap_argv(fake_bwrap)
     resolv_conf = Path("/etc/resolv.conf")
     resolved = resolv_conf.resolve()
     expected = (
@@ -473,7 +463,7 @@ def test_reviewer_sandbox_binds_resolv_conf(
         and any(resolved.is_relative_to(root) for root in (Path("/tmp"), Path("/run")))
         else (str(resolved), str(resolv_conf))
     )
-    assert expected in _pairs(argv, "--ro-bind")
+    assert expected in _pairs(sandbox_argv, "--ro-bind")
 
 
 @pytest.mark.parametrize("credential", [None, ""])
@@ -854,17 +844,6 @@ def test_env_is_stripped_to_allowlist_plus_auth(fake_bin: Path, tmp_path: Path,
     env = (fake_bin / "env").read_text()
     assert "ANTHROPIC_API_KEY=sk-secret" in env
     assert "OPENAI_API_KEY" not in env and "SOME_RANDOM_SECRET" not in env
-
-
-def test_secrets_never_appear_in_bwrap_argv(
-    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _fake_review(fake_bin, "claude")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
-    _review("claude", tmp_path)
-    argv = fake_bwrap.read_text().splitlines()
-    assert "sk-secret" not in argv and "ANTHROPIC_API_KEY" not in argv
-    assert "--clearenv" not in argv
 
 
 def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path, fake_bwrap: Path) -> None:
