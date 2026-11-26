@@ -18,7 +18,6 @@ REVIEWER_FAMILIES = ("claude", "codex")
 # Host locations that must never be exposed to the sandbox, even read-only, because they
 # hold credentials or live sockets (docker, ssh-agent, gpg-agent, dbus). Subpaths of /home
 # are allowed so tool caches such as ~/.local/bin can be listed explicitly.
-FORBIDDEN_RO = ("/", "/home", "/root", "/run", "/var/run", "/proc", "/dev", "/sys")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 FORBIDDEN_RO_TREES = ("/run", "/var/run", "/proc", "/dev", "/sys", "/root")
 
@@ -45,8 +44,7 @@ def load(path: Path | str) -> Config:
     """Load and validate a workflow file."""
     path = Path(path)
     try:
-        with path.open("rb") as handle:
-            data = tomllib.load(handle)
+        raw = path.read_bytes()
     except FileNotFoundError as exc:
         raise ConfigError(
             f"{path}: config file not found. Check out the intended repository, "
@@ -54,14 +52,18 @@ def load(path: Path | str) -> Config:
             "(https://github.com/feder-positronics/loop-zero/blob/main/SETUP.md#configure), "
             "or follow this repository's review process if it has one."
         ) from exc
-    except UnicodeDecodeError as exc:
-        raise ConfigError(f"{path}: {exc}") from exc
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
+    return _parse_workflow(raw, path)
+
+
+def _parse_workflow(raw: bytes, source: Path | str, hint: str = "") -> Config:
     try:
-        return _build(data)
-    except ConfigError as exc:
-        raise ConfigError(f"{path}: {exc}") from None
+        return _build(tomllib.loads(raw.decode("utf-8")))
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{source}: {exc}") from exc
+    except (tomllib.TOMLDecodeError, ConfigError) as exc:
+        invalid_toml = isinstance(exc, tomllib.TOMLDecodeError)
+        message = f"invalid TOML: {exc}" if invalid_toml else str(exc)
+        raise ConfigError(f"{source}: {message}{hint}") from (exc if invalid_toml and not hint else None)
 
 
 def run_git(worktree: Path, *args: str, timeout: float = 60) -> _proc.Completed:
@@ -124,15 +126,7 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
     )
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
-    try:
-        text = shown.stdout.encode("utf-8", errors="surrogateescape").decode("utf-8")
-        return _build(tomllib.loads(text)), revision
-    except UnicodeDecodeError as exc:
-        raise ConfigError(f"{source}: {exc}") from exc
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{source}: invalid TOML: {exc}. {hint}") from None
-    except ConfigError as exc:
-        raise ConfigError(f"{source}: {exc}. {hint}") from None
+    return _parse_workflow(shown.stdout.encode("utf-8", "surrogateescape"), source, f". {hint}"), revision
 
 
 def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: bool = False,
@@ -147,13 +141,12 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
             "or supply --config for bootstrap or an override."
         )
     branch = ref.removeprefix(prefix)
-    policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh, read_timeout=read_timeout)
-    if policy.base_branch != branch:
-        branch = policy.base_branch
+    for _ in range(2):
         policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh, read_timeout=read_timeout)
-        if policy.base_branch != branch:
-            raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
-    return replace(policy, trusted_base_revision=revision)
+        if policy.base_branch == branch:
+            return replace(policy, trusted_base_revision=revision)
+        branch = policy.base_branch
+    raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
 
 
 def _build(data: dict[str, Any]) -> Config:
@@ -269,14 +262,13 @@ def _merge_settings(delivery: dict[str, Any]) -> tuple[str, str | None]:
     if merge not in MERGE_STRATEGIES:
         raise ConfigError(f"delivery.merge must be one of {MERGE_STRATEGIES}, got {merge!r}")
     mergify_queue = delivery.get("mergify_queue")
-    if merge == "mergify" and not mergify_queue:
-        raise ConfigError("delivery.mergify_queue is required when delivery.merge = 'mergify'")
-    if mergify_queue is not None and merge != "mergify":
-        raise ConfigError(
-            f"delivery.mergify_queue requires delivery.merge = 'mergify', got {merge!r}"
-        )
-    if mergify_queue is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", mergify_queue):
-        raise ConfigError("delivery.mergify_queue must be a non-empty command-safe name")
+    if merge == "mergify":
+        if not mergify_queue:
+            raise ConfigError("delivery.mergify_queue is required when delivery.merge = 'mergify'")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", mergify_queue):
+            raise ConfigError("delivery.mergify_queue must be a non-empty command-safe name")
+    elif mergify_queue is not None:
+        raise ConfigError(f"delivery.mergify_queue requires delivery.merge = 'mergify', got {merge!r}")
     return merge, mergify_queue
 
 
@@ -298,7 +290,7 @@ def _host_paths(label: str, value: list[Any]) -> tuple[str, ...]:
         if not raw.startswith("/"):
             raise ConfigError(f"{label} entries must be absolute, got {raw!r}")
         path = Path(raw).resolve()
-        if str(path) in FORBIDDEN_RO or any(
+        if str(path) in ("/", "/home") or any(
             path.is_relative_to(tree) for tree in FORBIDDEN_RO_TREES
         ):
             raise ConfigError(f"{label} must not expose {raw!r} (host sockets or secrets)")
@@ -319,8 +311,7 @@ def _env_table(table: dict[str, Any]) -> tuple[tuple[str, str], ...]:
 def _limits(table: dict[str, Any]) -> ResourceLimits:
     defaults = ResourceLimits()
     _reject_unknown("checks.limits", table, defaults.__dict__)
-    values = defaults.__dict__ | table
-    for name, value in values.items():
+    for name, value in (defaults.__dict__ | table).items():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ConfigError(f"checks.limits.{name} must be a positive int")
-    return ResourceLimits(**values)
+    return ResourceLimits(**table)

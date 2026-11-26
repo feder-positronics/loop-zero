@@ -14,6 +14,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, replace
+from email.utils import formatdate
 from pathlib import Path
 from select import select
 from threading import Event
@@ -2525,26 +2526,17 @@ def test_ready_explains_trusted_policy_blocker(wt, gh, capsys, head, retargeted,
     assert without_accepted_receipt(out) == f"not ready: {reason}\n"
 
 
-def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, head) -> None:
+@pytest.mark.parametrize("command", ["ready", "merge"])
+def test_pending_required_check_names_the_wait(wt, gh, capsys, head, command):
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
-
-    code, out, err = run(capsys, "ready")
-
+    out, err = expect_cli(capsys, 1, command)
     out = without_accepted_receipt(out)
-    assert (code, err) == (1, "")
-    assert out.splitlines() == [
-        "not ready: required check 'checks' is pending",
-        "next: loopzero ready --wait",
-    ]
-
-    arm_pr(gh, head, isDraft=False)
-    arm_readiness(gh, head, wt)
-    arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
-    code, out, err = run(capsys, "merge")
-
-    assert (code, without_accepted_receipt(out)) == (1, "")
-    assert "required check 'checks' is pending; next: loopzero merge --wait" in err
+    reason = "required check 'checks' is pending"
+    if command == "ready":
+        assert out == f"not ready: {reason}\nnext: loopzero ready --wait\n" and err == ""
+    else:
+        assert out == "" and f"{reason}; next: loopzero merge --wait" in err
 
 
 @pytest.mark.parametrize("draft", [True, False])
@@ -2963,33 +2955,48 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, w
         (False, True), (True, True), (False, "tie"), (False, "missing"),
     )),
     (False, 300, False, False, 1, False),
+    *[(False, 180, failure, True, 1, False) for failure in
+      ("missing", "fractional-newer", "offset-tie", "naive-check", "malformed-check")],
+    (False, 180, "offset-older", True, 0, True),
+    *[(False, 5, failure, True, 1, False) for failure in ("naive-review", "malformed-review", "missing-review")],
+    *[(False, 5, sample, True, 0, True) for sample in
+      ("server-synced", "server-host-behind", "server-host-ahead", "invalid-date", "fractional-review")],
+    (False, 900, "server-old-review", True, 1, False),
 ])
 def test_ready_wait_review_failure_freshness(
-    wt, gh, capsys, monkeypatch, name, pending, age, new_failure, wait, expected, waited, head, replay_gh,
-):
+    wt: Path, gh: FakeGh, capsys, monkeypatch, name, pending, age, new_failure, wait, expected, waited, head,
+    replay_gh,
+) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
-    arm_approved_pr_with_check_result(
-        gh,
-        head,
-        wt,
-        "success",
-        reviews=[rev(head, "primary") | {"submitted_at": "2026-09-23T12:00:00Z"}],
-        isDraft=False,
-    )
-    epoch = 1790164800 + age  # 2026-09-23T12:00:00Z plus review age
-    failed_at = {
-        "tie": "2026-09-23T12:00:00Z",
-        "missing": None,
-    }.get(
-        new_failure,
-        "2026-09-23T12:00:10Z" if new_failure else "2026-09-23T11:59:00Z",
-    )
-    active_at = "2026-09-23T12:00:20Z"
+    current, earlier = "12:00:00Z", "11:59:59Z"
+    review_time, failure_time = {
+        True: (current, "12:00:10Z"), "tie": (current, current), "missing": (current, None),
+        "fractional-review": ("12:00:00.1234569Z", "12:00:00.1234561Z"),
+        "fractional-newer": (current, "12:00:00.250Z"),
+        "offset-tie": ("12:00:00+00:00", "11:00:00-01:00"),
+        "offset-older": ("13:00:00+01:00", "13:59:59+02:00"),
+        "naive-check": (current, "11:59:00"), "malformed-check": (current, "12:00:00+00:60"),
+        "naive-review": ("12:00:00", earlier), "malformed-review": ("bad", earlier),
+        "missing-review": (None, earlier),
+    }.get(new_failure, (current, earlier))
+    review_at, failed_at = (f"2026-09-23T{value}" if value else None for value in (review_time, failure_time))
+    reviews = [rev(head, "primary") | {"submitted_at": review_at}]
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=reviews, isDraft=False)
+    server_now = 1790164800 + age
+    server_timeline = str(new_failure).startswith("server-")
+    if server_timeline or new_failure == "invalid-date":
+        date = (formatdate(server_now, usegmt=True) if server_timeline
+                else "Wed, 23 Sep 2026 12:00:05 +0060")
+        gh.respond(reviews_key(), f"HTTP/2 200 OK\nDate: {date}\n\n{json.dumps(reviews)}")
+    offsets = {"server-host-behind": -40, "server-host-ahead": 1000, "server-old-review": -40}
+    start = server_now + offsets.get(new_failure, 0)
+    pending_at = "2026-09-23T12:00:20Z"
     if name == "checks":
-        runs = [{"name": name, "status": "completed", "conclusion": "failure", "completed_at": failed_at}]
-        statuses = [{"context": name, "state": "pending", "created_at": active_at}] if pending else []
+        runs = [{"name": name, "conclusion": "failure", "status": "completed",
+                 "completed_at": failed_at, "started_at": "2026-09-23T11:59:59Z"}]
+        statuses = [{"context": name, "state": "pending", "created_at": pending_at}] if pending else []
     else:
-        runs = [{"name": name, "status": "in_progress", "started_at": active_at}] if pending else []
+        runs = [{"name": name, "status": "in_progress", "started_at": pending_at}] if pending else []
         statuses = [{"context": name, "state": "failure", "created_at": failed_at}]
     arm_check_runs(gh, head, runs)
     status_key = f"api repos/{REPO}/commits/{head}/statuses"
@@ -3001,10 +3008,13 @@ def test_ready_wait_review_failure_freshness(
             gh.respond(status_key, [{"context": name, "state": "success"}])
 
     clock = poll_clock(monkeypatch, after_sleep=advance)
-    monkeypatch.setattr(cli.time, "time", lambda: epoch + clock.now)
-    wait_args = ["--wait=60" if age < 0 else "--wait"] if wait else []
-    out, _ = expect_cli(capsys, expected, "--config", "workflow.toml", "ready", *wait_args, stderr="")
-    assert bool(clock.sleeps) == waited
+    monkeypatch.setattr(cli.time, "time", lambda: start + clock.now)
+    wait_flag = "--wait=10" if server_timeline else "--wait=60" if age < 0 else "--wait"
+    out, _ = expect_cli(capsys, expected, "--config", "workflow.toml", "ready",
+                        *([wait_flag] if wait else []), stderr="")
+    assert bool(clock.sleeps) is waited
+    if server_timeline and waited:
+        assert clock.sleeps == [9.0]
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         f"not ready: required check '{name}' is failure{FAILED_CHECK_HINT}\n")
     assert (f"waiting: required check '{name}' is failure" in out) == waited
@@ -3013,20 +3023,15 @@ def test_ready_wait_review_failure_freshness(
     )
 
 
-def test_ready_wait_stops_if_pr_head_moves(wt: Path, gh: FakeGh, capsys, monkeypatch, head) -> None:
-    body = "# T1\n\n## Review\n"
-    gh.respond_pr_list([pr_json(headRefOid=head, body=body, isDraft=False)],
-               [pr_json(headRefOid="f" * 40, body=body, isDraft=False)])
-    gh.respond_pr_view( pr_json(headRefOid="f" * 40, body=body, isDraft=False))
+def test_ready_wait_stops_if_pr_head_moves(wt, gh, capsys, monkeypatch, head):
+    moved = "f" * 40
+    gh.respond_pr_list([pr_json(headRefOid=head, isDraft=False)], [pr_json(headRefOid=moved, isDraft=False)])
+    gh.respond_pr_view(pr_json(headRefOid=moved, isDraft=False))
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt, conclusion="pending")
-
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
-    code, out, err = run(capsys, "ready", "--wait")
-
-    out = without_accepted_receipt(out)
-    assert code == 1 and "waiting:" in out
-    assert f"PR head changed while waiting: {head[:12]} to {'f' * 12}" in err
+    expect_cli(capsys, 1, "ready", "--wait", stdout_contains=("waiting:",),
+               stderr_contains=(f"PR head changed while waiting: {head[:12]} to {moved[:12]}",))
 
 
 @pytest.mark.parametrize("running", [False, True], ids=["missing-ci", "late-required-job"])
@@ -4838,3 +4843,27 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys, refresh):
     draft = json.loads(gh.calls[-1]["--input"])["body"]
     assert "unverified" not in draft
     assert_contains(draft, f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0", "Manual validation evidence.")
+
+
+def test_late_checkpoint_preserves_completed_pass(wt, gh, capsys, head, monkeypatch):
+    def run_checks(cfg, path, *, progress, status, checkpoint, workflow):
+        locked_fd = checkpoint.keywords["locked_fd"]
+        results = tuple(CheckResult(c, 0, 0, "", input_key="key") for c in cfg.checks)
+        passed = CheckReport(head, False, results, cli.sandbox.settings_fingerprint(cfg))
+        incomplete = CheckResult(cli.sandbox.INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
+        partial = replace(passed, results=(results[0], incomplete))
+        checkpoint(partial)
+        assert cli._load_report(wt) == partial
+        cli._save_report(wt, passed, locked_fd=locked_fd)
+        checkpoint(partial)
+        assert cli._current_check_report(wt, cfg, head) == passed
+        cli._save_report(wt, replace(passed, results=results[:1]), locked_fd=locked_fd)
+        checkpoint(partial)
+        assert cli._load_report(wt) == partial
+        cli._save_report(wt, passed, locked_fd=locked_fd)
+        return replace(passed, results=(replace(results[0], exit_code=1),))
+
+    monkeypatch.setattr(cli.sandbox, "run_checks", run_checks)
+    code, _, err = run(capsys, "check")
+    assert code == 1 and "(exit 1)" in err, err
+    assert cli._load_report(wt).results[0].exit_code == 1

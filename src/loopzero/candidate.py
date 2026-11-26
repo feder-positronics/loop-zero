@@ -86,30 +86,26 @@ def _identity(actor: object) -> tuple[object, object, object, object]:
     return actor.get("id"), actor.get("login"), actor.get("type"), actor.get("html_url")
 
 
-def _object(value: JsonValue, message: str) -> JsonObject:
+def _object(value: object, message: str) -> JsonObject:
     _require(isinstance(value, dict), message)
     return value
 
 
 def flatten_batches(status: object) -> dict[str, JsonObject]:
-    _require(isinstance(status, dict), "Mergify status is not an object")
-    batches = status.get("batches")
+    batches = _object(status, "Mergify status is not an object").get("batches")
     _require(isinstance(batches, list), "Mergify status has no batches list")
     indexed: dict[str, JsonObject] = {}
 
     def visit(items: list[object]) -> None:
         for item in items:
-            _require(isinstance(item, dict), "Mergify status contains an invalid batch")
+            item = _object(item, "Mergify status contains an invalid batch")
             batch_id = item.get("id")
             _require(isinstance(batch_id, str) and batch_id, "Mergify batch has no id")
             _require(batch_id not in indexed, f"Mergify batch id is duplicated: {batch_id}")
             indexed[batch_id] = item
             children = item.get("sub_batches")
             if children is not None:
-                _require(
-                    isinstance(children, list),
-                    f"Mergify batch {batch_id} has invalid sub_batches",
-                )
+                _require(isinstance(children, list), f"Mergify batch {batch_id} has invalid sub_batches")
                 visit(children)
 
     visit(batches)
@@ -118,17 +114,11 @@ def flatten_batches(status: object) -> dict[str, JsonObject]:
 
 def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, list[int], list[str]]:
     indexed = flatten_batches(status)
-    matches = [
-        batch
-        for batch in indexed.values()
-        if batch.get("queue_pull_request_number") == candidate_number
-    ]
-    _require(
-        len(matches) == 1,
-        f"PR #{candidate_number} is not exactly one live Mergify batch",
-        CandidateBatchError,
-    )
-    candidate_id = matches[0]["id"]
+    matches = [batch_id for batch_id, batch in indexed.items()
+               if batch.get("queue_pull_request_number") == candidate_number]
+    _require(len(matches) == 1, f"PR #{candidate_number} is not exactly one live Mergify batch",
+             CandidateBatchError)
+    candidate_id = matches[0]
     pending, visited = [candidate_id], set()
     source_numbers, missing = [], []
     while pending:
@@ -141,10 +131,7 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
             missing.append(batch_id)
             continue
         pull_requests = batch.get("pull_requests")
-        _require(
-            isinstance(pull_requests, list),
-            f"Mergify batch {batch_id} has no pull_requests list",
-        )
+        _require(isinstance(pull_requests, list), f"Mergify batch {batch_id} has no pull_requests list")
         for pull_request in pull_requests:
             _require(
                 isinstance(pull_request, dict)
@@ -154,11 +141,9 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
             )
             source_numbers.append(pull_request["number"])
         parent_ids = batch.get("parent_ids", [])
-        _require(
-            isinstance(parent_ids, list)
-            and all(isinstance(parent_id, str) and parent_id for parent_id in parent_ids),
-            f"Mergify batch {batch_id} has invalid parent_ids",
-        )
+        _require(isinstance(parent_ids, list)
+                 and all(isinstance(parent, str) and parent for parent in parent_ids),
+                 f"Mergify batch {batch_id} has invalid parent_ids")
         pending.extend(parent_ids)
     _require(source_numbers, f"Mergify batch for PR #{candidate_number} has no sources")
     _require(len(source_numbers) == len(set(source_numbers)),
@@ -196,7 +181,8 @@ def _candidate_snapshot(
 def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
     head = source.get("head")
     base = source.get("base")
-    base_repo = base.get("repo") if isinstance(base, dict) else None
+    base = base if isinstance(base, dict) else {}
+    base_repo = base.get("repo")
     labels = source.get("labels", [])
     if not isinstance(labels, list) or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels):
         raise CandidateError("invalid source PR labels")
@@ -209,9 +195,8 @@ def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
         source.get("draft"),
         source.get("body"),
         head.get("sha") if isinstance(head, dict) else None,
-        base.get("ref") if isinstance(base, dict) else None,
-        base_repo.get("id") if isinstance(base_repo, dict) else None,
-        base_repo.get("full_name") if isinstance(base_repo, dict) else None,
+        base.get("ref"),
+        *_repo_identity(base_repo if isinstance(base_repo, dict) else {}),
     )
 
 
@@ -438,10 +423,8 @@ def _attest_candidate_once(
     """Return stable source evidence after every source passes `source_policy`."""
     repository = _object(event.get("repository"), "GitHub event repository is missing")
     event_pr = _object(event.get("pull_request"), "GitHub event pull request is missing")
-    _require(
-        event.get("action") in {"opened", "synchronize"},
-        "Candidate attestation requires its creation or head-update event",
-    )
+    _require(event.get("action") in {"opened", "synchronize"},
+             "Candidate attestation requires its creation or head-update event")
     full_name = repository.get("full_name")
     _require(isinstance(full_name, str) and _REPOSITORY.fullmatch(full_name) is not None,
              "GitHub event repository name is invalid")
@@ -453,22 +436,12 @@ def _attest_candidate_once(
 
     app = _object(github_get("/apps/mergify"), "GitHub App lookup is invalid")
     app_owner = app.get("owner")
-    _require(
-        app.get("id") == MERGIFY_APP_ID
-        and app.get("slug") == "mergify"
-        and isinstance(app_owner, dict)
-        and app_owner.get("login") == MERGIFY_APP_OWNER,
-        "Could not resolve the official Mergify GitHub App",
-    )
-    expected_actor = _object(
-        github_get("/users/mergify%5Bbot%5D"),
-        "GitHub bot lookup is invalid",
-    )
-    expected_identity = _identity(expected_actor)
-    _require(
-        expected_identity == (MERGIFY_BOT_ID, MERGIFY_BOT_LOGIN, "Bot", MERGIFY_APP_URL),
-        "Could not resolve the Mergify GitHub App identity",
-    )
+    _require(app.get("id") == MERGIFY_APP_ID and app.get("slug") == "mergify"
+             and isinstance(app_owner, dict) and app_owner.get("login") == MERGIFY_APP_OWNER,
+             "Could not resolve the official Mergify GitHub App")
+    expected_identity = _identity(_object(github_get("/users/mergify%5Bbot%5D"), "GitHub bot lookup is invalid"))
+    _require(expected_identity == (MERGIFY_BOT_ID, MERGIFY_BOT_LOGIN, "Bot", MERGIFY_APP_URL),
+             "Could not resolve the Mergify GitHub App identity")
     _require(_identity(event_pr.get("user")) == expected_identity,
              "Candidate author is not the verified Mergify GitHub App")
     _require(_identity(event.get("sender")) == expected_identity,
@@ -476,10 +449,7 @@ def _attest_candidate_once(
 
     candidate_number = event_pr.get("number")
     candidate_sha = event_head.get("sha")
-    _require(
-        isinstance(candidate_number, int) and candidate_number > 0,
-        "Candidate PR number is invalid",
-    )
+    _require(isinstance(candidate_number, int) and candidate_number > 0, "Candidate PR number is invalid")
     _require(isinstance(candidate_sha, str) and _SHA.fullmatch(candidate_sha) is not None,
              "Candidate head SHA is invalid")
     candidate_path = f"/repos/{full_name}/pulls/{candidate_number}"
