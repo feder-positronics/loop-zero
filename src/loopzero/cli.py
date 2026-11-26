@@ -18,13 +18,13 @@ import shlex
 import random
 import re
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial, wraps
 from pathlib import Path
+from uuid import uuid4
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
 from loopzero import config as config_mod
@@ -73,11 +73,26 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 # --------------------------------------------------------------------------- git / context
 
 
-def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
-    done = _proc.run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout)
+def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False) -> str:
+    done = _proc.run(
+        ["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout,
+        preserve_newlines=paths, encoding=sys.getfilesystemencoding() if paths else None,
+    )
     if done.exit_code != 0:
         raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
-    return done.stdout.strip()
+    return done.stdout if paths else done.stdout.strip()
+
+
+def _require_push_target(wt: Path, repo: str) -> None:
+    urls = _git(wt, "remote", "get-url", "--push", "--all", "origin").splitlines()
+    github_url = re.compile(
+        r"(?:https://(?:[a-z0-9._~%:+-]+@)?github\.com(?::443)?/"
+        r"|git@github\.com:|ssh://git@github\.com(?::22)?/|ssh://git@ssh\.github\.com:443/)"
+        + re.escape(repo) + r"(?:\.git)?/?",
+        re.IGNORECASE | re.ASCII,
+    )
+    if not urls or any(not github_url.fullmatch(url) for url in urls):
+        raise CliError(f"origin push URL does not target {repo}; correct the Git remote before running pr")
 
 
 def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
@@ -92,16 +107,17 @@ def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
 
 
 def _toplevel() -> Path:
-    return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel", paths=True).removesuffix("\n"))
 
 
 def _repo_root(wt: Path) -> Path:
     """The verified primary checkout or bare repository owning this linked worktree."""
-    first = _git(wt, "worktree", "list", "--porcelain", "-z").split("\0", 1)[0]
+    first = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0]
     if not first.startswith("worktree "):
         raise CliError("Git did not identify the primary worktree; refusing cleanup")
     root = Path(first.removeprefix("worktree "))
-    common = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    common = _git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)
+    common = Path(common.removesuffix("\n")).resolve()
     if root.resolve() == wt.resolve() or common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
     return root
@@ -369,20 +385,19 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
 
 
 @contextmanager
-def _lock_task_state(wt: Path) -> Iterator[None]:
+def _lock_task_state(wt: Path) -> Iterator[int]:
     directory = wt / ".loopzero"
     directory.mkdir(parents=True, exist_ok=True)
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        yield fd
     finally:
         os.close(fd)
 
 
 def _save_report(wt: Path, report: CheckReport) -> str | None:
     """Publish the receipt or return the current HEAD if the result is stale."""
-    path = wt / CHECKS_FILE
     payload = {
         "head": report.head,
         "dirty": report.dirty,
@@ -392,27 +407,26 @@ def _save_report(wt: Path, report: CheckReport) -> str | None:
     }
     if report.settings_sha256 is not None:
         payload["settings_sha256"] = report.settings_sha256
-    with _lock_task_state(wt):
+    with _lock_task_state(wt) as directory:
         current_head = worktree.head(wt)
         if report.head != current_head:
             return current_head
-        _write_json_atomically(path, payload)
+        _write_json_atomically(directory, CHECKS_FILE.name, payload)
     return None
 
 
-def _write_json_atomically(path: Path, payload: dict) -> None:
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}-", delete=False
-    ) as stream:
-        temp = Path(stream.name)
-        try:
+def _write_json_atomically(directory: int, name: str, payload: dict) -> None:
+    temp = f".{name}-{uuid4().hex}"
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(json.dumps(payload, indent=2) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
-            stream.close()
-            os.replace(temp, path)
-        finally:
-            temp.unlink(missing_ok=True)
+        os.replace(temp, name, src_dir_fd=directory, dst_dir_fd=directory)
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(temp, dir_fd=directory)
 
 
 def _load_report(wt: Path) -> CheckReport | None:
@@ -680,7 +694,6 @@ def cmd_pr(args: argparse.Namespace) -> int:
     force_lease = False
     push = ["push", "-u", "origin"]
     if pr is not None and pr.state == "OPEN":
-        # Only rewrite history this worktree has seen; an unknown remote head is someone else's.
         known = _proc.run(["git", "cat-file", "-e", f"{pr.head_sha}^{{commit}}"], cwd=wt,
                           env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
         if known.exit_code != 0:
@@ -689,8 +702,14 @@ def cmd_pr(args: argparse.Namespace) -> int:
             )
         force_lease = not _is_ancestor(wt, pr.head_sha, head)
         if force_lease:
+            previous_heads = _git(wt, "reflog", "show", "--format=%H", f"refs/heads/{branch}").splitlines()
+            if not any(_is_ancestor(wt, pr.head_sha, previous) for previous in previous_heads):
+                raise CliError(
+                    f"PR head {pr.head_sha[:12]} is absent from this task branch's history; integrate it first"
+                )
             push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
     push.append(branch)
+    _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
         with _lock_task_state(wt):
@@ -1124,14 +1143,14 @@ def _review_file(wt: Path, head: str, kind: str) -> Path:
 
 def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None) -> None:
     path = _review_file(wt, result.head, result.kind)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.parent.chmod(0o700)
     data = dataclasses.asdict(result)
     if publication is not None:
         data["publication"] = publication
-    if path.is_symlink():
-        raise OSError(f"refusing to replace symbolic link: {path}")
-    _write_json_atomically(path, data)
+    with _lock_task_state(wt) as directory:
+        os.fchmod(directory, 0o700)
+        if path.is_symlink():
+            raise OSError(f"refusing to replace symbolic link: {path}")
+        _write_json_atomically(directory, path.name, data)
 
 
 def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
@@ -1185,10 +1204,8 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
     name = None
     try:
         _repo_root(wt)
-        if worktree.head(wt) != pr.head_sha:
-            raise worktree.WorktreeError("local HEAD differs from merged PR head")
         name = worktree.branch(wt)
-        worktree.cleanup(wt)
+        worktree.cleanup(wt, pr.head_sha)
     except (worktree.WorktreeError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
@@ -1356,7 +1373,7 @@ def _wait_with_deadline(
                                 allow_skipped=allow_skipped, initial=initial)
     deadline = started + timeout
     if time.monotonic() >= deadline:
-        _print_check_wait_timeout(pr)
+        _print_check_wait_timeout(pr, args)
         return None
     reported_timeout = False
     try:
@@ -1367,17 +1384,20 @@ def _wait_with_deadline(
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
-            _print_check_wait_timeout(pr)
+            _print_check_wait_timeout(pr, args)
         return None
     return waited
 
 
-def _print_check_wait_timeout(pr: github.PR) -> None:
-    if pr.mergeable == "UNKNOWN":
-        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
-    else:
-        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
-
+def _print_check_wait_timeout(pr: github.PR, args: argparse.Namespace | None) -> None:
+    waiting_for = "GitHub to compute mergeability" if pr.mergeable == "UNKNOWN" else "required checks"
+    command = ["loopzero", args.command if args else "ready", "--wait"]
+    if args and args.config:
+        command.insert(1, f"--config={args.config}")
+    print(
+        f"timed out waiting for {waiting_for} on {pr.head_sha[:12]}. "
+        f"Run `{shlex.join(command)}` to resume on this head."
+    )
 
 def _verify_wait_snapshot(
     args: argparse.Namespace | None, wt: Path, config: Config, head: str, current_head: str,
@@ -1456,7 +1476,7 @@ def _wait_for_checks(
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "rerun the same `--wait` command"
             )
-    _print_check_wait_timeout(current)
+    _print_check_wait_timeout(current, args)
     return None
 
 
