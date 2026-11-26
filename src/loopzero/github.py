@@ -515,13 +515,6 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
     return list(_iter_paged(endpoint, key))
 
 
-def _with_file(content: str) -> Path:
-    fd, name = tempfile.mkstemp(suffix=".loopzero", text=True)
-    with open(fd, "w", encoding="utf-8") as handle:
-        handle.write(content)
-    return Path(name)
-
-
 def api_get(endpoint: str) -> object:
     """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
     return _gh_json("api", endpoint)
@@ -549,11 +542,12 @@ def _not_found(number: int, exc: Exception) -> GhError:
 
 def _api(endpoint: str, payload: dict, method: str = "POST",
          token: str | None = None) -> object:
-    path = _with_file(json.dumps(payload))
-    try:
-        return _gh_json("api", endpoint, "--method", method, "--input", str(path), token=token)
-    finally:
-        path.unlink(missing_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".loopzero", encoding="utf-8", delete_on_close=False
+    ) as handle:
+        handle.write(json.dumps(payload))
+        handle.close()
+        return _gh_json("api", endpoint, "--method", method, "--input", handle.name, token=token)
 
 
 def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
@@ -1063,11 +1057,21 @@ query($thread: ID!, $after: String!) {
 """
 
 
+def _next_thread_cursor(page: dict, seen: set[str]) -> str:
+    cursor = page.get("endCursor")
+    if not isinstance(cursor, str) or not cursor.strip() or cursor in seen:
+        raise GhError(("gh", "api", "graphql"), "missing or repeated review thread cursor")
+    seen.add(cursor)
+    return cursor
+
+
 def _has_thread_reply(node: dict, reply: str) -> bool:
     page = node["comments"].get("pageInfo", {})
+    seen: set[str] = set()
     while page.get("hasNextPage"):
+        cursor = _next_thread_cursor(page, seen)
         data = _gh_json("api", "graphql", "-f", f"query={_THREAD_REPLIES_QUERY}",
-                        "-F", f"thread={node['id']}", "-f", f"after={page['endCursor']}")
+                        "-F", f"thread={node['id']}", "-f", f"after={cursor}")
         try:
             comments = data["data"]["node"]["comments"]
             page = comments["pageInfo"]
@@ -1187,6 +1191,7 @@ def _unresolved_threads(repo: str, number: int) -> list[dict]:
 def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -> list[dict]:
     owner, name = repo.split("/", 1)
     after: str | None = None
+    seen: set[str] = set()
     found: list[dict] = []
     while True:
         args = [
@@ -1203,7 +1208,7 @@ def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -
             found += [node for node in nodes if include_resolved or not node.get("isResolved")]
             if not page["hasNextPage"]:
                 return found
-            after = page["endCursor"]
+            after = _next_thread_cursor(page, seen)
         except (KeyError, TypeError) as exc:
             raise _not_found(number, exc) from exc
 

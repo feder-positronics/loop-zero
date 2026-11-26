@@ -67,6 +67,14 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     return gh
 
 
+def written_statuses(publisher):
+    return [json.loads(call["--input"]) for call in publisher.calls if "--input" in call]
+
+
+def written_states(publisher):
+    return [status["state"] for status in written_statuses(publisher)]
+
+
 @pytest.mark.parametrize("case,blocker,status", [
     ("COMMENTED", "", "success"), ("APPROVED", "", "success"),
     ("DISMISSED", "", "pending"), ("PENDING", "", "pending"),
@@ -92,7 +100,7 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
         publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding",
                                                                          author="trusted-publisher")))
     assert hosted.main() == (1 if status == "failure" else 0)
-    statuses = [json.loads(c["--input"]) for c in publisher.calls if "--input" in c]
+    statuses = written_statuses(publisher)
     assert ([s["state"] for s in statuses] == ["pending", status]
             and all(s["context"] == "Loop-zero Eligibility" for s in statuses))
     assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
@@ -141,7 +149,7 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
     else:
         with pytest.raises(hosted.LoopZeroError, match="confirm eligibility status publication"):
             hosted.main()
-    assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == ["pending", state]
+    assert written_states(publisher) == ["pending", state]
 
 
 @pytest.mark.parametrize("error", ["api", "recover", "head", "publication", "config", "before"])
@@ -166,7 +174,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
         with pytest.raises(hosted.LoopZeroError, match="invalid description" if error == "publication" else None):
             hosted.main()
     states = {"before": [], "config": [], "head": ["pending", "failure"], "api": ["pending"], "recover": ["pending", "success"]}
-    assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == states.get(error, ["pending", "pending"])
+    assert written_states(publisher) == states.get(error, ["pending", "pending"])
 
 
 @pytest.mark.parametrize("case,error,message", [
@@ -317,12 +325,9 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
         ready=True, reasons=(),
     ))
 
-    def written_states():
-        return [json.loads(call["--input"])["state"] for call in publisher.calls if "--input" in call]
-
     if prior == 998:
         assert hosted.main() == 0
-        assert written_states() == ["pending", "success"]
+        assert written_states(publisher) == ["pending", "success"]
         assert not any("/commits/" in " ".join(call["argv"]) for call in publisher.calls)
         return
 
@@ -330,9 +335,9 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
     expected = ["pending", "success"] if prior == 999 else ["pending"]
     with pytest.raises(github.GhError, match=message):
         hosted.main()
-    assert written_states() == expected
+    assert written_states(publisher) == expected
 
     with pytest.raises(github.GhError, match=message):
         hosted.main()
-    assert written_states() == [*expected, "pending"]
+    assert written_states(publisher) == [*expected, "pending"]
     assert capsys.readouterr().out == ""
