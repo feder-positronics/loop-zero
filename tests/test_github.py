@@ -1449,6 +1449,33 @@ def test_readiness_distinguishes_capped_check_suites_from_missing_check(gh: Fake
     )
 
 
+@pytest.mark.parametrize(("unrelated", "include_failure", "reason"), [
+    (1000, False, f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"),
+    (100, True, "required check 'required-ci' is failure"),
+    (100, False, None),
+])
+def test_readiness_requires_check_run_evidence_for_status_success_at_suite_cap(
+    gh: FakeGh, unrelated: int, include_failure: bool, reason: str | None,
+) -> None:
+    arm_readiness(gh)
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
+               [{"context": "required-ci", "state": "success"}])
+    runs = [
+        {"name": "unrelated", "conclusion": "success", "check_suite": {"id": suite}}
+        for suite in range(2, unrelated + 2)
+    ]
+    if include_failure:
+        runs.append({"name": "required-ci", "conclusion": "failure", "check_suite": {"id": 1}})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
+               *({"check_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
+
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
+                              "main", ("required-ci",), HEAD)
+
+    assert result.ready == (reason is None)
+    assert result.reasons == ((reason,) if reason else ())
+
+
 @pytest.mark.parametrize("changed_files,path,severity,live_head,anchor", [
     (3001, "file-3001", "important", HEAD, None),
     (3000, "file-3000", "important", HEAD, "file-3000"),
