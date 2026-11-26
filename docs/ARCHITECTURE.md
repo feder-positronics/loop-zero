@@ -100,6 +100,11 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    the PR-wide cap of one primary and one delta across head rewrites, and the
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
+   The delta requires the reviewed commit on the current head's first-parent
+   history and verifies merged parents against the live configured base. The
+   runner receives topic patches in first-parent order and the difference
+   between each automatic remerge and its recorded tree. Isolated Git verifies
+   the history and builds the patch, excluding unrelated base changes.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),

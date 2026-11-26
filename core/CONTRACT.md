@@ -206,9 +206,11 @@ version.
 Loop-zero serves internal projects only and does not target tamper resistance for outside users.
 Freeze new work on Codex evidence projections. Simplify or delete them when they break or obstruct delivery.
 
-- One primary and at most one delta per PR. The delta reads only
-  changes since the primary; unresolved primary findings still count under
-  Blockers.
+- One primary and at most one delta per PR. After a base merge, the delta
+  receives first-parent topic patches and the changes from each automatic
+  remerge to its recorded merge tree. Merged parents must come from the verified
+  base, and the reviewed commit must be on the first-parent history. Unresolved
+  primary findings still count under Blockers.
 - Default: one writing model family per PR, including delegates and repairs;
   another may advise read-only and review independently. Before committing
   imported work, record every actual writing delegate in truthful
