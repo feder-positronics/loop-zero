@@ -2634,8 +2634,8 @@ def test_ready_wait_revalidates_its_ready_transition(
 
     assert (code, err) == (expected, "")
     assert "waiting: required check 'checks' is cancelled" in out
-    assert sleeps == ([30.0, 5.0, 5.0] if replacement == "pending" else
-                      [30.0, 5.0] if initial_pending else [30.0])
+    assert sleeps == ([30.0, 9.0, 1.0] if replacement == "pending" else
+                      [30.0, 9.0] if initial_pending else [30.0])
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         "not ready: required check 'checks' is failure\n" if expected == 1 else
                         f"timed out waiting for required checks on {head[:12]}\n")
@@ -2678,7 +2678,7 @@ def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypat
     code, out, err = run(capsys, "ready", "--wait=40")
 
     assert code == (1 if after in {"head_move", "blocker", "cancelled"} else 3)
-    assert sleeps == ([30.0, 5.0, 5.0] if after == "pending" else [30.0])
+    assert sleeps == ([30.0, 9.0, 1.0] if after == "pending" else [30.0])
     assert "ready: https" not in out
     assert ("PR head changed while waiting" in err) == (after == "head_move")
     if after == "cancelled":
@@ -2717,7 +2717,7 @@ def test_ready_transition_missing_run_gets_observation_grace(
 
     assert (code, err) == (0 if run_appears else 3, "")
     assert marked_at == [210.0]
-    assert sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [30.0, 30.0])
+    assert sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [55.0, 5.0])
     assert out.endswith(f"ready: {URL}\n" if run_appears else
                         f"timed out waiting for required checks on {head[:12]}\n")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
@@ -3164,6 +3164,36 @@ def test_merge_wait_times_out_on_pending_checks_with_exit_three(
     assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
+@pytest.mark.parametrize("command,timeout,green_at", [("ready", 300, 280), ("ready", 10, 8), ("merge", 10, 8)])
+def test_source_wait_observes_late_green(wt, gh, capsys, monkeypatch, head, command, timeout, green_at):
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    clock = 0.0
+    admitted = []
+
+    def advance(seconds):
+        nonlocal clock
+        clock += seconds
+        if clock >= green_at:
+            arm_check_runs(gh, head, [{"name": "checks", "status": "completed", "conclusion": "success"}])
+
+    def merge(_repo, _number, _strategy, expected_head):
+        admitted.append(expected_head)
+        return "c" * 40
+
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(cli.random, "uniform", lambda *_: 0.95)
+    monkeypatch.setattr(cli, "_sleep", advance)
+    monkeypatch.setattr(github, "merge", merge)
+    gh.respond("api -X", "")
+
+    code, out, err = run(capsys, command, f"--wait={timeout}")
+
+    assert (code, err) == (0, "")
+    assert green_at <= clock < timeout
+    assert admitted == ([head] if command == "merge" else [])
+    assert out.splitlines()[-1] == ("c" * 40 if command == "merge" else f"ready: {URL}")
+
+
 def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, head, replay_gh):
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     clock = [1000.0]
@@ -3188,7 +3218,7 @@ def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, h
     code, out, err = run(capsys, "merge", "--wait=16")
 
     assert (code, err) == (3, "")
-    assert budgets == pytest.approx([8.0])
+    assert budgets == pytest.approx([1.6])
     assert f"timed out waiting for required checks on {head[:12]}" in out
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
@@ -4148,6 +4178,34 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
 
 
+def test_mergify_landing_backoff_restarts_on_admission(wt, gh, monkeypatch):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    config = cli.config_mod.load_trusted(wt)
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    detail = f"api repos/{REPO}/pulls/7"
+    gh.respond(detail, merge_json(state="OPEN", head=head))
+    clock = 0.0
+    confirmations = []
+
+    def advance(seconds):
+        nonlocal clock
+        clock += seconds
+        if clock >= 201:
+            gh.respond(detail, merge_json(state="MERGED", head=head, sha="e" * 40))
+
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(cli.random, "uniform", lambda *_: 0.95)
+    monkeypatch.setattr(cli, "_sleep", advance)
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "membership", lambda *_: mergify.Membership() if clock >= 195 else None)
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: confirmations.append(clock))
+
+    assert cli._wait_for_mergify(config, pr, 360, confirmed=False) == "e" * 40
+    assert confirmations == [199.5]
+    assert clock == 228
+
+
 def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatch):
     commit_mergify_configuration(wt)
     head = head_of(wt)
@@ -4256,9 +4314,9 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     if outcome == "worktree_removed":
         poll_until = cli._poll_until
 
-        def remove_worktree_then_poll(*args):
+        def remove_worktree_then_poll(*args, **kwargs):
             git(repo, "worktree", "remove", "--force", str(wt))
-            return poll_until(*args)
+            return poll_until(*args, **kwargs)
 
         monkeypatch.setattr(cli, "_poll_until", remove_worktree_then_poll)
     try:
