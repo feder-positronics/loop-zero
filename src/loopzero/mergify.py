@@ -262,7 +262,11 @@ def markers(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool]:
 
 def request(repo: str, number: int, head: str, queue: str) -> None:
     body = f"@mergifyio queue\n\n{_marker(REQUEST, head, queue)}"  # Mergify deprecates naming the queue
-    github._api(f"repos/{repo}/issues/{number}/comments", {"body": body})
+    try:
+        github._api(f"repos/{repo}/issues/{number}/comments", {"body": body})
+    except (github.GhError, github.ProcTimeout, OSError):
+        if not markers(repo, number, head, queue)[0]:
+            raise
 
 
 def mark_confirmed(repo: str, number: int, head: str, queue: str) -> None:

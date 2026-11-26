@@ -10,7 +10,9 @@ import shutil
 import subprocess
 import sys
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import quote
@@ -18,7 +20,7 @@ from urllib.parse import quote
 import pytest
 
 from loopzero import cli, config, github, mergify
-from loopzero._proc import Completed, build_env
+from loopzero._proc import Completed, ProcTimeout, build_env
 from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
 from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
@@ -3783,6 +3785,57 @@ def test_mergify_merge_requests_once_for_behind_head(
         assert "requested from Mergify queue main" in out
     else:
         assert code == 1 and "queue configuration is unverified" in err and not requested
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accepted):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    settings = config.load_trusted(wt)
+    monkeypatch.setattr(cli, "_context", lambda *_args, **_kwargs: (wt, settings))
+    monkeypatch.setattr(cli, "_pr_readiness", lambda *_args, **_kwargs: (pr, github.Readiness(True, ())))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(github, "merged_sha", lambda *_args, **_kwargs: None)
+    endpoint = f"repos/{REPO}/issues/7/comments"
+    gh.respond(f"api {endpoint}", [])
+    gh.respond(f"api {endpoint} --method POST", {})
+    writing, overlap = Event(), Event()
+    original_api, original_markers, flock = github._api, mergify.markers, cli.fcntl.flock
+
+    def lock(fd, operation):
+        if writing.is_set():
+            overlap.set()
+        return flock(fd, operation)
+
+    def markers(*args):
+        result = original_markers(*args)
+        if writing.is_set():
+            overlap.set()
+        return result
+
+    def transport(path, payload, **kwargs):
+        if path != endpoint:
+            return original_api(path, payload, **kwargs)
+        if not writing.is_set():
+            writing.set()
+            assert overlap.wait(10), "second merge did not reach admission"
+            if accepted:
+                original_api(path, payload, **kwargs)
+                gh.respond(f"api {path}", [{"user": {"login": LOGIN}, "body": payload["body"]}])
+            raise ProcTimeout("lost Mergify command reply")
+        return original_api(path, payload, **kwargs)
+
+    monkeypatch.setattr(cli.fcntl, "flock", lock)
+    monkeypatch.setattr(mergify, "markers", markers)
+    monkeypatch.setattr(github, "_api", transport)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(cli.main, ["merge"])
+        assert writing.wait(10), "first merge did not reach the command POST"
+        second = pool.submit(cli.main, ["merge"])
+        assert first.result(timeout=15) == (0 if accepted else 1)
+        assert second.result(timeout=15) == 0
+    assert len([c for c in gh.calls if "--input" in c and c["argv"][1] == endpoint]) == 1
 
 
 @pytest.mark.parametrize("wait", [False, True])

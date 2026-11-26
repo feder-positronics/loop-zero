@@ -1479,7 +1479,7 @@ class _AdmissionDeadline(Exception):
 
 
 def _merge_with_mergify(
-    config: Config, pr: github.PR,
+    wt: Path, config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
     """Request Mergify after readiness verifies the source gates and queue configuration."""
@@ -1488,28 +1488,28 @@ def _merge_with_mergify(
         raise CliError("not ready to request Mergify: " + "; ".join(readiness.reasons) + hint)
     queue = config.mergify_queue
     assert queue is not None
-    requested, confirmed_marker = mergify.markers(
-        config.repo, pr.number, pr.head_sha, queue
-    )
-    state = mergify.membership(config.repo, pr.number, queue)
-    if sha := github.merged_sha(
-        config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
-    ):
-        return sha
-    confirmed = state is not None
-    if confirmed and not confirmed_marker:
-        mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
-        confirmed_marker = True
-    if not confirmed and confirmed_marker:
-        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
-        if sha:
+    with _lock_task_state(wt):
+        requested, confirmed_marker = mergify.markers(
+            config.repo, pr.number, pr.head_sha, queue
+        )
+        state = mergify.membership(config.repo, pr.number, queue)
+        if sha := github.merged_sha(
+            config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
+        ):
             return sha
-        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
-    if not confirmed and not requested:
-        if admit_by is not None and time.monotonic() > admit_by:
-            raise _AdmissionDeadline
-        mergify.request(config.repo, pr.number, pr.head_sha, queue)
-        requested = True
+        confirmed = state is not None
+        if confirmed and not confirmed_marker:
+            mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
+            confirmed_marker = True
+        if not confirmed and confirmed_marker:
+            sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+            if sha:
+                return sha
+            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+        if not confirmed and not requested:
+            if admit_by is not None and time.monotonic() > admit_by:
+                raise _AdmissionDeadline
+            mergify.request(config.repo, pr.number, pr.head_sha, queue)
     if deadline is not None:
         return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), confirmed)
     state_name = "confirmed in" if confirmed else "requested from"
@@ -1557,7 +1557,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
-            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by)
+            sha = _merge_with_mergify(wt, config, pr, readiness, deadline, admit_by)
         except _AdmissionDeadline:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3
