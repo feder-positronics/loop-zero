@@ -7,7 +7,7 @@ import io
 import sys
 from pathlib import Path
 
-WAIT_TIMEOUT = 1800.0
+WAIT_TIMEOUT = 5400.0
 
 
 def _wait_seconds(value: str) -> float:

@@ -1064,7 +1064,7 @@ def _has_thread_reply(node: dict, reply: str) -> bool:
     while page.get("hasNextPage"):
         cursor = _next_thread_cursor(page, seen)
         data = _gh_json("api", "graphql", "-f", f"query={_THREAD_REPLIES_QUERY}",
-                        "-F", f"thread={node['id']}", "-f", f"after={cursor}")
+                        "-F", f"thread={node['id']}", "-f", f"after={cursor}", token="")
         try:
             comments = data["data"]["node"]["comments"]
             page = comments["pageInfo"]
@@ -1328,9 +1328,7 @@ def _aggregate_signal(states: list[str]) -> str:
     return next((state for state in states if state not in _NONFAILING_CHECKS), "pending")
 
 
-def behind_reason(pr: PR, reviewed_head: str | None) -> str:
-    if reviewed_head != pr.head_sha:
-        return f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+def behind_reason(pr: PR) -> str:
     return (
         f"PR #{pr.number} is behind {pr.base_ref}. Finish any pending delta review, then run "
         f"`git fetch origin {shlex.quote(pr.base_ref)}`, "
@@ -1368,7 +1366,7 @@ def readiness(
     if blocker := mergeability_blocker(pr):
         reasons.append(blocker)
     if pr.merge_state == "BEHIND" and not allow_behind:
-        reasons.append(behind_reason(pr, reviewed_head))
+        reasons.append(behind_reason(pr))
     if not reviewed_head:
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:

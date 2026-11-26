@@ -152,6 +152,8 @@ to the base branch before starting your first task. If the base has a
 - Configure hosted check names, mounts, scratch and environment in the
   [commented workflow example](workflow.example.toml). See the contract's
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
+- Host paths in the trusted workflow must work on every delivery machine. Use a
+  machine-specific workflow with `--config` on check, ready and merge when paths differ.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
 - Check, review, ready, merge, and status load the workflow from the

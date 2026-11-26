@@ -20,7 +20,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    one GitHub review with inline findings. Approval exits 0, changes requested 5.
 5. `loopzero ready --wait` marks eligible PRs ready and activates drafts with
    only missing/skipped checks even with mergeability pending. Activation without a
-   wait exits 3. Both waiters use `--wait[=SECONDS]` (default 1800) on the same
+   wait exits 3. Both waiters use `--wait[=SECONDS]` (default 5400) on the same
    head. Zero can activate or enqueue. Mergeability can time out (exit 3)
    with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`.
    Green can precede CI scheduling. After two minutes of missing checks with

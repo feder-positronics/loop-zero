@@ -155,8 +155,13 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
         )
     branch = ref.removeprefix(prefix)
     for _ in range(2):
-        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh,
-                                            require_ci=require_ci, read_timeout=read_timeout)
+        try:
+            policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh,
+                                                require_ci=require_ci, read_timeout=read_timeout)
+        except ConfigError as exc:
+            if branch == ref.removeprefix(prefix):
+                raise
+            raise ConfigError(f"origin/HEAD:workflow.toml sets repo.base to {branch!r}. {exc}") from exc
         if policy.base_branch == branch:
             return replace(policy, trusted_base_revision=revision)
         branch = policy.base_branch

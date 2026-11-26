@@ -843,7 +843,7 @@ def test_check_offline_cache_preflight(wt, repo, fake_tool, capsys, uv, failed):
     if failed:
         assert "effective UV_CACHE_DIR inside the sandbox is /tmp/uv-cache" in err and "uv sync --group dev" in err
         assert "`[checks] network = false`" in err
-        assert "`[checks] writable` is warm" in err and "network = true" not in err
+        assert "list it in `[checks] writable`" in err and "network = true" not in err
 
 
 def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> None:
@@ -930,7 +930,8 @@ def test_check_selects_and_reports_workflow(wt, repo, tmp_path, capsys, policy):
         alt.write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"echo alt"'))
         options = ("--config", str(alt))
         expected, absent = ("checks are unpinned because --config was provided", "running: echo alt"), "README"
-    out, _ = expect_cli(capsys, 0, *options, "check", stderr="")
+    stderr = "note: dirty worktree; this check cannot satisfy loopzero ready\n" if policy == "task" else ""
+    out, _ = expect_cli(capsys, 0, *options, "check", stderr=stderr)
     assert_contains(out.splitlines(), *expected)
     assert absent is None or absent not in out
     assert not options or out.startswith("checks are unpinned because --config was provided\n")
@@ -4235,6 +4236,7 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
             }
             return threads_json(node)
         if "comments(first: 100" in query:
+            assert kwargs.get("token") == ""
             if "after=ROOT" in args:
                 return {"data": {"node": {"comments": {
                     "nodes": [{"body": reply, "viewerDidAuthor": False},

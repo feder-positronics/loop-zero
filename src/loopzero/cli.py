@@ -318,7 +318,7 @@ def _readiness(
         publishers=publishers,
     )
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
-        behind = github.behind_reason(pr, head if review else None)
+        behind = github.behind_reason(pr)
         reasons = result.reasons
         if mergify.configured(config.repo, config.base_branch, config.mergify_queue or "", mergify_deadline):
             reasons = tuple(reason for reason in reasons if reason != behind)
@@ -656,9 +656,9 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
                 print(
                     "\nThe sandbox has no network because `[checks] network = false`; "
                     f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
-                    "Run UV_CACHE_DIR=<effective-cache> uv sync --group dev on the host "
-                    "(use the required groups) so the cache under `[checks] writable` is warm, "
-                    "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
+                    f"On origin/{config.base_branch}, set `[checks] env` UV_CACHE_DIR to a host cache "
+                    "and list it in `[checks] writable`. Warm that same cache with "
+                    "UV_CACHE_DIR=<path> uv sync --group dev on the host (use the required groups).", file=sys.stderr,
                 )
     if (current_head := _save_report(wt, report, locked_fd=locked_fd)) is not None:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}; rerun loopzero check",
@@ -671,7 +671,9 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
     if not verified:
         print("check stages passed but the receipt is unverified; rerun loopzero check from the task "
               "worktree with a stable, readable configured runner before running ready", file=sys.stderr)
-    elif report.ok and not report.dirty:
+    elif report.ok and report.dirty:
+        print("note: dirty worktree; this check cannot satisfy loopzero ready", file=sys.stderr)
+    elif report.ok:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
     if verified:
@@ -689,7 +691,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     if pr is not None:
         raise CliError(
             f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
-            "run `loopzero start <new-task-slug>` for a new task"
+            "run `loopzero start <new-task-slug>` from the main checkout"
         )
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
@@ -1151,7 +1153,10 @@ def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
         return lines[0], detail + "\nFix: wait for the limit to reset or switch this reviewer's account.", _FALLBACK_REASONS[1]
     if isinstance(exc, runners.RunnerMissing):
         package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
-        return lines[0], detail + f"\nFix: install it with `npm install -g {package}`.", _FALLBACK_REASONS[2]
+        fix = f"install it with `npm install -g {package}`"
+        if family == "codex":
+            fix += " and list the npm prefix in `[delivery] reviewer_ro_paths` on the delivery branch"
+        return lines[0], detail + f"\nFix: {fix}.", _FALLBACK_REASONS[2]
     return lines[0], detail, _FALLBACK_REASONS[3]
 
 

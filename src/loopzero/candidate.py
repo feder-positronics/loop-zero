@@ -40,7 +40,7 @@ _TREE_SECONDS = 120
 _TREE_BYTES = 256 * 1024 * 1024
 _TREE_OUTPUT = 8 * 1024 * 1024
 _TREE_OBJECTS = 100_000
-_TREE_DEPTH = 200  # IntelFlo main at depth 200: ~16k objects, 29 MiB (full: 147k)
+_TREE_DEPTH = 200
 # Apply the limit in a child interpreter before replacing it with Git.
 _LIMITED_GIT = """\
 import os
