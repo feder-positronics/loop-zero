@@ -496,13 +496,6 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
     return list(_iter_paged(endpoint, key))
 
 
-def _with_file(content: str) -> Path:
-    fd, name = tempfile.mkstemp(suffix=".loopzero", text=True)
-    with open(fd, "w", encoding="utf-8") as handle:
-        handle.write(content)
-    return Path(name)
-
-
 def api_get(endpoint: str) -> object:
     """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
     return _gh_json("api", endpoint)
@@ -530,11 +523,12 @@ def _not_found(number: int, exc: Exception) -> GhError:
 
 def _api(endpoint: str, payload: dict, method: str = "POST",
          token: str | None = None) -> object:
-    path = _with_file(json.dumps(payload))
-    try:
-        return _gh_json("api", endpoint, "--method", method, "--input", str(path), token=token)
-    finally:
-        path.unlink(missing_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".loopzero", encoding="utf-8", delete_on_close=False
+    ) as handle:
+        handle.write(json.dumps(payload))
+        handle.close()
+        return _gh_json("api", endpoint, "--method", method, "--input", handle.name, token=token)
 
 
 def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
