@@ -34,9 +34,9 @@ two days running or independent incidents repeat.
    under comparable load or no benefit after adequate exposure. For insufficient
    evidence, name the next observation and date. Extend once, then escalate
    unresolved verdicts to Lean.
-2. Name a deletion candidate or explain why none qualifies. Choose at most
-   one change for the evidenced constraint. Record it and direct owner or OD
-   orders on `workflow-change` issues with a script target, two script guards,
+2. Name a deletion candidate first or explain why none qualifies. Choose at
+   most one change for the evidenced constraint, or none when the case is weak.
+   Record it and direct owner or OD orders on `workflow-change` issues with a script target, two script guards,
    review date, revert action and install marker. Recording must not delay orders.
 
 For structural changes, reverts or safeguard removals, Lean commissions a
