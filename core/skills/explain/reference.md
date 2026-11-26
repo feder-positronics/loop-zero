@@ -23,7 +23,5 @@ repair it.
 | Variant | Reader question | Emphasis |
 | --- | --- | --- |
 | project | What is this project, its direction and current state? | strategy, initiatives, built versus intended |
-| backlog | What is in progress and next? | active, blocked, decisions, next action |
-| pulse | Is anything unhealthy? | stale work, PR and merge health |
 | strategy | How does the product fit together? | dependencies, gaps, governing choices |
 | journey | What did the period produce? | milestones, inflections, lessons |

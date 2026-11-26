@@ -2464,6 +2464,32 @@ def test_late_check_preserves_receipt_when_head_moves(wt, gh, capsys, monkeypatc
         assert "receipt accepted:" in ready
 
 
+@pytest.mark.parametrize("mode", ["commands", "settings", "same", "override"])
+def test_check_stops_stale_trusted_plan_between_stages(repo, wt, gh, capsys, monkeypatch, mode):
+    """Replay the old-plan runs from #1988 without waiting for their long stages."""
+    new_workflow = {
+        "settings": WORKFLOW.replace("[checks]", "[checks]\nnetwork = true"),
+        "same": WORKFLOW + "\n# unchanged settings",
+    }.get(mode, WORKFLOW.replace("echo ok", "echo new plan"))
+    commit_file(repo, "workflow.toml", new_workflow, "advance trusted plan")
+    seen = []
+
+    def stage(config, path, prefix, command, timeout):
+        seen.append(command)
+        git(wt, "update-ref", "refs/remotes/origin/main", head_of(repo))
+        return CheckResult(command, 0, 0.0, "")
+
+    monkeypatch.setattr(cli.sandbox, "_run_one", stage)
+    args = ("--config", "workflow.toml", "check") if mode == "override" else ("check",)
+    if mode in {"commands", "settings"}:
+        expect_cli(capsys, 1, *args, stderr_contains=("trusted check plan changed", "Run loopzero check"))
+        assert seen == ["echo ok"]
+        assert not (wt / ".loopzero/checks.json").exists()
+    else:
+        expect_cli(capsys, 0, *args, stdout_endswith="PASS\n")
+        assert seen == ["echo ok", "test -f README.md"]
+
+
 @pytest.mark.parametrize("first_exit", [0, 1])
 def test_overlapping_checks_share_only_a_pass(wt, capsys, monkeypatch, first_exit):
     started, waiting = Event(), Event()
@@ -3751,7 +3777,7 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     gh.respond_pr_list([])
     out, _ = expect_cli(capsys, 0, "status")
     assert "branch:   lz/t1" in out and f"head:     {head}" in out and "dirty:    no" in out
-    assert "pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)" in out
+    assert "pr:       none (commit changes, then open with `loopzero pr` before a long check)" in out
     arm_approved_pr_with_check_result(gh, head, wt, "pending")
     (wt / "scratch").write_text("x")
     git_calls.clear()
@@ -4734,6 +4760,8 @@ def test_task_state_lock_times_out_with_a_live_holder(git_repo, monkeypatch):
         ):
             pytest.fail("contender acquired a held directory lock")
         assert now == 60
+        cli.worktree.write_local_state(git_repo, "review.json", "receipt", private=True)
+        assert cli.worktree.read_local_state(git_repo, "review.json") == "receipt"
     with cli.worktree.lock_local_state(git_repo):
         assert now == 60
 

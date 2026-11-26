@@ -115,9 +115,11 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
         if fetched.exit_code != 0:
             raise ConfigError(f"could not refresh origin/{branch}. {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
+    # Stage-boundary reads reuse the existing ref without fetching absent objects.
+    local_env = {"GIT_NO_LAZY_FETCH": "1"} if previous is not None and not refresh else None
     resolved = _proc.run_git_paths(
         ["git", "rev-parse", *directory_args, "--verify", f"{ref}^{{commit}}"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60),
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), extra_env=local_env,
     )
     if resolved.exit_code != 0:
         raise ConfigError(f"{source} has no remote-tracking base commit. {hint}")
@@ -128,6 +130,7 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
     shown = _proc.run(
         ["git", "show", f"{revision}:workflow.toml"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), preserve_newlines=True, encoding="utf-8",
+        extra_env=local_env,
     )
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")

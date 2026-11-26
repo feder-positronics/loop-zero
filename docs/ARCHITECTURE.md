@@ -92,6 +92,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    five minutes thereafter, and exit code/duration immediately after each stage.
    Heartbeats stop on completion or cancellation and never supply a verdict.
    Local stages drain merged child output and retain a bounded diagnostic tail.
+   Between stages, a locally observed trusted plan change stops the check
+   before it runs more obsolete commands. This read makes no network request.
    Trusted-base commands remain authoritative;
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
@@ -443,7 +445,9 @@ The coordinator resolves stages, aggregates them in order, stops on failure and
 verifies that HEAD and the clean/dirty state match their starting values. Only the coordinator
 writes the authoritative `checks.json` receipt. Checks lock the task state directory
 through execution and receipt publication. A waiter can reuse a newly published
-passing receipt when HEAD, settings and declared inputs match. Writers recheck
+passing receipt when it acquires the lock within 60 seconds and HEAD, settings
+and declared inputs match. Private review receipts use atomic replacement
+without the check lock. Check receipt writers recheck
 HEAD and atomically replace the receipt from a synced sibling temporary file.
 Successful keyed stages are checkpointed in the same receipt for reuse.
 A successful stage checkpoint preserves a clean pass for the same head,

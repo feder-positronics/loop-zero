@@ -14,7 +14,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from os.path import commonpath
@@ -125,7 +125,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         missing, preparations = _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
-        for ordinal, command in enumerate(commands, 1):
+        current = commands if _resolved else _current_commands(config, worktree, commands, settings_sha256)
+        for ordinal, command in enumerate(current, 1):
             if progress:
                 progress(command)
             key = _input_key(config, worktree, command, "" if dirty else base,
@@ -159,6 +160,27 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         )))
         dirty = True
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
+
+
+def _current_commands(config: Config, worktree: Path, commands: tuple[str, ...],
+                      settings: str | None) -> Iterator[str]:
+    if not config.trusted_base_revision:
+        yield from commands
+        return
+    previous = config
+    for command in commands:
+        try:
+            latest = config_mod.load_trusted(worktree, previous=previous)
+        except (config_mod.ConfigError, _proc.ProcTimeout):
+            # A failed local read does not establish that the pinned plan changed.
+            yield command
+            continue
+        if (latest.trusted_base_revision != previous.trusted_base_revision
+                and (latest.checks != config.checks or settings_fingerprint(latest) != settings)):
+            raise config_mod.ConfigError("trusted check plan changed during the run. "
+                                         "Run loopzero check again with the current workflow.")
+        previous = latest
+        yield command
 
 
 INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"

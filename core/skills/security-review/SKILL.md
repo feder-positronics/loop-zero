@@ -5,8 +5,8 @@ description: Add security review to diffs changing auth, sessions, permissions, 
 
 # Security Review
 
-Apply [code-review](../code-review/SKILL.md), including its JSON contract and
-missing-evidence failure. Do not edit the tree.
+Apply [code-review](../code-review/SKILL.md), including its JSON output and
+missing-evidence rule. Do not edit the tree.
 
 Before judging lines, identify actors, assets, crossed trust boundaries, and
 attacker-controlled inputs. Verify trust and controls in code; do not assume them.
@@ -31,13 +31,12 @@ is not a finding.
 
 ## Output
 
-Return only code-review's JSON. Secret exposure or a reachable exploit is
+Secret exposure or a reachable exploit is
 `critical`; a missing control on a real boundary is `important`; hardening is
 a `suggestion`. Both blocking severities require `request_changes`.
 
 Finish after assessing each changed boundary and plausible attacker-controlled
-path. Uncertainty that prevents a verdict is code-review's missing-evidence
-`critical` finding; never add fields outside its JSON.
+path. Uncertainty that prevents a verdict is a missing-evidence `critical` finding.
 
 Empty findings are valid when no defects are found.
 Never echo secrets, tokens, credentials, or PII in findings.
