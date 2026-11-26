@@ -38,8 +38,8 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    Merge rechecks readiness, uses the configured strategy, verifies the landed
    SHA, and deletes the branch and worktree. If cleanup warns, the merge landed.
    Follow the recovery step it names. A queue initially enqueues;
-   `--wait` covers readiness, landing and cleanup within the same budget.
-   Enqueueing without `--wait` returns 0 without cleanup.
+   `--wait` shares a budget across source-check and landing waits. Cleanup follows
+   verified landing. Enqueueing without `--wait` returns 0 without cleanup.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
