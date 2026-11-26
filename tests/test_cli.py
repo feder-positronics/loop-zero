@@ -2992,7 +2992,7 @@ def test_ready_requires_receipt_from_current_check_environment(
 def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
     arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
     with monkeypatch.context() as worker_env:
-        if worker != "matching":
+        if worker == "different-path":
             worker_env.setenv("PATH", str(tmp_path / "worker-bin"), prepend=":")
         assert run(capsys, "check")[0] == 0
 

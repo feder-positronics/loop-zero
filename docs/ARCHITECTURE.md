@@ -498,6 +498,7 @@ Receipts that use saved stage results bind the current head and check settings.
 For delegated checks, both the receipt and the stage key bind the runner's launch
 path, resolved executable path and executable bytes. Unavailable runner identity
 prevents receipt reuse.
+
 A worker running the entire check is itself the coordinator and writes a
 receipt with its own effective settings. Transferring it preserves the
 fingerprint, if present. Local readiness applies the same receipt predicate
