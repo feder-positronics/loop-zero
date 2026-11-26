@@ -30,9 +30,9 @@ def event_number(event: dict) -> int:
         value = prs[0].get("number")
     else:
         value = event.get("inputs", {}).get("pr", "")
-    if isinstance(value, bool) or not str(value).isdigit() or int(value) < 1:
-        raise LoopZeroError("refresh requires a positive PR number")
-    return int(value)
+    if not isinstance(value, bool) and str(value).isdigit() and (number := int(value)) > 0:
+        return number
+    raise LoopZeroError("refresh requires a positive PR number")
 
 
 def main() -> int:
@@ -121,11 +121,10 @@ def _landed_before_publication(repo: str, number: int, head: str, snapshot: gith
     current = github.pr_view(repo, number)
     if current.head_sha != head:
         raise LoopZeroError("head changed before publication; refresh eligibility")
-    if snapshot is not None:
-        if current.state == "MERGED":
-            return True
-        if eligibility.source_fingerprint(current) != eligibility.source_fingerprint(snapshot):
-            raise LoopZeroError("source metadata changed before publication; refresh eligibility")
+    if snapshot is None or current.state == "MERGED":
+        return snapshot is not None
+    if eligibility.source_fingerprint(current) != eligibility.source_fingerprint(snapshot):
+        raise LoopZeroError("source metadata changed before publication; refresh eligibility")
     return False
 
 

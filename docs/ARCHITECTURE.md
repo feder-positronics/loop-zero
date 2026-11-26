@@ -121,7 +121,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
-   target branch and required CI. The receipt must record a clean passing run
+   target branch and required CI. Readiness compares parsed instants for verdict
+   freshness and uses a valid GitHub response Date during waits. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. Ready and
    merge validate the PR, head and hold before checking the local receipt.
    An invalid receipt stops the command before it fetches remote readiness
@@ -543,8 +544,9 @@ stage is retried after success or uncertain launch. Only the coordinator writes
 the authoritative `checks.json` receipt. Writers lock the task state directory
 while rechecking HEAD and atomically replacing the receipt from a synced sibling
 temporary file. Successful keyed stages are checkpointed in the same receipt
-for reuse. The checkpoint cannot satisfy readiness before final worktree
-validation. Runners cannot select stages or mint receipts. Stage admission
+for reuse. A checkpoint cannot replace a clean pass for the same head and
+settings or satisfy readiness before final worktree validation. Completed
+failures still replace passes. Runners cannot select stages or mint receipts. Stage admission
 belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.

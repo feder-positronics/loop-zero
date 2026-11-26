@@ -54,10 +54,9 @@ def review_projection(review: dict, head: str, repo: str, number: int):
     if not positions:
         return False, None
     try:
-        if positions != [1] or len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
-            return True, None
-        if len(block) > 2 and (len(block) != 3 or not re.fullmatch(
-                r"<!-- loopzero:adjudication v=1 replaces=[0-9]+(?:,[0-9]+)* target=" + head + r" -->", block[2])):
+        if (positions != [1] or len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT
+                or (len(block) > 2 and (len(block) != 3 or not re.fullmatch(
+                    r"<!-- loopzero:adjudication v=1 replaces=[0-9]+(?:,[0-9]+)* target=" + head + r" -->", block[2])))):
             return True, None
         marker = REVIEW_MARKER_RE.fullmatch(block[0])
         evidence = runners.decode_codex_evidence(block[1])
