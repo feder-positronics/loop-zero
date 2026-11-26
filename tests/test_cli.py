@@ -173,8 +173,8 @@ def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def wt(repo: Path, git_seed: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    path = cli.worktree.worktree_dir(repo, "t1")
+def wt(repo: Path, git_seed: Path, monkeypatch: pytest.MonkeyPatch, request) -> Path:
+    path = cli.worktree.worktree_dir(repo, getattr(request, "param", "t1"))
     git(repo, "worktree", "add", "-q", str(path), "lz/t1")
     shutil.copytree(git_seed / ".loopzero", cli.worktree.task_file(path).parent)
     monkeypatch.chdir(path)
@@ -1060,12 +1060,12 @@ def test_pr_replaces_closed_never_merged_pr(wt: Path, gh: FakeGh, capsys) -> Non
     assert run(capsys, "pr") == (0, URL + "\n", "")
 
 
-def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
-    task = wt / ".loopzero" / "task.md"
-    task.write_text("## Objective\nx\n\n# Add the feature flag\n")
-    assert cli._pr_title(wt, "lz/t1") == "Add the feature flag"
-    task.write_text("## Objective\nonly sections\n")
-    assert cli._pr_title(wt, "lz/t1") == "lz/t1"
+def test_pr_title_prefers_human_heading(wt: Path) -> None:
+    for heading, title in [("# Dodaj Łódź", "Dodaj Łódź"), ("only sections", "lz/t1")]:
+        (wt / ".loopzero/task.md").write_text(f"## Objective\nx\n\n{heading}\n", encoding="utf-8")
+        command = "from loopzero.cli import _pr_title; from pathlib import Path; print(ascii(_pr_title(Path.cwd(), 'lz/t1')))"
+        env = {**os.environ, "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0"}
+        assert subprocess.check_output([sys.executable, "-X", "utf8=0", "-c", command], env=env, text=True).strip() == ascii(title)
 
 
 @pytest.mark.parametrize("name,value", [
@@ -3686,13 +3686,13 @@ def test_status_explains_detached_head(wt: Path, capsys) -> None:
     assert err == "loopzero status: HEAD is detached. Switch to a branch and retry.\n"
 
 
-def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
-    head = head_of(wt)
+@pytest.mark.parametrize("wt", ["Łódź"], indirect=True)
+def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls, head, monkeypatch) -> None:
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "ascii")
     gh.respond_pr_list([])
     code, out, _ = run(capsys, "status")
-    assert code == 0
-    assert "branch:   lz/t1" in out and f"head:     {head}" in out and "dirty:    no" in out
-    assert "pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)" in out
+    assert (code, out.splitlines()[:3]) == (0, [f"worktree: {wt}", "branch:   lz/t1", f"head:     {head}"])
+    assert "dirty:    no" in out and "pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)" in out
     arm_approved_pr_with_check_result(gh, head, wt, "pending")
     (wt / "scratch").write_text("x")
     git_calls.clear()

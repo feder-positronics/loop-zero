@@ -34,10 +34,10 @@ def commit_on_origin(repo: Path, name: str) -> str:
     return git(clone, "rev-parse", "HEAD").strip()
 
 
-def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
+def test_branch_preserves_unicode_whitespace(repo: Path, monkeypatch) -> None:
     name = worktree.branch_name(repo, "zażółć\u00a0")
     git(repo, "switch", "-c", name)
-
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "ascii")
     assert worktree.branch(repo) == "lz/zażółć\u00a0"
 
 

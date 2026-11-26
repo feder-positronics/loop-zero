@@ -57,7 +57,7 @@ def _git(
 ) -> str:
     argv = ("git", *args)
     done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-               preserve_newlines=preserve_newlines)
+               encoding="utf-8", preserve_newlines=preserve_newlines)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
     if preserve_newlines:
@@ -235,7 +235,7 @@ def task_text(wt: Path) -> str:
             "or recreate the file using the handoff template at "
             "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md"
         )
-    return task.read_text()
+    return task.read_text(encoding="utf-8")
 
 
 def base_sha(wt: Path) -> str:

@@ -338,7 +338,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout) if scope else timeout)
+                       timeout=_read_timeout(timeout) if scope else timeout, encoding="utf-8")
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc

@@ -71,7 +71,8 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 
 
 def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
-    done = _proc.run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout)
+    done = _proc.run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout,
+                     encoding=sys.getfilesystemencoding(), preserve_newlines=True)
     if done.exit_code != 0:
         raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
     return done.stdout.strip()
@@ -1692,10 +1693,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     wt = _toplevel()
     config = _load_config(args, wt, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
-    print(f"worktree: {wt}")
-    print(f"branch:   {branch}")
-    print(f"head:     {head}")
-    print(f"base:     {config.base_branch}")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(errors="backslashreplace")
+    print(f"worktree: {wt}\nbranch:   {branch}\nhead:     {head}\nbase:     {config.base_branch}")
     print(f"dirty:    {'yes' if worktree.is_dirty(wt) else 'no'}")
     pr = github.pr_for_branch(config.repo, branch)
     if pr is None:
