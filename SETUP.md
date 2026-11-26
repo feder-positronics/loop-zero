@@ -349,11 +349,11 @@ access to the configured GitHub repository even before a PR exists. See the
 
 ### Check receipts with remote execution
 
-Run the current `loopzero check` coordinator from the task worktree with
-the same effective settings used by `loopzero ready`. To execute stages
-remotely, configure an operator-trusted `[checks].runner` that implements the
-[stage protocol](docs/ARCHITECTURE.md#check-stage-runners). The local coordinator
-writes the receipt.
+Use one pinned CLI revision and the same effective settings for `check`,
+`ready`, and `merge`. If a shared install can change mid-task, use the
+[isolated install](#install). The coordinator runs in the task worktree and
+writes the receipt. For remote stages, configure an operator-trusted
+`[checks].runner` using the [stage protocol](docs/ARCHITECTURE.md#check-stage-runners).
 
 Without a stage adapter, run the whole check locally. Use a local slot if the
 host requires one. On miki, run this from the task worktree.
