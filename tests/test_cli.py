@@ -3172,9 +3172,11 @@ def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, 
     assert run(capsys, "ready")[0] == 0
 
 
-@pytest.mark.parametrize("change,exit_code", [("plain", 0), ("unrelated", 0), ("policy", 1), ("slow", 3)])
+@pytest.mark.parametrize("change,exit_code", [("plain", 0), ("unrelated", 0), ("order", 0), ("policy", 1), ("slow", 3)])
 def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatch, tmp_path, change, exit_code):
-    policy = WORKFLOW.replace("[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]')
+    env = 'CHECK_A = "first", CHECK_B = "second"'
+    policy = WORKFLOW.replace("[checks]", f"[checks]\nenv = {{ {env} }}")
+    policy = policy.replace("[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]')
     if change != "plain":
         publish_workflow(wt, policy)
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
@@ -3188,8 +3190,11 @@ def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatc
             if change == "slow":
                 clock.now += timeout
                 raise cli._proc.ProcTimeout("origin timed out")
-            path, body = ("workflow.toml", policy.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "changed" }')
-                          ) if change == "policy" else ("unrelated.txt", "advance main")
+            path, body = "unrelated.txt", "advance main"
+            if change == "policy":
+                path, body = "workflow.toml", policy.replace('CHECK_A = "first"', 'CHECK_A = "changed"')
+            elif change == "order":
+                path, body = "workflow.toml", policy.replace(env, ", ".join(reversed(env.split(", "))))
             commit_file(external, path, body, "advance main")
             git(external, "push", "-q", "origin", "main")
             arm_check_runs(gh, head, [{"name": "checks", "status": "completed", "conclusion": "success"}])

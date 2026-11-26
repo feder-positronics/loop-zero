@@ -321,7 +321,7 @@ def _env_table(table: dict[str, Any]) -> tuple[tuple[str, str], ...]:
             raise ConfigError(f"checks.env must not override {name}")
         if not isinstance(value, str):
             raise ConfigError(f"checks.env.{name} must be a str")
-    return tuple(table.items())
+    return tuple(sorted(table.items()))
 
 
 def _limits(table: dict[str, Any]) -> ResourceLimits:
