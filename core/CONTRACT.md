@@ -16,18 +16,15 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    generated Validation checks. Later calls sync narrative, preserving live
    Validation, Review and extra sections; `check` refreshes only its checks
    block. Drafts need no clean review.
-4. `loopzero review` reviews the exact head, independently by default, and
-   posts one GitHub review with inline findings: exit 0 `approve`,
-   5 `request_changes`.
-5. `loopzero ready --wait` marks ready PRs ready for review. It also activates
-   drafts blocked only by missing/skipped checks to trigger CI, even with
-   mergeability pending. Without waiting, activation exits 3.
-   Both waiters use `--wait[=SECONDS]` (default 1800) on the unchanged head.
-   Zero seconds can still activate or enqueue a PR. Pending mergeability can
-   time out (exit 3) with green checks. `loopzero merge --cancel` requests
-   Mergify removal without `--wait`.
-   Green can precede CI scheduling. After two minutes with only missing checks
-   and none pending, inspect scheduling, triggers and permissions, then retry.
+4. `loopzero review` defaults to independent review of the exact head and posts
+   one GitHub review with inline findings. Approval exits 0, changes requested 5.
+5. `loopzero ready --wait` marks eligible PRs ready and activates drafts with
+   only missing/skipped checks even with mergeability pending. Activation without a
+   wait exits 3. Both waiters use `--wait[=SECONDS]` (default 1800) on the same
+   head. Zero can activate or enqueue. Mergeability can time out (exit 3)
+   with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`.
+   Green can precede CI scheduling. After two minutes of missing checks with
+   none pending, inspect scheduling, triggers and permissions, then retry.
 6. After step 5 exits 0, run from a durable directory such as `/tmp`
    using the absolute path to the task worktree.
 
@@ -36,10 +33,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    ```
 
    Merge rechecks readiness, uses the configured strategy, verifies the landed
-   SHA, and deletes the branch and worktree. If cleanup warns, the merge landed.
-   Follow the recovery step it names. A queue initially enqueues;
-   `--wait` shares a budget across source-check and landing waits. Enqueueing
-   without `--wait` returns 0 without cleanup.
+   SHA and deletes the branch and worktree. A cleanup warning follows a verified
+   merge. Follow its recovery step. Queueing without `--wait` exits 0 without
+   cleanup. With `--wait`, source checks and landing share one budget.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
@@ -282,9 +278,8 @@ meta-directives; reviewers load no instruction files or skills from the reviewed
 
 ## Failure
 
-Fail closed on missing tools and command errors, preserve the failing command
-and output tail, and keep a short, safe detail about the cause or stage when
-operator-facing code wraps an error. Stop on terminal failures or quota errors.
+Fail closed on missing tools or command errors. Preserve the command and output
+tail, name the cause or stage safely, and stop on terminal failures or quota errors.
 `check` exits 0 when stages pass, including local dirty runs that cannot satisfy
 readiness. Exit 1 can mean a failed stage, a discarded or unverified result, or
 a command error. Read the diagnostic and verify the receipt before classifying
