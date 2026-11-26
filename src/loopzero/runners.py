@@ -38,8 +38,8 @@ _CODEX_EFFORT_RE = re.compile(r"^[ \t]*reasoning effort[ \t]*:[ \t]*([^\r\n]+)$"
 
 _AUTH_FAILURE = re.compile(
     r"not logged in|please run /login|please (?:run )?`?codex login`?|invalid api key"
-    r"|authentication[_ ]error|OAuth access token has expired|Failed to authenticate|token expired"
-    r"|\b401\b.*unauthori[sz]ed|login required|not authenticated|missing credentials", re.IGNORECASE,
+    r"|authentication[_ ]error|OAuth access token has expired|Failed to authenticate|token expired|login required"
+    r"|\b401\b.*unauthori[sz]ed|unauthori[sz]ed.*\b401\b|not authenticated|missing credentials", re.IGNORECASE,
 )
 
 REVIEW_SCHEMA: dict[str, object] = {
