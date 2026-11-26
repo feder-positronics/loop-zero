@@ -799,7 +799,8 @@ def _inspection_commands(command, cwd):
                 args = [
                     part
                     for part in group[1:]
-                    if part not in {"--no-color", "--no-ext-diff", "--no-textconv"}
+                    if part not in {"--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                                    "--ignore-submodules=none", "--submodule=short"}
                 ]
                 if len(args) != 2 or not all(_hex(part, 40) for part in args):
                     return []

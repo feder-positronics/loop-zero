@@ -1186,6 +1186,12 @@ def test_timeout_becomes_bad_output(
     assert len(detail.splitlines()[-1]) <= runners.TAIL_CHARS and "waiting for proxy" not in fallback
 
 
+def test_inspection_accepts_the_reviewer_patch_command() -> None:
+    command = (f"git -C /repo diff --no-color --no-ext-diff --no-textconv --text "
+               f"--ignore-submodules=none --submodule=short {'a' * 40} {'b' * 40}")
+    assert runners._inspection_commands(command, "/repo") == [("diff", "a" * 40, "b" * 40)]
+
+
 def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
     deleted = (
         "diff --git a/gone.py b/gone.py\n"
