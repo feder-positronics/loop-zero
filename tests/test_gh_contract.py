@@ -13,6 +13,7 @@ import pytest
 
 from loopzero import github
 from loopzero.types import Finding, ReviewResult
+from tests.conftest import isolate_github_auth
 from tests.test_github import (
     HEAD,
     PR_FILES,
@@ -50,8 +51,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
 
     with pytest.MonkeyPatch.context() as env:
         env.setenv("PATH", str(tmp_path), prepend=os.pathsep)
-        env.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token")
-        env.setattr(github, "_app_token_cache", ("", 0.0))
+        isolate_github_auth(tmp_path, env)
         github.pr_for_branch(REPO, "lz/x")
         github.pr_view(REPO, 7)
         github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body\n")
