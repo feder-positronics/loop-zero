@@ -2971,7 +2971,7 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
-@pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty", "wrong-commands", "legacy"])
+@pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty", "wrong-commands", "legacy", "incompatible", "matching"])
 def test_ready_requires_clean_successful_local_report_at_head(
     wt: Path, gh: FakeGh, capsys, condition: str, head
 ) -> None:
@@ -2979,18 +2979,27 @@ def test_ready_requires_clean_successful_local_report_at_head(
     report_path = wt / ".loopzero" / "checks.json"
     if condition == "missing":
         report_path.unlink()
-    elif condition in {"wrong-head", "wrong-commands", "legacy"}:
+    elif condition in {"wrong-head", "wrong-commands", "legacy", "incompatible"}:
         report = json.loads(report_path.read_text())
         if condition == "wrong-head":
             report["head"] = "0" * 40
         elif condition == "wrong-commands":
             report["results"][0]["command"] = "true"
-        else:
+        elif condition == "legacy":
             del report["settings_sha256"]
+        else:
+            report["settings_sha256"] = "0" * 64
         report_path.write_text(json.dumps(report))
     code, out, _ = run(capsys, "ready")
-    assert code == 1
-    assert out.endswith("not ready: run loopzero check at this head\n")
+    assert code == (0 if condition == "matching" else 1)
+    if condition in {"legacy", "incompatible"}:
+        reason = ("check receipt is missing its settings fingerprint" if condition == "legacy"
+                  else "check receipt has an incompatible settings fingerprint")
+        assert f"not ready: {reason}." in out
+        assert ("Run loopzero check in this worktree at this head with the same current CLI and effective "
+                "settings as ready, using a local coordinator for delegated stages." in out)
+    elif condition != "matching":
+        assert out.endswith("not ready: run loopzero check at this head\n")
 
 
 @pytest.mark.parametrize("wait_for", [None, "ready", "merge"])
@@ -3025,7 +3034,7 @@ def test_ready_requires_receipt_from_current_check_environment(
         config_path.write_text(new_config)
     code, out, _ = run(capsys, *args, "ready")
     assert code == 1
-    assert out.endswith("not ready: run loopzero check at this head\n")
+    assert "not ready: check receipt has an incompatible settings fingerprint." in out
     assert run(capsys, *args, "check")[0] == 1
 
 
@@ -3067,7 +3076,7 @@ def test_ready_matches_effective_inherited_check_environment(
     if fixed:
         assert code == 0
     else:
-        assert code == 1 and out.endswith("not ready: run loopzero check at this head\n")
+        assert code == 1 and "not ready: check receipt has an incompatible settings fingerprint." in out
 
 
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
