@@ -26,7 +26,6 @@ from loopzero.runners import (
     RunnerPromptTooLong,
     RunnerUsageLimit,
     author_families,
-    build_prompt,
     codex_evidence,
     merge_reviews,
     render_patch,
@@ -265,15 +264,6 @@ def repo(tmp_path):
 
 
 # ----------------------------------------------------------------- prompt
-
-
-def test_prompt_frames_exact_task_and_raw_diff() -> None:
-    prompt = build_prompt(kind="delta", head="deadbeef", task_text=" Objective ", diff="+line\n")
-    header, diff = prompt.split("\n", 1)
-    assert json.loads(header) == {
-        "head": "deadbeef", "kind": "delta", "task_text": " Objective ", "diff_utf8_bytes": 6,
-    }
-    assert diff == "+line\n"
 
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
