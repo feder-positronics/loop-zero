@@ -11,49 +11,40 @@ two days running or independent incidents repeat.
 
 ## Evidence
 
-- Run [retro_metrics.py](../../../scripts/retro_metrics.py) with the commissioned
-  `--repo`, fixed UTC `--window-end`, outcome, order and p0 labels, and configured
-  receipts and host inputs where available. Pass the agreed `--stall-hours`
-  threshold to include stalled p0s. Compare the last seven days with the
-  previous seven and use the four-week trend for context. Lead with outcomes
-  closed and order-to-acceptance time.
-- Take all numbers from the script. Save JSON stdout to a scratch file (`mktemp`).
-  Use the stderr table and query needed fields. Read selected issues, PRs and
-  change records directly. Keep missing data as `UNKNOWN` and name its source.
-- Use `weekly_sample.items`. The script reserves two seeded merged controls,
-  two slowest orders accepted that week and the longest stalled p0 when
-  available, then takes up to four oldest open orders from the order input
-  up to eight distinct cases total. The seed derives from the repository and
-  report end. Replay with the same end and frozen inputs. Use the pool sizes
-  and shortfall to explain when the category limits or available cases leave
-  fewer than six.
-- For each case, identify where it waited, who could move it and the first
-  real consumer use or its missing proof. Test the apparent constraint
-  against a contrary case. Route defects to the owning issue through
+- Run [retro_metrics.py](../../../scripts/retro_metrics.py) once with the
+  commissioned repo, fixed UTC window end, outcome, order and p0 labels,
+  agreed stall threshold, and available receipt and host inputs. Save JSON
+  stdout to scratch. Take numbers only from the script and query fields needed for decisions.
+  Compare the last seven days with the prior seven and the four-week trend.
+  Lead with outcomes closed and order-to-acceptance time. Name the source of
+  each `UNKNOWN`. Replay with the same end and frozen inputs.
+- Use `weekly_sample.items` directly. Explain any shortfall below six from the
+  report. Read each sampled case once for its wait, who could move it and first
+  real consumer use or missing proof. Use a sampled contrary case to test the
+  apparent constraint when available. Read additional records only to settle
+  a verdict or test that constraint. Route defects to the owning issue via
   [diagnose](../diagnose/SKILL.md) in the same turn.
 
 ## Two decisions
 
-1. Give each recent change **keep**, **revert** or **still-open** using its
+1. Give each recent change **keep**, **revert** or **still-open** against its
    recorded rule and review date. Separate installation, first real consumer
-   use and measured effect. Keep when comparable evidence meets the target
-   with both guards intact. Revert if a protection was lost, a material
-   regression appears under comparable load, or adequate exposure shows no
-   benefit. Mark still-open when evidence is insufficient and name the next
-   observation and date. Extend once and surface any unresolved verdict to Lean.
-2. Name a deletion candidate first or explain why none qualifies. Choose at
-   most one next change aimed at the evidenced constraint, including zero
-   when the case is weak. Record any chosen change on a `workflow-change`
-   issue with a script metric as the target, two script metrics as guards,
-   a review date, a revert action and an install marker. Record direct owner
-   and OD workflow orders the same way, without delaying the work.
+   use and measured effect. Keep if comparable evidence meets the target
+   with both guards intact. Revert for a lost protection, material regression
+   under comparable load or no benefit after adequate exposure. For insufficient
+   evidence, name the next observation and date. Extend once, then escalate
+   unresolved verdicts to Lean.
+2. Name a deletion candidate or explain why none qualifies. Choose at most
+   one change for the evidenced constraint. Record it and direct owner or OD
+   orders on `workflow-change` issues with a script target, two script guards,
+   review date, revert action and install marker. Recording must not delay orders.
 
-Lean commissions a short read-only cross-family check for structural changes,
-reverts or safeguard removals. Follow [model resolution](../../../docs/DELEGATION.md#resolve-the-model-before-delegation)
-to select a configured `deep` route from a different family than the analyst's.
-For the default OpenAI analyst, explicitly select the Anthropic alternative.
-Adopt when both agree or defer with the disputed fact.
+For structural changes, reverts or safeguard removals, Lean commissions a
+short read-only check using the same evidence and a different family's
+configured [deep route](../../../docs/DELEGATION.md#resolve-the-model-before-delegation).
+Select Anthropic for the default OpenAI analyst. Adopt on agreement or defer
+with the disputed fact.
 
-Send one screen to Marcin in “Since you were away” using Warsaw dates and
-plain language. Put any owner decisions first under a visible heading, with
-a recommendation and default for each. Include up to two owner decisions.
+Send Marcin one “Since you were away” screen in plain language with Warsaw
+dates. Put up to two owner decisions first under a heading, each with a
+recommendation and default.
