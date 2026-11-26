@@ -51,9 +51,9 @@ def test_branch_refuses_detached_head(repo: Path) -> None:
 
 
 @pytest.mark.parametrize("branch", [None, "feature/ci+release"])
-def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None) -> None:
-    if branch:
-        git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None, monkeypatch) -> None:
+    side = branch or "side"
+    git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{side}")
     upstream = commit_on_origin(repo, "feature.txt")
     if branch:
         checkout = repo.parent / "single-branch"
@@ -61,6 +61,14 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
         assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
         repo = checkout
+    invoke = worktree._git
+    def interleave(path, *args, **kwargs):
+        result = invoke(path, *args, **kwargs)
+        if args[0] == "fetch":
+            git(path, "fetch", "-q", "origin", f"refs/heads/{side}")
+        return result
+
+    monkeypatch.setattr(worktree, "_git", interleave)
     wt = worktree.start(repo, "my-task", "main")
     assert wt == repo / ".worktrees" / "my-task"
     assert (wt / "feature.txt").exists(), "fetched origin/main before branching"
@@ -208,9 +216,9 @@ def test_dirty_head_and_diff(repo: Path) -> None:
     assert not worktree.is_dirty(wt)
     assert worktree.head(wt) != base
     diff = worktree.diff_since(wt, base)
-    assert "+print(1)" in diff and "new.py" in diff
+    assert b"+print(1)" in diff and b"new.py" in diff
     (wt / "new.py").write_text("print(2)\n")
-    assert "print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
+    assert b"print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
     assert worktree.is_dirty(wt)
 
 

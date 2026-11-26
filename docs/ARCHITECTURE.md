@@ -33,7 +33,9 @@ local-receipt exceptions. Merge authority permits merging by default outside
 reserved classes.
 
 Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
-reviews, finding threads, check statuses and merge state. CI and branch protection
+reviews, finding threads, check statuses and merge state. Within a task worktree,
+PR body writers lock the state directory from the live read through the update.
+CI and branch protection
 provide the hosted enforcement. Readiness is a checklist over these sources,
 not a tamper-proof security boundary: repository writers can edit PR evidence,
 and branch protection remains essential.
@@ -82,8 +84,9 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
 3. Branch PR lookup starts with the remote head and GitHub's commit-to-PR
    endpoint. It matches the source branch and repository, then re-reads PR
-   detail. Other commands prefer open PRs, then the newest closed PR, with
-   pull-list fallback when the branch or a matching open PR is absent. Before pushing
+   detail. Lookup falls back to listing open PRs if the branch or matching open
+   PR is absent, then checks the newest closed PR when requested. Check refresh
+   is open-only. Before pushing
    or writing, `pr` requires a confirmed merge or a complete closed-history read
    through GitHub REST. A confirmed merge completes that branch even when a
    newer duplicate exists. If the head commit cannot prove completion, the
@@ -179,7 +182,10 @@ The R3 runner separates fixed reviewer policy from supplied material
 inside the existing runner adapters. A fixed ASCII paragraph and validated scope
 enter Claude's append-system-prompt or Codex's developer_instructions override;
 commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
-that header, a newline and the exact raw diff without trimming task or diff text.
+that header, a newline and the Git patch, including carriage returns and the
+final newline. UTF-8 patches are supplied verbatim. For other patches, the
+prompt escapes invalid bytes and literal backslashes so the changes stay
+visible. The native inspection digest always binds the original Git bytes.
 The runner probes the selected Codex binary with `--version` and records its
 stdout in runner provenance and the saved review receipt. A failed probe uses
 RunnerBadOutput and existing family fallback before model input. Successful
@@ -492,10 +498,17 @@ either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.
-Only this worktree's clean passing keyed receipt is eligible; dirty trees run
-fresh. A tracked receipt is never eligible for reuse.
+Reuse only successful keyed stages from this worktree's clean receipt or
+checkpoint. Dirty trees run fresh. A tracked receipt is never eligible for reuse.
 Receipts that use saved stage results bind the current head and check settings.
 For delegated checks, both the receipt and the stage key bind the runner's launch
 path, resolved executable path and executable bytes. Unavailable runner identity
 prevents receipt reuse.
+
+A worker running the entire check is itself the coordinator and writes a
+receipt with its own effective settings. Transferring it preserves the
+fingerprint, if present. Local readiness applies the same receipt predicate
+as for any other coordinator. See [check receipts with remote execution](../SETUP.md#check-receipts-with-remote-execution)
+for the operator route.
+
 CI and merge-queue candidates run fresh without a local worktree receipt.
