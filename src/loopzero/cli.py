@@ -1710,12 +1710,15 @@ def _merge_with_mergify(
     wt: Path, config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
-    """Request Mergify after readiness verifies the source gates and queue configuration."""
-    if not readiness.ready:
-        hint = _merge_check_hint(config, pr, readiness)
-        raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
+    """Request admission after readiness, or observe a live queue entry without writing."""
     queue = config.mergify_queue
     assert queue is not None
+    if not readiness.ready:
+        if (deadline is not None and pr.base_ref == config.base_branch
+                and mergify.membership(config.repo, pr.number, queue) is not None):
+            return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), True)
+        hint = _merge_check_hint(config, pr, readiness)
+        raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )

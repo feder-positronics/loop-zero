@@ -4376,6 +4376,9 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
     ("head_changed", 1.0),
     ("timeout", 0.9),
     ("timeout", 1.0),
+    ("incompatible_landed", 1.0),
+    ("incompatible_absent", 1.0),
+    ("incompatible_unverified", 1.0),
     ("api_error", 1.0),
     ("unsafe_config", 1.0),
     ("config_error", 1.0),
@@ -4392,9 +4395,12 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         gh, head, wt, "success", isDraft=False,
         state="MERGED" if outcome.startswith("already_") else "OPEN",
     )
+    if outcome.startswith("incompatible_"):
+        receipt = wt / ".loopzero/checks.json"
+        receipt.write_text(json.dumps({**json.loads(receipt.read_text()), "settings_sha256": "0" * 64}))
     gh.respond("api -X", "")
     landed = outcome in {
-        "merged", "worktree_removed", "merged_head_changed", "already_merged", "already_merged_changed",
+        "merged", "incompatible_landed", "worktree_removed", "merged_head_changed", "already_merged", "already_merged_changed",
     }
     snapshots = []
     if not outcome.startswith("already_"):
@@ -4425,6 +4431,10 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     reads = []
     def membership(*_):
         reads.append(True)
+        if outcome == "incompatible_absent":
+            return None
+        if outcome == "incompatible_unverified":
+            raise mergify.MergifyError("HTTP 503")
         if outcome in {"unsafe_pending", "requested_head_changed"} and len(reads) == 1:
             return None
         if len(reads) > 1:
@@ -4454,7 +4464,9 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
-    if outcome in {"merged", "already_merged", "worktree_removed"}:
+    if outcome.startswith("incompatible_"):
+        assert reads == [True] * (2 if landed else 1)
+    if outcome in {"merged", "incompatible_landed", "already_merged", "worktree_removed"}:
         assert code == 0 and "e" * 40 in out and not wt.exists(), err
         if outcome == "worktree_removed":
             assert "warning: merged but worktree cleanup failed" in err
@@ -4465,6 +4477,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
             assert err.index('"Left the queue" comment') < err.index("post `@mergifyio queue`")
         message = {"ejected": "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`", "head_changed": "head changed",
                    "timeout": "timed out", "api_error": "HTTP 503",
+                   "incompatible_absent": "incompatible settings fingerprint", "incompatible_unverified": "HTTP 503",
                    "unsafe_config": "unsafe or unavailable", "unsafe_pending": "unsafe or unavailable", "config_error": "HTTP 503",
                    "requested_head_changed": "head changed", "merged_head_changed": "head changed", "already_merged_changed": "head changed", "ejection_head_changed": "head changed"}[outcome]
         assert message in out + err
