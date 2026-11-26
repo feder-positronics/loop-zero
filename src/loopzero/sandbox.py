@@ -212,6 +212,7 @@ def _execution_settings(config: Config, base: str) -> dict:
     settings = {k: v for k, v in asdict(config).items() if k in {
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits"}}
     settings["local_shell"] = CHECK_SHELL
+    settings["check_runner"] = []  # Removed setting kept so existing receipts stay valid.
     if config.inputs:
         settings["base"] = base
     settings["environment"] = check_environment(config)

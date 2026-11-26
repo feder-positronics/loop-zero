@@ -73,6 +73,15 @@ def make_config(**overrides) -> Config:
     return Config(**(defaults | overrides))
 
 
+@pytest.mark.parametrize("inputs,expected", [
+    ({}, "93d09d9b25849bd98e9f24f82ca2aa26dee49b6f683c07fd2797a4998401f6df"),
+    ({"echo hello": (".",)}, "7c7a6b12ef710f9ef79c882d268e1e8879f97e85a7319771cb3800e2eb17e60c")])
+def test_settings_fingerprint_is_stable_across_releases(inputs, expected):
+    # A changed digest makes ready refuse every receipt written by the previous release.
+    config = make_config(env_allowlist=Config.env_allowlist, inputs=inputs)
+    assert sandbox.settings_fingerprint(config) == expected
+
+
 @pytest.fixture
 def bwrap_log(fake_tool, tmp_path) -> Path:
     log = tmp_path / "bwrap.argv"
