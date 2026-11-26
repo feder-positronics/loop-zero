@@ -60,6 +60,12 @@ class SandboxUnavailable(LoopZeroError):
     """bubblewrap is missing or cannot create a sandbox on this host."""
 
 
+class StageRunnerFailure(LoopZeroError):
+    def __init__(self, exit_code: int, detail: str):
+        super().__init__(f"runner failure, not a check result: {detail}")
+        self.exit_code = exit_code
+
+
 @contextmanager
 def _private_directories():
     with ExitStack() as stack:
@@ -148,7 +154,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 result = replace(result, input_key=key)
             if ordinal > len(preparations) or result.exit_code:
                 results.append(result)
-                if checkpoint is not None and result.input_key and result.exit_code == 0:
+                if checkpoint is not None and not config.check_runner and result.input_key and result.exit_code == 0:
                     # The receipt stays nonpassing until final validation.
                     incomplete = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
                     unvisited = (previous[stage] for stage in commands[ordinal:] if stage in previous)
@@ -608,7 +614,7 @@ def _runner_executable(config: Config) -> str | None:
     return executable if Path(executable).is_absolute() else shutil.which(executable)
 
 
-def _stage_frame(stdout: str, binding: dict) -> dict:
+def _stage_frame(stdout: str, binding: dict, runner_exit: int) -> dict:
     frame = json.loads(stdout, object_pairs_hook=_unique_fields)
     if (not isinstance(frame, dict)
             or set(frame) != {*binding, "exit_code", "duration_s", "not_started", "tail"}
@@ -618,7 +624,8 @@ def _stage_frame(stdout: str, binding: dict) -> dict:
             or type(frame["duration_s"]) not in (int, float)
             or not math.isfinite(frame["duration_s"]) or frame["duration_s"] < 0
             or type(frame["not_started"]) is not bool
-            or not isinstance(frame["tail"], str)):
+            or not isinstance(frame["tail"], str)
+            or (runner_exit and not frame["exit_code"])):
         raise ValueError("invalid or mismatched stage result")
     return frame
 
@@ -630,6 +637,7 @@ def _dispatch_one(
     binding = {"worktree": str(worktree.resolve()), "head": head, "base": base, "command": command, "network": config.network,
                "env_sha256": hashlib.sha256(json.dumps(
                    env, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()}
+    runner_exit, failure_detail = 0, ""
     try:
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed before stage")
@@ -648,14 +656,17 @@ def _dispatch_one(
                    for path in {value, *value.split(":")}
                    if Path(path).is_absolute() or ".." in Path(path).parts):
                 raise ValueError("Stage runner references task worktree")
-            done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
-                             input=json.dumps({**binding, "env": env}), encoding="utf-8")
-        if done.exit_code:
+            try:
+                done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
+                                 input=json.dumps({**binding, "env": env}), encoding="utf-8")
+            except _proc.ProcTimeout as exc:
+                done = _proc.Completed(TIMEOUT_EXIT, exc.stdout, exc.stderr, exc.duration_s or timeout)
+                failure_detail = f"timed out after {timeout:g}s"
+        runner_exit = done.exit_code
+        if runner_exit:
             stderr = _proc.tail(_redact_check_output(config, done.stderr))[-2000:]
-            detail = f"Stage runner failed: process exit {done.exit_code}"
-            return CheckResult(command, done.exit_code, done.duration_s,
-                               f"{detail}\n{stderr}".rstrip())
-        frame = _stage_frame(done.stdout, binding)
+            failure_detail = f"{failure_detail or f'process exit {runner_exit}'}\n{stderr}".rstrip()
+        frame = _stage_frame(done.stdout, binding, runner_exit)
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed after stage")
         if frame["not_started"]:
@@ -670,10 +681,6 @@ def _dispatch_one(
             return local.results[-1]
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
                            _check_tail(frame["tail"], config))
-    except _proc.ProcTimeout as exc:
-        return CheckResult(command, TIMEOUT_EXIT,
-                           exc.duration_s if exc.duration_s is not None else timeout,
-                           _check_tail(exc.stdout, config, suffix=f"\n[loopzero] timed out after {timeout:g}s"))
     except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
-        detail = _redact_check_output(config, str(exc))
-        return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {detail}"))
+        detail = failure_detail or _check_tail(str(exc), config)
+        raise StageRunnerFailure(runner_exit or 1, detail) from exc

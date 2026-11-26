@@ -543,9 +543,11 @@ ASCII escaping and compact separators (`,` and `:`). Stdout must contain exactly
 one JSON object echoing worktree, head, base, command, network and env_sha256, plus
 `exit_code` (integer), `duration_s` (finite nonnegative number), `not_started`
 (boolean), and `tail` (string). Env values must not be echoed. Diagnostics belong
-on stderr. Missing, extra, duplicate, malformed or mismatched fields and runner
-process failures fail the stage closed. Runner timeouts report exit code 124
-and the measured elapsed duration. `not_started=true` requires exit_code=0,
+on stderr. A valid reported stage failure is authoritative even if the runner
+also exits nonzero. Missing, extra, duplicate, malformed or mismatched fields
+and interruption before a complete result are runner failures. Check preserves
+the prior receipt, returns the runner status (124 for a supervisor timeout), and
+does not publish a stage verdict. A receipt is eligible only for its own HEAD. `not_started=true` requires exit_code=0,
 duration_s=0 and empty tail, and permits only local fallback through bwrap.
 
 The runner may read `worktree` as data to execute the exact clean head, including
@@ -557,8 +559,8 @@ the authoritative `checks.json` receipt. Checks lock the task state directory
 through execution and receipt publication. A waiter can reuse a newly published
 passing receipt when HEAD, settings and declared inputs match. Writers recheck
 HEAD and atomically replace the receipt from a synced sibling temporary file.
-Successful keyed stages are checkpointed in the same receipt
-for reuse. A checkpoint cannot replace a clean pass for the same head and
+Successful local keyed stages are checkpointed in the same receipt
+for reuse. Delegated results are published only after the check completes. A checkpoint cannot replace a clean pass for the same head and
 settings or satisfy readiness before final worktree validation. Completed
 failures still replace passes. Runners cannot select stages or mint receipts. Stage admission
 belongs to the runner: the outer `loopzero check`

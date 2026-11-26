@@ -1931,6 +1931,9 @@ def _run(args: argparse.Namespace) -> int:
     try:
         with _proc.unwind_on_sigterm():
             return globals()[f"cmd_{args.command}"](args)
+    except sandbox.StageRunnerFailure as exc:
+        print(f"loopzero {args.command}: {_one_line(exc)}", file=sys.stderr)
+        return exc.exit_code
     except IndependentReviewerUnavailable as exc:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
         return 4
@@ -1952,4 +1955,5 @@ def _one_line(exc: BaseException) -> str:
 
 
 if __name__ == "__main__":
-    sys.exit(_run(_module_args))
+    from loopzero._cli_entry import _exit_status
+    sys.exit(_exit_status(_run(_module_args)))

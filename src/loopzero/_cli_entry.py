@@ -7,4 +7,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(build_parser(), argv)
     from loopzero.cli import _run
 
-    return _run(args)
+    return _exit_status(_run(args))
+
+
+def _exit_status(code: int) -> int:
+    if code < 0:
+        import signal
+        if -code not in (signal.SIGKILL, signal.SIGSTOP):
+            signal.signal(-code, signal.SIG_DFL)
+        signal.raise_signal(-code)
+    return code
