@@ -81,7 +81,7 @@ def test_broken_local_link_fails_even_with_guide_update(git_repo, target):
 
 def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo):
     base = prepare(git_repo)
-    path = git_repo / "src/loopzero/cli.py"
+    path = git_repo / "src/loopzero/_cli_args.py"
     path.parent.mkdir(parents=True)
     path.write_text("def build_parser():\n    return 'public'\n\ndef _fix():\n    return 1\n")
     git(git_repo, "add", ".")
