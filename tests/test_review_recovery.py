@@ -225,20 +225,20 @@ def test_interrupted_explicit_repost_recovers_repost_body(wt, gh, fake_bin, monk
     assert support.marker(head, "primary", "repost") in support.posted_review(gh)["body"]
 
 
-@pytest.mark.parametrize("failure", ["timeout", "transient"])
-def test_recovery_transport_caps_request_time_and_does_not_retry(monkeypatch, failure):
-    timeouts = []
+@pytest.mark.parametrize("failure,budget", [("timeout", 0.5), ("transient", 0.5), ("transient", 10)])
+def test_recovery_transport_retries_only_within_deadline(monkeypatch, failure, budget):
+    timeouts, sleeps = [], []
     def request(argv, **kwargs):
         timeouts.append(kwargs["timeout"])
         if failure == "timeout":
             raise _proc.ProcTimeout("timeout")
         return _proc.Completed(1, "", "HTTP 503", 0)
     monkeypatch.setattr(github, "run", request)
-    monkeypatch.setattr(github, "app_token", lambda: "")
-    monkeypatch.setattr(github.time, "monotonic", lambda: 10.0)
-    with github.bounded_reads(github.time.monotonic() + 0.5), pytest.raises((github.GhError, _proc.ProcTimeout)):
+    monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
+    monkeypatch.setattr(github.time, "monotonic", lambda: 10.0 + sum(sleeps))
+    with github.bounded_reads(10 + budget, retry=True), pytest.raises((github.GhError, _proc.ProcTimeout)):
         github.api_get("repos/acme/widgets/pulls/7/reviews")
-    assert timeouts == [0.5]
+    assert (timeouts, sleeps) == (([10, 5], [5]) if budget == 10 else ([0.5], []))
 
 
 @pytest.mark.parametrize("source", ["model", "repost"])
