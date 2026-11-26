@@ -7,11 +7,13 @@ import http.client
 import json
 import os
 import re
+import signal
 import stat
 import ssl
 import time
 import urllib.error
 import urllib.request
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -73,12 +75,29 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _retry_sleep = time.sleep
 
 
-def _open(request: urllib.request.Request):
+class _RequestDeadline(Exception):
+    """Bypass transport handlers that retry OSError."""
+
+
+@contextmanager
+def _open(request: urllib.request.Request, timeout: float = 30):
+    def expire(_signum, _frame):
+        raise _RequestDeadline()
+
+    if signal.getitimer(signal.ITIMER_REAL) != (0, 0):
+        raise TimeoutError("Mergify HTTP request cannot start with an active alarm")
     try:
-        return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
-    except ValueError:
-        # The HTTP client can include the Authorization value in a header error.
-        raise MergifyError("Mergify API request has an invalid URL or header") from None
+        with ExitStack() as cleanup:
+            cleanup.callback(signal.signal, signal.SIGALRM, signal.signal(signal.SIGALRM, expire))
+            cleanup.callback(signal.setitimer, signal.ITIMER_REAL, 0)
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+            try:
+                response = urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout)
+            except ValueError:
+                raise MergifyError("Mergify API request has an invalid URL or header") from None
+            yield cleanup.enter_context(response)
+    except _RequestDeadline:
+        raise TimeoutError("Mergify HTTP request timed out") from None
 
 
 def api_get(repo: str, suffix: str) -> object | None:

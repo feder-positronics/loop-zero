@@ -95,7 +95,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
                                                    "Runner requires a clean worktree"),))
     base = _check_base(config, worktree)
-    settings_sha256 = settings_fingerprint(config, worktree, base=base)
+    settings_sha256 = settings_fingerprint(config)
     previous = _previous(worktree, settings_sha256) if config.inputs and base and settings_sha256 and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
@@ -161,7 +161,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     # A runner upgrade during execution makes the resulting receipt unverified.
     settings_sha256 = (
         settings_sha256 if not config.check_runner
-        or settings_sha256 == settings_fingerprint(config, worktree, base=base) else None
+        or settings_sha256 == settings_fingerprint(config) else None
     )
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
@@ -228,11 +228,9 @@ def _execution_settings(config: Config, base: str) -> dict:
     return settings
 
 
-def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = None) -> str | None:
-    """Bind a receipt to its check execution and stage reuse settings."""
-    if base is None:
-        base = _check_base(config, worktree)
-    settings = _execution_settings(config, base)
+def settings_fingerprint(config: Config) -> str | None:
+    """Bind a receipt to effective check settings, independent of the base revision."""
+    settings = _execution_settings(config, config.base_branch)
     if config.check_runner and settings["runner_executable"] is None:
         return None
     if not config.check_runner:
