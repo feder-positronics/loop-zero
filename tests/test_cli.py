@@ -4877,6 +4877,10 @@ def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, co
         (folder / f"{name}.py").write_text("# counted line\n" * lines)
         git(checkout, "add", "src")
         git(checkout, "commit", "-qm", name)
+    # The trusted checker must import standard modules, not candidate files.
+    (wt / "ast.py").write_text("raise AssertionError('candidate module loaded')\n")
+    git(wt, "add", "ast.py")
+    git(wt, "commit", "-qm", "add candidate module shadow")
     # Deliberately leave origin/main stale in the source repository.
     git(repo, "push", "--no-verify", str(repo.parent / "origin.git"), "main")
     git(repo, "update-ref", "refs/remotes/origin/main", fork)
@@ -4895,5 +4899,6 @@ def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, co
         assert code == 3 and "size budget" not in out + err
     else:
         assert code == 1 and f"src={cap + 8} (base 26, delta {cap - 18}, cap {cap}" in out + err
+        assert "candidate module loaded" not in out + err
     assert head_of(wt) == head
     assert not (wt / "src/loopzero/upstream.py").exists()

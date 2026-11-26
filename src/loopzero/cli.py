@@ -1227,7 +1227,8 @@ def _prequeue_size_budget(
     with tempfile.TemporaryDirectory(prefix="loopzero-size-") as directory:
         root = Path(directory)
         env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-               "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1", "PYTHON": sys.executable}
+               "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+               "PYTHON": sys.executable, "PYTHONSAFEPATH": "1"}
         git = partial(_git, root, extra_env=env)
         git("clone", "--shared", "--no-checkout", "--template=", str(wt), ".")
         # Fetch with the user's credential configuration for private origins.
