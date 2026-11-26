@@ -272,65 +272,75 @@ def update_evidence(value, path, replacement):
     value[path[-1]] = replacement
 
 
-@pytest.mark.parametrize("path,replacement", [
-    (("extra",), 1),
-    (("version",), 2),
-    (("chunk_count",), True),
-    (("pr",), 7.0),
-    (("receipt",), "/private/review.json"),
-    (("raw_sha256",), "A" * 64),
-    (("calls", 0, "head_event", "start"), -1),
-    (("calls",), []),
-    (("calls", 0, "session"), None),
-    (("kind",), "delta"),
-    (("repo",), "another/repo"),
-    (("pr",), 8),
-    (("publisher",), "stranger"),
-    (("head",), "f" * 40),
-    (("complete",), False),
-    (("calls", 0, "fatal"), "present"),
-])
-def test_invalid_latest_evidence_cannot_revive_older_approval(published_native, path, replacement):
-    result, rendered, line = published_native
-    value = runners.decode_codex_evidence(line)
-    update_evidence(value, path, replacement)
-    latest = row(result, rendered.replace(line, packed(value)))
-    assert eligible(row(result), latest) is None
-
-
 @pytest.mark.parametrize("mutation", [
     "duplicate_header", "before_marker", "after_prose", "noncanonical", "duplicate_key", "oversized",
+    "fence", "wrong_adjudication", "unknown_leading", "whitespace_json", "invalid_event_offset",
+    *[
+        (("extra",), 1),
+        (("version",), 2),
+        (("chunk_count",), True),
+        (("pr",), 7.0),
+        (("receipt",), "/private/review.json"),
+        (("raw_sha256",), "A" * 64),
+        (("calls", 0, "head_event", "start"), -1),
+        (("calls",), []),
+        (("calls", 0, "session"), None),
+        (("kind",), "delta"),
+        (("repo",), "another/repo"),
+        (("pr",), 8),
+        (("publisher",), "stranger"),
+        (("head",), "f" * 40),
+        (("complete",), False),
+        (("calls", 0, "fatal"), "present"),
+        (("calls", 0, "reported", "model"), "m" * 129),
+        (("calls", 0, "requested", "effort"), "e" * 33),
+    ],
 ])
-def test_strict_transport_and_no_older_approval_revival(published_native, mutation):
+def test_invalid_review_evidence_is_rejected(published_native, mutation):
     result, rendered, line = published_native
-    if mutation == "duplicate_header":
+    value = runners.decode_codex_evidence(line)
+    without_header = rendered.replace(line + "\n", "")
+    if isinstance(mutation, tuple):
+        path, replacement = mutation
+        update_evidence(value, path, replacement)
+        changed = rendered.replace(line, packed(value))
+    elif mutation == "invalid_event_offset":
+        update_evidence(value, ("calls", 0, "diff_event", "end"), value["raw_bytes"] + 1)
+        changed = rendered.replace(line, packed(value))
+    elif mutation == "duplicate_header":
         changed = rendered.replace(line, line + "\n" + line)
     elif mutation == "before_marker":
-        changed = line + "\n" + rendered.replace(line + "\n", "")
+        changed = line + "\n" + without_header
     elif mutation == "after_prose":
-        changed = rendered.replace(line + "\n", "") + "\n" + line
+        changed = without_header + "\n" + line
+    elif mutation == "fence":
+        changed = without_header + "\n```\n" + line + "\n```"
     elif mutation == "noncanonical":
         changed = rendered.replace(line, line[:-4] + "= -->")
     elif mutation == "duplicate_key":
-        value = runners.decode_codex_evidence(line)
-        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).replace(
-            '"version":1', '"version":1,"version":1'
-        )
-        changed = rendered.replace(line, packed_json(payload))
-    else:
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        changed = rendered.replace(line, packed_json(payload.replace('"version":1', '"version":1,"version":1')))
+    elif mutation == "oversized":
         changed = rendered.replace(line, runners.CODEX_HEADER + "x" * 8192 + " -->")
-    prior = row(result)
-    latest = row(result, changed)
-    found = eligible(prior, latest)
-    if mutation == "after_prose":
-        assert eligibility.review_projection(latest, result.head, "acme/widgets", 7) == (
-            False,
-            None,
-        )
-        # Ordinary clean legacy is UNKNOWN; quoted projection is never inspection proof.
-        assert found is not None
+    elif mutation == "wrong_adjudication":
+        marker = "<!-- loopzero:adjudication v=1 replaces=1 target=" + ("f" * 40) + " -->"
+        changed = rendered.replace(line, line + "\n" + marker)
+    elif mutation == "unknown_leading":
+        changed = rendered.replace(line, line + "\n<!-- loopzero:unadopted v=1 -->")
     else:
-        assert found is None
+        changed = rendered.replace(line, packed_json(json.dumps(value, indent=2)))
+    if mutation in ("after_prose", "fence"):
+        assert projection(result, changed) == (False, None)
+    elif mutation in ("wrong_adjudication", "unknown_leading", "whitespace_json", "invalid_event_offset") or (
+        isinstance(mutation, tuple) and mutation[0] in (("calls", 0, "reported", "model"), ("calls", 0, "requested", "effort"))
+    ):
+        assert projection(result, changed) == (True, None)
+    if isinstance(mutation, tuple) or mutation in (
+        "duplicate_header", "before_marker", "after_prose", "noncanonical", "duplicate_key", "oversized",
+    ):
+        found = eligible(row(result), row(result, changed))
+        # Clean legacy may remain eligible, but a quoted header supplies no inspection proof.
+        assert (found is not None) is (mutation == "after_prose")
 
 
 def test_overflow_is_hold_without_silent_chunk_truncation(native):
@@ -488,35 +498,6 @@ def test_legacy_toolfree_remains_unknown_without_projection(tmp_path):
     assert eligible(row(legacy))
     cli._save_review(tmp_path, legacy)
     assert cli._load_review(tmp_path, legacy.head, "primary").raw == legacy.raw
-
-
-@pytest.mark.parametrize("change", [
-    "fence", "wrong_adjudication", "unknown_leading", "whitespace_json",
-    "oversized_model", "oversized_effort", "invalid_event_offset",
-])
-def test_leading_block_is_anchored_and_schema_complete(published_native, change):
-    result, rendered, line = published_native
-    value = runners.decode_codex_evidence(line)
-    if change == "fence":
-        modified = rendered.replace(line + "\n", "") + "\n```\n" + line + "\n```"
-    elif change == "wrong_adjudication":
-        marker = "<!-- loopzero:adjudication v=1 replaces=1 target=" + ("f" * 40) + " -->"
-        modified = rendered.replace(line, line + "\n" + marker)
-    elif change == "unknown_leading":
-        modified = rendered.replace(line, line + "\n<!-- loopzero:unadopted v=1 -->")
-    elif change == "whitespace_json":
-        modified = rendered.replace(line, packed_json(json.dumps(value, indent=2)))
-    else:
-        path, replacement = {
-            "oversized_model": (("calls", 0, "reported", "model"), "m" * 129),
-            "oversized_effort": (("calls", 0, "requested", "effort"), "e" * 33),
-            "invalid_event_offset": (("calls", 0, "diff_event", "end"), value["raw_bytes"] + 1),
-        }[change]
-        update_evidence(value, path, replacement)
-        modified = rendered.replace(line, packed(value))
-    present, evidence = projection(result, modified)
-    assert evidence is None
-    assert present is (change != "fence")
 
 
 def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, tmp_path):
