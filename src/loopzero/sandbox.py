@@ -288,7 +288,7 @@ def _execution_settings(config: Config, base: str) -> dict:
         settings["runner_executable"] = _runner_identity(config)
         settings["environment"] = _proc.build_env(config.env_allowlist)
     else:
-        settings["environment"] = _sandbox_environment(config)
+        settings["environment"] = check_environment(config)
     return settings
 
 
@@ -372,13 +372,9 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str]) -> 
         remedy = (f"Git object alternate {alternate!r} is not readable in the check sandbox. "
                   "Create a standalone clone without --shared/--reference, then run "
                   "loopzero start there and rerun loopzero check.")
+        command = ("/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"', "loopzero-alternate", alternate)
         try:
-            result = _run_bwrap(
-                config, worktree, prefix,
-                ("/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"',
-                 "loopzero-alternate", alternate),
-                timeout=GIT_TIMEOUT,
-            )
+            result = _run_bwrap(config, worktree, prefix, command, timeout=GIT_TIMEOUT)
         except _proc.ProcTimeout:
             raise SandboxUnavailable(f"Git alternate visibility probe timed out. {remedy}") from None
         if result.exit_code != 0:
@@ -452,15 +448,12 @@ def _run_one(
 ) -> CheckResult:
     try:
         limits = config.limits
-        done = _run_bwrap(
-            config, worktree, prefix,
-            ("prlimit",
-             f"--as={_cap_limit(limits.memory_mb * 1024 * 1024, resource.RLIMIT_AS)}",
-             f"--fsize={_cap_limit(limits.file_mb * 1024 * 1024, resource.RLIMIT_FSIZE)}",
-             "--", *CHECK_SHELL, command),
-            timeout=timeout,
-            merge_output=True,
+        argv = (
+            "prlimit", f"--as={_cap_limit(limits.memory_mb * 1024 * 1024, resource.RLIMIT_AS)}",
+            f"--fsize={_cap_limit(limits.file_mb * 1024 * 1024, resource.RLIMIT_FSIZE)}",
+            "--", *CHECK_SHELL, command,
         )
+        done = _run_bwrap(config, worktree, prefix, argv, timeout=timeout, merge_output=True)
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,
                            _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
@@ -486,23 +479,18 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}{remedy}")
 
 
-def _sandbox_environment(config: Config) -> dict[str, str]:
-    return {
-        **SANDBOX_ENV,
-        **_proc.build_env(config.env_allowlist),
-        **dict(config.env),
-        "HOME": SANDBOX_HOME,
-    }
+def check_environment(config: Config) -> dict[str, str]:
+    inherited = _proc.build_env(config.env_allowlist, dict(config.env))
+    return SANDBOX_ENV | inherited | {"HOME": SANDBOX_HOME}
 
 
 def _run_bwrap(
     config: Config, worktree: Path, prefix: list[str], command: Sequence[str],
     *, timeout: float, merge_output: bool = False,
 ) -> _proc.Completed:
-    # Let bwrap apply settings after clearing its environment. Only PATH is
-    # needed to locate the launcher. The option stream is private to the child.
+    # Apply settings inside bwrap without exposing the option stream in argv.
     with tempfile.TemporaryFile() as options:
-        for name, value in _sandbox_environment(config).items():
+        for name, value in check_environment(config).items():
             if "\0" in value:
                 raise ValueError("embedded null byte in check environment")
             options.write(os.fsencode(f"--setenv\0{name}\0{value}\0"))
@@ -572,7 +560,7 @@ def bwrap_argv(
         argv += ["--bind", str(source), str(worktree / entry)]
     argv += ["--chdir", str(worktree), *(["--clearenv"] if clearenv else [])]
     if not clearenv:
-        for key, value in _sandbox_environment(config).items():
+        for key, value in check_environment(config).items():
             argv += ["--setenv", key, value]
     argv.append("--")
     return argv
