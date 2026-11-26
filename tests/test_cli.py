@@ -4824,6 +4824,8 @@ def test_cross_checkout_check_refresh_keeps_review_summary(wt, repo, head, monke
     with ThreadPoolExecutor() as pool:
         check = pool.submit(cli._refresh_pr_checks, wt, cfg)
         assert patch_started.wait(10)
+        with lock(REPO, 8):
+            assert not check.done()
         monkeypatch.chdir(repo)
         assert cli._finish_review(cfg, pr, result) == 0
         check.result(timeout=10)
