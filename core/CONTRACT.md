@@ -261,10 +261,8 @@ configured `[checks].ro_paths`/`[checks].writable` home paths, no network unless
 `PATH HOME LANG LC_ALL TERM`) plus `[checks].env`.
 
 Local checks and native reviews require working `bwrap` and fail without it.
-A configured [stage runner](../docs/ARCHITECTURE.md#check-stage-runners) can
-execute checks without local `bwrap`. If the runner reports that it did not
-start a stage, local fallback requires `bwrap`. Checks and reviews recheck HEAD
-and dirtiness after running. Changes during the run invalidate results.
+Checks and reviews recheck HEAD and dirtiness after running. Changes during the
+run invalidate results.
 
 Reviews use read-only worktree/Git, private HOME, reviewer runtime paths and
 network. Auth binds remain route-specific exceptions to state isolation;
