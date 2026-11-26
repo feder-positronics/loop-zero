@@ -71,9 +71,9 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     return gh
 
 
-def approval(head=HEAD):
-    return {"state": "APPROVED", "commit_id": head, "user": {"login": "trusted-publisher"},
-            "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n**approve**"}
+def approval(head=HEAD, *, state="APPROVED", verdict="**approve**"):
+    return {"state": state, "commit_id": head, "user": {"login": "trusted-publisher"},
+            "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n{verdict}"}
 
 
 def check_source(publisher, states, *, exit_code=0, error=None, match=None):
@@ -130,7 +130,9 @@ def test_hosted_review_coverage_after_source_head_changes(
     source = fixtures.rest_pr_json(pr_json(headRefOid=head))
     source["base"]["sha"] = base
     publisher.respond(f"api repos/{REPO}/pulls/7", source)
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [approval(reviewed) | {"state": "COMMENTED"}])
+    verdict = "loopzero primary review by claude: **approve** (0 critical, 0 important, 0 suggestion)"
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1",
+                      [approval(reviewed, state="COMMENTED", verdict=verdict)])
     publisher.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": "ahead"})
     monkeypatch.setattr(hosted.candidate_mod, "fetched_git",
                         lambda *_: nullcontext(partial(git, git_repo)))

@@ -96,9 +96,10 @@ def raw_details(raw):
     return f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
 
 
-def assert_single_publication(gh, fake_bin):
+def assert_single_publication(gh, fake_bin, *, allow_body_update=False):
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    writes = [c["argv"][1] for c in gh.calls if "--input" in c]
+    assert (writes.count(support.post_key().split()[1]) if allow_body_update else len(writes)) == 1
 
 
 @pytest.mark.parametrize("override", [None, "pr", "head", "raw", "bytes", "effort"])
@@ -135,8 +136,7 @@ def test_plain_review_surfaces_receipt_after_interruption_before_post(
         assert path.read_bytes() == saved
         assert not any("--input" in c for c in gh.calls)
         assert run(capsys, "review", "--repost")[0] == 0
-        assert_single_publication(gh, fake_bin)
-        assert any(c["argv"][1] == support.post_key().split()[1] and "--input" in c for c in gh.calls)
+        assert_single_publication(gh, fake_bin, allow_body_update=True)
     else:
         assert code == 0, err
         assert (fake_bin / "claude.runs").read_text().splitlines() == ["run", "run"]
