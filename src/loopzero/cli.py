@@ -580,8 +580,8 @@ def _refresh_existing_pr_checks(wt: Path, config: Config) -> None:
         if upstream.exit_code != 0:
             return
         branch, head = worktree.branch(wt), worktree.head(wt)
-        pr = github.pr_for_branch(config.repo, branch)
-        if pr is not None and pr.state == "OPEN" and pr.head_sha == head:
+        pr = github.pr_for_branch(config.repo, branch, open_only=True)
+        if pr is not None and pr.head_sha == head:
             _update_pr_checks(wt, head, config, pr)
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
@@ -915,12 +915,15 @@ def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
 def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettingsLayout, bool]]:
     old_settings = "requested_settings" not in result.provenance
     formats: list[tuple[github.ReviewSettingsLayout, bool]] = [("current", False)]
-    if runners.codex_evidence(result) is None:
+    codex = runners.codex_evidence(result)
+    if codex is None:
         formats.append(("current", True))
         if old_settings:
             formats.append(("summary", True))
     if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
         formats.append(("requested-reported", True))
+    if codex is not None and all("configured" not in call for call in codex["calls"]):
+        formats.append(("requested-reported", False))
     if result.family == "codex" and old_settings:
         formats.append(("summary", False))
     return [(prefix, settings, display)
@@ -1512,16 +1515,12 @@ def _merge_with_mergify(
     config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
-    """Request Mergify after source gates pass; BEHIND is admission state, not readiness."""
-    behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
-    blockers = tuple(reason for reason in readiness.reasons if reason != behind)
-    if blockers:
+    """Request Mergify after readiness verifies the source gates and queue configuration."""
+    if not readiness.ready:
         hint = _merge_check_hint(config, pr, readiness)
-        raise CliError("not ready to request Mergify: " + "; ".join(blockers) + hint)
+        raise CliError("not ready to request Mergify: " + "; ".join(readiness.reasons) + hint)
     queue = config.mergify_queue
     assert queue is not None
-    if not mergify.configured(config.repo, config.base_branch, queue):
-        raise CliError("Mergify queue configuration is unverified or permits in-place head updates")
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )
