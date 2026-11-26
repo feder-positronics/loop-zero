@@ -31,17 +31,16 @@ permissions, with visual proof for UI changes per [Reporting](../../CONTRACT.md#
 Leave unobserved acceptance open with a next-action owner. Record revision,
 observations, trade-offs and limits in Notes or human Validation.
 Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
-If readiness rejects the receipt plan or settings fingerprint, align the CLI
-version and effective check settings with readiness, including the trusted
-workflow and stage coordinator, before retrying the slotted check.
 
 Run commands expected to exceed about two minutes as [long-running jobs](../../../docs/DELEGATION.md#long-running-jobs)
 and follow the brief's [waiting and output rules](../../../docs/DELEGATION.md#briefs-and-ownership).
+Do not end the turn or report done before the job's `LOG.exit` exists, unless you report it killed and failed.
 
 Keep receipts, evidence, review artifacts and handoffs on the PR, issue or named durable scratch;
 reserve `/tmp` for running-command logs, builds and browser runs. At task finish, leave leftover
 worktrees and generated files to the [retention job](../../../docs/DELEGATION.md#leftover-cleanup) named in host
 or repository instructions; with no named job or unverified conditions, preserve them and report cleanup to the owner.
+For confirmed-abandoned tasks outside its scope, give the owner the [manual procedure](../../../SETUP.md#removing-an-abandoned-task-worktree).
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head, including base updates after review.
