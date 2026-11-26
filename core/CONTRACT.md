@@ -136,7 +136,7 @@ of draft and queues it directly in GitHub:
 
 - The failure also occurs on main or is on the consumer's documented flake list.
 - The failing stage is a guard, not a test, and the stage it guards passed.
-- The head moved only by a clean rebase and the old head was green.
+- The head moved only by a clean base merge and the old head was green.
 
 This is the documented owner route; a red receipt still blocks `loopzero ready`
 and `loopzero merge`.
