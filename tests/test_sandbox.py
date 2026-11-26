@@ -542,7 +542,7 @@ def test_silent_stage_reports_live_metadata_then_completion(
     monkeypatch.setattr(sandbox, "_run_one", run_stage)
     report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
     assert report.results[0].exit_code == exit_code
-    assert report.results[0].tail == "credential-value\nprivate-stderr"
+    assert report.results[0].tail == "[REDACTED]\nprivate-stderr"
     statuses = [event for event in events if event not in cfg.checks]
     heartbeats = [event for event in statuses if "running" in event]
     assert heartbeats and all(re.fullmatch(
@@ -724,14 +724,16 @@ def fetched_base(git_repo):
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change):
-    cfg = make_config(checks=('echo one', 'echo two'),
+    cfg = make_config(checks=('echo one', 'echo two'), env=(("AUDIT_TOKEN", "fake-cached-token"),),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
         assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted', fetched_base) is None
     whole = replace(cfg, inputs={'*': ('.',)})
     key = sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     assert key is not None
-    _save_report(git_repo, sandbox.run_checks(cfg, git_repo))
+    first = sandbox.run_checks(cfg, git_repo)
+    original_tails = tuple(replace(r, tail=f"{r.tail} fake-cached-token") for r in first.results)
+    _save_report(git_repo, replace(first, results=original_tails))
     receipt = git_repo / '.loopzero/checks.json'
     git(git_repo, 'config', 'core.excludesFile', str(git_repo / '.git/info/exclude'))
     with (git_repo / '.git/info/exclude').open('a') as stream:
@@ -767,6 +769,8 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     report = sandbox.run_checks(cfg, git_repo, status=(messages := []).append)
     assert [r.command for r in report.results] == list(cfg.checks)
     assert all(bool(r.reused_from) == (change == 'other') for r in report.results)
+    if change == 'other':
+        assert [r.tail for r in report.results] == ['one [REDACTED]', 'two [REDACTED]']
     assert any('reused ' in m for m in messages) == (change == 'other')
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 

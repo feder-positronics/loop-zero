@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,11 @@ class Completed:
 def tail(text: str, lines: int = TAIL_LINES) -> str:
     """Return the last `lines` lines of `text`, without a trailing newline."""
     return "\n".join(text.rstrip("\n").splitlines()[-lines:])
+
+
+def redact_values(text: str, values: Iterable[str]) -> str:
+    secrets = sorted({value for value in values if value}, key=len, reverse=True)
+    return re.sub("|".join(map(re.escape, secrets)), "[REDACTED]", text) if secrets else text
 
 
 def build_env(

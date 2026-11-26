@@ -14,9 +14,11 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
 
 @pytest.mark.parametrize('base_ref', ['stale', 'missing', 'recorded'])
 @pytest.mark.parametrize('body,verdict,tails', [
-    ('print(json.dumps(r))', True, ['ok', 'ok']),
-    ('r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
-    ('print("x" * 3000 + "worker socket unavailable", file=sys.stderr);sys.exit(42)', False, None),
+    ('r["tail"]="ok "+env["AUDIT_TOKEN"];print(json.dumps(r))', True, ['ok [REDACTED]'] * 2),
+    ('r["exit_code"]=7;r["tail"]="ok "+env["AUDIT_TOKEN"];print(json.dumps(r))', False, ['ok [REDACTED]']),
+    ('print("x" * 3000 + "worker socket unavailable " + env["AUDIT_TOKEN"], file=sys.stderr);sys.exit(42)', False, None),
+    ('r["exit_code"]=7;r["tail"]=env["AUDIT_TOKEN"]+"Ω"*8183+" newest";print(json.dumps(r))', False,
+     ['[REDACTED]' + 'Ω' * 8183 + ' newest']),
     ('r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
      ['Ω' * 8188 + ' newest']),
     ('subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
@@ -43,18 +45,19 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         git(git_repo, 'update-ref', 'refs/remotes/origin/main', base)
     if base_ref == 'missing':
         git(git_repo, 'branch', '-D', 'main')
+    configured = {"UV_CACHE_DIR": "/operator/cache", "AUDIT_TOKEN": "ghs_FAKE0123"}
     body = (f'repo=r["worktree"]\nassert r["base"] == "{base}"\n'
             'assert not Path.cwd().is_relative_to(Path(repo))\n'
-            f'assert r.pop("env") == {dict(sandbox.SANDBOX_ENV, UV_CACHE_DIR="/operator/cache")!r}\n'
+            f'env=r.pop("env");assert env == {dict(sandbox.SANDBOX_ENV, **configured)!r}\n'
             'assert r["network"] is True\n'
             'assert r["env_sha256"] == hashlib.sha256(json.dumps('
-            f'{dict(sandbox.SANDBOX_ENV, UV_CACHE_DIR="/operator/cache")!r},'
+            f'{dict(sandbox.SANDBOX_ENV, **configured)!r},'
             'sort_keys=True,separators=(",", ":")).encode()).hexdigest()\n' + body)
     path = tmp_path / 'runner.py'
     path.write_text('import hashlib,json,sys,subprocess\nfrom pathlib import Path\nr=json.load(sys.stdin)\nr.update(exit_code=0,duration_s=0.1,not_started=False,tail="ok")\n' + body)
     calls = []
     report = sandbox.run_checks(make_config(checks=('echo one', 'echo two'),
-                                env=(("UV_CACHE_DIR", "/operator/cache"),), network=True,
+                                env=tuple(configured.items()), network=True,
                                 check_runner=(sys.executable, str(path))), git_repo, progress=calls.append)
     assert report.ok is verdict
     if 'exit_code"]=7' in body:
@@ -62,7 +65,7 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
     if 'sys.exit(42)' in body:
         result = report.results[0]
         assert result.exit_code == 42 and result.duration_s > 0
-        assert result.tail == 'Stage runner failed: process exit 42\n' + ('x' * 3000 + 'worker socket unavailable')[-2000:]
+        assert result.tail == 'Stage runner failed: process exit 42\n' + ('x' * 3000 + 'worker socket unavailable [REDACTED]')[-2000:]
     if tails is not None:
         assert [r.tail for r in report.results] == tails
     if not verdict:
@@ -152,14 +155,15 @@ def test_runner_timeout(git_repo, monkeypatch):
     original = sandbox._proc.run
     def run(argv, **kwargs):
         if argv[0] == sys.executable:
-            raise sandbox._proc.ProcTimeout('deadline', 'partial', duration_s=0.25)
+            raise sandbox._proc.ProcTimeout('deadline', 'partial ghs_FAKE0123', duration_s=0.25)
         return original(argv, **kwargs)
     monkeypatch.setattr(sandbox._proc, 'run', run)
-    report = sandbox.run_checks(make_config(check_runner=(sys.executable,)), git_repo, timeout=0.1)
+    cfg = make_config(check_runner=(sys.executable,), env=(("AUDIT_TOKEN", "ghs_FAKE0123"),))
+    report = sandbox.run_checks(cfg, git_repo, timeout=0.1)
     assert not report.ok
     result = report.results[0]
     assert result.exit_code == 124 and result.duration_s == 0.25
-    assert 'partial' in result.tail and 'timed out after 0.1s' in result.tail
+    assert 'partial [REDACTED]' in result.tail and 'timed out after 0.1s' in result.tail
 
 
 @pytest.mark.parametrize('change', ['fallback', 'base'])

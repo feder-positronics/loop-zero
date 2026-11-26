@@ -24,6 +24,9 @@ class ReviewConfig:
     allowed_efforts: tuple[str, ...] = ()
 
 
+DEFAULT_CHECK_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
+
+
 @dataclass(frozen=True)
 class Config:
     repo: str  # "owner/name"
@@ -37,7 +40,7 @@ class Config:
     review_chunk_bytes: int = 200_000
     check_runner: tuple[str, ...] = ()
     network: bool = False  # allow network inside sandbox
-    env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
+    env_allowlist: tuple[str, ...] = DEFAULT_CHECK_ENV
     sandbox_ro: tuple[str, ...] = ()  # extra host paths exposed read-only in the sandbox
     writable: tuple[str, ...] = ()  # host paths bound read-write (shared tool caches)
     scratch: tuple[str, ...] = (".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache")
