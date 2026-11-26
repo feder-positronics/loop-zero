@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -4763,3 +4764,19 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
     assert "unverified" not in draft
     assert f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0" in draft
     assert "Manual validation evidence." in draft
+
+
+def test_late_checkpoint_preserves_completed_pass(wt, head):
+    cfg = config.load(wt / "workflow.toml")
+    passed = CheckReport(head, False, tuple(CheckResult(c, 0, 0, "", input_key="key") for c in cfg.checks),
+                         cli.sandbox.settings_fingerprint(cfg, wt))
+    save = partial(cli._save_report, wt)
+    checkpoint = cli.sandbox._checkpoint_success
+    checkpoint(partial(save, checkpoint=True), passed, {}, ())
+    assert cli._load_report(wt).results[0].input_key == "key"
+    save(passed)
+    checkpoint(partial(save, checkpoint=True), passed, {}, ())
+    assert cli._current_check_report(wt, cfg, head) == passed
+    failed = replace(passed, results=(replace(passed.results[0], exit_code=1),))
+    save(failed)
+    assert cli._load_report(wt) == failed
