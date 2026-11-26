@@ -673,7 +673,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(
                 f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
             )
-        force_lease = not _is_ancestor(wt, pr.head_sha, head)
+        force_lease = pr.head_sha != head and not _is_ancestor(wt, pr.head_sha, head)
         if force_lease:
             push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
     push.append(branch)
@@ -1600,8 +1600,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if args.cancel and args.wait is not None:
         raise CliError("merge --cancel cannot be combined with --wait")
     wt, config = _context(args, pin_checks=True)
-    branch = worktree.branch(wt)
     if args.cancel:
+        branch = worktree.branch(wt)
         if config.merge_strategy != "mergify":
             raise CliError("merge --cancel is only available with delivery.merge = 'mergify'")
         pr = _require_pr(config, branch)

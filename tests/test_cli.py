@@ -1144,12 +1144,14 @@ def test_pr_migrates_old_checks_heading_to_validation(wt: Path) -> None:
 
 
 @pytest.mark.parametrize("corrupt_report", [False, True], ids=["no-report", "corrupt-report"])
-def test_pr_updates_existing_open_pr(wt, gh, capsys, corrupt_report):
+def test_pr_updates_existing_open_pr(wt, gh, capsys, corrupt_report, git_calls):
     if corrupt_report:
         (wt / ".loopzero" / "checks.json").write_text('{"results": "nope"}')
     arm_pr_body_patch(gh, head_of(wt))
 
+    git_calls.clear()
     code, out, err = run(capsys, "pr")
+    assert_git_cost(git_calls, 9, 1)
 
     assert code == 0 and out == URL + "\n"
     assert ("warning: ignoring unreadable" in err) == corrupt_report
@@ -1167,6 +1169,7 @@ def test_pr_updates_existing_open_pr(wt, gh, capsys, corrupt_report):
 )
 def test_pr_aborts_on_ancestry_probe_error(wt, gh, fake_tool, tmp_path, capsys, probe, diagnostic):
     arm_pr_body_patch(gh, head_of(wt))
+    git(wt, "commit", "--allow-empty", "-m", "Advance local head")
     pushes = tmp_path / "pushes"
     fake_tool("git", f'''\
 if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ]; then {probe}; fi
@@ -3873,7 +3876,7 @@ def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys, he
 @pytest.mark.parametrize("attested", [True, False])
 @pytest.mark.parametrize("merge_state", ["BEHIND", "CLEAN"])
 def test_mergify_merge_requests_once_for_behind_head(
-    wt: Path, gh: FakeGh, capsys, monkeypatch, attested, merge_state
+    wt: Path, gh: FakeGh, capsys, monkeypatch, attested, merge_state, git_calls
 ) -> None:
     head = commit_mergify_configuration(wt)
     arm_approved_ready_pr(gh, head, wt, isDraft=False, mergeStateStatus=merge_state)
@@ -3882,7 +3885,9 @@ def test_mergify_merge_requests_once_for_behind_head(
     stub_mergify_admission(monkeypatch, configured=None)
     monkeypatch.setattr(mergify, "request", lambda *args: requested.append(args))
 
+    git_calls.clear()
     code, out, err = run(capsys, "merge")
+    assert_git_cost(git_calls, 7, 1)
 
     if attested:
         assert (code, err) == (0, "")
