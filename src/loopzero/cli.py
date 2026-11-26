@@ -409,13 +409,12 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
 
 def _save_report(wt: Path, report: CheckReport) -> str | None:
     """Publish the receipt or return the current HEAD if the result is stale."""
-    payload = {
-        "head": report.head,
-        "dirty": report.dirty,
-        "results": [{k: v for k, v in dataclasses.asdict(result).items()
-                     if k not in {"input_key", "reused_from"} or v is not None}
-                    for result in report.results],
-    }
+    results = [
+        {k: v for k, v in dataclasses.asdict(result).items()
+         if k not in {"input_key", "reused_from"} or v is not None}
+        for result in report.results
+    ]
+    payload = {"head": report.head, "dirty": report.dirty, "results": results}
     if report.settings_sha256 is not None:
         payload["settings_sha256"] = report.settings_sha256
     return worktree.write_local_state(
@@ -550,15 +549,13 @@ def _require_pr_details(wt: Path) -> None:
 def _append_review(body: str, result: ReviewResult) -> str:
     """Append one compact review record under Review, replacing its placeholder."""
     line = f"- {result.kind}, {result.family}, {result.head[:12]}, {result.verdict}"
-    pattern = re.compile(r"(^## Review\n)(.*?)(?=^## |\Z)", re.DOTALL | re.MULTILINE)
-    match = pattern.search(body)
+    match = re.search(r"^## Review\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
     if not match:
         return f"{body.rstrip()}\n\n## Review\n{line}\n"
-    existing = match.group(2).rstrip()
-    if existing.startswith("(filled by `loopzero review`)"):
-        existing = ""
-    replacement = match.group(1) + (f"{existing}\n" if existing else "") + line + "\n\n"
-    return pattern.sub(lambda _: replacement, body, count=1).rstrip() + "\n"
+    existing = match[1].rstrip()
+    if existing and not existing.startswith("(filled by `loopzero review`)"):
+        line = f"{existing}\n{line}"
+    return (body[:match.start(1)] + line + "\n\n" + body[match.end():]).rstrip() + "\n"
 
 
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
@@ -587,9 +584,6 @@ def _pr_title(wt: Path, branch: str) -> str:
     """First heading of task.md that is not a template section name; else the branch."""
     headings = [ln.lstrip("#").strip() for ln in worktree.task_text(wt).splitlines() if ln[:1] == "#"]
     return next((t for t in headings if t and t.lower() not in _SECTIONS), branch)
-
-
-# --------------------------------------------------------------------------- commands
 
 
 def cmd_start(args: argparse.Namespace) -> int:
@@ -623,15 +617,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     worktree.local_state_files(wt, CHECKS_FILE.name)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
-    try:
-        report = sandbox.run_checks(config, wt, progress=lambda command: print(
-            f"running: {github.redact_credentials(command)}", flush=True),
-            status=lambda message: print(message, flush=True),
-            checkpoint=lambda partial: _save_report(wt, partial),
-            workflow=args.config or f"origin/{config.base_branch}:workflow.toml")
-    except sandbox.SandboxUnavailable as exc:
-        print(f"sandbox unavailable: {exc}", file=sys.stderr)
-        return 2
+    report = sandbox.run_checks(
+        config, wt, progress=lambda command: print(f"running: {github.redact_credentials(command)}", flush=True),
+        status=lambda message: print(message, flush=True), checkpoint=lambda partial: _save_report(wt, partial),
+        workflow=args.config or f"origin/{config.base_branch}:workflow.toml",
+    )
     shortened = False
     for result in report.results:
         if result.exit_code != 0:
@@ -657,16 +647,16 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
     if shortened:
         print(f"Full diagnostic tail: {CHECKS_FILE} (head {report.head})", file=sys.stderr)
-    if report.ok and report.settings_sha256 is None:
+    verified = not report.ok or report.settings_sha256 is not None
+    if not verified:
         print("check stages passed but the receipt is unverified; rerun loopzero check from the task "
               "worktree with a stable, readable configured runner before running ready", file=sys.stderr)
-        _refresh_pr_checks(wt, config)
-        return 1
-    if report.ok and not report.dirty:
+    elif report.ok and not report.dirty:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
-    print("PASS" if report.ok else "FAIL")
-    return 0 if report.ok else 1
+    if verified:
+        print("PASS" if report.ok else "FAIL")
+    return 0 if report.ok and verified else 1
 
 
 def cmd_pr(args: argparse.Namespace) -> int:
@@ -688,8 +678,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     force_lease = False
     push = ["push", "-u", "origin"]
     if pr is not None and pr.state == "OPEN":
-        known = _proc.run(["git", "cat-file", "-e", f"{pr.head_sha}^{{commit}}"], cwd=wt,
-                          env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
+        known = config_mod.run_git(wt, "cat-file", "-e", f"{pr.head_sha}^{{commit}}")
         if known.exit_code != 0:
             raise CliError(
                 f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
@@ -776,10 +765,10 @@ def _lock_review(run_review: Callable[[argparse.Namespace, Path, Config], int]):
 
 @_lock_review
 def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
-    if args.config:
-        runtime_source = "reviewer paths are unpinned because --config was provided"
-    else:
-        runtime_source = f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}"
+    runtime_source = (
+        "reviewer paths are unpinned because --config was provided" if args.config
+        else f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}"
+    )
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     kinds = ("primary", "delta")
@@ -801,10 +790,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     if len(saved) > 1:
         raise CliError("multiple saved reviews for HEAD; publication is ambiguous")
     reviews = [] if saved else _pr_reviews(config.repo, pr.number)
-    if saved:
-        kind = saved[0]
-    else:
-        kind, reviewed = _select_review_round(config, pr, head, reviews)
+    kind, reviewed = (saved[0], None) if saved else _select_review_round(config, pr, head, reviews)
     publication_context = {"repo": config.repo, "number": pr.number, "publisher": publisher}
     if args.repost:
         result, publication = _load_review(wt, head, kind)
@@ -833,28 +819,21 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             wt, config, head, kind, publication_context,
         ):
             raise CliError(f"saved {kind} review for {head[:12]}; run `loopzero review --repost`")
-        try:
-            result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
-                                 runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
-        except sandbox.SandboxUnavailable as exc:
-            print(f"sandbox unavailable: {exc}", file=sys.stderr)
-            return 2
+        result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
+                             runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
         final_head, final_dirty = worktree.head(wt), worktree.is_dirty(wt)
         if final_head != head or final_dirty:
             raise CliError(
                 f"worktree changed during review: HEAD before {head}, HEAD after {final_head}; "
                 f"dirty before False, dirty after {final_dirty}"
             )
-        prefix = review_marker(head, kind, "model")
     try:
-        evidence = runners.codex_evidence(result)
+        if not _matches_publication(result, publication_context):
+            raise CliError("native publication context changed; HOLD")
     except runners.RunnerBadOutput:
         _save_review(wt, result)
         raise
-    if evidence is not None and (evidence["repo"], evidence["pr"], evidence["publisher"]) != (config.repo, pr.number, publisher):
-        raise CliError("native publication context changed; HOLD")
-    if args.repost:
-        prefix = _repost_prefix(result)
+    prefix = _repost_prefix(result) if args.repost else review_marker(head, kind, "model")
     _save_review(wt, result, publication_context)
     token = _refresh_publisher_token(token, publisher)
     try:
@@ -905,22 +884,28 @@ def _repost_reviewer_families(
     wt: Path, config: Config, head: str, result: ReviewResult,
 ) -> tuple[list[str], list[str]]:
     authors = runners.author_families(wt, head, _primary_base(wt, config))
+    candidates = [family for family in config.reviewers if family not in authors]
     excluded = [family for family in config.reviewers if family in authors]
     if result.fallback and result.family not in excluded:
         raise CliError(
             f"saved review claims a same-family fallback, but {result.family} is not a configured "
             "reviewer family that contributed to this PR lineage; run without --repost"
         )
-    if not result.fallback and not any(family not in authors for family in config.reviewers):
-        raise IndependentReviewerUnavailable(
-            _independence_message(authors, excluded, [])
-        )
+    if not result.fallback and not candidates:
+        raise IndependentReviewerUnavailable(_independence_message(authors, excluded, []))
     if result.family in authors and not result.fallback:
         raise IndependentReviewerUnavailable(
             f"saved reviewer family {result.family} contributed to this PR lineage; "
             "run without --repost to obtain an independent review"
         )
-    return [family for family in config.reviewers if family not in authors], excluded
+    return candidates, excluded
+
+
+def _matches_publication(result: ReviewResult, publication: dict) -> bool:
+    evidence = runners.codex_evidence(result)
+    return evidence is None or (evidence["repo"], evidence["pr"], evidence["publisher"]) == (
+        publication["repo"], publication["number"], publication["publisher"]
+    )
 
 
 def _has_recoverable_review(
@@ -934,12 +919,9 @@ def _has_recoverable_review(
         candidates, excluded = _repost_reviewer_families(wt, config, head, result)
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             return False
-        evidence = runners.codex_evidence(result)
+        return _matches_publication(result, publication)
     except (CliError, runners.RunnerBadOutput):
         return False
-    return evidence is None or (evidence["repo"], evidence["pr"], evidence["publisher"]) == (
-        publication["repo"], publication["number"], publication["publisher"],
-    )
 
 
 def _repost_prefix(result: ReviewResult) -> str:
@@ -1104,10 +1086,7 @@ def _run_review(
                 result = selected[family](diff=diff)
             except runners.RunnerPromptTooLong:
                 chunks = runners.split_diff(diff, config.review_chunk_bytes)
-                print(
-                    f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks",
-                    file=sys.stderr,
-                )
+                print(f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks", file=sys.stderr)
                 chunk_results = [selected[family](diff=chunk, chunk=(index, len(chunks)))
                                  for index, chunk in enumerate(chunks, 1)]
                 result = runners.merge_reviews(chunk_results)
@@ -1580,16 +1559,13 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
     closed: list[github.GhError] = []
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
     for _ in _poll_until(started, timeout):
-        sha = _landed(config, pr, closed)
-        if sha:
+        if sha := _landed(config, pr, closed):
             return sha
         if not github.merge_pending(config.repo, pr.number):
-            sha = _landed(config, pr, closed)
-            if sha:
+            if sha := _landed(config, pr, closed):
                 return sha
-            if closed:
-                continue
-            raise CliError(f"PR #{pr.number} left the merge queue unmerged")
+            if not closed:
+                raise CliError(f"PR #{pr.number} left the merge queue unmerged")
     if closed:
         raise closed[0]
     return None
@@ -1916,9 +1892,6 @@ def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readi
         print(f"  Mergify report: {report}")
 
 
-# --------------------------------------------------------------------------- entry point
-
-
 def main(argv: list[str] | None = None) -> int:
     return _run(parse_args(build_parser(), argv))
 
@@ -1931,6 +1904,9 @@ def _run(args: argparse.Namespace) -> int:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
         return 4
     except HANDLED as exc:
+        if isinstance(exc, sandbox.SandboxUnavailable) and args.command in {"check", "review"}:
+            print(f"sandbox unavailable: {exc}", file=sys.stderr)
+            return 2
         message = str(exc) if isinstance(exc, ReviewersUnavailable) else _one_line(exc)
         print(f"loopzero {args.command}: {message}", file=sys.stderr)
         return 1

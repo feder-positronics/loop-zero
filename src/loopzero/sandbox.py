@@ -82,11 +82,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                status: Callable[[str], None] | None = None,
                checkpoint: Callable[[CheckReport], None] | None = None,
                workflow: str | Path = "workflow.toml", _resolved: bool = False) -> CheckReport:
-    """Run checks, stopping at the first failure; status emits only stage metadata.
-
-    progress receives each command before launch, as before. Optional status receives
-    heartbeats from a reporting thread and completion from the calling thread.
-    """
+    """Run until a check fails, reporting commands via progress and stage metadata via status."""
     worktree = worktree.resolve()
     if not config.check_runner and shutil.which("bwrap") is None:
         raise SandboxUnavailable(
@@ -147,11 +143,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 if checkpoint is not None and result.input_key and result.exit_code == 0:
                     # The receipt stays nonpassing until final validation.
                     incomplete = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
-                    unvisited = (
-                        previous[stage] for stage in commands[ordinal:] if stage in previous
-                    )
-                    checkpoint(CheckReport(head, dirty, (*results, *unvisited, incomplete),
-                                           settings_sha256))
+                    unvisited = (previous[stage] for stage in commands[ordinal:] if stage in previous)
+                    checkpoint(CheckReport(head, dirty, (*results, *unvisited, incomplete), settings_sha256))
             if status:
                 status(f"stage {ordinal}/{len(commands)}: exit {result.exit_code} "
                        f"({result.duration_s:.1f}s)")
@@ -189,10 +182,8 @@ def _previous(worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
             if (isinstance(command, str) and isinstance(key, str) and key
                     and is_check_exit_code(code) and code == 0 and isinstance(tail, str)):
                 source = result.get("reused_from")
-                previous[command] = CheckResult(
-                    command, 0, 0.0, _check_tail(tail), key,
-                    source if isinstance(source, str) else data["head"],
-                )
+                reused_from = source if isinstance(source, str) else data["head"]
+                previous[command] = CheckResult(command, 0, 0.0, _check_tail(tail), key, reused_from)
         return previous
     except (OSError, WorktreeError, ValueError, KeyError, TypeError, AttributeError):
         return {}
@@ -249,8 +240,7 @@ def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = N
         host_env = {"PATH", "LANG", "LC_ALL", "TERM", "HEAVY_SLOT_GRANTED_CORES"}
         for name in host_env - dict(config.env).keys():
             settings["environment"].pop(name, None)
-    payload = [settings, config.inputs]
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([settings, config.inputs], sort_keys=True).encode()).hexdigest()
 
 
 def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str | None:
