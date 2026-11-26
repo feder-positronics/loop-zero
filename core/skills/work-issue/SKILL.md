@@ -17,6 +17,8 @@ the issue. Deliver through [implement](../implement/SKILL.md), applying the safe
 and [implementation or repairs without a merge queue](reference.md#integration-without-a-queue).
 
 Before review, update docs as needed and record changes or evidence that none are needed.
+Before publishing a PR, follow the target repo's template and body policy,
+including any required opening section and fields.
 Before publication, inspect the issue and links for its lifecycle blueprint and
 include required completion in the closing delivery. A child does not own its parent's blueprint.
 Recheck collisions, live acceptance, prior delivery and ownership before
