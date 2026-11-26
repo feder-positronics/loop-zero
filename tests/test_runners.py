@@ -261,10 +261,11 @@ def replace_codex_events(script: Path, events, *, prepend=False) -> None:
     script.write_text(text[:start] + f"printf '%s\\n' {shlex.quote(lines)}\n" + suffix)
 
 
-def _fake_review(bin_dir, family):
+def _fake_review(bin_dir, family, payload=APPROVE, *, exit_code=0, diagnostic=None):
     if family == "claude":
-        return _fake_claude(bin_dir, _claude_envelope(APPROVE))
-    return _fake_codex(bin_dir, json.dumps(APPROVE))
+        envelope = _claude_envelope(payload, **({"result": diagnostic} if diagnostic is not None else {}))
+        return _fake_claude(bin_dir, envelope, exit_code=exit_code)
+    return _fake_codex(bin_dir, json.dumps(payload), stderr=diagnostic or "", exit_code=exit_code)
 
 
 def _review(family: str, cwd: Path, diff: str = "--- a\n+++ b\n+x\n", **options):
@@ -382,21 +383,20 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
     assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
 
 
-@pytest.mark.parametrize("version", ["codex-cli 0.168.0", "codex-cli 1.0.0-beta.1", "custom build", ""])
-def test_codex_observes_version_without_pinning(fake_bin, tmp_path, version):
-    _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
-    result = _review("codex", tmp_path)
-    assert result.verdict == "approve"
-    assert result.provenance["cli_version"] == version
-    assert json.loads(result.raw)["cli_version"] == version
-    assert (fake_bin / "codex.stdin").exists()
-
-
-@pytest.mark.parametrize("failure", ["nonzero", "missing", "timeout"])
-def test_codex_version_probe_errors_use_known_failure_path(fake_bin, tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("version,failure", [
+    *((version, None) for version in ("codex-cli 0.168.0", "codex-cli 1.0.0-beta.1", "custom build", "")),
+    *(("codex-cli 0.161.0", failure) for failure in ("nonzero", "missing", "timeout")),
+])
+def test_codex_version_probe(fake_bin, tmp_path, monkeypatch, version, failure):
     from loopzero import _proc
 
-    _fake_codex(fake_bin, json.dumps(APPROVE), version_exit=int(failure == "nonzero"))
+    _fake_codex(fake_bin, json.dumps(APPROVE), version=version, version_exit=int(failure == "nonzero"))
+    if failure is None:
+        result = _review("codex", tmp_path)
+        assert result.verdict == "approve"
+        assert result.provenance["cli_version"] == json.loads(result.raw)["cli_version"] == version
+        assert (fake_bin / "codex.stdin").exists()
+        return
     original = _proc.run
 
     def probe(argv, **kwargs):
@@ -512,13 +512,11 @@ def test_real_claude_environment_auth_hides_host_state(repo,
     config = tmp_path / "custom-config" if custom else host / ".claude"
     config.mkdir(parents=True)
     host.mkdir(exist_ok=True)
-    history = config / "history.jsonl"
-    history.write_text("synthetic sibling history marker")
+    (config / "history.jsonl").write_text("synthetic sibling history marker")
     (config / ".credentials.json").write_text('{"token":"synthetic-disk-auth"}')
     global_state = host / ".claude.json"
     global_state.write_text('{"oauth":"synthetic-disk-auth","history":"mixed marker"}')
-    alternate_state = config / ".config.json"
-    alternate_state.write_text('{"history":"custom mixed marker"}')
+    (config / ".config.json").write_text('{"history":"custom mixed marker"}')
     before = {path: path.read_bytes() for path in (*config.iterdir(), global_state)}
     monkeypatch.setenv("HOME", str(host))
     if custom:
@@ -527,11 +525,9 @@ def test_real_claude_environment_auth_hides_host_state(repo,
         monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", oauth)
     monkeypatch.setenv("ANTHROPIC_API_KEY", api)
-    hidden = [history, global_state, alternate_state, config / ".credentials.json",
-              Path(SANDBOX_HOME) / ".claude/history.jsonl",
-              Path(SANDBOX_HOME) / ".claude.json",
-              Path(SANDBOX_HOME) / ".claude/.config.json",
-              Path(SANDBOX_HOME) / ".claude/.credentials.json"]
+    state_names = ("history.jsonl", ".config.json", ".credentials.json")
+    hidden = [global_state, Path(SANDBOX_HOME) / ".claude.json"]
+    hidden.extend(root / name for root in (config, Path(SANDBOX_HOME) / ".claude") for name in state_names)
     checks = "\n".join(
         f"test ! -e {shlex.quote(str(path))} || "
         "{ echo 'host state exposed' >&2; exit 70; }" for path in hidden
@@ -638,10 +634,7 @@ def test_linked_worktree_and_git_directory_are_read_only(
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
 def test_review_escalates_verdict_with_blocking_finding(fake_bin, tmp_path, family):
-    if family == "claude":
-        _fake_claude(fake_bin, _claude_envelope(CHANGES))
-    else:
-        _fake_codex(fake_bin, json.dumps(CHANGES), stderr="model: fallback")
+    _fake_review(fake_bin, family, CHANGES, diagnostic="model: fallback" if family == "codex" else None)
 
     result = _review(family, tmp_path)
 
@@ -712,10 +705,7 @@ def test_claude_classifies_error_envelopes(fake_bin, tmp_path, exit_code, output
 ])
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_auth_phrases_only_fail_on_nonzero_exit(fake_bin: Path, tmp_path: Path, family, message, exit_code) -> None:
-    if family == "claude":
-        _fake_claude(fake_bin, _claude_envelope(APPROVE, result=message), exit_code=exit_code)
-    else:
-        _fake_codex(fake_bin, json.dumps(APPROVE), stderr=message, exit_code=exit_code)
+    _fake_review(fake_bin, family, exit_code=exit_code, diagnostic=message)
     if exit_code:
         with pytest.raises(RunnerAuthFailed):
             _review(family, tmp_path)
@@ -733,10 +723,8 @@ AUTH_WORDS = {
 @pytest.mark.parametrize("family", ["claude", "codex"])
 def test_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: Path,
                                                      family: str) -> None:
-    if family == "claude":
-        _fake_claude(fake_bin, _claude_envelope(AUTH_WORDS))
-    else:
-        _fake_codex(fake_bin, json.dumps(AUTH_WORDS), stderr="warning: not authenticated to telemetry")
+    diagnostic = "warning: not authenticated to telemetry" if family == "codex" else None
+    _fake_review(fake_bin, family, AUTH_WORDS, diagnostic=diagnostic)
     result = _review(family, tmp_path)
     assert result.verdict == "approve" and result.findings[0].title == "Handle 401 Unauthorized"
 
@@ -780,8 +768,7 @@ def test_reviewer_binary_selection(fake_bin: Path, git_repo: Path, monkeypatch, 
     real_dir.mkdir()
     (fake_bin / "git").symlink_to("/usr/bin/git")
     if mode in {"shim-first", "ordinary"}:
-        real = (_fake_claude(real_dir, _claude_envelope(APPROVE)) if family == "claude"
-                else _fake_codex(real_dir, json.dumps(APPROVE)))
+        real = _fake_review(real_dir, family)
         real.rename(real_dir / "2.1.286")
         real.symlink_to(real_dir / "2.1.286")
         if mode == "ordinary":
