@@ -179,8 +179,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         for index, command in enumerate(commands):
             if progress:
                 progress(command)
-            key = _input_key(config, worktree, command, base, status=status,
-                             workflow=workflow) if not dirty else None
+            key = _input_key(config, worktree, command, "" if dirty else base,
+                             status=status, workflow=workflow)
             old = previous.get(command)
             if key and old and old.input_key == key:
                 result = old
@@ -321,16 +321,19 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
 def _input_key(config: Config, worktree: Path, command: str, base: str, *,
                status: Callable[[str], None] | None = None,
                workflow: str | Path = "workflow.toml") -> str | None:
-    if not base or (command not in config.inputs and "." not in config.inputs.get("*", ())):
+    if command not in config.inputs and "." not in config.inputs.get("*", ()):
         return None
-    paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
-    blobs = _input_blobs(config, worktree, paths)
-    if not blobs:
-        if blobs == "" and status:
-            entry = command if command in config.inputs else "*"
-            status(f"{workflow}: checks.inputs[{entry!r}] matches no tracked files. "
-                   f"Correct the pathspecs {paths!r}. Running the check fresh.")
+    entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
+    blobs = _input_blobs(config, worktree, tuple(path for paths in entries.values() for path in paths))
+    if blobs == "" and status:
+        status(f"{workflow}: checks.inputs for {command!r} matches no tracked files. "
+               f"Correct these entries: {entries!r}. Running the check fresh.")
+    if not blobs or not base:
         return None
+    return _hash_inputs(config, worktree, command, base, blobs)
+
+
+def _hash_inputs(config: Config, worktree: Path, command: str, base: str, blobs: str) -> str | None:
     contents = []
     root = worktree.resolve()
     try:
