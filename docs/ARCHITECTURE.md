@@ -154,7 +154,9 @@ At native review launch the CLI pins checks, publishers and
 `delivery.reviewer_ro_paths` to one remote PR-base revision. A missing remote ref
 or workflow blocks launch. Bootstrap requires an explicit `--config`, which
 still undergoes validation. Reposts and other commands retain their fallback
-policy. Runners validate the complete mount plan against private review state and
+policy, except that review publishers never come from the PR's own workflow:
+without a base workflow they are empty and the current login applies, and
+`resolve` refuses a PR whose GitHub base differs from the configured base. Runners validate the complete mount plan against private review state and
 known standard/custom native state roots. Existing file-backed auth mounts remain
 explicit exceptions. Claude's environment routes are `ANTHROPIC_API_KEY` and
 `CLAUDE_CODE_OAUTH_TOKEN`: a nonempty value (whitespace included) is forwarded

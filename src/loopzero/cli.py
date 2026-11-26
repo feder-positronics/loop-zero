@@ -112,7 +112,8 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     config = config_mod.load(path, checks={})
     base, revision = config_mod.load_base(root, config.base_branch)
     if base is None:
-        return config_mod.load(path)
+        # Never trust publishers the PR itself adds; the current-login fallback applies.
+        return dataclasses.replace(config_mod.load(path), review_publishers=())
     base_checks = config_mod.base_section(base, config.base_branch, "checks")
     config = config_mod.load(
         path, checks=base_checks, validation_source=f"origin/{config.base_branch}:workflow.toml",
@@ -1580,6 +1581,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     """List open blocking findings, or reply to one with what changed and resolve its thread."""
     wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
     pr = _require_pr(config, worktree.branch(wt))
+    if pr.base_ref != config.base_branch:
+        raise CliError(f"PR #{pr.number} targets {pr.base_ref}, configured base is {config.base_branch}")
     publishers = config.review_publishers or (github.login(),)
     if not args.finding:
         for marker_id, _thread, f in github.open_findings(config.repo, pr.number, publishers):

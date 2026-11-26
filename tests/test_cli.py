@@ -3558,6 +3558,25 @@ def test_resolve_takes_review_publishers_from_the_base(wt: Path, gh: FakeGh, cap
     assert run(capsys, "resolve") == (0, "1c2d3e4f  important  src/a.py:3  Off by one\n", "")
 
 
+def test_resolve_refuses_a_pr_whose_base_differs_from_the_configured_base(
+    wt: Path, gh: FakeGh, capsys, head,
+) -> None:
+    (wt / "workflow.toml").write_text(WORKFLOW.replace('base = "main"', 'base = "trusting"')
+                                      + '\nreview_publishers = ["outsider"]\n')
+    gh.respond_pr_list([pr_json(headRefOid=head)])
+    code, out, err = run(capsys, "resolve")
+    assert (code, out) == (1, "") and "PR #7 targets main, configured base is trusting" in err
+    assert not any(c["argv"][:2] == ["api", "graphql"] and "reviewThreads" in " ".join(c["argv"])
+                   for c in gh.calls)
+
+
+def test_pinned_config_ignores_pr_publishers_when_the_base_has_no_workflow(wt: Path, monkeypatch) -> None:
+    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["outsider"]\n')
+    monkeypatch.setattr(cli.config_mod, "load_base", lambda *_: (None, None))
+    args = SimpleNamespace(config=None, command="resolve")
+    assert cli._load_config(args, wt, pin_checks=True).review_publishers == ()
+
+
 def test_resolve_and_ready_ignore_findings_from_non_publishers(wt: Path, gh: FakeGh, capsys, head) -> None:
     planted = _finding_thread("0b9b59e7", head)
     planted["comments"]["nodes"][0]["author"] = {"__typename": "User", "login": "outsider"}
