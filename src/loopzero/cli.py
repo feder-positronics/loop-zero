@@ -1311,6 +1311,7 @@ def _warn_queue_size(
 
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
+    read_started = time.monotonic()
     pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None)
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
@@ -1328,7 +1329,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
     ):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
                                      shown=readiness.reasons if kicked else (), args=args,
-                                     allow_skipped=True, initial=None if kicked else readiness)
+                                     allow_skipped=True, initial=None if kicked else readiness,
+                                     initial_read_time=started - read_started)
         if waited is None:
             return 3
         pr, readiness, kicked = waited
@@ -1338,7 +1340,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
             waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=True, started=started,
-                                         args=args, allow_skipped=True)
+                                         args=args, allow_skipped=True,
+                                         initial_read_time=started - read_started)
             if waited is None:
                 return 3
             pr, readiness, kicked = waited
@@ -1403,17 +1406,25 @@ def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness
     return ""
 
 
-def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Iterator[None]:
+def _poll_until(
+    started: float, timeout: float, *, bounded: bool = False, initial_read_time: float = 0.0,
+) -> Iterator[None]:
     delay = WAIT_INTERVAL
+    longest_read = initial_read_time
     while True:
+        read_started = time.monotonic()
         yield  # Observe immediately, including --wait=0.
-        remaining = timeout - (time.monotonic() - started)
+        now = time.monotonic()
+        longest_read = max(longest_read, now - read_started)
+        remaining = timeout - (now - started)
         if remaining <= 0:
             return
         pause = delay * random.uniform(0.9, 1.0)
         if bounded and remaining <= pause:
-            # Leave part of the final interval for the last observation to complete.
-            _sleep(remaining / 2)
+            # Poll late enough to see a settled check while reserving time to read it.
+            baseline = min(5.0, max(0.5, remaining / 10))
+            allowance = min(remaining / 2, max(baseline, 2 * longest_read))
+            _sleep(remaining - allowance)
             yield
             remaining = timeout - (time.monotonic() - started)
             if remaining > 0:
@@ -1427,6 +1438,7 @@ def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
     allow_merged: bool = False, allow_skipped: bool = False, initial: github.Readiness | None = None,
+    initial_read_time: float = 0.0,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     started = time.monotonic() if started is None else started
     wait = partial(_wait_for_checks, wt, config, pr, timeout, kicked=kicked, started=started,
@@ -1441,7 +1453,7 @@ def _wait_with_deadline(
     reported_timeout = False
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
-            waited = wait(bounded=True)
+            waited = wait(bounded=True, initial_read_time=initial_read_time)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1495,6 +1507,7 @@ def _wait_for_checks(
     started: float | None = None, shown: tuple[str, ...] = (),
     args: argparse.Namespace | None = None, bounded: bool = False, allow_merged: bool = False,
     allow_skipped: bool = False, initial: github.Readiness | None = None,
+    initial_read_time: float = 0.0,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     """Poll the same head until it settles, omitting readiness for an allowed merge."""
     grace_started = time.monotonic()
@@ -1502,7 +1515,7 @@ def _wait_for_checks(
     current = pr
     stale_notice = False
     previous = config
-    for _ in _poll_until(started, timeout, bounded=bounded):
+    for _ in _poll_until(started, timeout, bounded=bounded, initial_read_time=initial_read_time):
         if initial is not None:
             readiness = initial
             initial = None
@@ -1747,6 +1760,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         mergify.dequeue(config.repo, pr.number)
         print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
+    read_started = time.monotonic()
     pr, readiness = _pr_readiness(
         wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None
     )
@@ -1758,7 +1772,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
-                                     args=args, allow_merged=True, initial=readiness)
+                                     args=args, allow_merged=True, initial=readiness,
+                                     initial_read_time=started - read_started)
         if waited is None:
             return 3
         pr, readiness, _ = waited
