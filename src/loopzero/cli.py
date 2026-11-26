@@ -1749,8 +1749,7 @@ def main(argv: list[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     try:
         with _proc.unwind_on_sigterm():
-            handler = getattr(args, "func", None) or globals()[f"cmd_{args.command}"]
-            return handler(args)
+            return globals()[f"cmd_{args.command}"](args)
     except IndependentReviewerUnavailable as exc:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
         return 4
@@ -1771,4 +1770,4 @@ def _one_line(exc: BaseException) -> str:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run(_module_args))
