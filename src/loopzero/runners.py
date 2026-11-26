@@ -1253,7 +1253,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     )
 
 
-def split_diff(diff: str, budget: int) -> list[str]:
+def split_diff(diff: str, budget: int = 200_000) -> list[str]:
     """Group unified-diff file blocks below ``budget`` bytes."""
     starts = [match.start() for match in re.finditer(r"(?m)^diff --git ", diff)]
     blocks = [diff[start:end] for start, end in zip(starts, [*starts[1:], len(diff)], strict=False)] or [diff]

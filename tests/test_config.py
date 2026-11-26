@@ -30,8 +30,7 @@ def test_load_full_config(tmp_path, strategy, queue):
     env = {"UV_CACHE_DIR": "/home/me/.cache/uv", "UV_PYTHON_DOWNLOADS": "never"}
     execution = dict(required_ci=("checks",), network=True, env_allowlist=("PATH", "HOME"),
                      writable=("/home/me/.cache/uv",), scratch=(".venv",))
-    delivery = dict(reviewers=("codex",), reviewer_ro_paths=("/opt/claude", "/opt/codex"),
-                    review_chunk_bytes=12345)
+    delivery = dict(reviewers=("codex",), reviewer_ro_paths=("/opt/claude", "/opt/codex"))
     limits = dict(memory_mb=1024, file_mb=512)
     workflow = "".join((
         table("repo", name="owner/name", base="develop"),
@@ -75,8 +74,6 @@ FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc
     ('[repo]\nname = "noslash"\n', 'must look like "owner/name"'),
     ('[repo]\nname = 3\n', "repo.name must be a string"),
     (MINIMAL + '[checks]\ncommands = "pytest"\n', "checks.commands must be an array"),
-    *((MINIMAL + f"[checks]\nrunner = {value}", "checks.runner") for value in
-      ('[]', '[""]', '[1]', '"runner"', '["./runner"]', '["tools/runner"]')),
     (MINIMAL + '[checks]\ncommands = ["ok", 1]\n', "non-empty strings"),
     (MINIMAL + '[checks]\ncommands = ["true", "   "]\n',
      r"workflow\.toml: checks\.commands.*nonblank command"),
@@ -94,8 +91,6 @@ FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc
     (MINIMAL + 'base = ""\n', "repo.base must not be empty"),
     (MINIMAL + '[delivery]\nreviewers = []\n', "at least one reviewer"),
     (MINIMAL + '[delivery]\nreviewer_ro_paths = ["relative"]\n', "must be absolute"),
-    *[(MINIMAL + f'[delivery]\nreview_chunk_bytes = {value}\n', "int >= 4096")
-      for value in (0, 1, 4095)],
     (MINIMAL + '[delivery.review.codex]\nmode = "x"\n',
      "unknown key\\(s\\) in \\[delivery.review.codex\\]: mode"),
     (MINIMAL + '[delivery.review.codex]\nallowed_efforts = [1]\n',
@@ -119,20 +114,12 @@ FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc
      "unknown key\\(s\\) in checks.limits: cpu"),
     (MINIMAL + '[checks]\ncommands = ["echo ok"]\n'
      '[checks.inputs]\n"echo okay" = ["."]\n', r'checks\.inputs\."echo okay".*exact'),
-    *((MINIMAL + '[checks]\nrunner = ["runner"]\ncommands = ["true"]\n'
-       f"[checks.limits]\n{limit} = 1\n", rf"checks\.limits\.{limit}.*local")
-      for limit in ("file_mb", "memory_mb")),
+    (MINIMAL + '[checks]\nrunner = ["runner"]\n', "unknown key\\(s\\) in \\[checks\\]: runner"),
 ])
 def test_invalid_content(tmp_path, text, message):
     with pytest.raises(config.ConfigError, match=message) as info:
         config.load(write(tmp_path, text))
     assert str(info.value).startswith(str(tmp_path / "workflow.toml"))
-
-
-@pytest.mark.parametrize("runner", [("dispatch", "--stage"), ("python3", "tools/run_stage.py"),
-                                    ("dispatch", "--opt=/operator/run.py")])
-def test_runner_prefix(tmp_path, runner):
-    assert config.load(write(tmp_path, MINIMAL + f"[checks]\nrunner = {list(runner)!r}")).check_runner == runner
 
 
 @pytest.mark.parametrize("path", ["/home/me/.local/bin", "/opt/tool", "/tmp/x"])
