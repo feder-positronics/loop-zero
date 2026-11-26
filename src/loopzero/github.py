@@ -443,7 +443,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     return "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None) + guidance
 
 
-def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:
+def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:  # noqa: C901 - best-effort parse of each rate-limit evidence source
     """Best-effort reset evidence for a primary GraphQL limit, never a preflight."""
     if re.search(r"secondary|HTTP 429", tail, re.IGNORECASE):
         return ""
@@ -784,7 +784,7 @@ def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
 ReviewSettingsLayout = Literal["current", "requested-reported", "summary"]
 
 
-def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = "", *,
+def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = "", *,  # noqa: C901 - optional review sections per layout
                  settings_layout: ReviewSettingsLayout = "current", legacy_display: bool = False,
                  publication: tuple[str, int] | None = None) -> str:
     evidence = None
@@ -1346,7 +1346,7 @@ def mergeability_blocker(pr: PR) -> str | None:
     return None
 
 
-def readiness(
+def readiness(  # noqa: C901 - one branch per readiness condition
     repo: str,
     pr: PR,
     base_branch: str,

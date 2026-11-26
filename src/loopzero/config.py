@@ -164,7 +164,7 @@ def _require_ci(checks: dict[str, Any]) -> None:
         )
 
 
-def _build(data: dict[str, Any]) -> Config:
+def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every workflow.toml section in one pass
     _reject_unknown("top level", data, _SECTIONS)
     sections = {
         section: _check_table(section, data.get(section, {}), schema)
