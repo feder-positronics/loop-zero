@@ -10,6 +10,10 @@ on:
 permissions: {}
 jobs:
   notify:
+    if: >-
+      contains(github.event.review.body, 'loopzero:review') ||
+      contains(github.event.changes.body.from, 'loopzero:') ||
+      contains(github.event.comment.body, 'loopzero:finding')
     runs-on: ubuntu-24.04
     steps:
       - run: 'true'
