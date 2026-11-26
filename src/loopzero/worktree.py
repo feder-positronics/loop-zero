@@ -229,13 +229,28 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
     remote_ref = f"refs/heads/{base_branch}"
-    lookup = ("ls-remote", "--refs", "origin", remote_ref)
+    tracking = f"refs/remotes/origin/{base_branch}"
+    base = None
     try:
-        advertised = _git(repo_root, *lookup)
-        base, _, ref = advertised.partition("\t")
-        if ref != remote_ref:
-            raise GitError(("git", *lookup), f"origin did not report a unique {remote_ref}")
-        _git(repo_root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", base)
+        valid = run(("git", "check-ref-format", remote_ref), cwd=repo_root, env_allowlist=GIT_ENV, timeout=30)
+        symbolic = run(("git", "symbolic-ref", "-q", tracking), cwd=repo_root, env_allowlist=GIT_ENV, timeout=30)
+        if valid.exit_code == 0 and symbolic.exit_code == 1:
+            fetch = ("git", "fetch", "--porcelain", "--verbose", "--no-tags", "--no-prune",
+                     "--no-write-fetch-head", "--refmap=", "origin", f"+{remote_ref}:{tracking}")
+            result = run(fetch, cwd=repo_root, env_allowlist=GIT_ENV, timeout=120)
+            if result.exit_code != 129:  # Older Git does not accept --porcelain.
+                row = result.stdout.removesuffix("\n").rsplit(" ", 2)
+                if result.exit_code or len(row) != 3 or row[-1] != tracking:
+                    raise GitError(fetch, result.stderr or result.stdout or f"origin did not report {remote_ref}")
+                base = row[1]
+        if base is None:
+            lookup = ("ls-remote", "--refs", "origin", remote_ref)
+            advertised = _git(repo_root, *lookup)
+            base, _, ref = advertised.partition("\t")
+            if ref != remote_ref:
+                raise GitError(("git", *lookup), f"origin did not report a unique {remote_ref}")
+            _git(repo_root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", base)
+            _git(repo_root, "update-ref", "--no-deref", tracking, base)
     except GitError:
         if "origin" not in _git(repo_root, "remote").splitlines():
             raise WorktreeError(
@@ -244,7 +259,6 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
                 "with `git remote rename <name> origin`."
             ) from None
         raise
-    _git(repo_root, "update-ref", "--no-deref", f"refs/remotes/origin/{base_branch}", base)
     if existing:
         existing_head = _resumable_head(repo_root, wt, branch)
         if existing_head is None:
