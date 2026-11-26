@@ -73,7 +73,11 @@ _retry_sleep = time.sleep
 
 
 def _open(request: urllib.request.Request):
-    return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    try:
+        return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    except ValueError:
+        # The HTTP client can include the Authorization value in a header error.
+        raise MergifyError("Mergify API request has an invalid URL or header") from None
 
 
 def _wait_to_retry(delay: float, deadline: float | None) -> bool:

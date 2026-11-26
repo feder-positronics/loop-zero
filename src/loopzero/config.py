@@ -124,12 +124,14 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None) -> tu
         return previous, revision
     shown = _proc.run(
         ["git", "show", f"{revision}:workflow.toml"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60, preserve_newlines=True, encoding="utf-8",
     )
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
     try:
-        data = tomllib.loads(shown.stdout)
+        data = tomllib.loads(shown.stdout.encode("utf-8", errors="surrogateescape").decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{source}: {exc}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{source}: invalid TOML: {exc}. {hint}") from None
     try:
