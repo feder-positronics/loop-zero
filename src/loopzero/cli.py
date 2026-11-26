@@ -1331,6 +1331,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if not readiness.ready:
         if args.wait is None and _pending_checks(config, pr, readiness):
             print(NEXT_WAIT)
+            return 3
         return 1
     print(f"ready: {pr.url}")
     return 0
@@ -1568,7 +1569,7 @@ def _wait_for_checks(
 
 def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str | None:
     """Merge SHA if landed; a closed-unmerged read is held as not final (GitHub lags a
-    queue merge) and re-raised by the caller only if it persists to the deadline."""
+    queue merge) until the next poll or the deadline."""
     try:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
     except github.ClosedUnmerged as exc:
@@ -1584,8 +1585,13 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
     closed: list[github.GhError] = []
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
     for _ in _poll_until(started, timeout):
+        was_closed = bool(closed)
         if sha := _landed(config, pr, closed):
             return sha
+        if closed:
+            if was_closed:
+                raise closed[0]
+            continue
         if not github.merge_pending(config.repo, pr.number, pr.head_sha):
             if sha := _landed(config, pr, closed):
                 return sha
@@ -1663,8 +1669,13 @@ def _mergify_departure(
 def _mergify_wait_poll(
     config: Config, pr: github.PR, queue: str, deadline: float, closed: list[github.GhError], confirmed: bool,
 ) -> tuple[str | None, mergify.Membership | None, bool]:
+    was_closed = bool(closed)
     if sha := _landed(config, pr, closed):
         return sha, None, False
+    if closed:
+        if was_closed:
+            raise closed[0]
+        return None, None, False
     if not mergify.configured(config.repo, config.base_branch, queue, deadline):
         raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
     state = mergify.membership(config.repo, pr.number, queue, deadline)
@@ -1738,6 +1749,8 @@ def _merge_with_mergify(
     assert queue is not None
     if not readiness.ready:
         return _follow_blocked_mergify(config, pr, readiness, queue, deadline)
+    if pr.is_draft:
+        raise CliError(f"PR #{pr.number} is still a draft; next: loopzero ready --wait")
     with worktree.lock_local_state(wt):
         requested, confirmed_marker = mergify.markers(
             config.repo, pr.number, pr.head_sha, queue
