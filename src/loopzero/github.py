@@ -1279,8 +1279,9 @@ def _check_signals(
                   and states[name] not in _NONFAILING_CHECKS
                   and all(at and at < review_at for state, at in values if state not in _NONFAILING_CHECKS)
                   and (review_grace or any(at and at >= review_at for state, at in values if state in _PENDING_CHECKS)))
+    # Only eligibility (eligibility.CONTEXT) refreshes on a review (#259); CI verdicts stay current.
     stale_verdicts = tuple(name for name, values in signals.items() if review_at and stale_verdict_grace
-                           and name not in stale and states[name] in _FAILED_VERDICTS
+                           and name == "Loop-zero Eligibility" and name not in stale and states[name] in _FAILED_VERDICTS
                            and all(at and at < review_at for state, at in values if state != "success"))
     stale += stale_verdicts
     superseded: list[str] = []

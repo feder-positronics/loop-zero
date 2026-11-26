@@ -2189,7 +2189,7 @@ def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher)
     ("no-pr", "no pull request for lz/t1"),
     ("retargeted", "PR targets release, configured base is main"),
     ("dirty", "uncommitted"),
-    ("unpushed", "push or pull first"),
+    ("unpushed", "run `loopzero check` then `loopzero pr`"),
 ])
 def test_review_refuses_invalid_preflight(wt: Path, gh: FakeGh, fake_bin: Path,
                                          capsys, condition, message) -> None:
@@ -3043,6 +3043,8 @@ def test_ready_wait_review_failure_freshness(
     wt: Path, gh: FakeGh, capsys, monkeypatch, name, pending, age, new_failure, wait, expected, waited, head,
     replay_gh,
 ) -> None:
+    if name == "checks" and waited and (age < 0 or age >= 120) and not pending:
+        expected, waited = 1, False  # r7-c2-1: only eligibility verdicts await a post-review refresh.
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
     current, earlier = "12:00:00Z", "11:59:59Z"
     review_time, failure_time = {
@@ -3904,7 +3906,7 @@ def test_commands_refuse_closed_or_mismatched_pr(wt, gh, capsys, command, closed
         expect_cli(capsys, 1, command, stderr_contains=("PR #7 is CLOSED, not open",))
     else:
         arm_pr(gh, "0" * 40, isDraft=False)
-        expect_cli(capsys, 1, command, stdout="", stderr_contains=("push or pull first",))
+        expect_cli(capsys, 1, command, stdout="", stderr_contains=("run `loopzero check` then `loopzero pr`",))
         assert wt.exists() and all(c["argv"][:2] not in (["pr", "merge"], ["pr", "ready"]) for c in gh.calls)
 
 

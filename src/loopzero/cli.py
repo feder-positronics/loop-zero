@@ -178,7 +178,8 @@ def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, head
 def _require_pushed(pr: github.PR, head: str) -> None:
     if pr.head_sha != head:
         raise CliError(
-            f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; push or pull first"
+            f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; for local commits run "
+            "`loopzero check` then `loopzero pr`; for remote ones pull first"
         )
 
 
@@ -1576,7 +1577,7 @@ def _wait_for_checks(
         # when no visible pending check explains why the required jobs have not appeared.
         if (
             elapsed >= MISSING_RUN_GRACE
-            and all(" missing on " in r for r in pending)
+            and all(" missing on " in r or r.endswith(" is skipped") for r in pending)
             and not readiness.has_pending_checks
             and not _read_wait_poll(partial(github.has_active_workflow, config.repo, pr.head_sha),
                                     started + timeout)
