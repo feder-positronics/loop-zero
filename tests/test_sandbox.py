@@ -507,19 +507,29 @@ def test_real_sandbox_tmp_subpath_bind_stays_visible(git_repo, tmp_path):
 @pytest.mark.skipif(
     not _real_bwrap_works() or shutil.which("uv") is None, reason="needs real bwrap and uv"
 )
-def test_real_sandbox_uv_run_offline(git_repo):
-    home = Path.home()  # the sandbox home inside `loopzero check`: bind the real toolchain
-    uv_cache = os.environ.get("UV_CACHE_DIR", f"{home}/.cache/uv")
-    uv_pythons = os.environ.get("UV_PYTHON_INSTALL_DIR", f"{home}/.local/share/uv/python")
+def test_real_sandbox_uv_run_offline(git_repo, tmp_path):
+    uv_cache = tmp_path / "uv-cache"
+    uv_cache.mkdir()
+    uv = shutil.which("uv")
+    assert uv is not None
+    env = {
+        "UV_CACHE_DIR": str(uv_cache),
+        "UV_NO_CONFIG": "1",
+        "UV_OFFLINE": "1",
+        "UV_PYTHON": str(Path(sys._base_executable).resolve()),
+        "UV_PYTHON_DOWNLOADS": "never",
+    }
     pyproject = '[project]\nname = "t"\nversion = "0"\nrequires-python = ">=3.12"\n'
     (git_repo / "pyproject.toml").write_text(pyproject + "[dependency-groups]\ndev = []\n")
-    subprocess.run(["uv", "lock", "-q"], cwd=git_repo, check=True)  # projects commit uv.lock
+    lock_env = {"HOME": str(tmp_path), "PATH": os.defpath, **env}
+    subprocess.run([uv, "lock", "-q"], cwd=git_repo, env=lock_env, check=True)
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-q", "-m", "uv project")
     cfg = make_config(
         checks=("uv run --group dev python -c 1", ".venv/bin/python -c 1", "test ! -w ."),
-        env=(("UV_CACHE_DIR", uv_cache), ("UV_PYTHON_INSTALL_DIR", uv_pythons)),
-        sandbox_ro=(str(Path(shutil.which("uv")).parent), uv_pythons), writable=(uv_cache,),
+        env=tuple(env.items()),
+        sandbox_ro=(str(Path(uv).parent), sys.base_prefix),
+        writable=(str(uv_cache),),
     )
     report = sandbox.run_checks(cfg, git_repo)
     assert report.ok, report
