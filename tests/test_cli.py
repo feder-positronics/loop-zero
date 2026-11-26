@@ -613,6 +613,67 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
         assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["exit_code"] == 0
 
 
+@pytest.mark.parametrize("receipt", ["saved", "head moved", "write failed"])
+def test_check_bounds_large_failure_and_preserves_receipt(wt, head, capsys, monkeypatch, receipt):
+    tail = 'TEST_FAILURES={"detail":"' + "é" * 7500 + '","error":"Failed to fetch package"}\n'
+    tail += "migration failed: relation widgets already exists\nAssertionError: assert " + "x" * 1000
+    monkeypatch.setattr(cli.sandbox, "run_checks", lambda *a, **k: CheckReport(
+        "a" * 40 if receipt == "head moved" else head, False,
+        (CheckResult("apply migrations", 7, 0.1, tail),),
+    ))
+    if receipt == "write failed":
+        monkeypatch.setattr(cli, "_save_report", Mock(side_effect=PermissionError("receipt write denied")))
+    code, out, err = run(capsys, "check")
+    assert len((out + err).encode()) < 2500
+    assert code == 1 and "apply migrations (exit 7)" in err
+    assert all(text in err for text in ("migration failed: relation widgets already exists", "AssertionError: assert", "[...]"))
+    assert "uv sync --group dev" in err
+    if receipt == "saved":
+        assert out.endswith("FAIL\n") and ".loopzero/checks.json" in err and head in err
+        assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["tail"] == tail
+    else:
+        assert ".loopzero/checks.json" not in err
+        assert ("current HEAD" if receipt == "head moved" else "receipt write denied") in err
+
+
+def test_check_hour_long_stage_transcript(wt, head, gh, capsys, monkeypatch):
+    sandbox = cli.sandbox
+    clock = poll_clock(monkeypatch)
+    deadline = 0.0
+
+    def wait(seconds):
+        clock.now += seconds
+        return clock.now >= deadline
+
+    monkeypatch.setattr(sandbox.threading, "Event", lambda: Mock(wait=wait))
+    monkeypatch.setattr(sandbox.threading, "Thread", lambda *, target, daemon: Mock(start=target))
+
+    def run_checks(cfg, path, *, progress, status, checkpoint, workflow):
+        nonlocal deadline
+        results = []
+        for ordinal in range(1, 25):
+            command = f"run tool {ordinal:02d}"
+            duration = 3600.0 if ordinal == 1 else 0.1
+            deadline = clock.now + duration
+            progress(command)
+            with sandbox._stage_status(status, ordinal, 24):
+                pass
+            status(f"stage {ordinal}/24: exit 0 ({duration:.1f}s)")
+            results.append(CheckResult(command, 0, duration, ""))
+        return CheckReport(head, False, tuple(results), sandbox.settings_fingerprint(cfg, path))
+
+    monkeypatch.setattr(sandbox, "run_checks", run_checks)
+    code, out, err = run(capsys, "check")
+    assert len((out + err).encode()) < 2400
+    assert (code, err, gh.calls) == (0, "", []) and out.endswith("PASS\n")
+    assert f"receipt produced: head={head}" in out and "stage 24/24: exit 0" in out
+    assert out.count("running: run tool") == 24
+    assert [float(seconds) for seconds in re.findall(r"running \(([\d.]+)s elapsed\)", out)] == list(
+        range(30, 3600, 300)
+    )
+    assert out.rindex("s elapsed)") < out.index("stage 1/24: exit 0 (3600.0s)")
+
+
 @pytest.mark.parametrize("command,exit_code,tail", [
     ("echo no; exit 3", 3, "no\n"),
     ("seq 1 50; exit 1", 1, "".join(f"{i}\n" for i in range(11, 51)))])
@@ -1477,13 +1538,14 @@ def test_review_runtime_paths_use_only_verified_base(
 def test_runtime_pinning_requires_trusted_workflow(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, command: str, missing: str,
 ) -> None:
+    origin = Path(git(wt, "remote", "get-url", "origin").strip())
     if missing == "default":
         git(wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
-    elif missing == "remote":
-        git(wt, "update-ref", "-d", "refs/remotes/origin/main")
     else:
-        git(wt, "update-ref", "refs/remotes/origin/main",
-            git(wt, "rev-list", "--max-parents=0", "HEAD").strip())
+        options = ("-d",) if missing == "remote" else ()
+        revision = () if options else (git(wt, "rev-list", "--max-parents=0", "HEAD").strip(),)
+        for checkout, ref in ((wt, "refs/remotes/origin/main"), (origin, "refs/heads/main")):
+            git(checkout, "update-ref", *options, ref, *revision)
     prepare_review(wt, gh, fake_bin)
     code, out, err = run(capsys, command)
     assert "reviewer paths" not in out + err
@@ -2183,7 +2245,7 @@ def test_ready_after_reviewed_head(
     popen = subprocess.Popen
 
     def isolated_fetch(argv, **kwargs):
-        if "fetch" in argv:
+        if "fetch" in argv and f"https://github.com/{REPO}.git" in argv:
             if history == "missing history":
                 raise cli.eligibility.candidate.CandidateError("history unavailable")
             argv = [wt.as_uri() if arg == f"https://github.com/{REPO}.git" else arg for arg in argv]
@@ -2224,7 +2286,7 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch, git
     gh.respond("pr ready", "")
     git_calls.clear()
     code, out, err = run(capsys, "ready")
-    assert_git_cost(git_calls, 7, 1)
+    assert_git_cost(git_calls, 8, 1)
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
@@ -3166,6 +3228,7 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     repo: Path, gh: FakeGh, capsys, monkeypatch, state
 ) -> None:
     primary = repo.parent / "origin.git"
+    git(primary, "remote", "add", "origin", str(primary))
     linked = repo.parent / "linked task"
     git(primary, "worktree", "add", "-q", "-b", "lz/bare", str(linked), "main")
     monkeypatch.chdir(linked)
@@ -3695,7 +3758,7 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
         git(wt, "checkout", "-q", "--ignore-other-worktrees", base)
     else:
         publish_workflow(wt, workflow.read_text())
-        git(wt, "update-ref", f"refs/remotes/origin/{base}", "refs/remotes/origin/main")
+        git(wt, "push", "-q", "origin", f"origin/main:refs/heads/{base}")
         git(wt, "checkout", "-q", "-b", base)
     for command in ("pr", "review", "ready", "merge"):
         code, out, err = run(capsys, command)
@@ -4190,12 +4253,25 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
 
 
 @pytest.mark.parametrize("publisher", ["stranger", "lz-bot"])
-def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
-    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]'))
+def test_ready_pins_review_publishers_to_base(wt, repo, gh, capsys, monkeypatch, publisher, head):
+    policy = WORKFLOW.replace('required_ci = ["checks"]', 'required_ci = ["checks", "Loop-zero Eligibility"]')
+    publish_workflow(wt, policy.replace(PUBLISHERS, 'review_publishers = ["stranger"]'))
+    commit_file(repo, "workflow.toml", policy, "rotate publisher")
+    git(repo, "push", str(repo.parent / "origin.git"), "main")  # preserve the retired local publisher
+    (wt / "workflow.toml").write_text(policy.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]'))
     arm_approved_pr_with_check_result(
         gh, head, wt, "success", review_login=publisher, isDraft=False
     )
+    gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [{"context": "Loop-zero Eligibility", "state": "success"}])
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
+    event = repo / "event.json"
+    event.write_text(json.dumps({"inputs": {"pr": "7"}}))
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    assert hosted.main() == 0
+    assert json.loads(gh.calls[-1]["--input"])["state"] == ("success" if publisher == LOGIN else "pending")
 
 
 def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatch):
