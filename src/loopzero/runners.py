@@ -538,7 +538,7 @@ def _repository_skill_paths(cwd: Path) -> set[str]:
 def _claude_provenance(envelope: dict, raw: str) -> dict[str, object]:
     required = ("session_id", "usage", "total_cost_usd", "duration_api_ms")
     if any(name not in envelope for name in required):
-        raise RunnerMalformedOutput("claude: result envelope lacks provenance", _tail(raw))
+        raise RunnerBadOutput("claude: result envelope lacks provenance", _tail(raw))
     session_id = envelope["session_id"]
     usage = envelope["usage"]
     cost = envelope["total_cost_usd"]
@@ -552,7 +552,7 @@ def _claude_provenance(envelope: dict, raw: str) -> dict[str, object]:
         or isinstance(duration, bool)
         or not isinstance(duration, (int, float))
     ):
-        raise RunnerMalformedOutput("claude: result envelope has invalid provenance", _tail(raw))
+        raise RunnerBadOutput("claude: result envelope has invalid provenance", _tail(raw))
     return {
         "family": "claude",
         "session_id": session_id,
@@ -1084,7 +1084,7 @@ def _codex_provenance(
         else None
     )
     if not session_id or not isinstance(usage, dict):
-        raise RunnerMalformedOutput(
+        raise RunnerBadOutput(
             "codex: execution output lacks session/token provenance", _tail(stdout + stderr)
         )
     clean_stderr = re.sub(r"\x1b\[[0-9;]*m", "", stderr)
@@ -1167,7 +1167,7 @@ def _review_claude(
     try:
         payload = _claude_payload(envelope)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerMalformedOutput("claude: result text is not JSON", _tail(raw)) from exc
+        raise RunnerMalformedOutput("claude: result text is not JSON", _tail(str(envelope.get("result", "")))) from exc
     usage = envelope.get("modelUsage")
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
     reported_model = ", ".join(models) or None
@@ -1175,7 +1175,7 @@ def _review_claude(
     provenance["requested_settings"] = [{"model": model, "effort": effort}]
     provenance["configured_settings"] = [configured]
     return replace(
-        parse_review(payload, family="claude", head=head, kind=kind, raw=raw),
+        parse_review(payload, family="claude", head=head, kind=kind, raw=raw, excerpt=json.dumps(payload)),
         model=reported_model or model, effort=effort,
         duration_s=done.duration_s, provenance=provenance,
     )
@@ -1277,7 +1277,7 @@ def _review_codex(
             raise RunnerMalformedOutput("codex: final message is not UTF-8", fragment) from exc
         provenance, raw = _codex_provenance(done.stdout, done.stderr, message, home=home)
     if not message.strip():
-        raise RunnerMalformedOutput("codex: no final message written", _tail(done.stdout + done.stderr))
+        raise RunnerBadOutput("codex: no final message written", _tail(done.stdout + done.stderr))
     try:
         payload = _extract_json_object(message)
     except (json.JSONDecodeError, ValueError) as exc:
