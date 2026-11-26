@@ -30,6 +30,7 @@ from .worktree import WorktreeError
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
 TIMEOUT_EXIT = 124
+CHECK_SHELL = ("/bin/bash", "--posix", "-o", "pipefail", "-c")
 CHECK_TAIL_BYTES = 16 * 1024
 HEARTBEAT_INTERVAL = 30.0
 SANDBOX_HOME = "/tmp/home"
@@ -255,6 +256,7 @@ def _runner_identity(config: Config) -> tuple[str, str, str] | None:
 def _execution_settings(config: Config, base: str) -> dict:
     settings = {k: v for k, v in asdict(config).items() if k in {
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
+    settings["local_shell"] = CHECK_SHELL
     if config.check_runner or config.inputs:
         settings["base"] = base
     if config.check_runner:
@@ -428,7 +430,7 @@ def _run_one(
             [*prefix, "prlimit",
              f"--as={_cap_limit(limits.memory_mb * 1024 * 1024, resource.RLIMIT_AS)}",
              f"--fsize={_cap_limit(limits.file_mb * 1024 * 1024, resource.RLIMIT_FSIZE)}",
-             "--", "/bin/sh", "-c", command],
+             "--", *CHECK_SHELL, command],
             cwd=worktree,
             env_allowlist=config.env_allowlist,
             timeout=timeout,
