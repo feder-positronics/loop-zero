@@ -408,10 +408,8 @@ def request(repo: str, number: int, head: str, queue: str) -> None:
     body = f"@mergifyio queue\n\n{_marker(REQUEST, head, queue)}"  # Mergify deprecates naming the queue
     try:
         github._api(f"repos/{repo}/issues/{number}/comments", {"body": body})
-    except github.GhUnavailable:
-        raise
-    except (github.GhError, github.ProcTimeout, OSError):
-        if not markers(repo, number, head, queue)[0]:
+    except (github.GhError, github.ProcTimeout, OSError) as exc:
+        if getattr(exc, "confirmed_rate_limit", False) or not markers(repo, number, head, queue)[0]:
             raise
 
 

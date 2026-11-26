@@ -3879,8 +3879,8 @@ def test_mergify_merge_requests_once_for_behind_head(
     else:
         assert "queue configuration is unverified" in err
 
-@pytest.mark.parametrize("accepted", [True, False])
-def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accepted):
+@pytest.mark.parametrize(("accepted", "transient"), [(True, False), (False, False), (True, True)])
+def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accepted, transient):
     head = arm_mergify_pr(wt, gh)
     pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
     settings = config.load_trusted(wt)
@@ -3908,6 +3908,8 @@ def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accep
             if accepted:
                 original_api(path, payload, **kwargs)
                 gh.respond(f"api {path}", [{"user": {"login": LOGIN}, "body": payload["body"]}])
+            if transient:
+                raise github.GhUnavailable(("GitHub API request",), "HTTP 502")
             raise github.ProcTimeout("lost Mergify command reply")
         return original_api(path, payload, **kwargs)
 

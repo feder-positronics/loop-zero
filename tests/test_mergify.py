@@ -283,14 +283,16 @@ def test_request_deadline(monkeypatch, phase):
     assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
 
 
-def test_rate_limited_queue_post_does_not_reconcile(monkeypatch):
-    rejected = github.GhUnavailable(("GitHub API request",), "HTTP 429")
-
-    def submit(*args):
-        raise rejected
-
-    monkeypatch.setattr(github, "_api", submit)
+@pytest.mark.parametrize("response", [
+    'HTTP/2 429 Too Many Requests\n\n{}',
+    'HTTP/2 403 Forbidden\nX-RateLimit-Remaining: 0\n\n{}',
+    'HTTP/2 403 Forbidden\n\n{"message":"API rate limit exceeded"}',
+])
+def test_rate_limited_queue_post_does_not_reconcile(monkeypatch, response):
+    monkeypatch.setattr(github, "run", lambda *_a, **_k: SimpleNamespace(
+        exit_code=1, stdout=response, stderr="",
+    ))
     monkeypatch.setattr(mergify, "markers", lambda *_: pytest.fail("read markers after rate-limited POST"))
     with pytest.raises(github.GhUnavailable) as exc:
         mergify.request("acme/widgets", 7, "a" * 40, "main")
-    assert exc.value is rejected
+    assert exc.value.confirmed_rate_limit
