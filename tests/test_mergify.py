@@ -13,16 +13,8 @@ import pytest
 from loopzero import mergify
 
 
-class Response(io.BytesIO):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.close()
-
-
-def response(payload: object) -> Response:
-    return Response(json.dumps(payload).encode())
+def response(payload: object) -> io.BytesIO:
+    return io.BytesIO(json.dumps(payload).encode())
 
 
 def test_membership_uses_bearer_and_validates_queue(monkeypatch):
@@ -86,7 +78,7 @@ def queue_api(monkeypatch):
         {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status") else
         {"configuration": [{"name": "main", "config": {"allow_inplace_checks": True}}]}
     ))
-    def github_config(text, *, default="main", changed=False):
+    def github_config(text, *, default="main", changed=False, file_overrides=None):
         reads = 0
         def get(path):
             nonlocal reads
@@ -95,7 +87,7 @@ def queue_api(monkeypatch):
             assert path == "repos/acme/widgets/contents/.mergify.yml?ref=refs%2Fheads%2Fmain"
             reads += 1
             return {"type": "file", "encoding": "base64", "sha": str(reads if changed else 1)*40,
-                    "content": base64.b64encode(text.encode()).decode()}
+                    "content": base64.b64encode(text.encode()).decode(), **(file_overrides or {})}
         monkeypatch.setattr(mergify.github, "api_get", get)
     return github_config
 
@@ -104,13 +96,7 @@ SAFE_CONFIG = "merge_queue: {mode: serial, max_parallel_checks: 3}\nqueue_rules:
 ONE_CHECK = SAFE_CONFIG.replace("checks: 3", "checks: 1")  # in place unless batches are explicit
 
 
-@pytest.mark.parametrize("text", [SAFE_CONFIG, ONE_CHECK.replace("main}", "main, batch_size: 8}")])
-def test_configured_accepts_documented_speculation_despite_raw_inplace_default(queue_api, text):
-    queue_api(text)
-    assert mergify.configured("acme/widgets", "main", "main")
-
-
-@pytest.mark.parametrize("text", [
+UNSAFE_CONFIGS = [
     SAFE_CONFIG.replace("checks: 3", f"checks: {value}")
     for value in ["1", "0", "-1", "true", '"3"', "null"]
 ] + [
@@ -120,35 +106,27 @@ def test_configured_accepts_documented_speculation_despite_raw_inplace_default(q
     SAFE_CONFIG + "merge_queue: {max_parallel_checks: 1}\n",
     "[]", "!!python/object:object {}", "merge_queue: [",
 ] + [ONE_CHECK.replace("main}", r) for r in ["main, batch_size: 1}", "main, batch_size: true}",
-     'main, batch_size: "8"}', "main, batch_size: null}", "main}, {name: o, batch_size: 8}"]])
-def test_configured_rejects_unsafe_or_ambiguous_canonical_config(queue_api, text):
-    queue_api(text)
-    assert not mergify.configured("acme/widgets", "main", "main")
+     'main, batch_size: "8"}', "main, batch_size: null}", "main}, {name: o, batch_size: 8}"]]
 
 
-@pytest.mark.parametrize("options", [{"default": "other"}, {"changed": True}])
-def test_configured_rejects_wrong_default_branch_or_config_change(queue_api, options):
-    queue_api(SAFE_CONFIG, **options)
-    assert not mergify.configured("acme/widgets", "main", "main")
+@pytest.mark.parametrize("text,options,accepted", [
+    (SAFE_CONFIG, {}, True),
+    (ONE_CHECK.replace("main}", "main, batch_size: 8}"), {}, True),
+    *((text, {}, False) for text in UNSAFE_CONFIGS),
+    (SAFE_CONFIG, {"default": "other"}, False),
+    (SAFE_CONFIG, {"changed": True}, False),
+    *((SAFE_CONFIG, {"file_overrides": {key: value}}, False)
+      for key, value in (("encoding", "none"), ("type", "symlink"), ("sha", None),
+                         ("sha", "z" * 40), ("content", None), ("content", "!"))),
+])
+def test_configured_validates_canonical_github_config(queue_api, text, options, accepted):
+    queue_api(text, **options)
+    assert mergify.configured("acme/widgets", "main", "main") == accepted
 
 
 def test_configured_still_requires_vendor_queue_identity(queue_api, monkeypatch):
     queue_api(SAFE_CONFIG)
     monkeypatch.setattr(mergify, "api_get", lambda *_: {"batches": [], "mode": "serial", "configuration": []})
-    assert not mergify.configured("acme/widgets", "main", "main")
-
-
-@pytest.mark.parametrize("field,value", [("encoding", "none"), ("type", "symlink"),
-                                        ("sha", None), ("sha", "z"*40), ("content", None), ("content", "!")])
-def test_configured_rejects_malformed_github_file(queue_api, monkeypatch, field, value):
-    queue_api(SAFE_CONFIG)
-    original = mergify.github.api_get
-    def malformed(path):
-        data = original(path)
-        if "/contents/" in path:
-            data[field] = value
-        return data
-    monkeypatch.setattr(mergify.github, "api_get", malformed)
     assert not mergify.configured("acme/widgets", "main", "main")
 
 
