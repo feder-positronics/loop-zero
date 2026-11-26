@@ -2467,6 +2467,32 @@ def test_late_check_preserves_receipt_when_head_moves(wt, gh, capsys, monkeypatc
         assert "receipt accepted:" in ready
 
 
+@pytest.mark.parametrize("mode", ["commands", "settings", "same", "override"])
+def test_check_stops_stale_trusted_plan_between_stages(repo, wt, gh, capsys, monkeypatch, mode):
+    """Replay the old-plan runs from #1988 without waiting for their long stages."""
+    new_workflow = {
+        "settings": WORKFLOW.replace("[checks]", "[checks]\nnetwork = true"),
+        "same": WORKFLOW + "\n# unchanged settings",
+    }.get(mode, WORKFLOW.replace("echo ok", "echo new plan"))
+    commit_file(repo, "workflow.toml", new_workflow, "advance trusted plan")
+    seen = []
+
+    def stage(config, path, prefix, command, timeout):
+        seen.append(command)
+        git(wt, "update-ref", "refs/remotes/origin/main", head_of(repo))
+        return CheckResult(command, 0, 0.0, "")
+
+    monkeypatch.setattr(cli.sandbox, "_run_one", stage)
+    args = ("--config", "workflow.toml", "check") if mode == "override" else ("check",)
+    if mode in {"commands", "settings"}:
+        expect_cli(capsys, 1, *args, stderr_contains=("trusted check plan changed", "Run loopzero check"))
+        assert seen == ["echo ok"]
+        assert not (wt / ".loopzero/checks.json").exists()
+    else:
+        expect_cli(capsys, 0, *args, stdout_endswith="PASS\n")
+        assert seen == ["echo ok", "test -f README.md"]
+
+
 @pytest.mark.parametrize("first_exit", [0, 1])
 def test_overlapping_checks_share_only_a_pass(wt, capsys, monkeypatch, first_exit):
     started, waiting = Event(), Event()
@@ -3399,10 +3425,11 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     code, out, err = run(capsys, "merge")
     assert {primary.resolve(), repo.resolve()}.isdisjoint(cwds)
 
+    assert code == 0 and out.endswith(f"{'c' * 40}\n") and "cd " not in out, (out, err)
     if state == "wrong_primary":
-        assert code == 1 and "does not own this linked worktree" in err
+        assert "warning: merged but worktree cleanup failed:" in err
+        assert "does not own this linked worktree" in err
     else:
-        assert code == 0 and out.endswith(f"{'c' * 40}\n") and "cd " not in out, (out, err)
         assert ("worktree is dirty" in err) if state == "dirty" else not err
     assert linked.exists() is (state != "clean")
     assert bool(git(primary, "branch", "--list", "lz/bare")) is (state != "clean")
