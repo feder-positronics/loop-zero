@@ -1485,6 +1485,21 @@ def _merge_with_mergify(
     return None
 
 
+def _merge_pr_readiness(
+    wt: Path, config: Config, *, workflow_wait: bool
+) -> tuple[str, github.PR, github.Readiness | None]:
+    if previous := worktree.detached_from(wt):
+        _repo_root(wt)
+        _require_task_branch(config, previous)
+        pr = github.merged_pr_at_head(config.repo, previous, worktree.head(wt))
+        if pr is None:
+            raise CliError(f"no merged PR proves cleanup of detached worktree for {previous!r}")
+        return previous, pr, None
+    branch = worktree.branch(wt)
+    pr, readiness = _pr_readiness(wt, config, allow_merged=True, workflow_wait=workflow_wait)
+    return branch, pr, readiness
+
+
 def cmd_merge(args: argparse.Namespace) -> int:
     if args.cancel and args.wait is not None:
         raise CliError("merge --cancel cannot be combined with --wait")
@@ -1497,18 +1512,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         mergify.dequeue(config.repo, pr.number)
         print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
-    if previous := worktree.detached_from(wt):
-        _repo_root(wt)
-        _require_task_branch(config, previous)
-        pr = github.merged_pr_at_head(config.repo, previous, worktree.head(wt))
-        if pr is None:
-            raise CliError(f"no merged PR proves cleanup of detached worktree for {previous!r}")
-        branch, readiness = previous, None
-    else:
-        branch = worktree.branch(wt)
-        pr, readiness = _pr_readiness(
-            wt, config, allow_merged=True, workflow_wait=args.wait is not None
-        )
+    branch, pr, readiness = _merge_pr_readiness(wt, config, workflow_wait=args.wait is not None)
     started = time.monotonic()
     deadline = None if args.wait is None else started + args.wait
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
