@@ -298,7 +298,7 @@ def _review_cap_reason(config: Config, pr: github.PR, head: str, reviews: list[d
     )
 
 
-MERGEABILITY_PENDING = "GitHub is computing mergeability"
+MERGEABILITY_PENDING = github.MERGEABILITY_PENDING
 
 
 def _readiness_precheck(wt: Path, config: Config, pr: github.PR, head: str, diagnostics: bool) -> str | None:
@@ -355,8 +355,6 @@ def _readiness(
             result = dataclasses.replace(result, reasons=tuple(
                 exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
             ))
-    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
-        result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
     report = _load_report(wt)
     receipt_problem = _check_report_problem(report, config, head)
     if receipt_problem:
@@ -709,6 +707,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
     body = _pr_body(wt, head, config, existing)
     force_lease = False
+    git_branch = os.fsdecode(branch.encode("utf-8", "surrogateescape"))
     push = ["push", "-u", "origin"]
     if pr is not None:
         known = config_mod.run_git(wt, "cat-file", "-e", f"{pr.head_sha}^{{commit}}")
@@ -718,13 +717,13 @@ def cmd_pr(args: argparse.Namespace) -> int:
             )
         force_lease = pr.head_sha != head and not _is_ancestor(wt, pr.head_sha, head)
         if force_lease:
-            previous_heads = _git(wt, "reflog", "show", "--format=%H", f"refs/heads/{branch}").splitlines()
+            previous_heads = _git(wt, "reflog", "show", "--format=%H", f"refs/heads/{git_branch}").splitlines()
             if not any(_is_ancestor(wt, pr.head_sha, previous) for previous in previous_heads):
                 raise CliError(
                     f"PR head {pr.head_sha[:12]} is absent from this task branch's history; integrate it first"
                 )
-            push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
-    push.append(branch)
+            push.extend(("--porcelain", f"--force-with-lease={git_branch}:{pr.head_sha}"))
+    push.append(git_branch)
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None:
@@ -1849,29 +1848,34 @@ def _cleanup_remote_refs(wt: Path, config: Config, branch: str, expected_head: s
 def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
     if not branch.startswith("lz/") or branch.count("/") != 1:
         return
-    ref = f"refs/remotes/origin/{branch}"
+    ref = os.fsdecode(f"refs/remotes/origin/{branch}".encode("utf-8", "surrogateescape"))
     try:
         _repo_root(wt)
-        current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref)
+        current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref, paths=True).rstrip(" ")
         if current == f"{expected_head} {ref}":
             _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
     except (CliError, OSError, _proc.ProcTimeout) as exc:
         print(f"warning: merged but tracking ref cleanup failed for {ref}: {exc}", file=sys.stderr)
 
 
-def cmd_resolve(args: argparse.Namespace) -> int:
+def _print_display(text: str) -> None:
     encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, "backslashreplace").decode(encoding))
+
+
+def cmd_resolve(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
-    pr = _require_pr(config, worktree.branch(wt))
+    branch = worktree.branch(wt)
+    pr = _require_pr(config, branch)
     if pr.base_ref != config.base_branch:  # trusted publishers belong to the configured base
         raise CliError(f"PR #{pr.number} targets {pr.base_ref}, configured base is {config.base_branch}")
     publishers = config.review_publishers or (github.login(),)
     if not args.finding:
         for marker_id, _thread, f in github.open_findings(config.repo, pr.number, publishers):
-            print(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}".encode(encoding, "backslashreplace").decode(encoding))
+            _print_display(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}")
         return 0
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply, publishers)
-    print(f"resolved {args.finding}: {finding.title}".encode(encoding, "backslashreplace").decode(encoding))
+    _print_display(f"resolved {args.finding}: {finding.title}")
     try:
         with github.api_error_diagnostics():
             remaining = github.open_blocking_findings(config.repo, pr.number, None, publishers)
@@ -1886,7 +1890,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             f"Then, if no findings remain, run `{retry}`."
         ) from exc
     if not remaining:
-        github.refresh_eligibility(config.repo, pr.number, config.base_branch)
+        github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers)
         print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
     return 0
 
@@ -1895,27 +1899,24 @@ def cmd_status(args: argparse.Namespace) -> int:
     wt = _toplevel()
     config = _load_config(args, wt, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
-    print(f"worktree: {wt}")
-    print(f"branch:   {branch}")
-    print(f"head:     {head}")
-    print(f"base:     {config.base_branch}")
-    print(f"dirty:    {'yes' if worktree.is_dirty(wt) else 'no'}")
+    _print_display(f"worktree: {wt}\nbranch:   {branch}\nhead:     {head}\nbase:     {config.base_branch}")
+    _print_display(f"dirty:    {'yes' if worktree.is_dirty(wt) else 'no'}")
     pr = github.pr_for_branch(config.repo, branch)
     if pr is None:
-        print("pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)")
+        _print_display("pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)")
         return 0
-    print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
+    _print_display(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     reviews = _pr_reviews(config.repo, pr.number)
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
-        print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
+        _print_display(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
-        print("review:   none on this PR")
+        _print_display("review:   none on this PR")
     readiness = _readiness(wt, config, pr, head, reviews, diagnostics=True)
-    print(f"ready:    {'yes' if readiness.ready else 'no'}")
+    _print_display(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
-        print(f"  - {reason}")
+        _print_display(f"  - {reason}")
     if config.merge_strategy == "mergify" and pr.state == "OPEN" and pr.head_sha == head:
         _print_mergify_status(config, pr, readiness)
     return 0
@@ -1933,9 +1934,9 @@ def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readi
         label = "ejected"
     elif requested or (readiness.ready and report):
         label = "waiting for admission"
-    print(f"mergify:  {label} ({queue})")
+    _print_display(f"mergify:  {label} ({queue})")
     if label == "waiting for admission" and report:
-        print(f"  Mergify report: {report}")
+        _print_display(f"  Mergify report: {report}")
 
 
 def main(argv: list[str] | None = None) -> int:

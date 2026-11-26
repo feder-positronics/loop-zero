@@ -32,6 +32,7 @@ APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 PR_LOCK_DIR = Path.home() / ".cache/loopzero/pr-locks"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
+MERGEABILITY_PENDING = "GitHub is computing mergeability"
 MARKER_RE = re.compile(
     r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
     r"head=(?P<head>[0-9a-f]{40}) id=(?P<id>[0-9a-f]{8}) -->"
@@ -389,7 +390,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout, scoped=read_only))
+                       timeout=_read_timeout(timeout, scoped=read_only), encoding="utf-8")
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
@@ -1138,13 +1139,44 @@ def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, .
             "-f", f"ref={base}", "-f", f"inputs[pr]={number}")
 
 
-def refresh_eligibility(repo: str, number: int, base: str) -> None:
-    args = eligibility_dispatch_args(repo, number, base)
+def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bool:
+    query = f"event=workflow_dispatch&branch={quote(base, safe='')}&created={quote('>=' + since, safe='')}&per_page=100"
+    data = api_get(f"repos/{repo}/actions/workflows/eligibility.yml/runs?{query}")
+    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+    complete = isinstance(runs, list) and data.get("total_count") == len(runs)
+    identified = [run.get("display_title") if isinstance(run, dict) else None for run in runs] if complete else []
+    if f"Refresh eligibility for PR #{number}" in identified:
+        return True
+    if not complete or any(not isinstance(name, str) or not re.fullmatch(r"Refresh eligibility for PR #[0-9]+", name) for name in identified):
+        raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
+    return False
+
+
+def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...]) -> None:
+    args = eligibility_dispatch_args(repo, pr.number, base)
+    since = datetime.fromtimestamp(time.time(), UTC).isoformat(timespec="seconds")
     try:
-        _gh(*args)
+        try:
+            _gh(*args)
+        except (GhUnavailable, ProcTimeout) as exc:
+            if isinstance(exc, GhUnavailable) and not _transient_error(exc.tail, False):
+                raise
+            _retry_sleep(RETRY_DELAY)
+            current = pr_for_branch(repo, branch, open_only=True)
+            if current is None or (current.number, current.head_sha, current.base_ref) != (
+                pr.number, pr.head_sha, pr.base_ref,
+            ):
+                raise GhError(("refresh Loop-zero Eligibility",), "the PR or head changed after resolution") from exc
+            if _eligibility_dispatched(repo, pr.number, base, since):
+                return
+            if open_blocking_findings(repo, pr.number, None, publishers):
+                raise GhError(("refresh Loop-zero Eligibility",), "blocking findings appeared after resolution") from exc
+            _gh(*args)
     except (GhError, ProcTimeout, OSError) as exc:
         retry = shlex.join(("gh", *args))
-        raise GhError(("refresh Loop-zero Eligibility",), f"{exc}\nRun manually: {retry}") from exc
+        raise GhError(("refresh Loop-zero Eligibility",),
+                      f"Finding on PR #{pr.number} is resolved. {exc}\n"
+                      f"Verify the PR head, remaining findings and recent runs before retrying: {retry}") from exc
 
 
 def open_blocking_findings(
@@ -1282,29 +1314,30 @@ def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_
         producer = find_producer(_paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
     if producer is None or not producer.get("workflow_id"):
         return False
-    created = producer.get("created_at")
+    created = readiness_timestamp(producer.get("created_at"))
     for workflow in workflows:
         if (workflow.get("head_sha") != head_sha
                 or workflow.get("workflow_id") != producer["workflow_id"]
                 or workflow.get("status") not in _ACTIVE_WORKFLOWS):
             continue
         if workflow.get("id") == producer.get("id"):
-            if (workflow.get("run_attempt", 1) > 1 and check.get("completed_at")
-                    and workflow.get("run_started_at")
-                    and workflow["run_started_at"] > check["completed_at"]):
+            if (workflow.get("run_attempt", 1) > 1
+                    and (completed := readiness_timestamp(check.get("completed_at"))) is not None
+                    and (started := readiness_timestamp(workflow.get("run_started_at"))) is not None
+                    and started > completed):
                 return True
-        elif (created and isinstance(producer.get("id"), int)
-              and workflow.get("created_at") and isinstance(workflow.get("id"), int)
-              and (workflow["created_at"], workflow["id"]) > (created, producer["id"])):
+        elif (created is not None and isinstance(producer.get("id"), int)
+              and (replacement := readiness_timestamp(workflow.get("created_at"))) is not None
+              and isinstance(workflow.get("id"), int)
+              and (replacement, workflow["id"]) > (created, producer["id"])):
             return True
     return False
 
 
-def _check_run_order(run: dict) -> tuple[int, str]:
+def _check_run_order(run: dict) -> tuple[int, bool, ReadinessTimestamp | None]:
     run_id = run.get("id")
-    started_at = run.get("started_at")
-    return (run_id if isinstance(run_id, int) else -1,
-            started_at if isinstance(started_at, str) else "")
+    started_at = readiness_timestamp(run.get("started_at"))
+    return run_id if isinstance(run_id, int) else -1, started_at is not None, started_at
 
 
 def _aggregate_signal(states: list[str]) -> str:
@@ -1321,6 +1354,14 @@ def behind_reason(pr: PR, reviewed_head: str | None) -> str:
         f"`git fetch origin {shlex.quote(pr.base_ref)}`, "
         f"`git merge {shlex.quote(f'origin/{pr.base_ref}')}`, `loopzero check` and `loopzero pr` before retrying readiness."
     )
+
+
+def mergeability_blocker(pr: PR) -> str | None:
+    if pr.mergeable == "CONFLICTING":
+        return f"PR #{pr.number} has merge conflicts with {pr.base_ref}"
+    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
+        return MERGEABILITY_PENDING
+    return None
 
 
 def readiness(
@@ -1342,8 +1383,8 @@ def readiness(
         reasons.append(f"PR #{pr.number} is {pr.state}, not open")
     if pr.base_ref != base_branch:
         reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}")
-    if pr.mergeable == "CONFLICTING":
-        reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
+    if blocker := mergeability_blocker(pr):
+        reasons.append(blocker)
     if pr.merge_state == "BEHIND" and not allow_behind:
         reasons.append(behind_reason(pr, reviewed_head))
     if not reviewed_head:
@@ -1476,7 +1517,7 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     current = _remote_branch_head(endpoint)
     if current != expected_head:
         return current is None
-    ref = f"refs/heads/{branch}"
+    ref = os.fsdecode(f"refs/heads/{branch}".encode("utf-8", "surrogateescape"))
     argv = ("git", "-c", "credential.helper=!gh auth git-credential",
             "push", f"--force-with-lease={ref}:{expected_head}",
             f"https://github.com/{repo}.git", f":{ref}")

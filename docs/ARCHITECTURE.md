@@ -139,12 +139,21 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    delegated or input-keyed checks binds the configured base branch. Only the
    stage reuse key binds the exact base revision. Source-check waiters check for policy
    changes on every poll.
+   Local readiness and hosted eligibility share the mergeability verdict.
+   Hosted source refresh retries an unknown result on the same head before
+   leaving it pending.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree
    with the actual merge tree. Unavailable history blocks inherited coverage.
    Ancestor coverage includes outdated unresolved blocking threads. A primary
    that requested changes also requires resolved findings at the reviewed head.
+   For check runs with the same name, numeric run IDs take precedence. Equal
+   or missing IDs fall back to the parsed start instant, with usable times ahead
+   of missing or invalid times. Ties keep API order. A retry of the same run
+   supersedes a failure for waiting purposes only when it starts strictly after
+   the failure completed. A different run of the same workflow compares creation
+   instants first, then numeric IDs when those instants are equal.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
    Each poll resolves the trusted workflow ref, reusing parsed policy when the
