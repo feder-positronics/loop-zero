@@ -144,8 +144,8 @@ def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = Fals
         _read_scope.reset(scope)
 
 
-def _read_timeout(limit: float) -> float:
-    scope = _read_scope.get()
+def _read_timeout(limit: float, *, scoped: bool = True) -> float:
+    scope = _read_scope.get() if scoped else None
     if scope is None:
         return limit
     remaining = scope[0] - time.monotonic()
@@ -327,8 +327,8 @@ def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> boo
             or bool(re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)))
 
 
-def _retry_pause(delay: float | None, limit: float) -> bool:
-    if delay is None or delay >= _read_timeout(limit):
+def _retry_pause(delay: float | None, limit: float, *, scoped: bool = True) -> bool:
+    if delay is None or delay >= _read_timeout(limit, scoped=scoped):
         return False
     _retry_sleep(delay)
     return True
@@ -373,13 +373,13 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout) if scope else timeout)
+                       timeout=_read_timeout(timeout, scoped=read_only))
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
-            _read_timeout(timeout)
-            if not _retry_pause(delay, timeout):
+            _read_timeout(timeout, scoped=bool(scope and scope[2]))
+            if not _retry_pause(delay, timeout, scoped=read_only):
                 raise ProcTimeout(
                     _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
                     stderr=_redact_tokens(exc.stderr, selected), duration_s=exc.duration_s,
@@ -389,7 +389,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                                  else (None, {}, done.stdout))
         tail = "\n".join(part for part in (done.stderr, body) if part)
         if done.exit_code and _rate_limited(status, headers, tail):
-            if _retry_pause(_rate_limit_delay(headers, delay), timeout):
+            if _retry_pause(_rate_limit_delay(headers, delay), timeout, scoped=read_only):
                 continue
             guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api or headers
                         else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
@@ -399,7 +399,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                 raise GhUnavailable(("GitHub API request",), detail, token=selected, guidance=guidance)
             raise GhUnavailable(("gh", *args), tail, token=selected, guidance=guidance)
         transient = _transient_error(tail, retry_idempotent, status)
-        if done.exit_code == 0 or not transient or not _retry_pause(delay, timeout):
+        if done.exit_code == 0 or not transient or not _retry_pause(delay, timeout, scoped=read_only):
             break
     if done.exit_code != 0:
         error_command = ("GitHub API request",) if diagnostic_api or patch_error else argv
