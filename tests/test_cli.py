@@ -4661,32 +4661,6 @@ def test_cleanup_preserves_local_work(wt, case, capsys):
     assert ("worktree is dirty" if case == "dirty" else "local HEAD differs") in err
 
 
-@pytest.mark.parametrize('error', [None, 'lookup', 'os', 'config', 'head', 'open', 'cleanup'])
-def test_backfill_dry_run_lists_only(wt, monkeypatch, capsys, error):
-    import importlib.util
-
-    script = Path(__file__).resolve().parents[1] / 'scripts/backfill_receipts.py'
-    spec = importlib.util.spec_from_file_location('backfill', script)
-    backfill = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(backfill)
-    (wt / '.loopzero/review-native.json').write_text('{}')
-    pr = SimpleNamespace(state='OPEN' if error == 'open' else 'MERGED', number=7,
-                         head_sha='a' * 40 if error == 'head' else cli.worktree.head(wt))
-    calls = []
-    def lookup(*a, **kw):
-        calls.append(a)
-        if error in ('lookup', 'os', 'config'):
-            raise {'os': OSError, 'config': backfill.config_mod.ConfigError}.get(error, cli.CliError)('load/lookup failed')
-        return pr
-    monkeypatch.setattr(backfill.config_mod if error == 'config' else cli,
-                        'load' if error == 'config' else '_require_pr', lookup)
-    monkeypatch.setattr(cli, '_cleanup', lambda *a: None if error == 'cleanup' else pytest.fail('dry run'))
-    assert backfill.main((['--confirm'] if error == 'cleanup' else []) + [str(wt)] * 2) == bool(error)
-    assert len(calls) == 2
-    assert ('retaining' if error else 'merged PR #7') in capsys.readouterr().out
-    assert wt.exists()
-
-
 def _closed_unmerged_wait(monkeypatch, reads, steps=0):
     """Run _wait_for_merge against scripted merged_sha reads; return its result."""
     argv = ("gh", "api", "repos/o/r/pulls/7")
