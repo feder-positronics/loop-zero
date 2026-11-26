@@ -1640,6 +1640,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     """List open blocking findings, or reply to one with what changed and resolve its thread."""
     wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
     pr = _require_pr(config, worktree.branch(wt))
+    if pr.base_ref != config.base_branch:  # trusted publishers belong to the configured base
+        raise CliError(f"PR #{pr.number} targets {pr.base_ref}, configured base is {config.base_branch}")
     publishers = config.review_publishers or (github.login(),)
     if not args.finding:
         for marker_id, _thread, f in github.open_findings(config.repo, pr.number, publishers):

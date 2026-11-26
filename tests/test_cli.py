@@ -4039,6 +4039,14 @@ def test_resolve_takes_review_publishers_from_the_base(wt: Path, gh: FakeGh, cap
     assert run(capsys, "resolve") == (0, "1c2d3e4f  important  src/a.py:3  Off by one\n", "")
 
 
+@pytest.mark.parametrize("argv", [("resolve",), ("resolve", "0b9b59e7", "Fixed.")])
+def test_resolve_refuses_a_pr_targeting_another_base(wt: Path, gh: FakeGh, capsys, head, argv) -> None:
+    gh.respond_pr_list([pr_json(headRefOid=head, baseRefName="release")])
+    code, out, err = run(capsys, *argv)
+    assert (code, out) == (1, "") and "PR #7 targets release, configured base is main" in err
+    assert not any("reviewThreads" in " ".join(c["argv"]) for c in gh.calls)
+
+
 def test_resolve_and_ready_ignore_findings_from_non_publishers(wt: Path, gh: FakeGh, capsys, head) -> None:
     planted = _finding_thread("0b9b59e7", head)
     planted["comments"]["nodes"][0]["author"] = {"__typename": "User", "login": "outsider"}
