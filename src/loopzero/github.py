@@ -1144,11 +1144,11 @@ def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bo
     data = api_get(f"repos/{repo}/actions/workflows/eligibility.yml/runs?{query}")
     runs = data.get("workflow_runs") if isinstance(data, dict) else None
     complete = isinstance(runs, list) and data.get("total_count") == len(runs)
-    if not complete:
+    titles = [run.get("display_title") if isinstance(run, dict) else 0 for run in runs] if complete else []
+    if not complete or not all(t is None or isinstance(t, str) for t in titles):
         raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
-    # Consumer workflows may not set a run title; only a title naming another PR excludes a run.
-    others = (re.fullmatch(r"Refresh eligibility for PR #([0-9]+)", str(run.get("display_title"))) for run in runs)
-    return any(not m or int(m[1]) == number for m in others)
+    # Consumer workflows may not set a run title; a title naming another PR excludes a run.
+    return any(not (m := re.search(r"#([0-9]+)", t or "")) or int(m[1]) == number for t in titles)
 
 
 def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...]) -> None:
