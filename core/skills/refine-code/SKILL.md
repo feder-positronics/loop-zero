@@ -5,29 +5,22 @@ description: Simplify a named or current-task diff, or delete evidenced dead cod
 
 # Refine Code
 
-Simplify the user-named or current-task diff while preserving observable behavior
-and public contracts. Follow [the contract](../../CONTRACT.md) in the outer task's
-worktree; confirm branch and task before editing. Prefer clear names, control
-flow and established local patterns without unrelated cleanup or compatibility
-layers.
+Preserve observable behavior and public contracts in the user-named or current-task diff.
+Confirm task and branch in the outer worktree and follow [the contract](../../CONTRACT.md).
+Use clear names, control flow and local patterns. Keep cleanup and compatibility layers within scope.
 
 Treat concurrency, exception timing, transactions, ordering, query predicates,
 persistence, isolation, serialization, public imports, API shape and assertions
 as semantic until equivalence is demonstrated. Route new behavior, abstraction
 boundaries or weakened tests to [implement](../implement/SKILL.md).
 
-Deletion of code outside the current task diff requires explicit requester
-commissioning; an audit finding ([code health](../../../docs/CODE-HEALTH.md))
-is a lead, not a commission. Choose a clean rollback commit before a deletion
-batch; if any check fails, restore the whole batch to it before debugging.
-
-For deletion, establish that supported consumers, including dynamic entry points,
-registries, reflection, plugins, configuration, generated consumers and public
-exports, do not reach the code. Inspect base and current tree; local edits cannot
-prove base unreachability. Lint and coverage alone do not prove deadness, nor does
-one dead symbol prove its module dead. Preserve uncertain candidates and explain
-why. Keep removal recoverable in Git and validate affected runtime, build,
-packaging, deployment and documentation boundaries.
+Deletion outside the task diff needs explicit commissioning. Treat [code health](../../../docs/CODE-HEALTH.md)
+findings as leads. Select a clean rollback commit and restore the whole batch before debugging any failed check.
+Verify in the base and current trees that supported consumers cannot reach removed code. Check dynamic entry
+points, registries, reflection, plugins, configuration, generated consumers and public exports.
+Lint, coverage, post-edit searches and one dead symbol alone do not prove base or module unreachability.
+Explain and preserve uncertain candidates. Keep removals recoverable in Git and validate affected runtime,
+build, packaging, deployment and docs boundaries.
 
 Explain the clarity gain and any apparently behavioral edit. Run focused success
 and relevant failure/cancellation tests and [contract checks](../../CONTRACT.md#blockers); record evidence and

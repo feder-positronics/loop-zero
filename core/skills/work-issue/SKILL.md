@@ -5,23 +5,16 @@ description: Own full delivery of a live GitHub issue through verified merge and
 
 # Work Issue
 
-Use [the contract](../../CONTRACT.md); the issue owns intake context, the PR owns
-delivery evidence. Read live issue acceptance, comments, artifacts and linked
-work. Before pickup, reconcile prior and partial deliveries, branches and
-competing PRs with the issue's [dispatch authority](../../../docs/DELEGATION.md#team-roles).
-Verify remote identity before mutation and connected environment before
-relying on production claims. Before presenting counts, censuses or states for
-a decision or requesting production-change approval, follow
-[evidence for approval](reference.md#evidence-for-approval).
-Before continuing an existing branch or PR, follow
-[inherited-work guidance](reference.md#inherited-work).
-
-Retain an inherited task worktree or use `loopzero start <task-slug>`.
-Record observable acceptance and the issue link. Deliver through
-[implement](../implement/SKILL.md). Follow the linked safeguards for
-[API shape changes](reference.md#api-shape-changes),
-[seeded browser state or changed prerequisites](reference.md#fresh-stack-proof),
-and [implementation or repairs without a base merge queue](reference.md#integration-without-a-queue).
+Follow [the contract](../../CONTRACT.md). The issue owns intake and the PR owns delivery evidence.
+Read live acceptance, comments, artifacts and linked work. Reconcile prior and partial deliveries,
+branches and competing PRs before pickup with the [dispatch authority](../../../docs/DELEGATION.md#team-roles).
+Verify remote identity before mutation and connected environment before production claims.
+Use [approval evidence](reference.md#evidence-for-approval) for decision counts, censuses or states
+and production-change approval. Use [inherited-work guidance](reference.md#inherited-work) before resuming.
+Keep the inherited worktree or use `loopzero start <task-slug>`. Record observable acceptance and link
+the issue. Deliver through [implement](../implement/SKILL.md), applying the safeguards for
+[API shape](reference.md#api-shape-changes), [changed stack prerequisites or seeded browser state](reference.md#fresh-stack-proof)
+and [implementation or repairs without a merge queue](reference.md#integration-without-a-queue).
 
 Before review, update docs as needed and record changes or evidence that none are needed.
 Before publication, inspect the issue and links for its lifecycle blueprint and
@@ -43,10 +36,8 @@ Follow the linked safeguards when [partial delivery auto-closes the issue](refer
 for [findings after completed acceptance](reference.md#late-findings), and for
 [monitoring after shipped acceptance or deferred work](reference.md#monitoring-and-deferred-work).
 
-Open the return with one plain sentence: what changed for the owner and whether
-anything is needed from them. Then return evidence, PR/head or landed SHA,
-remaining acceptance and next-action owner
-with command or trigger to the dispatch authority on the issue/PR or through the
-parent. Reconcile conflicts and scope-expanding or reserved choices with that
-owner. Continue only an already commissioned successor after recording this
-item's evidence and rechecking live state in a fresh task worktree.
+Use [Reporting](../../CONTRACT.md#reporting) and open with one plain sentence covering owner impact
+and any action needed. Send evidence, PR/head or landed SHA, outstanding acceptance and next-action
+owner with command or trigger to dispatch authority on the issue/PR or through the parent.
+Reconcile conflicts and scope-expanding or reserved choices with that owner. Continue only an
+already commissioned successor after recording this item's evidence and rechecking live state in a fresh worktree.
