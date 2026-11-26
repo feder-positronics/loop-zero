@@ -611,6 +611,67 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
         assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["exit_code"] == 0
 
 
+@pytest.mark.parametrize("receipt", ["saved", "head moved", "write failed"])
+def test_check_bounds_large_failure_and_preserves_receipt(wt, head, capsys, monkeypatch, receipt):
+    tail = 'TEST_FAILURES={"detail":"' + "é" * 7500 + '","error":"Failed to fetch package"}\n'
+    tail += "migration failed: relation widgets already exists\nAssertionError: assert " + "x" * 1000
+    monkeypatch.setattr(cli.sandbox, "run_checks", lambda *a, **k: CheckReport(
+        "a" * 40 if receipt == "head moved" else head, False,
+        (CheckResult("apply migrations", 7, 0.1, tail),),
+    ))
+    if receipt == "write failed":
+        monkeypatch.setattr(cli, "_save_report", Mock(side_effect=PermissionError("receipt write denied")))
+    code, out, err = run(capsys, "check")
+    assert len((out + err).encode()) < 2500
+    assert code == 1 and "apply migrations (exit 7)" in err
+    assert all(text in err for text in ("migration failed: relation widgets already exists", "AssertionError: assert", "[...]"))
+    assert "uv sync --group dev" in err
+    if receipt == "saved":
+        assert out.endswith("FAIL\n") and ".loopzero/checks.json" in err and head in err
+        assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["tail"] == tail
+    else:
+        assert ".loopzero/checks.json" not in err
+        assert ("current HEAD" if receipt == "head moved" else "receipt write denied") in err
+
+
+def test_check_hour_long_stage_transcript(wt, head, gh, capsys, monkeypatch):
+    sandbox = cli.sandbox
+    clock = poll_clock(monkeypatch)
+    deadline = 0.0
+
+    def wait(seconds):
+        clock.now += seconds
+        return clock.now >= deadline
+
+    monkeypatch.setattr(sandbox.threading, "Event", lambda: Mock(wait=wait))
+    monkeypatch.setattr(sandbox.threading, "Thread", lambda *, target, daemon: Mock(start=target))
+
+    def run_checks(cfg, path, *, progress, status, checkpoint, workflow):
+        nonlocal deadline
+        results = []
+        for ordinal in range(1, 25):
+            command = f"run tool {ordinal:02d}"
+            duration = 3600.0 if ordinal == 1 else 0.1
+            deadline = clock.now + duration
+            progress(command)
+            with sandbox._stage_status(status, ordinal, 24):
+                pass
+            status(f"stage {ordinal}/24: exit 0 ({duration:.1f}s)")
+            results.append(CheckResult(command, 0, duration, ""))
+        return CheckReport(head, False, tuple(results), sandbox.settings_fingerprint(cfg, path))
+
+    monkeypatch.setattr(sandbox, "run_checks", run_checks)
+    code, out, err = run(capsys, "check")
+    assert len((out + err).encode()) < 2400
+    assert (code, err, gh.calls) == (0, "", []) and out.endswith("PASS\n")
+    assert f"receipt produced: head={head}" in out and "stage 24/24: exit 0" in out
+    assert out.count("running: run tool") == 24
+    assert [float(seconds) for seconds in re.findall(r"running \(([\d.]+)s elapsed\)", out)] == list(
+        range(30, 3600, 300)
+    )
+    assert out.rindex("s elapsed)") < out.index("stage 1/24: exit 0 (3600.0s)")
+
+
 @pytest.mark.parametrize("command,exit_code,tail", [
     ("echo no; exit 3", 3, "no\n"),
     ("seq 1 50; exit 1", 1, "".join(f"{i}\n" for i in range(11, 51)))])
