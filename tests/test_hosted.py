@@ -159,7 +159,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
     if error in {"api", "recover", "before"}:
-        assert hosted.main() == (1 if error == "before" else 0) and sleeps == [5]
+        assert hosted.main() == (1 if error == "before" else 0) and sleeps == ([5] if error == "recover" else list(github.RETRY_DELAYS))
         assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error != "recover")
     else:
         with pytest.raises(hosted.LoopZeroError, match="invalid description" if error == "publication" else None):

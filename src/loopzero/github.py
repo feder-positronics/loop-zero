@@ -346,7 +346,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    delays = ((RETRY_DELAYS[0], None) if scope[2] else (None,)) if scope else (*RETRY_DELAYS, None)
+    delays = (None,) if scope and not scope[2] else (*RETRY_DELAYS, None)
     for delay in delays:
         selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         try:
