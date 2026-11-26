@@ -124,7 +124,7 @@ def _run(cfg: Config) -> int:
         raise
     _publish_verdict(cfg.repo, head, state, message[:140])
     print(message)
-    return int(state == "failure")
+    return 0  # A published "not eligible" verdict is the result, not a workflow failure.
 
 
 def _publication_snapshot(

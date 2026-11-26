@@ -108,7 +108,7 @@ def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case
     if blocker == "important":
         publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding",
                                                                          author="trusted-publisher")))
-    statuses = check_source(publisher, ["pending", status], exit_code=int(status == "failure"))
+    statuses = check_source(publisher, ["pending", status])
     assert all(s["context"] == "Loop-zero Eligibility" for s in statuses)
     assert delays == {"unknown": [2, 4, 8], "settles": [2]}.get(blocker, [])
     if status == "success":
@@ -247,8 +247,8 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
         raise github.ProcTimeout("lost status reply", "")
 
     monkeypatch.setattr(github, "commit_status", lose_reply)
-    check_source(publisher, ["pending", state], exit_code=int(not ready),
-                 error=hosted.LoopZeroError if readback != "match" else None,
+    check_source(publisher, ["pending", state],
+                 error=hosted.LoopZeroError if readback not in {"match", "publisher"} else None,
                  match="confirm eligibility status publication")
 
 
