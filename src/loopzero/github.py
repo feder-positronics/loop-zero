@@ -1241,6 +1241,15 @@ def _aggregate_signal(states: list[str]) -> str:
     return failures[0] if failures else "pending"
 
 
+MERGEABILITY_PENDING = "GitHub is computing mergeability"
+
+
+def mergeability_blocker(pr: PR) -> str:
+    if pr.mergeable == "CONFLICTING":
+        return f"PR #{pr.number} has merge conflicts with {pr.base_ref}"
+    return MERGEABILITY_PENDING if pr.state == "OPEN" and pr.mergeable == "UNKNOWN" else ""
+
+
 def readiness(
     repo: str,
     pr: PR,
@@ -1259,8 +1268,8 @@ def readiness(
         reasons.append(f"PR #{pr.number} is {pr.state}, not open")
     if pr.base_ref != base_branch:
         reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}")
-    if pr.mergeable == "CONFLICTING":
-        reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
+    if blocker := mergeability_blocker(pr):
+        reasons.append(blocker)
     if pr.merge_state == "BEHIND" and not allow_behind:
         reasons.append(f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks")
     if not reviewed_head:

@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 import pytest
 
-from loopzero import cli, config, github, mergify
+from loopzero import cli, config, eligibility, github, hosted, mergify
 from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git, init_git_repo
@@ -2487,6 +2487,48 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, sett
         assert code == (0 if command == "ready" else 3)
     assert requests == ([(REPO, 7, head, "main")]
                         if command == "merge" and settled == "MERGEABLE" else [])
+
+
+@pytest.mark.parametrize("initial,settled,verdict", [
+    ("UNKNOWN", "UNKNOWN", 1),
+    ("UNKNOWN", "MERGEABLE", 0),
+    ("UNKNOWN", "CONFLICTING", 1),
+    ("MERGEABLE", "MERGEABLE", 0),
+    ("CONFLICTING", "CONFLICTING", 1),
+])
+def test_hosted_and_local_mergeability_verdicts(wt, gh, head, tmp_path, monkeypatch, capsys,
+                                                initial, settled, verdict):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False, mergeable=initial)
+    before, after = (rest_pr_json(pr_json(headRefOid=head, isDraft=False, mergeable=state))
+                     for state in (initial, settled))
+    endpoint = f"api repos/{REPO}/pulls/7"
+    gh.respond(endpoint, before, after)
+    monkeypatch.setattr(cli, "_sleep", lambda _delay: None)
+    wait = ("--wait=1",) if initial != settled else ()
+    code, out, _ = run(capsys, "ready", *wait)
+    assert code == verdict
+
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    (trusted / "workflow.toml").write_text(WORKFLOW + f'review_publishers = ["{LOGIN}"]\n')
+    event = trusted / "event.json"
+    event.write_text(json.dumps({"inputs": {"pr": "7"}}))
+    monkeypatch.chdir(trusted)
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    sleeps = []
+    monkeypatch.setattr(eligibility, "sleep", sleeps.append)
+    gh.calls_file.write_text("[]")
+    gh.respond(endpoint, before, before, after)
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    assert hosted.main() == verdict
+    payload = json.loads(gh.calls[-1]["--input"])
+    assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{head}"
+    assert payload["state"] == ("failure" if verdict else "success")
+    if settled == "UNKNOWN":
+        assert "GitHub is computing mergeability" in out
+        assert "GitHub is computing mergeability" in payload["description"]
+    assert len(sleeps) == (1 if initial == "UNKNOWN" else 0)
 
 
 @pytest.mark.parametrize("command,check,hold_at_admission", [

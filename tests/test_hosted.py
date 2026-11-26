@@ -74,6 +74,7 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     ("stale", "", "pending"), ("malformed", "", "pending"),
     ("revoked", "", "pending"), ("absent", "important", "failure"),
     ("absent", "conflict", "failure"), ("COMMENTED", "important", "failure"),
+    ("APPROVED", "mergeability-reset", "failure"),
 ])
 def test_source_publication_is_bound_to_live_review(publisher, case, blocker, status):
     review = {"state": "COMMENTED", "commit_id": HEAD, "user": {"login": "trusted-publisher"},
@@ -86,6 +87,11 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     if case == "revoked":
         reviews.insert(0, review | {"state": "APPROVED"})
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", reviews)
+    if blocker == "mergeability-reset":
+        endpoint = f"api repos/{REPO}/pulls/7"
+        mergeable, unknown = (fixtures.rest_pr_json(pr_json(mergeable=state))
+                              for state in ("MERGEABLE", "UNKNOWN"))
+        publisher.respond(endpoint, mergeable, mergeable, unknown)
     if blocker == "conflict":
         publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(mergeable="CONFLICTING")))
     if blocker == "important":

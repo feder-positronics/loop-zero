@@ -10,6 +10,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from time import sleep
 
 from loopzero import candidate, config, github, runners
 from loopzero.types import LoopZeroError
@@ -159,6 +160,9 @@ def evaluate(repo: str, number: int, head: str, base: str,
     if not publishers or not re.fullmatch(r"[0-9a-f]{40}", head):
         raise LoopZeroError("eligibility requires trusted publishers and a full source SHA")
     pr = github.pr_view(repo, number)
+    if pr.head_sha == head and github.mergeability_blocker(pr) == github.MERGEABILITY_PENDING:
+        sleep(2)
+        pr = github.pr_view(repo, number)
     if pr.head_sha != head:
         return github.Readiness(False, ("source head changed; refresh eligibility",))
     reviews, page = [], 1
@@ -173,8 +177,11 @@ def evaluate(repo: str, number: int, head: str, base: str,
     review = readiness_review(reviews, head, publishers, repo=repo, number=number, base_branch=base)
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head)
-    if github.pr_view(repo, number).head_sha != head:
+    current = github.pr_view(repo, number)
+    if current.head_sha != head:
         return github.Readiness(False, ("source head changed during eligibility refresh",))
+    if result.ready and (blocker := github.mergeability_blocker(current)):
+        return github.Readiness(False, (blocker,))
     return result
 
 
