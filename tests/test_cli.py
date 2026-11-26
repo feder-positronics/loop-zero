@@ -19,7 +19,7 @@ import pytest
 
 from loopzero import cli, config, github, mergify
 from loopzero._proc import Completed, build_env
-from loopzero.types import CheckReport, CheckResult, ReviewResult
+from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
 from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
 from tests.test_github import (
@@ -196,6 +196,44 @@ def test_review_marker_parser_accepts_old_and_v1_forms() -> None:
     new = cli.review_marker("b" * 40, "delta")
     assert cli.REVIEW_MARKER_RE.search(old).groups() == ("a" * 40, "primary")
     assert cli.REVIEW_MARKER_RE.search(new).groups() == ("b" * 40, "delta")
+
+
+@pytest.mark.parametrize("source", ["model", "pair"])
+def test_review_marker_quoted_in_prose_neither_voids_nor_hides_a_review(gh: FakeGh, source: str) -> None:
+    head = "a" * 40
+    quote = cli.review_marker("b" * 40, "primary", source)
+    result = ReviewResult("claude", head, "primary", "approve",
+                          (Finding("suggestion", None, None, "Fixture", f"The fixture quotes {quote}."),),
+                          "raw", provenance={"session_ids": ["s"]})
+    gh.respond(f"api repos/{REPO}/pulls/7/files", [])
+    (payload,) = github.review_payloads(REPO, 7, head, result, [(marker(head, "primary"), "current", False)])
+    review = {"body": payload["body"], "state": "COMMENTED", "commit_id": head, "user": {"login": LOGIN}}
+    assert quote in review["body"]
+
+    assert cli.eligibility.eligible_review([review], head, (LOGIN,)) is review
+    assert cli.eligibility.readiness_review(
+        [review], head, (LOGIN,), repo=REPO, number=7, base_branch="main") is review
+    assert cli._pr_markers([review], head, (LOGIN,)) == [cli.Marker(head, "primary", "COMMENTED")]
+
+
+def test_second_review_marker_in_the_leading_block_voids_the_review() -> None:
+    head = "a" * 40
+    body = f"{marker(head, 'primary')}\n{marker('b' * 40, 'primary')}\nreview: **approve**"
+    review = {"body": body, "state": "APPROVED", "commit_id": head, "user": {"login": LOGIN}}
+    assert cli.eligibility.eligible_review([review], head, (LOGIN,)) is None
+    assert cli.eligibility.readiness_review(
+        [review], head, (LOGIN,), repo=REPO, number=7, base_branch="main") is None
+    assert cli._pr_markers([review], head, (LOGIN,)) == []
+
+
+def test_publication_recovery_ignores_markers_quoted_on_other_commits(wt: Path, gh: FakeGh, head) -> None:
+    config = cli.config_mod.load(wt / "workflow.toml")
+    result = ReviewResult("claude", head, "primary", "approve", (), "raw", provenance={"session_ids": ["s"]})
+    other = rev("f" * 40, "primary")
+    other["body"] += f"\nA finding quotes {marker(head, 'primary')}"
+    gh.respond_pr_view(pr_json(headRefOid=head))
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    assert cli._confirm_review(wt, config, pr, result, LOGIN, [other]) is False
 
 
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
@@ -429,7 +467,8 @@ def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, ca
     before = len(gh.calls)
     assert run(capsys, command)[0] == 0
     history = HISTORY_CALLS if command == "pr" else []
-    assert [c["argv"][:2] for c in gh.calls[before:]] == history + LOOKUP_CALLS
+    refresh = [["api", f"repos/{REPO}/pulls/7"]] if command == "pr" else []
+    assert [c["argv"][:2] for c in gh.calls[before:]] == history + LOOKUP_CALLS + refresh
 
 
 @pytest.mark.parametrize("body", [
@@ -458,6 +497,25 @@ def test_check_refresh_replaces_previous_head_without_losing_evidence(
     for text in ["Retained browser proof.", "Human evidence.", "Approved."]:
         if text in body:
             assert text in updated
+
+
+def test_delayed_check_preserves_review_summary(wt, gh, fake_bin, capsys, monkeypatch):
+    head = prepare_review(wt, gh, fake_bin)
+    body = "# PR\n\n## Notes\nHuman evidence.\n"
+    gh.respond_pr_list([pr_json(headRefOid=head, body=body)])
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    refresh = cli._refresh_pr_checks
+
+    def delay(path, config):
+        assert run(capsys, "review")[0] == 0
+        live = json.loads(gh.calls[-1]["--input"])["body"]
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=live)))
+        refresh(path, config)
+
+    monkeypatch.setattr(cli, "_refresh_pr_checks", delay)
+    assert run(capsys, "check")[0] == 0
+    final = json.loads(gh.calls[-1]["--input"])["body"]
+    assert all(text in final for text in ("Human evidence.", "Recorded for", "- primary, claude"))
 
 
 @pytest.mark.parametrize("command,exit_code", [("check", 0), ("pr", 1)])
@@ -1047,7 +1105,7 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     code, out, _ = run(capsys, "pr")
     assert code == 0 and out == URL + "\n"
     assert [c["argv"][:2] for c in gh.calls] == (
-        HISTORY_CALLS + LOOKUP_CALLS + [["api", f"repos/{REPO}/pulls/7"]])
+        HISTORY_CALLS + LOOKUP_CALLS + [["api", f"repos/{REPO}/pulls/7"]] * 2)
     assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
@@ -2933,7 +2991,7 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
-@pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty", "wrong-commands", "legacy"])
+@pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty", "wrong-commands", "legacy", "incompatible", "matching"])
 def test_ready_requires_clean_successful_local_report_at_head(
     wt: Path, gh: FakeGh, capsys, condition: str, head
 ) -> None:
@@ -2941,18 +2999,27 @@ def test_ready_requires_clean_successful_local_report_at_head(
     report_path = wt / ".loopzero" / "checks.json"
     if condition == "missing":
         report_path.unlink()
-    elif condition in {"wrong-head", "wrong-commands", "legacy"}:
+    elif condition in {"wrong-head", "wrong-commands", "legacy", "incompatible"}:
         report = json.loads(report_path.read_text())
         if condition == "wrong-head":
             report["head"] = "0" * 40
         elif condition == "wrong-commands":
             report["results"][0]["command"] = "true"
-        else:
+        elif condition == "legacy":
             del report["settings_sha256"]
+        else:
+            report["settings_sha256"] = "0" * 64
         report_path.write_text(json.dumps(report))
     code, out, _ = run(capsys, "ready")
-    assert code == 1
-    assert out.endswith("not ready: run loopzero check at this head\n")
+    assert code == (0 if condition == "matching" else 1)
+    if condition in {"legacy", "incompatible"}:
+        reason = ("check receipt is missing its settings fingerprint" if condition == "legacy"
+                  else "check receipt has an incompatible settings fingerprint")
+        assert f"not ready: {reason}." in out
+        assert ("Run loopzero check in this worktree at this head with the same current CLI and effective "
+                "settings as ready, using a local coordinator for delegated stages." in out)
+    elif condition != "matching":
+        assert out.endswith("not ready: run loopzero check at this head\n")
 
 
 @pytest.mark.parametrize("wait_for", [None, "ready", "merge"])
@@ -2987,7 +3054,7 @@ def test_ready_requires_receipt_from_current_check_environment(
         config_path.write_text(new_config)
     code, out, _ = run(capsys, *args, "ready")
     assert code == 1
-    assert out.endswith("not ready: run loopzero check at this head\n")
+    assert "not ready: check receipt has an incompatible settings fingerprint." in out
     assert run(capsys, *args, "check")[0] == 1
 
 
@@ -3029,7 +3096,7 @@ def test_ready_matches_effective_inherited_check_environment(
     if fixed:
         assert code == 0
     else:
-        assert code == 1 and out.endswith("not ready: run loopzero check at this head\n")
+        assert code == 1 and "not ready: check receipt has an incompatible settings fingerprint." in out
 
 
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
