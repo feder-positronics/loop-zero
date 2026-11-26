@@ -104,6 +104,45 @@ def test_merged_source_refresh_publishes_nothing(publisher):
     assert hosted.main() == 0 and not [c for c in publisher.calls if "--input" in c] and publisher.argv(0)[-1] == "--include"
 
 
+@pytest.mark.parametrize("state,readback", [
+    ("success", "match"), ("failure", "match"), ("success", "absent"),
+    ("success", "publisher"), ("success", "description"), ("success", "state"),
+    ("success", "unreadable"),
+])
+def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
+    ready = state == "success"
+    monkeypatch.setattr(hosted.eligibility, "evaluate",
+                        lambda *_: github.Readiness(ready, () if ready else ("Blocking finding",)))
+    post = github.commit_status
+    endpoint = f"api repos/{REPO}/commits/{HEAD}/statuses"
+    monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
+
+    def lose_reply(repo, head, context, value, description):
+        post(repo, head, context, value, description)
+        if description.startswith(("Refreshing", "Eligibility refresh failed")):
+            return
+        accepted = {"context": context, "state": value, "description": description,
+                    "creator": {"login": "github-actions[bot]"}}
+        assert value == state
+        observed = {
+            "absent": [],
+            "publisher": [accepted | {"creator": {"login": "other"}}, accepted],
+            "description": [accepted | {"description": "other"}, accepted],
+            "state": [accepted | {"state": "pending"}, accepted],
+            "unreadable": {"exit": 1, "stderr": "unavailable"},
+        }.get(readback, [accepted])
+        publisher.respond(endpoint, observed)
+        raise github.ProcTimeout("lost status reply", "")
+
+    monkeypatch.setattr(github, "commit_status", lose_reply)
+    if readback == "match":
+        assert hosted.main() == (0 if ready else 1)
+    else:
+        with pytest.raises(hosted.LoopZeroError, match="confirm eligibility status publication"):
+            hosted.main()
+    assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == ["pending", state]
+
+
 @pytest.mark.parametrize("error", ["api", "head", "publication", "config"])
 def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, error):
     monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
@@ -124,7 +163,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
     if error == "publication":
         assert "invalid description (HTTP 422)" in str(raised.value)
     statuses = [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c]
-    assert statuses == ([] if error == "config" else ["pending", "pending", "failure"]
+    assert statuses == ([] if error == "config" else ["pending", "pending"]
                         if error == "publication" else ["pending", "failure"])
 
 
