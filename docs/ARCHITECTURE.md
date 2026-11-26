@@ -116,6 +116,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    that requested changes also requires resolved findings at the reviewed head.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
+   Each poll resolves the trusted workflow ref, reusing parsed policy when the
+   branch and immutable revision match the preceding observation.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge
    admission checks readiness again. Missing-run diagnosis keeps its two-minute
