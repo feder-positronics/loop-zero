@@ -34,7 +34,7 @@ Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../
 
 Run commands expected to exceed about two minutes as [long-running jobs](../../../docs/DELEGATION.md#long-running-jobs)
 and follow the brief's [waiting and output rules](../../../docs/DELEGATION.md#briefs-and-ownership).
-Do not end the turn or report done before the job's `LOG.exit` exists, unless you report it killed and failed.
+Do not report done before the job's `LOG.exit` exists, unless you report it killed and failed.
 
 Keep receipts, evidence, review artifacts and handoffs on the PR, issue or named durable scratch;
 reserve `/tmp` for running-command logs, builds and browser runs. At task finish, leave leftover
