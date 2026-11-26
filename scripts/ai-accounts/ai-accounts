@@ -56,8 +56,10 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -115,11 +117,14 @@ def notify(msg: str) -> None:
 
 def write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    fd, staged = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(staged, path)
+    except BaseException:
+        Path(staged).unlink(missing_ok=True)
+        raise
 
 
 # ----------------------------------------------------------------- accounts
@@ -171,7 +176,10 @@ class AccountLockTimeout(TimeoutError):
 
 @contextmanager
 def _locked(name: str):
-    with (STATE / name).open("a") as lock:
+    fd = os.open(STATE / name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    with os.fdopen(fd, "rb") as lock:
+        if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+            raise ValueError(f"{name} is not a regular lock file")
         deadline = time.monotonic() + 60
         while (remaining := deadline - time.monotonic()) > 0:
             try:
