@@ -19,6 +19,8 @@ freeze them. Change Acceptance only with a recorded reason in Notes, before
 implementing the change. For changes touching guards, auth, permissions,
 sessions, secrets or trust boundaries, record a short design pass in Notes
 before the first code edit: threats, invariants and chosen approach.
+When deduplicating tests, list their distinct assertions before editing,
+keep each in a surviving test, and record where in the PR body.
 
 Use [write-tests](../write-tests/SKILL.md) to prove the bounded acceptance.
 Map migration, authorization, locking/concurrency and policy edge cases to tests
