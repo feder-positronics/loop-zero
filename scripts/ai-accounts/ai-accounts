@@ -1085,6 +1085,10 @@ def cmd_shim(name: str, args: list[str]) -> int:
     dirs = os.environ.get("PATH", "").split(os.pathsep)
     shim_dirs = [d for d in dirs if is_shim_dir(d)]
     rest = [d for d in dirs if d not in shim_dirs]
+    if name == "loopzero":
+        # Codex's transient launcher shims are hidden in the check sandbox.
+        arg0 = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "tmp/arg0-linux"
+        rest = [d for d in rest if Path(d).parent != arg0 or not Path(d).name.startswith("codex-arg0")]
     real = next((str(c) for d in rest if (c := Path(d or ".") / name).is_file()
                  and os.access(c, os.X_OK)), None)
     if real is None:

@@ -455,7 +455,10 @@ def test_shim_prefers_verified_codex_only_for_loopzero(helper, tmp_path, monkeyp
             codex = pin / 'codex'
             codex.write_text('#!/bin/sh\nexit 0\n')
             codex.chmod(0o755 if pin_state != 'nonexecutable' else 0o644)
-    monkeypatch.setenv('PATH', f'{shims}:{binaries}')
+    codex_home = tmp_path / 'codex-home'
+    arg0 = codex_home / 'tmp/arg0-linux/codex-arg0ABC123'
+    monkeypatch.setenv('CODEX_HOME', str(codex_home))
+    monkeypatch.setenv('PATH', f'{shims}:{arg0}:{binaries}')
     monkeypatch.setattr(helper.sys, 'argv', [str(shims / name)])
     calls = []
     monkeypatch.setattr(helper.os, 'execve', lambda *args: calls.append(args))
@@ -471,7 +474,7 @@ def test_shim_prefers_verified_codex_only_for_loopzero(helper, tmp_path, monkeyp
             expected.insert(0, str(pin))
         assert env['PATH'].split(helper.os.pathsep) == expected
     else:
-        assert env['PATH'] == f'{shims}:{binaries}'
+        assert env['PATH'] == f'{shims}:{arg0}:{binaries}'
 
 
 @pytest.mark.parametrize('provider,email,shown', [

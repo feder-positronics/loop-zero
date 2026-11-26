@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
-from tests.conftest import commit_file, git
+from tests.conftest import commit_file, git, git_environment, init_git_repo
 
 
 @pytest.fixture
@@ -34,6 +34,13 @@ def commit_on_origin(repo: Path, name: str) -> str:
     return git(clone, "rev-parse", "HEAD").strip()
 
 
+def test_git_fixture_ignores_inherited_directory(tmp_path, monkeypatch):
+    ambient = tmp_path / "ambient.git"
+    monkeypatch.setenv("GIT_DIR", str(ambient))
+    checkout = init_git_repo(tmp_path / "checkout")
+    assert (checkout / ".git").is_dir() and not ambient.exists()
+
+
 def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
     name = worktree.branch_name(repo, "zażółć\u00a0")
     git(repo, "switch", "-c", name)
@@ -48,18 +55,20 @@ def test_branch_refuses_detached_head(repo: Path) -> None:
         worktree.branch(repo)
 
 
-@pytest.mark.parametrize("branch", [None, "feature/ci+release"])
+@pytest.mark.parametrize("branch", [None, "feature/ci+release", "symbolic"])
 def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None, monkeypatch) -> None:
     side = branch or "side"
     git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{side}")
     upstream = commit_on_origin(repo, "feature.txt")
-    if branch:
+    if branch == "symbolic":
+        git(repo, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/main")
+    elif branch:
         checkout = repo.parent / "single-branch"
         origin = (repo.parent / "origin.git").as_uri()
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
         assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
         repo = checkout
-    invoke = worktree._git
+    invoke, local_head = worktree._git, worktree.head(repo)
     def interleave(path, *args, **kwargs):
         result = invoke(path, *args, **kwargs)
         if args[0] == "fetch":
@@ -71,7 +80,8 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     assert wt == repo / ".worktrees" / "my-task"
     assert (wt / "feature.txt").exists(), "fetched origin/main before branching"
     assert worktree.branch(wt) == "lz/my-task"
-    assert worktree.head(wt) == upstream
+    assert worktree.head(wt) == upstream and worktree.head(repo) == local_head
+    assert git(repo, "rev-parse", "refs/remotes/origin/main").strip() == upstream
     assert worktree.base_sha(wt) == upstream
     text = worktree.task_text(wt)
     assert text.startswith("# My task\n")
@@ -131,9 +141,17 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     assert task.read_text().endswith("(filled by `loopzero review`)\n")
 
 
-def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
+@pytest.mark.parametrize("redirect", [None, "file", "directory"])
+def test_start_excludes_worktrees_and_task_dir(repo: Path, redirect: str | None) -> None:
     exclude = repo / ".git" / "info" / "exclude"
     exclude.write_text("*.log")  # no trailing newline on purpose
+    if redirect:
+        link = exclude if redirect == "file" else exclude.parent
+        link.symlink_to(link.rename(repo.parent / "outside"))
+        with pytest.raises(worktree.WorktreeError, match="outside its Git directory"):
+            worktree.start(repo, "t1", "main")
+        assert exclude.read_text() == "*.log" and not (repo / ".worktrees").exists()
+        return
     old_inode = exclude.stat().st_ino
     wt = worktree.start(repo, "t1", "main")
     assert exclude.stat().st_ino != old_inode
@@ -197,7 +215,7 @@ def test_start_explains_missing_origin(repo: Path, change: tuple[str, ...]) -> N
 def test_start_reports_git_failure_with_command(repo: Path) -> None:
     with pytest.raises(worktree.GitError) as info:
         worktree.start(repo, "nobase", "does-not-exist")
-    assert info.value.command[:2] == ("git", "fetch")
+    assert info.value.command[:2] == ("git", "ls-remote")
     assert info.value.tail
 
 
@@ -262,7 +280,7 @@ def test_task_helpers_errors(repo: Path) -> None:
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
     monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
-    worktree.cleanup(wt)  # #439: no cleanup git runs in (or -C) the primary checkout
+    worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
@@ -273,13 +291,13 @@ def test_cleanup_preserves_user_files(repo: Path, file: str) -> None:
     wt = worktree.start(repo, "dirty", "main")
     (wt / file).write_text("x")
     with pytest.raises(worktree.WorktreeError, match="worktree is dirty" if file == "scratch.txt" else "ignored file"):
-        worktree.cleanup(wt)
+        worktree.cleanup(wt, worktree.head(wt))
     assert (wt / file).read_text() == "x" and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
 def test_cleanup_missing_worktree(repo: Path) -> None:
     with pytest.raises(worktree.WorktreeError, match="no such worktree"):
-        worktree.cleanup(repo / ".worktrees" / "ghost")
+        worktree.cleanup(repo / ".worktrees" / "ghost", worktree.head(repo))
 
 
 @pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])
@@ -310,7 +328,7 @@ def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> Non
     commands = section.split("```sh\n", 1)[1].split("```", 1)[0]
     result = subprocess.run(
         ["sh", "-c", commands, "cleanup-guide", str(wt), "abandoned", head],
-        cwd=caller, capture_output=True, text=True, check=False,
+        cwd=caller, env=git_environment(), capture_output=True, text=True, check=False,
     )
 
     assert (result.returncode == 0) == (state == "clean"), result.stderr

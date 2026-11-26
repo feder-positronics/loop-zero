@@ -9,6 +9,7 @@ the Mergify Candidate Policy workflow pin in that directory as pinned_candidate.
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import subprocess
 from copy import deepcopy
 from functools import partial
@@ -19,7 +20,7 @@ from shutil import copytree
 
 import pytest
 
-from loopzero import candidate
+from loopzero import candidate, github
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
 from loopzero.types import LoopZeroError
 from tests.conftest import commit_file, git as isolated_git
@@ -672,18 +673,16 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
         assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
 
 
-@pytest.mark.parametrize("exceeds_bound", [False, True])
-def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_bound):
-    waits = []
-    killed = []
-
+@pytest.mark.parametrize("outcome", ["normal", "bound", "fetch"])
+def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome):
+    waits, killed = [], []
     class Child:
         pid = 123
-        returncode = 0
-
         def __init__(self, argv, cwd, **kwargs):
-            self.root = cwd
-            self.running = "test-command" in argv
+            self.root, self.running = cwd, "test-command" in argv
+            self.returncode = 128 if outcome == "fetch" and "fetch" in argv else 0
+            if self.returncode:
+                kwargs["stderr"].write(b"fatal: The requested URL returned error: 503")
 
         def poll(self):
             return None if self.running else self.returncode
@@ -691,7 +690,7 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_
         def wait(self, timeout=None):
             if self.running:
                 waits.append(timeout)
-                if timeout is not None and exceeds_bound:
+                if timeout is not None and outcome == "bound":
                     (self.root / "oversized").write_bytes(b"x" * 65)
                     raise subprocess.TimeoutExpired("test-command", timeout)
                 self.running = False
@@ -703,12 +702,13 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_
     monkeypatch.setattr(candidate.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     monkeypatch.setattr(candidate.time, "sleep", lambda _: pytest.fail("used a fixed delay"))
 
-    with candidate.fetched_git("owner/repo", []) as git:
-        if exceeds_bound:
+    error = pytest.raises(github.GhUnavailable, match="temporarily unavailable") if outcome == "fetch" else nullcontext()
+    with error, candidate.fetched_git("owner/repo", []) as git:
+        if outcome == "bound":
             with pytest.raises(CandidateError, match="Git object/size bound exceeded"):
                 git("test-command")
         else:
             assert git("test-command") == ""
 
-    assert waits == ([0.02, None] if exceeds_bound else [0.02])
-    assert killed == ([(123, candidate.signal.SIGKILL)] if exceeds_bound else [])
+    assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": []}[outcome]
+    assert killed == ([(123, candidate.signal.SIGKILL)] if outcome == "bound" else [])

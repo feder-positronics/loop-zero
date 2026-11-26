@@ -121,6 +121,8 @@ def _clean_base_merges(repo: str, number: int, reviewed: str, head: str, base_br
                     return False
                 cursor = first
             return cursor == reviewed
+    except github.GhUnavailable:
+        raise
     except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError):
         return False
 
