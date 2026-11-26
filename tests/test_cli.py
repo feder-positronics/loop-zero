@@ -613,6 +613,7 @@ def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, ca
 @pytest.mark.parametrize("body", [
     "# PR\n\n## Evidence\nRetained browser proof.\n",
     "# PR\n\n## Validation\nHuman evidence.\n\n## Review\nApproved.\n",
+    "# PR\n\n## Checks\nLegacy summary.\n\n## Validation\nHuman evidence.\n",
 ])
 def test_check_refresh_replaces_previous_head_without_losing_evidence(
     wt: Path, gh: FakeGh, capsys, body: str,
@@ -627,8 +628,8 @@ def test_check_refresh_replaces_previous_head_without_losing_evidence(
     assert run(capsys, "check")[0] == 0
     updated = json.loads(gh.calls[-1]["--input"])["body"]
     assert old_head[:12] not in updated and head_of(wt)[:12] in updated
-    assert updated.count("Recorded for") == 1
-    for text in ["Retained browser proof.", "Human evidence.", "Approved."]:
+    assert updated.count("Recorded for") == 1 and updated.count("## Validation") == 1
+    for text in ["Retained browser proof.", "Human evidence.", "Approved.", "## Checks\nLegacy summary."]:
         if text in body:
             assert text in updated
 
@@ -4294,10 +4295,17 @@ def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, monkeypatch, c
         git(wt, "switch", "-q", "--detach")
     monkeypatch.chdir(wt / ".loopzero")
     _, err = expect_cli(capsys, 1, "start", "nested", stdout="", stderr_contains=("already inside task worktree",))
-    assert "run start from the checkout that created it" in err
+    assert f"run start from {repo}\n" in err
     assert not (repo / ".worktrees" / "nested").exists()
     assert not (wt / ".worktrees" / "nested").exists()
     assert "lz/nested" not in git(repo, "branch", "--list", "lz/nested")
+
+
+def test_start_accepts_primary_clone_inside_worktrees_directory(repo: Path, tmp_path: Path, monkeypatch, capsys) -> None:
+    clone = shutil.copytree(repo, tmp_path / ".worktrees" / "project")
+    monkeypatch.chdir(clone)
+    out, _ = expect_cli(capsys, 0, "start", "fresh")
+    assert out.strip() == str(clone / ".worktrees" / "fresh")
 
 
 def test_start_accepts_detached_harness_worktree(repo: Path, tmp_path: Path, monkeypatch, capsys) -> None:

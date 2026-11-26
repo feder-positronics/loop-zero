@@ -437,7 +437,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = (existing if existing is not None else worktree.task_text(wt)).replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(r"^## (?:Validation|Checks)\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = match.group(1)
@@ -473,7 +473,7 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
     task = worktree.task_text(wt).replace("\r\n", "\n")
     existing = existing.replace("\r\n", "\n")
     owned = {m.group(1): m.group() for m in pattern.finditer(task)
-             if m.group(1) not in {"Validation", "Checks", "Review"}}
+             if m.group(1) not in {"Validation", "Review"}}
     content = existing[first.start():] if (first := pattern.search(existing)) else ""
     prefix = task[:first.start()] if (first := pattern.search(task)) else task
 
@@ -556,13 +556,14 @@ def _pr_title(wt: Path, branch: str) -> str:
 def cmd_start(args: argparse.Namespace) -> int:
     root = _toplevel()
     current = config_mod.run_git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
-    # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
-    if current.stdout.strip().startswith("lz/") or root.parent.name == ".worktrees":
-        raise CliError(f"already inside task worktree {root}; run start from the checkout that created it")
-    config = _load_config(args, root)
     # Nest task worktrees in the primary checkout, so removing a harness worktree cannot delete them.
-    primary = _git(root, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0].removeprefix("worktree ")
-    print(worktree.start(Path(primary), args.slug, config.base_branch))
+    listing = _git(root, "worktree", "list", "--porcelain", "-z", paths=True)
+    primary = Path(listing.split("\0", 1)[0].removeprefix("worktree "))
+    # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
+    if current.stdout.strip().startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
+        raise CliError(f"already inside task worktree {root}; run start from {primary}")
+    config = _load_config(args, root)
+    print(worktree.start(primary, args.slug, config.base_branch))
     return 0
 
 
