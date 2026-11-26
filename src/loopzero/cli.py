@@ -1568,16 +1568,24 @@ class _AdmissionDeadline(Exception):
     """The --wait budget expired before a new merge or queue request."""
 
 
+def _observe_mergify_or_report_blocker(
+    config: Config, pr: github.PR, readiness: github.Readiness, queue: str, deadline: float | None,
+) -> str | None:
+    if deadline is not None and mergify.membership(config.repo, pr.number, queue) is not None:
+        return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), confirmed=True)
+    hint = _merge_check_hint(config, pr, readiness)
+    raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
+
+
 def _merge_with_mergify(
     config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
-    """Request Mergify after readiness verifies the source gates and queue configuration."""
-    if not readiness.ready:
-        hint = _merge_check_hint(config, pr, readiness)
-        raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
+    """Request admission after readiness, or follow a confirmed entry without writing."""
     queue = config.mergify_queue
     assert queue is not None
+    if not readiness.ready:
+        return _observe_mergify_or_report_blocker(config, pr, readiness, queue, deadline)
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )

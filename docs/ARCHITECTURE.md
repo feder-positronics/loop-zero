@@ -121,7 +121,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    branch and immutable revision match the preceding observation.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge
-   admission checks readiness again. Missing-run diagnosis keeps its two-minute
+   admission checks readiness again. A wait can follow a live Mergify entry
+   with blocked readiness. That observation cannot request or confirm admission. Missing-run diagnosis keeps its two-minute
    grace after activation without extending the deadline.
    When every non-success signal of a required check strictly predates the eligible
    review, `ready --wait` allows up to 15 minutes from that review for a refresh,

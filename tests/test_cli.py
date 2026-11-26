@@ -3943,22 +3943,33 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
+@pytest.mark.parametrize("state", ["ejected", "queued", "absent"])
 def test_mergify_wait_resume_does_not_resubmit_and_reports_ejection(
-    wt: Path, gh: FakeGh, capsys, monkeypatch
+    wt: Path, gh: FakeGh, capsys, monkeypatch, state
 ) -> None:
     head = commit_mergify_configuration(wt)
-    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    readiness = {} if state == "ejected" else {"local_exit": None}
+    arm_approved_ready_pr(gh, head, wt, readiness=readiness, isDraft=False)
     gh.append(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, isDraft=False)))
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=head, sha=None))
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
-    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "membership", lambda *_: mergify.Membership() if state == "queued" else None)
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: pytest.fail("resume must not confirm again"))
+    if state == "queued":
+        def follow(config, pr, timeout, confirmed):
+            assert pr.head_sha == head and confirmed and 0 <= timeout <= 1
+
+        monkeypatch.setattr(cli, "_wait_for_mergify", follow)
     monkeypatch.setattr(
         mergify, "request", lambda *_: pytest.fail("resume must not submit another command")
     )
 
     code, _out, err = run(capsys, "merge", "--wait=1")
 
+    if state != "ejected":
+        assert (code, "run loopzero check at this head" in err) == ((3, False) if state == "queued" else (1, True))
+        return
     assert 'Read Mergify\'s "Left the queue" comment' in err
     assert code == 1 and "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`" in err
 
