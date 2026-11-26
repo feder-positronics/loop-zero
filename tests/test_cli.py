@@ -189,8 +189,8 @@ def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def wt(repo: Path, git_seed: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    path = cli.worktree.worktree_dir(repo, "t1")
+def wt(repo: Path, git_seed: Path, monkeypatch: pytest.MonkeyPatch, request) -> Path:
+    path = cli.worktree.worktree_dir(repo, getattr(request, "param", "t1"))
     git(repo, "worktree", "add", "-q", str(path), "lz/t1")
     shutil.copytree(git_seed / ".loopzero", cli.worktree.task_file(path).parent)
     monkeypatch.chdir(path)
@@ -837,17 +837,6 @@ def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> Non
     assert not (wt / ".loopzero" / "checks.json").exists()
 
 
-@pytest.mark.parametrize("bootstrap", [False, True])
-def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys, bootstrap) -> None:
-    if bootstrap:
-        git(wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
-    alt = tmp_path / "alt.toml"
-    alt.write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"echo alt"'))
-    code, out, _ = run(capsys, "--config", str(alt), "check")
-    assert code == 0 and "echo alt" in out and "README" not in out
-    assert out.startswith("checks are unpinned because --config was provided\n")
-
-
 @pytest.mark.parametrize("trusted", [False, True])
 def test_invalid_workflow_utf8_names_file(wt, capsys, trusted):
     data = WORKFLOW.encode().replace(b"echo ok", b"echo \xff")
@@ -899,23 +888,35 @@ def test_commands_refuse_linked_local_state(wt, gh, capsys, tmp_path, command, s
     assert directory.stat().st_mode & 0o777 == 0o755
 
 
-def test_check_uses_base_commands_when_worktree_weakens_them(wt: Path, capsys) -> None:
-    (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"'))
-    out, _ = expect_cli(capsys, 0, "check", stderr="")
-    assert "running: echo ok\n" in out and "running: test -f README.md\n" in out
-    assert "  true" not in out
-
-
-def test_check_reads_workflow_from_reported_base_commit(wt, repo, capsys):
-    older_base = head_of(repo)
-    advance_checks(repo, ["echo current-base"])
-    base = head_of(repo)
-    git(wt, "tag", "origin/main", older_base)
-
-    out, _err = expect_cli(capsys, 0, "check", stderr="")
-    lines = out.splitlines()
-    assert_contains(lines, f"checks pinned to origin/main@{base}", "running: echo current-base")
-    assert "running: echo ok" not in lines
+@pytest.mark.parametrize("policy", ["task", "tag-collision", "release", "override", "bootstrap-override"])
+def test_check_selects_and_reports_workflow(wt, repo, tmp_path, capsys, policy):
+    options = ()
+    if policy == "task":
+        (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"'))
+        expected, absent = ("running: echo ok", "running: test -f README.md"), "  true"
+    elif policy == "tag-collision":
+        older_base = head_of(repo)
+        advance_checks(repo, ["echo current-base"])
+        git(wt, "tag", "origin/main", older_base)
+        expected, absent = (f"checks pinned to origin/main@{head_of(repo)}", "running: echo current-base"), "running: echo ok"
+    elif policy == "release":
+        release_policy = WORKFLOW.replace('base = "main"', 'base = "release"')
+        commit_file(repo, "workflow.toml", release_policy, "select release")
+        git(repo, "push", "-q", "origin", "main")
+        commit_file(repo, "workflow.toml", release_policy.replace("echo ok", "echo release"), "release checks")
+        git(repo, "push", "-q", "origin", "HEAD:refs/heads/release")
+        expected, absent = (f"checks pinned to origin/release@{head_of(repo)}", "running: echo release"), None
+    else:
+        if policy == "bootstrap-override":
+            git(wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+        alt = tmp_path / "alt.toml"
+        alt.write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"echo alt"'))
+        options = ("--config", str(alt))
+        expected, absent = ("checks are unpinned because --config was provided", "running: echo alt"), "README"
+    out, _ = expect_cli(capsys, 0, *options, "check", stderr="")
+    assert_contains(out.splitlines(), *expected)
+    assert absent is None or absent not in out
+    assert not options or out.startswith("checks are unpinned because --config was provided\n")
 
 
 @pytest.mark.parametrize("command", ["check", "review", "ready", "merge"])
@@ -929,55 +930,30 @@ def test_privileged_commands_resolve_policy_independently_of_task(wt, command):
     assert config.checks == ("echo ok", "test -f README.md")
 
 
-def test_trusted_default_workflow_can_select_delivery_branch(wt, repo, capsys):
-    release_policy = WORKFLOW.replace('base = "main"', 'base = "release"')
-    commit_file(repo, "workflow.toml", release_policy, "select release")
+@pytest.mark.parametrize("shallow", [False, True], ids=["merge-base", "missing-history"])
+def test_primary_review_requires_merge_base(wt, repo, gh, fake_bin, tmp_path, monkeypatch, capsys, shallow):
+    commit_file(repo, "upstream.py", "upstream = 1\n", "upstream change")
     git(repo, "push", "-q", "origin", "main")
-    commit_file(repo, "workflow.toml", release_policy.replace("echo ok", "echo release"), "release checks")
-    git(repo, "push", "-q", "origin", "HEAD:refs/heads/release")
-
-    out, _err = expect_cli(capsys, 0, "check", stderr="")
-    assert_contains(out, f"checks pinned to origin/release@{head_of(repo)}", "running: echo release")
-
-
-def publish_upstream_change(repo):
-    (repo / "upstream.py").write_text("upstream = 1\n")
-    git(repo, "add", "upstream.py")
-    git(repo, "commit", "-qm", "upstream change")
-    git(repo, "push", "-q", "origin", "main")
-
-
-def test_primary_review_diffs_from_merge_base_not_base_tip(
-    wt: Path, repo: Path, gh: FakeGh, fake_bin: Path, capsys
-) -> None:
-    publish_upstream_change(repo)
-    git(wt, "fetch", "-q", "origin")
-    prepare_review(wt, gh, fake_bin, post_id=4)
-
-    code, _, _ = run(capsys, "review")
-
-    prompt = (fake_bin / "claude.stdin").read_text()
-    assert code == 0 and "upstream = 1" not in prompt
-
-
-def test_primary_review_stops_when_shallow_history_hides_merge_base(
-    wt: Path, repo: Path, gh: FakeGh, fake_bin: Path, tmp_path: Path, monkeypatch, capsys
-) -> None:
-    publish_upstream_change(repo)
-    git(wt, "push", "-q", "origin", "HEAD:refs/heads/lz/t1")
-    shallow = tmp_path / "shallow"
-    origin = tmp_path / "origin.git"
-    git(repo, "clone", "-q", "--depth=1", "--no-single-branch", "--branch", "lz/t1",
-        origin.as_uri(), str(shallow))
-    git(shallow, "remote", "set-head", "origin", "main")
-    (shallow / ".git/info/exclude").write_text(".loopzero/\n")
-    shutil.copytree(wt / ".loopzero", shallow / ".loopzero")
-    monkeypatch.chdir(shallow)
-    prepare_review(shallow, gh, fake_bin)
-
-    expect_cli(capsys, 1, "review", stderr_contains=("no merge base", "deepen or unshallow"))
-    assert not (fake_bin / "claude.stdin").exists()
-    assert all("--method" not in call["argv"] for call in gh.calls)
+    checkout = wt
+    if shallow:
+        git(wt, "push", "-q", "origin", "HEAD:refs/heads/lz/t1")
+        checkout = tmp_path / "shallow"
+        git(repo, "clone", "-q", "--depth=1", "--no-single-branch", "--branch", "lz/t1",
+            (tmp_path / "origin.git").as_uri(), str(checkout))
+        git(checkout, "remote", "set-head", "origin", "main")
+        (checkout / ".git/info/exclude").write_text(".loopzero/\n")
+        shutil.copytree(wt / ".loopzero", checkout / ".loopzero")
+        monkeypatch.chdir(checkout)
+    else:
+        git(wt, "fetch", "-q", "origin")
+    prepare_review(checkout, gh, fake_bin, post_id=1 if shallow else 4)
+    material = fake_bin / "claude.stdin"
+    if shallow:
+        expect_cli(capsys, 1, "review", stderr_contains=("no merge base", "deepen or unshallow"))
+        assert not material.exists() and all("--method" not in call["argv"] for call in gh.calls)
+    else:
+        expect_cli(capsys, 0, "review")
+        assert "upstream = 1" not in material.read_text()
 
 
 @pytest.mark.parametrize("workflow,error", [
@@ -1007,22 +983,32 @@ def test_check_rejects_invalid_base_workflow(wt, repo, capsys, workflow, error):
 # --- pr ------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("token, status, installation_hint", [
-    ("app-token", 404, True),
-    ("", 404, False),
-    ("app-token", 403, False),
+@pytest.mark.parametrize("token,status,detail,options", [
+    ("app-token", 404, False, ()), ("", 404, False, ()), ("app-token", 403, False, ()),
+    ("app-token", 404, True, ()), ("app-token", 404, True, ("--repost",)),
 ])
-def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys,
-                                  token, status, installation_hint):
+def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys, token, status, detail, options):
     monkeypatch.setattr(github, "app_token", lambda: token)
-    gh.fail(pr_list_key(), f"gh: request failed (HTTP {status})")
-
-    _, err = expect_cli(capsys, 1, "review")
-    assert REPO in err and f"HTTP {status}" in err
-    assert ("GitHub App installation" in err) == installation_hint
-    if installation_hint:
-        assert "rerun `loopzero review`" in err
-    assert [call["token"] or "" for call in gh.calls] == [token, token]
+    endpoint = f"repos/{REPO}/pulls/7"
+    if detail:
+        gh.respond(pr_list_key(), [{"number": 7}])
+        gh.fail(f"api {endpoint}", "gh: Not Found (HTTP 404)")
+    else:
+        gh.fail(pr_list_key(), f"gh: request failed (HTTP {status})")
+    _, err = expect_cli(capsys, 1, "review", *options, stdout="" if detail else None)
+    command = " ".join(("loopzero", "review", *options))
+    assert_contains(err, REPO, f"HTTP {status}")
+    if detail:
+        assert_contains(err, "PR #7", endpoint, "branch", "lz/t1", f"rerun `{command}`")
+        assert [call["argv"] for call in gh.calls] == [
+            [*BRANCH_READ, "--include"], [*PR_LIST_READ, "--include"], ["api", endpoint, "--include"],
+        ]
+    else:
+        hint = token == "app-token" and status == 404
+        assert ("GitHub App installation" in err) == hint
+        if hint:
+            assert f"rerun `{command}`" in err
+        assert [call["token"] or "" for call in gh.calls] == [token, token]
     assert not (fake_bin / "claude.stdin").exists()
 
 
@@ -1048,26 +1034,13 @@ def test_pr_list_404_explains_app_installation(
     assert git(repo.parent / "origin.git", "branch", "--list", "lz/t1").strip() == ""
 
 
-@pytest.mark.parametrize("options", [(), ("--repost",)])
-def test_review_pr_detail_404(gh, wt, monkeypatch, capsys, options):
-    monkeypatch.setattr(github, "app_token", lambda: "app-token")
-    endpoint = f"repos/{REPO}/pulls/7"
-    gh.respond(pr_list_key(), [{"number": 7}])
-    gh.fail(f"api {endpoint}", "gh: Not Found (HTTP 404)")
-
-    _out, err = expect_cli(capsys, 1, "review", *options, stdout="")
-    assert "PR #7" in err and endpoint in err and "HTTP 404" in err
-    assert "branch" in err and "lz/t1" in err
-    assert "rerun `" + " ".join(("loopzero", "review", *options)) + "`" in err
-    assert [call["argv"] for call in gh.calls] == [
-        [*BRANCH_READ, "--include"], [*PR_LIST_READ, "--include"], ["api", endpoint, "--include"],
-    ]
-
-
-def trace_pushes(fake_tool, tmp_path):
+def trace_pushes(fake_tool, tmp_path, *, ancestry_probe=None):
     pushes = tmp_path / "pushes"
+    probe = f'if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ]; then {ancestry_probe}; fi' if ancestry_probe else ""
+    skip_push = " exit 0;" if ancestry_probe else ""
     fake_tool("git", f'''\
-if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; fi
+{probe}
+if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}";{skip_push} fi
 exec /usr/bin/git "$@"
 ''')
     return pushes
@@ -1152,10 +1125,16 @@ def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, 
     assert cli._load_report(wt).results == results
 
 
-@pytest.mark.parametrize("failure", ["merged", "CLOSED", "OPEN", "read", "malformed", "incomplete", "repeated", "detail"])
-def test_pr_refuses_closed_or_unproven_branch_history(wt, gh, fake_tool, tmp_path, capsys, failure):
-    head = head_of(wt)
+@pytest.mark.parametrize("failure", ["merged", "CLOSED", "OPEN", "read", "malformed", "incomplete",
+                                     "repeated", "detail", "closed-unmerged"])
+def test_pr_requires_proven_branch_history(wt, gh, fake_tool, tmp_path, capsys, head, failure):
     gh.respond_pr_create(pr_json(headRefOid=head))
+    if failure == "closed-unmerged":
+        closed = pr_json(state="CLOSED", headRefOid=head)
+        gh.respond(branch_history_key(), [closed_history_row(closed)])
+        gh.respond_pr_list([closed])
+        expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
+        return
     completed = failure in {"merged", "CLOSED", "OPEN"}
     if completed:
         merged = pr_json(state="MERGED", headRefOid=head)
@@ -1197,15 +1176,6 @@ def arm_unproven_history(gh, failure):
             gh.respond(branch_history_key(2), page)
 
 
-def test_pr_replaces_closed_never_merged_pr(wt: Path, gh: FakeGh, capsys) -> None:
-    closed = pr_json(state="CLOSED", headRefOid=head_of(wt))
-    gh.respond(branch_history_key(), [closed_history_row(closed)])
-    gh.respond_pr_list([closed])
-    gh.respond_pr_create(pr_json(headRefOid=head_of(wt)))
-
-    assert run(capsys, "pr") == (0, URL + "\n", "")
-
-
 @pytest.mark.parametrize(("heading", "expected"), [("", "lz/t1"), ("\n# Zażółć gęślą jaźń\n", "Zażółć gęślą jaźń")])
 def test_pr_title_prefers_human_heading(wt: Path, monkeypatch, heading, expected) -> None:
     task, read_text = wt / ".loopzero" / "task.md", Path.read_text
@@ -1218,14 +1188,18 @@ def test_pr_title_prefers_human_heading(wt: Path, monkeypatch, heading, expected
     ("Context", ""),
     ("Problem", "<one or two plain sentences before code names: what goes wrong (one problem only), who notices, and evidence/cost; refs in brackets at the end>"),
     ("Goal", "<one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>"),
+    pytest.param(None, "dirty", id="dirty-worktree"),
     pytest.param(None, None, id="missing-task"),
     pytest.param(None, "- **Context:**\n- **Problem:** <describe the problem>\n", id="unfilled-task"),
 ])
-def test_pr_explains_incomplete_task(wt, gh, capsys, name, value):
+def test_pr_refuses_invalid_local_state(wt, gh, capsys, name, value):
     task = wt / ".loopzero/task.md"
     if name:
         task.write_text(re.sub(rf"(?m)^- \*\*{name}:\*\*.*$", f"- **{name}:** {value}", task.read_text()))
         message = f"- **{name}:**"
+    elif value == "dirty":
+        (wt / "scratch.txt").write_text("x")
+        message = "uncommitted or untracked"
     elif value is None:
         task.unlink()
         message = (
@@ -1240,7 +1214,7 @@ def test_pr_explains_incomplete_task(wt, gh, capsys, name, value):
             " (Context, Problem and Goal become the PR description)\n"
         )
     _, err = expect_cli(capsys, 1, "pr", stdout="")
-    assert (message in err) if name else (err == message)
+    assert (message in err) if name or value == "dirty" else (err == message)
     assert gh.calls == []
 
 
@@ -1281,16 +1255,10 @@ def test_pr_updates_existing_open_pr(wt, gh, capsys, corrupt_report, git_calls):
 def test_pr_aborts_when_ancestry_cannot_be_verified(wt, gh, fake_tool, tmp_path, capsys, probe, diagnostic):
     if probe is None:
         gh.respond_pr_list([pr_json(headRefOid="a" * 40)])
-        pushes = trace_pushes(fake_tool, tmp_path)
     else:
         arm_pr_body_patch(gh, head_of(wt))
         git(wt, "commit", "--allow-empty", "-m", "Advance local head")
-        pushes = tmp_path / "pushes"
-        fake_tool("git", f'''\
-if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ]; then {probe}; fi
-if [ "$1" = "push" ]; then touch "{pushes}"; exit 0; fi
-exec /usr/bin/git "$@"
-''')
+    pushes = trace_pushes(fake_tool, tmp_path, ancestry_probe=probe)
 
     _, err = expect_cli(capsys, 1, "pr", stdout="")
     assert diagnostic in err
@@ -1353,6 +1321,47 @@ def test_pr_uses_lease_for_rewritten_open_pr(wt, repo, gh, fake_tool, tmp_path, 
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == (old if case == "hook-fails" else head)
 
 
+@pytest.mark.parametrize("wt", ["Łódź"], indirect=True)
+def test_legacy_locale_status_reflog_push_and_cleanup(wt, repo, gh, monkeypatch, rewritten_branch):
+    branch, head = "lz/Łódź", head_of(wt)
+    ref, origin = f"refs/heads/{branch}", repo.parent / "origin.git"
+    git(wt, "branch", "-m", branch)
+    git(origin, "update-ref", ref, rewritten_branch)
+    assert git(wt, "remote", "get-url", "origin").strip() == str(origin)
+    monkeypatch.chdir(repo)
+
+    gh.respond(branch_history_key(branch=branch), [])
+    gh.respond_pr_list([pr_json(headRefOid=rewritten_branch)], branch=branch)
+    gh.respond(reviews_key(), [])
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+    program = """
+from pathlib import Path
+from loopzero import cli, worktree
+
+cli._readiness = lambda *_, **__: cli.github.Readiness(False, ("check \\u0141 is pending",))
+assert cli.main(["status"]) == 0
+# The fixture verifies and uses a local bare remote.
+cli._require_push_target = lambda *_: None
+assert cli.main(["pr"]) == 0
+wt = Path.cwd()
+head = worktree.head(wt)
+cli._delete_tracking_ref(wt, worktree.branch(wt), head)
+worktree.cleanup(wt, head)
+"""
+    result = subprocess.run(
+        [sys.executable, "-X", "utf8=0", "-c", program], cwd=wt,
+        env={**os.environ, "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONIOENCODING": "ascii:strict"},
+        capture_output=True, encoding="ascii",
+    )
+    assert result.returncode == 0, result.stderr
+    escaped = branch.encode("ascii", "backslashreplace").decode("ascii")
+    assert f"branch:   {escaped}" in result.stdout
+    assert r"check \u0141 is pending" in result.stdout
+    assert any(pr_list_key(branch).removeprefix("api ") in call["argv"] for call in gh.calls)
+    assert git(origin, "rev-parse", ref).strip() == head
+    assert not wt.exists() and not git(repo, "branch", "-a", "--list", f"*{branch}")
+
+
 def test_pr_refuses_to_overwrite_a_pr_head_it_has_never_seen(
     wt: Path, repo: Path, gh: FakeGh, capsys
 ) -> None:
@@ -1371,12 +1380,6 @@ def test_cli_info_leaves_delivery_backends_unloaded(flag, pattern):
         done = subprocess.run([sys.executable, "-X", "importtime", *entry, flag], capture_output=True, text=True)
         assert done.returncode == 0 and re.match(pattern, done.stdout), done
         assert not re.search(r"loopzero\.(github|mergify|runners|sandbox)\b", done.stderr)
-
-
-def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
-    (wt / "scratch.txt").write_text("x")
-    expect_cli(capsys, 1, "pr", stdout="", stderr_contains=("uncommitted or untracked",))
-    assert gh.calls == []
 
 
 # --- review ---------------------------------------------------------------------------
@@ -1549,36 +1552,42 @@ def test_overlapping_review_dispatches_and_publishes_once(
                for call in gh.calls) == 1
 
 
-@pytest.mark.parametrize("refresh_fails", [False, True])
-def test_review_summary_uses_body_edited_during_review(wt, gh, fake_bin, capsys, monkeypatch, refresh_fails):
+@pytest.mark.parametrize("body_case", ["edited", "read-fails", "existing-review"])
+def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatch, body_case):
     head = prepare_review(wt, gh, fake_bin)
     detail_key = f"api repos/{REPO}/pulls/7"
+    prior = "- primary, codex, 123456789abc, request_changes"
+    line = f"- primary, claude, {head[:12]}, approve"
     live = "# T1\n\n## Notes\nEdited during review\n\n## Validation\nNew check results\n"
     run_review = cli._run_review
 
     def change_body_during_review(*args, **kwargs):
         result = run_review(*args, **kwargs)
-        if refresh_fails:
+        if body_case == "read-fails":
             gh.respond(detail_key, {}, exit=1, stderr="body read failed")
         else:
-            detail = rest_pr_json({**pr_json(headRefOid=head), "body": live})
-            gh.respond(detail_key, detail)
+            gh.respond(detail_key, rest_pr_json(pr_json(headRefOid=head, body=live)))
         return result
 
-    monkeypatch.setattr(cli, "_run_review", change_body_during_review)
+    if body_case == "existing-review":
+        arm_pr_body_patch(gh, head, body=f"# T1\n\n## Review\n{prior}\n\n## Notes\n")
+    else:
+        monkeypatch.setattr(cli, "_run_review", change_body_during_review)
     _, err = expect_cli(capsys, 0, "review", stdout_contains=(f"primary review by claude on {head[:12]}: approve",))
     posted_review(gh)
     post_index = next(i for i, call in enumerate(gh.calls) if call["argv"][:2] == post_key().split())
     assert gh.calls[post_index + 1]["argv"] == [*detail_key.split(), "--include"]
     patches = [call for call in gh.calls if "PATCH" in call["argv"]]
-    if refresh_fails:
+    if body_case == "read-fails":
         assert not patches
-        assert "could not append PR review summary" in err and "body read failed" in err
+        assert_contains(err, "could not append PR review summary", "body read failed")
     else:
         assert len(patches) == 1 and not err
-        assert json.loads(patches[0]["--input"])["body"] == (
-            f"{live}\n## Review\n- primary, claude, {head[:12]}, approve\n"
-        )
+        updated = json.loads(patches[0]["--input"])["body"]
+        if body_case == "existing-review":
+            assert updated.index(prior) < updated.index(line) < updated.index("## Notes")
+        else:
+            assert updated == f"{live}\n## Review\n{line}\n"
 
 
 @pytest.mark.parametrize("source", ["task", "base", "override", "missing_ref", "bootstrap"])
@@ -1696,18 +1705,26 @@ def test_review_repost_rejects_reviewer_overrides(monkeypatch, capsys, option, r
     assert f"--repost cannot be combined with {option}" in capsys.readouterr().err
 
 
+def reject_review_post(gh, capsys, saved):
+    gh.fail(post_key(), "HTTP 500 server error")
+    return expect_cli(capsys, 1, "review", stderr_contains=(f"review saved at {saved}",))
+
+
+def arm_saved_repost(gh, fake_bin):
+    (fake_bin / "claude.stdin").unlink()
+    gh.respond(post_key(), {"id": 5})
+
+
 @pytest.mark.parametrize("padding", ["", "x" * 574_264], ids=["short", "long"])
 def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_bin: Path,
                                                     capsys, padding: str, head) -> None:
     arm_empty_primary_review_history(gh, head)
-    gh.fail(post_key(), "HTTP 500 server error")
     envelope = {"padding": padding, "synthetic_metadata": "private-runner-metadata",
                 **_claude_envelope(CHANGES, modelUsage={"claude-sonnet-4-6": {}})}
     _fake_claude(fake_bin, envelope)
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
-    code, out, err = run(capsys, "review")
-    assert code == 1 and out.startswith("reviewer paths pinned") and saved.exists()
-    assert f"review saved at {saved}" in err and "loopzero review --repost" in err
+    out, err = reject_review_post(gh, capsys, saved)
+    assert out.startswith("reviewer paths pinned") and "loopzero review --repost" in err
     saved_bytes = saved.read_bytes()
     data = json.loads(saved_bytes)
     assert json.loads(data["raw"]) == envelope
@@ -1716,24 +1733,20 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     assert data["verdict"] == "request_changes" and len(data["findings"]) == 2
     assert data["model"] == "claude-sonnet-4-6" and data["duration_s"] >= 0
     first_body = posted_review(gh)["body"]
-    assert "model claude-sonnet-4-6" in first_body
-    assert len(first_body.encode("utf-8")) < 65_536
-    assert "private-runner-metadata" not in first_body and "Raw reviewer output" not in first_body
     # Repost can still read ordinary receipts containing the old pair defaults.
     data.update(members=[], reconciliation="", pair_authority=None, pair_prompt_sha256=None)
     saved.write_text(json.dumps(data))
-    (fake_bin / "claude.stdin").unlink()
-    gh.respond(post_key(), {"id": 5})
+    arm_saved_repost(gh, fake_bin)
     code, out, err = run(capsys, "review", "--repost")
     assert (code, err) == (5, "") and out.splitlines()[-1].startswith("primary review by claude"), err
     assert not (fake_bin / "claude.stdin").exists(), "no model invoked"
     payload = posted_review(gh)
     assert marker(head, "primary", "repost") in payload["body"] and "Nit" in payload["body"]
     assert "claude-session-123" in payload["body"]
-    assert len(payload["body"].encode("utf-8")) < 65_536
-    assert "private-runner-metadata" not in payload["body"] and "Raw reviewer output" not in payload["body"]
+    for body in (first_body, payload["body"]):
+        assert "model claude-sonnet-4-6" in body and len(body.encode("utf-8")) < 65_536
+        assert "private-runner-metadata" not in body and "Raw reviewer output" not in body
     assert saved.read_bytes() == saved_bytes
-    assert "model claude-sonnet-4-6" in payload["body"]
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
 
 
@@ -1742,14 +1755,10 @@ def test_interrupted_review_save_preserves_previous_receipt(wt, gh, fake_bin, ca
     head = prepare_review(wt, gh, fake_bin)
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
     if repost:
-        gh.fail(post_key(), "HTTP 500 server error")
-        expect_cli(capsys, 1, "review", stderr_contains=(f"review saved at {saved}",))
+        reject_review_post(gh, capsys, saved)
         original = saved.read_bytes()
-        (fake_bin / "claude.stdin").unlink()
-        gh.respond(post_key(), {"id": 5})
-        args = ["review", "--repost"]
-    else:
-        args = ["review"]
+        arm_saved_repost(gh, fake_bin)
+    args = ["review", "--repost"] if repost else ["review"]
     calls_before = len(gh.calls)
     encode = json.dumps
 
@@ -2065,22 +2074,6 @@ def test_review_extra_delta_after_base_conflict(wt, repo, gh, fake_bin, capsys, 
 
 
 
-def test_review_appends_line_after_existing_review(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
-    prior = "- primary, codex, 123456789abc, request_changes"
-    body = f"# T1\n\n## Review\n{prior}\n\n## Notes\n"
-    arm_pr_body_patch(gh, head, body=body)
-    gh.respond(reviews_key(), [])
-    gh.respond(post_key(), {"id": 3})
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
-
-    assert run(capsys, "review")[0] == 0
-
-    updated = json.loads(gh.calls[-1]["--input"])["body"]
-    assert prior in updated
-    assert f"- primary, claude, {head[:12]}, approve" in updated
-    assert updated.index(prior) < updated.index(head[:12]) < updated.index("## Notes")
-
-
 def test_review_ignores_forged_history(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
     history = [rev(head, "primary", login="stranger"), rev(head, "delta", commit="2" * 40)]
     prepare_review(wt, gh, fake_bin, history=history)
@@ -2191,47 +2184,35 @@ def test_review_refuses_invalid_preflight(wt: Path, gh: FakeGh, fake_bin: Path,
         assert gh.calls == []
 
 
-@pytest.mark.parametrize("private_path", ["", " /home/private/secret-path"], ids=["auth", "redaction"])
-def test_review_falls_through_when_preferred_family_fails(
-    wt, gh, fake_bin, fake_tool, capsys, private_path
-):
-    git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
-    prepare_review(wt, gh, fake_bin, post_id=4)
-    fake_tool("codex", "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
-              f"echo 'Please run codex login{private_path}' >&2\nexit 1\n")
-    code, out, err = run(capsys, "review")
-    body = posted_review(gh)["body"]
-    assert code == 0 and "review by claude" in out
-    assert_contains(err, "reviewer codex unavailable:", "same-family fallback: independent reviewers failed: codex:")
-    assert "Same-family fallback:" in body
-    if private_path:
-        assert "independent reviewers failed: codex: not authenticated." in body
-        assert "secret-path" not in body
-
-
-@pytest.mark.parametrize("codex_ok", [False, True])
-def test_review_unusable_fallback_effort_waits_for_independent_result(
-    wt: Path, gh: FakeGh, fake_bin: Path, fake_tool, capsys, codex_ok
-) -> None:
-    publish_workflow(wt, WORKFLOW + """
-[delivery.review.claude]
-allowed_efforts = ["medium"]
-""")
+@pytest.mark.parametrize("case", ["auth", "redaction", "bad-effort-codex-ok", "bad-effort-codex-unavailable"])
+def test_review_fallback_after_independent_attempt(wt, gh, fake_bin, fake_tool, capsys, case):
+    bad_effort = case.startswith("bad-effort")
+    codex_ok = case == "bad-effort-codex-ok"
+    if bad_effort:
+        publish_workflow(wt, WORKFLOW + '\n[delivery.review.claude]\nallowed_efforts = ["medium"]\n')
     git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
     prepare_review(wt, gh, fake_bin, post_id=4)
     if codex_ok:
         _fake_codex(fake_bin, json.dumps(APPROVE))
     else:
+        private_path = " /home/private/secret-path" if case == "redaction" else ""
         fake_tool("codex", "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
-                  "echo 'Please run codex login' >&2\nexit 1\n")
-    code, out, err = run(capsys, "review", "--effort", "high")
-    if codex_ok:
-        assert code == 0 and "review by codex" in out
+                  f"echo 'Please run codex login{private_path}' >&2\nexit 1\n")
+    code, out, err = run(capsys, "review", *(("--effort", "high") if bad_effort else ()))
+    if bad_effort:
+        if codex_ok:
+            assert code == 0 and "review by codex" in out
+            return
+        assert code == 4 and "same-family fallback:" not in err and "reviewer codex unavailable:" not in err
+        assert_contains(err, "Please run codex login", "effort 'high' is not allowed for claude")
+        assert not (fake_bin / "claude.argv").exists()
         return
-    assert code == 4 and "same-family fallback:" not in err
-    assert "Please run codex login" in err and "effort 'high' is not allowed for claude" in err
-    assert "reviewer codex unavailable:" not in err
-    assert not (fake_bin / "claude.argv").exists()
+    body = posted_review(gh)["body"]
+    assert code == 0 and "review by claude" in out and "Same-family fallback:" in body
+    assert_contains(err, "reviewer codex unavailable:", "same-family fallback: independent reviewers failed: codex:")
+    if case == "redaction":
+        assert "independent reviewers failed: codex: not authenticated." in body
+        assert "secret-path" not in body
 
 
 def test_review_observes_new_codex_version_in_saved_receipt(

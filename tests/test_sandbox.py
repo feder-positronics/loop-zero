@@ -148,11 +148,15 @@ def test_check_pipeline_verdict(git_repo, bwrap_log, monkeypatch, capsys, comman
     assert capsys.readouterr().out.splitlines()[-1] == ("FAIL" if stage_exit else "PASS")
 
 
-def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
+@pytest.mark.parametrize("limited", [False, True], ids=["default", "constrained"])
+def test_bwrap_flags(git_repo, bwrap_log, monkeypatch, limited):
+    options = {"limits": ResourceLimits(memory_mb=64, file_mb=3)} if limited else {}
+    if limited:
+        monkeypatch.setattr(resource, "getrlimit", lambda _: (0, 32 * 1024 * 1024))
     monkeypatch.setenv("LZ_KEEP", "kept")
     monkeypatch.setenv("LZ_DROP", "dropped")
     values = 'printf "%s\\n" "$PATH" "$LZ_KEEP" "${LZ_DROP-unset}" "$UV_CACHE_DIR" "$PYTHONDONTWRITEBYTECODE"'
-    (result,) = sandbox.run_checks(make_config(checks=(values,)), git_repo).results
+    (result,) = sandbox.run_checks(make_config(checks=(values,), **options), git_repo).results
     argv = argv_of(bwrap_log)
     head, tail = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
     for flag in ("--die-with-parent", "--new-session", "--unshare-all", "--clearenv"):
@@ -183,9 +187,11 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert sandbox.run_checks(make_config(), git_repo).dirty is False
     # /tmp tmpfs comes before the worktree bind so a worktree under /tmp stays visible.
     assert head.index("--tmpfs") < head.index(str(git_repo))
-    assert tail == ["prlimit", f"--as={sandbox._cap_limit(4096 << 20, resource.RLIMIT_AS)}",
-                    f"--fsize={sandbox._cap_limit(2048 << 20, resource.RLIMIT_FSIZE)}",
-                    "--", *sandbox.CHECK_SHELL, values]
+    limits = ["--as=33554432", "--fsize=3145728"] if limited else [
+        f"--as={sandbox._cap_limit(4096 << 20, resource.RLIMIT_AS)}",
+        f"--fsize={sandbox._cap_limit(2048 << 20, resource.RLIMIT_FSIZE)}",
+    ]
+    assert tail == ["prlimit", *limits, "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", values]
 
 
 @pytest.mark.parametrize("checks", [(), ("echo hello",)], ids=["probe", "stage"])
@@ -272,17 +278,6 @@ def test_timeout_is_recorded_with_drained_output(git_repo, bwrap_log):
     assert len(result.tail.encode()) == 16 * 1024
 
 
-def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, monkeypatch):
-    limits = ResourceLimits(memory_mb=64, file_mb=3)
-    monkeypatch.setattr(resource, "getrlimit", lambda _: (0, 32 * 1024 * 1024))
-    sandbox.run_checks(make_config(limits=limits), git_repo)
-    argv = argv_of(bwrap_log)
-    assert argv[argv.index("--") + 1:] == [
-        "prlimit", "--as=33554432", "--fsize=3145728",
-        "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", "echo hello",
-    ]
-
-
 def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
     linked = tmp_path / "linked"
     git(git_repo, "worktree", "add", "-q", str(linked), "-b", "feature")
@@ -323,10 +318,7 @@ def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypat
 
 
 def test_probe_timeout_reports_only_the_timeout(git_repo, monkeypatch):
-    def timed_out(*args, **kwargs):
-        raise sandbox._proc.ProcTimeout("private probe diagnostic")
-
-    monkeypatch.setattr(sandbox._proc, "run", timed_out)
+    monkeypatch.setattr(sandbox._proc, "run", Mock(side_effect=sandbox._proc.ProcTimeout("private probe diagnostic")))
     with pytest.raises(sandbox.SandboxUnavailable) as info:
         sandbox.probe(make_config(), git_repo, ["bwrap", "--"])
 
@@ -428,10 +420,8 @@ class TestRealSandbox:
             report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
             assert report.results[0].exit_code != 0, report
             assert not escaped.exists()
-        checks = (
-            "echo x > \"$HOME/ok\" && cat \"$HOME/ok\" && test ! -e /tmp/repo",
-            "test \"$(pwd)\" = \"$PWD\" && env | grep -c '^LZ_' ; true",
-        )
+        checks = ('echo x > "$HOME/ok" && cat "$HOME/ok" && test ! -e /tmp/repo',
+                  'test "$(pwd)" = "$PWD" && env | grep -c "^LZ_" ; true')
         report = sandbox.run_checks(make_config(checks=checks), git_repo)
         assert [r.exit_code for r in report.results] == [0, 0], report
 
@@ -814,10 +804,7 @@ def test_input_diagnostic_failure_does_not_block_dirty_check(
     git_repo, bwrap_log, fetched_base, monkeypatch, path,
 ):
     if path == "README.md":
-        def timed_out(*args):
-            raise sandbox._proc.ProcTimeout("input lookup timed out")
-
-        monkeypatch.setattr(sandbox, "_input_blobs", timed_out)
+        monkeypatch.setattr(sandbox, "_input_blobs", Mock(side_effect=sandbox._proc.ProcTimeout("input lookup timed out")))
     (git_repo / "README.md").write_text("dirty\n")
     command = 'test "$(cat README.md)" = dirty'
     config = make_config(checks=(command,), inputs={command: (path,)})
@@ -872,7 +859,6 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     command = f"echo '{marker}'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
     original = sandbox.run_checks(config, git_repo)
-    assert original.ok
     legacy = replace(original.results[0], tail=f"{'x' * 20_000}\n{marker}")
     _save_report(git_repo, replace(original, results=(legacy,)))
 
@@ -882,7 +868,7 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     receipt = json.loads(receipt_path.read_text())
     assert receipt["head"] == git(git_repo, "rev-parse", "HEAD").strip()
     [result] = receipt["results"]
-    assert result["reused_from"] == original.head
+    assert original.ok and result["reused_from"] == original.head
     assert marker in result["tail"].splitlines()
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
@@ -892,8 +878,7 @@ def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkey
     command = "echo stage ran"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
     original = cache_check(config, clean=True, verify_reuse=True)
-    assert original.results[0].input_key
-    assert original.head == fetched_base
+    assert original.results[0].input_key and original.head == fetched_base
 
     run = sandbox._proc.run
 
@@ -980,9 +965,8 @@ def test_runner_upgrade_invalidates_pass(git_repo, fetched_base, tmp_path, chang
     write_runner(original, 0)
     runner.symlink_to(original)
     config = make_config(check_runner=(str(runner),), inputs={"echo hello": (".",)})
-    report = cache_check(config)
+    report = cache_check(config, verify_reuse=True)
     assert _current_check_report(git_repo, config, report.head)
-    assert sandbox.run_checks(config, git_repo).results[0].reused_from == report.head
 
     if change == "target":
         replacement = tmp_path / "runner-b"

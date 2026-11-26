@@ -59,10 +59,8 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(
-    cwd: Path, *args: str, timeout: float = 120,
-    preserve_whitespace: bool = False, preserve_newlines: bool = False,
-) -> str:
+def _git(cwd: Path, *args: str, timeout: float = 120,
+         preserve_whitespace: bool = False, preserve_newlines: bool = False) -> str:
     argv = ("git", *args)
     if preserve_whitespace:
         done = run_git_paths(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
@@ -273,7 +271,7 @@ def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | No
             or not (wt / ".git").is_file()):
         return None
     common = _git(repo_root, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True)
-    if _git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True) != common or branch(wt) != expected_branch:
+    if _git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True) != common or branch(wt, native=True) != expected_branch:
         return None
     current_head = head(wt)
     return current_head if fields[1] == f"HEAD {current_head}" and not is_dirty(wt) else None
@@ -303,11 +301,11 @@ def is_linked_checkout(wt: Path) -> bool:
     return git_dir != common_dir
 
 
-def branch(wt: Path) -> str:
+def branch(wt: Path, *, native: bool = False) -> str:
     name = _git(Path(wt), "branch", "--show-current", preserve_whitespace=True)
     if not name:
         raise WorktreeError("HEAD is detached. Switch to a branch and retry.")
-    return name
+    return name if native else os.fsencode(name).decode("utf-8", "surrogateescape")
 
 
 def task_text(wt: Path) -> str:
@@ -354,7 +352,8 @@ def _lock_verified_ref(wt: Path, ref: str, expected_head: str) -> Iterator[None]
     ) as transaction:
         assert transaction.stdin is not None and transaction.stdout is not None
         try:
-            transaction.stdin.write(f"option no-deref\nverify {ref} {expected_head}\nprepare\n")
+            wire_ref = os.fsencode(ref).decode("utf-8", "surrogateescape")
+            transaction.stdin.write(f"option no-deref\nverify {wire_ref} {expected_head}\nprepare\n")
             transaction.stdin.flush()
             if not select([transaction.stdout], [], [], 30)[0]:
                 raise GitError(argv, "timed out verifying the merged branch")
@@ -387,11 +386,11 @@ def cleanup(wt: Path, expected_head: str) -> None:
         raise WorktreeError(f"no such worktree: {wt}")
     if head(wt) != expected_head:
         raise WorktreeError("local HEAD differs from merged PR head")
-    name = branch(wt)
+    name = branch(wt, native=True)
     gd = Path(_git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True))
     ref = f"refs/heads/{name}"
     with _lock_verified_ref(wt, ref, expected_head):
-        if branch(wt) != name:
+        if branch(wt, native=True) != name:
             raise WorktreeError("local branch changed during merge cleanup")
         if is_dirty(wt):
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
