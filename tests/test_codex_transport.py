@@ -17,13 +17,13 @@ from tests import test_cli, test_runners
 from tests.conftest import commit_file, git, git_environment
 
 fake_bwrap = test_runners.fake_bwrap
-gh = test_cli.gh
+gh, replay_gh = test_cli.gh, test_cli.replay_gh
 APPROVE = test_runners.APPROVE
-BYTE_LIMIT_REVIEW = test_runners._native_codex_result("a" * 40)
+SYNTHETIC_NATIVE = test_runners._native_codex_result("a" * 40)
 
 
 @pytest.fixture
-def native(git_repo, fake_bin, fake_tool):
+def native(git_repo, fake_tool):
     base = git(git_repo, "rev-parse", "HEAD").strip()
     content = "PRIVATE_CANARY /home/private/secret.txt\n" + "x" * 40000 + "Ω\n"
     commit_file(git_repo, "large.txt", content, "large synthetic source")
@@ -85,11 +85,10 @@ def row(result, rendered=None):
     }
 
 
-@pytest.fixture
-def published_native(native):
-    result = native[0]()
-    rendered = body(result)
-    return result, rendered, rendered.splitlines()[1]
+@pytest.fixture(scope="module")
+def published_native():
+    rendered = body(SYNTHETIC_NATIVE)
+    return SYNTHETIC_NATIVE, rendered, rendered.splitlines()[1]
 
 
 def projection(result, rendered=None):
@@ -342,8 +341,8 @@ def test_invalid_review_evidence_is_rejected(published_native, mutation):
         assert (found is not None) is (mutation == "after_prose")
 
 
-def test_overflow_is_hold_without_silent_chunk_truncation(native):
-    value = runners.codex_evidence(native[0]())
+def test_overflow_is_hold_without_silent_chunk_truncation():
+    value = runners.codex_evidence(SYNTHETIC_NATIVE)
     value["calls"] = [
         {**copy.deepcopy(value["calls"][0]), "index": i, "session": "s" + str(i)}
         for i in range(1, 40)
@@ -367,7 +366,7 @@ def test_retired_pair_marker_cannot_pass_eligibility(published_native, source, i
 
 
 @pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_legacy"])
-def test_large_publication_confirmation_and_hosted_agreement(native, gh, fake_bin, monkeypatch, kind):
+def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, gh, fake_bin, monkeypatch, kind):
     from tests.test_github import pr_json, rest_pr_json, threads_json
 
     result = native[0]()
@@ -475,9 +474,8 @@ def test_saved_or_model_supplied_summary_cannot_grant_inspection(published_nativ
     ("raw_bytes", True), ("raw_bytes", 0), ("raw_bytes", 2**31), ("chunk_count", 0),
     ("repo", "x" * 257), ("publisher", "/private"), ("kind", []), ("complete", 1),
 ])
-def test_strict_projection_types_and_bounds(native, field, value):
-    result = native[0]()
-    evidence = runners.codex_evidence(result)
+def test_strict_projection_types_and_bounds(field, value):
+    evidence = runners.codex_evidence(SYNTHETIC_NATIVE)
     evidence[field] = value
     assert not runners.valid_codex_evidence(evidence)
     with pytest.raises((ValueError, runners.RunnerBadOutput)):
@@ -485,10 +483,9 @@ def test_strict_projection_types_and_bounds(native, field, value):
 
 
 def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
-    legacy = test_runners._native_codex_result("a" * 40)
-    raw = json.loads(legacy.raw)
+    raw = json.loads(SYNTHETIC_NATIVE.raw)
     raw.pop("review_context")
-    legacy = dataclasses.replace(legacy, raw=json.dumps(raw))
+    legacy = dataclasses.replace(SYNTHETIC_NATIVE, raw=json.dumps(raw))
     assert runners.validate_runner_result(legacy) and runners.codex_evidence(legacy) is None
     review = row(legacy)
     assert runners.CODEX_HEADER not in review["body"] and eligible(review)
@@ -544,8 +541,8 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
       for overflow in (0, 1, 2)),
     pytest.param("\n", 1, True, id="adjudication-counts-toward-tightened-budget"),
 ])
-def test_raw_leading_utf8_span_at_limit_and_overflow(request, separator, overflow, tightened, monkeypatch):
-    result = request.getfixturevalue("native")[0]() if tightened else BYTE_LIMIT_REVIEW
+def test_raw_leading_utf8_span_at_limit_and_overflow(separator, overflow, tightened, monkeypatch):
+    result = SYNTHETIC_NATIVE
     marker = cli.review_marker(result.head, result.kind)
     header = runners.encode_codex_evidence(runners.codex_evidence(result))
     adjudication = "<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
@@ -561,8 +558,7 @@ def test_raw_leading_utf8_span_at_limit_and_overflow(request, separator, overflo
     present, evidence = projection(result, rendered)
     assert present and (evidence is not None) is (overflow == 0)
     if not tightened:
-        latest = eligible(row(result), row(result, rendered))
-        assert (latest is not None) is (overflow == 0)
+        assert (eligible(row(result), row(result, rendered)) is not None) is (overflow == 0)
     if separator == "\n":  # Publication stays LF; readers count every accepted separator verbatim.
         if overflow:
             with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):
