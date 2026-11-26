@@ -703,15 +703,23 @@ def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys, bootstrap)
     assert out.startswith("checks are unpinned because --config was provided\n")
 
 
-def test_invalid_workflow_utf8_names_file(wt, capsys):
-    filename = "broken-workflow.toml"
-    (wt / filename).write_bytes(bytes([255]))
-    args = ["--config", filename, "status"]
+@pytest.mark.parametrize("trusted", [False, True])
+def test_invalid_workflow_utf8_names_file(wt, capsys, trusted):
+    data = WORKFLOW.encode().replace(b"echo ok", b"echo \xff")
+    filename = "origin/main:workflow.toml" if trusted else "broken-workflow.toml"
+    if trusted:
+        (wt / "workflow.toml").write_bytes(data)
+        git(wt, "add", "workflow.toml")
+        git(wt, "commit", "-qm", "invalid workflow bytes")
+        git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
+    else:
+        (wt / filename).write_bytes(data)
+    args = ["status"] if trusted else ["--config", filename, "status"]
 
     code, _, err = run(capsys, *args)
 
     assert code == 1
-    assert filename in err and "utf-8" in err.lower() and "position 0" in err
+    assert filename in err and "utf-8" in err.lower() and "position " in err
     assert "Traceback" not in err
 
 
