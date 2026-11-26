@@ -4334,7 +4334,8 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
 
 
-def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatch):
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatch, confirmed):
     head = commit_mergify_configuration(wt)
     config = cli.config_mod.load_trusted(wt)
     pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
@@ -4346,25 +4347,24 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
 
     def membership(*_):
         reads_at_membership.append(len(gh.calls))
-        if sum(sleeps) == 60:
+        if confirmed and sum(sleeps) == 60:
             gh.respond(" ".join(detail), merge_json(state="MERGED", head=head, sha="e" * 40))
-        return mergify.Membership()
+        return mergify.Membership() if confirmed or sum(sleeps) >= 210 else None
 
-    def configured(*args):
-        configurations.append(args)
-        return True
-
-    monkeypatch.setattr(mergify, "configured", configured)
+    monkeypatch.setattr(mergify, "configured", lambda *args: configurations.append(args) or True)
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: gh.respond(
+        " ".join(detail), merge_json(state="MERGED", head=head, sha="e" * 40)))
     monkeypatch.setattr(mergify, "membership", membership)
     monkeypatch.setattr(cli.time, "monotonic", lambda: sum(sleeps))
     monkeypatch.setattr(cli.random, "uniform", lambda *_: 1.0)
     monkeypatch.setattr(cli, "_sleep", sleeps.append)
 
-    assert cli._wait_for_mergify(config, pr, 60, confirmed=True) == "e" * 40
-    assert sleeps == [30, 30]
-    assert configurations == [(REPO, "main", "main")] * 3
-    assert reads_at_membership == [1, 2, 3]
-    assert [c["argv"][:2] for c in gh.calls] == [detail] * 4
+    assert cli._wait_for_mergify(config, pr, 60 if confirmed else 360, confirmed=confirmed) == "e" * 40
+    assert sleeps == ([30, 30] if confirmed else [30, 60, 120, 30])
+    assert configurations == [(REPO, "main", "main")] * (3 if confirmed else 4)
+    assert reads_at_membership == ([1, 2, 3] if confirmed else [1, 4, 7, 10])
+    assert sum(c["argv"][:2] == detail for c in gh.calls) == (4 if confirmed else 9)
+    assert len(gh.calls) == (4 if confirmed else 12)
 
 
 @pytest.mark.parametrize("outcome,jitter", [
@@ -4441,9 +4441,9 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     if outcome == "worktree_removed":
         poll_until = cli._poll_until
 
-        def remove_worktree_then_poll(*args):
+        def remove_worktree_then_poll(*args, **kwargs):
             git(repo, "worktree", "remove", "--force", str(wt))
-            return poll_until(*args)
+            return poll_until(*args, **kwargs)
 
         monkeypatch.setattr(cli, "_poll_until", remove_worktree_then_poll)
     try:
