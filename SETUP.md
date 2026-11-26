@@ -327,7 +327,8 @@ resolve review findings.
 
 ## Removing an abandoned task worktree
 
-For a merged PR, run `loopzero merge` from its task worktree to retry cleanup.
+For a merged PR, retry cleanup from a durable directory with
+`(cd "/absolute/path/to/task-worktree" && loopzero merge)`.
 For a closed, unmerged PR outside the host retention job's scope, the task owner
 can remove the worktree manually after confirming it is abandoned and no session
 or job still uses it. In GitHub, verify the closed PR belongs to this repository
@@ -335,27 +336,25 @@ and task branch, and copy its full head SHA. Preserve any delivery evidence
 required by the contract and inspect ignored files for local work or evidence
 before removing the tree. Resolve any shared stash or uncertain ownership first.
 
-Save the following as a shell script outside the task worktree. Run it from
-the primary checkout with `sh /path/to/script <task-slug> <pr-head-sha>`.
-It checks the worktree's branch, local head, live origin head and cleanliness
-before removal.
+Save this script outside the task worktree. From a durable directory, run
+`sh /path/to/script /absolute/path/to/task-worktree <task-slug> <pr-head-sha>`.
 
 ```sh
 (
     set -eu
-    slug=$1
-    pr_head=$2
-    branch="refs/heads/lz/$slug"
-    tree=".worktrees/$slug"
+    tree=$1
+    branch="refs/heads/lz/$2"
+    pr_head=$3
+    git_dir=$(git -C "$tree" rev-parse --path-format=absolute --git-common-dir)
     test "$(git -C "$tree" symbolic-ref --quiet HEAD)" = "$branch"
     test "$(git -C "$tree" rev-parse HEAD)" = "$pr_head"
-    published=$(git ls-remote --exit-code origin "$branch")
+    published=$(git -C "$tree" ls-remote --exit-code origin "$branch")
     test "$published" = "$(printf '%s\t%s' "$pr_head" "$branch")"
-    stash=$(git stash list)
+    stash=$(git --git-dir="$git_dir" stash list)
     test -z "$stash"
     changes=$(git -C "$tree" status --porcelain --untracked-files=all --ignore-submodules=none)
     test -z "$changes"
-    git worktree remove -- "$tree"
+    git --git-dir="$git_dir" worktree remove -- "$tree"
 )
 ```
 

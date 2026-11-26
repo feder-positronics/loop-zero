@@ -10,17 +10,17 @@ and [setup guidance](../../SETUP.md#api-keys-for-local-agents).
 
 | Name | Use when |
 | --- | --- |
-| `plan` | Bound an unclear change before implementation: one objective, observable acceptance. |
-| `implement` | Deliver a bounded task under the contract's owner queue route and merge authority. |
-| `work-issue` | Run the act skills (`plan`, `implement` and others as needed) for one live GitHub issue through verified merge, then closure or explicit partial delivery. |
+| `plan` | Plan PR-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or planned blueprints. |
+| `implement` | Deliver a bounded task or PR slice with behavior proof. Use work-issue for full GitHub issue delivery. |
+| `work-issue` | Own full delivery of a live GitHub issue through verified merge and closure or an explicit partial handoff. |
 | `write-design-doc` | Create or refine a durable design contract: exploration, ADR, initiative, blueprint or guide. |
 | `grill-me` | Stress-test requested decisions or settle structurally coupled material choices. |
 | `design-mockup` | Explore UI direction in a standalone, non-production HTML/CSS mockup. |
 | `explain` | Explain complex topics in Markdown, HTML or an evidence-backed briefing. |
-| `backlog` | Inspect live GitHub issues, PRs, blockers, collisions and next work read-only. |
+| `backlog` | Inspect live GitHub issues and PRs read-only for next work, backlog state, delivery retrospectives or digests. Use retro for weekly workflow decisions. |
 | `diagnose` | Diagnose failures and repair the correct owner when commissioned. |
 | [`retro`](retro/SKILL.md) | Judge recent workflow changes and pick at most one next change in the weekly retro. |
-| `resolve-findings` | Decide bounded responses to existing PR threads before applying fixes. |
+| `resolve-findings` | Verify existing PR findings, fix commissioned blockers or hand off repairs, and explain each disposition in-thread. |
 | `code-review` | Review a frozen code diff against acceptance; emit JSON for `loopzero review`. |
 | `review` | Assess an artifact, system, architecture, workflow, agent configuration or idea read-only. |
 | `security-review` | Review changes to auth, permissions, secrets, external calls, config, file/shell primitives, serialization or dependencies. |
