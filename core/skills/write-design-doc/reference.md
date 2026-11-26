@@ -55,7 +55,7 @@ low-confidence, evidence-conflicted decisions or plausible alternatives.
 
 ## Artifact Lifecycle
 
-Preserve `upstream:` or equivalent source relationships. Change generated
+Preserve recorded source relationships. Change generated
 lifecycle fields and indexes through their source or generator.
 For time-gated decisions, record review date, owner, evidence to inspect,
 and reversal condition in the artifact; do not create reminder issues.
