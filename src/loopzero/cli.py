@@ -1501,7 +1501,7 @@ def _read_wait_poll[T](read: Callable[[], T], deadline: float) -> T:
     while True:
         try:
             return read()
-        except (github.GhUnavailable, mergify.MergifyUnavailable) as exc:
+        except (github.GhUnavailable, mergify.MergifyUnavailable, _proc.ProcTimeout, config_mod.RefreshFailed) as exc:
             # A quota waits one second past its verified reset; other transients retry next poll.
             delay = WAIT_INTERVAL
             if quota := isinstance(exc, github.GhRateLimited):
@@ -1592,7 +1592,7 @@ def _wait_for_checks(
 
 def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str | None:
     """Merge SHA if landed; a closed-unmerged read is held as not final (GitHub lags a
-    queue merge) and re-raised by the caller only if it persists to the deadline."""
+    queue merge) and re-raised by the caller once it persists for two polls."""
     try:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
     except github.ClosedUnmerged as exc:
@@ -1607,6 +1607,7 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
     started = time.monotonic()
     closed: list[github.GhError] = []
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
+    held = 0
     for _ in _poll_until(started, timeout):
         if sha := _landed(config, pr, closed):
             return sha
@@ -1615,6 +1616,8 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
                 return sha
             if not closed:
                 raise CliError(f"PR #{pr.number} left the merge queue unmerged")
+        if (held := held + 1 if closed else 0) >= 2:
+            raise closed[0]  # Closed unmerged for two polls is final, not landing lag.
     if closed:
         raise closed[0]
     return None
@@ -1710,13 +1713,15 @@ def _wait_for_mergify(
     state = None
     deferred_landing_read = False
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
-    polls = _poll_until(started, timeout, admitted=lambda: confirmed)
+    polls, held = _poll_until(started, timeout, admitted=lambda: confirmed), 0
     for _ in polls:
         deadline = started + timeout
         poll = partial(_mergify_wait_poll, config, pr, queue, deadline, closed, confirmed)
         sha, state, deferred_landing_read = _read_wait_poll(poll, deadline)
         if sha:
             return sha
+        if (held := held + 1 if closed else 0) >= 2:
+            raise closed[0]  # Closed unmerged for two polls is final, not landing lag.
         if state is not None and not confirmed:
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
             confirmed = True
@@ -1805,9 +1810,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
         return 0
     started = time.monotonic()
     deadline = None if args.wait is None else started + args.wait
-    pr, readiness = _pr_readiness(
-        wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None, mergify_deadline=deadline,
-    )
+    read = partial(_pr_readiness, wt, config, branch, allow_merged=True,
+                   workflow_wait=args.wait is not None, mergify_deadline=deadline)
+    pr, readiness = _read_wait_poll(read, deadline) if args.wait else read()  # A blip retries within --wait.
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
     admit_by = deadline if args.wait else None
     if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
@@ -1824,6 +1829,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
         if sha is None:
             raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
+    elif readiness.ready and pr.is_draft:
+        raise CliError(f"PR #{pr.number} is a draft; next: loopzero ready --wait")
     elif config.merge_strategy == "mergify":
         try:
             sha = _merge_with_mergify(wt, config, pr, readiness, deadline, admit_by)

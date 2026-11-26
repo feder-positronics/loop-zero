@@ -40,6 +40,10 @@ class ConfigError(LoopZeroError):
     """The configuration file is missing, unreadable, or has invalid content."""
 
 
+class RefreshFailed(ConfigError):
+    """`git fetch` of the settings branch failed, usually a network or remote fault."""
+
+
 def load(path: Path | str, *, require_ci: bool = False) -> Config:
     """Load and validate a workflow file."""
     path = Path(path)
@@ -115,7 +119,8 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
         if fetched.exit_code != 0:
             message = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@",
                              _proc.tail(fetched.stderr or fetched.stdout, 1) or f"git exited {fetched.exit_code}")
-            raise ConfigError(f"could not refresh origin/{branch}: {message}. {hint}")
+            raise RefreshFailed(f"could not refresh origin/{branch}: {message}. If the network or remote "
+                                f"is down, rerun later; otherwise: {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
     # Stage-boundary reads reuse the existing ref without fetching absent objects.
     local_env = {"GIT_NO_LAZY_FETCH": "1"} if previous is not None and not refresh else None

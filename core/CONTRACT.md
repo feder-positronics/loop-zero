@@ -24,8 +24,10 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    passes. A PR whose only blockers are missing or skipped required checks
    (with or without pending mergeability) also leaves draft but is not ready
    yet; without a wait that exits 3. Both waiters use `--wait[=SECONDS]` (default 5400) on the same
-   head. Zero can take a PR out of draft or enqueue. Mergeability can time out (exit 3)
-   with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`.
+   head. Zero can take a PR out of draft or enqueue. `merge --wait` takes a draft out of
+   draft only when required checks are missing; it refuses an otherwise ready draft.
+   Mergeability can time out (exit 3) with green checks. `loopzero merge --cancel`
+   requests Mergify removal without `--wait`.
    Green can precede CI scheduling. After four minutes of missing checks with
    none pending, inspect scheduling, triggers and permissions, then retry.
 6. After step 5 exits 0, run from a durable directory such as `/tmp`

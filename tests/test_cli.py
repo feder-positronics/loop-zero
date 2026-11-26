@@ -4428,7 +4428,7 @@ def test_ready_pins_review_publishers_to_base(wt, repo, gh, capsys, monkeypatch,
 
 
 @pytest.mark.parametrize("kind", ["checks", "mergify"])
-@pytest.mark.parametrize("reset", [None, -1, 20, 100, "transient"])
+@pytest.mark.parametrize("reset", [None, -1, 20, 100, "transient", "network"])
 def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
     head = commit_mergify_configuration(wt)
     config = cli.config_mod.load_trusted(wt)
@@ -4440,6 +4440,9 @@ def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
     if reset == "transient":  # Two failures 2-5 s apart while the PR may still be queued.
         error = (github.GhUnavailable(("gh",), "HTTP 502") if kind == "checks"
                  else mergify.MergifyUnavailable("Mergify queue lookup failed with HTTP 502"))
+    elif reset == "network":  # A hung read or a failed settings fetch during the wait.
+        error = (cli._proc.ProcTimeout("gh timed out") if kind == "checks"
+                 else cli.config_mod.RefreshFailed("could not refresh origin/main"))
 
     def next_poll(*_args):
         polls.append(clock.now)
@@ -4463,7 +4466,7 @@ def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
         wait = partial(cli._wait_for_mergify, config, pr, 90, confirmed=True)
         expected = "e" * 40
 
-    if reset in (20, "transient"):
+    if reset in (20, "transient", "network"):
         assert wait() == expected
         delay = 21 if reset == 20 else cli.WAIT_INTERVAL  # One second past the verified reset.
         assert polls == [0, delay]
@@ -4473,6 +4476,27 @@ def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
             wait()
         assert polls == [0]
         assert not clock.sleeps
+
+
+@pytest.mark.parametrize("queue", ["native", "mergify"])
+def test_closed_unmerged_is_final_after_two_polls(wt, monkeypatch, queue):
+    head = commit_mergify_configuration(wt)
+    config = cli.config_mod.load_trusted(wt)
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    clock = poll_clock(monkeypatch, jitter=1.0)
+    closed = github.ClosedUnmerged(("gh",), "PR #7 is closed")
+    monkeypatch.setattr(github, "merged_sha", Mock(side_effect=closed))
+    monkeypatch.setattr(github, "merge_pending", lambda *_: True)
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "membership", lambda *_: mergify.Membership())
+    with pytest.raises(github.ClosedUnmerged):
+        cli._wait_for_merge(config, pr, 5400) if queue == "native" else cli._wait_for_mergify(config, pr, 5400, True)
+    assert len(clock.sleeps) == 1  # Two polls, not 90 minutes.
+
+
+def test_merge_refuses_ready_draft(wt, gh, capsys, head):
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=True)
+    expect_cli(capsys, 1, "merge", "--wait", stderr_contains=("PR #7 is a draft; next: loopzero ready --wait",))
 
 
 @pytest.mark.parametrize("confirmed", [True, False])
