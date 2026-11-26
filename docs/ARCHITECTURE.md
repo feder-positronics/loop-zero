@@ -33,8 +33,8 @@ local-receipt exceptions. Merge authority permits merging by default outside
 reserved classes.
 
 Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
-reviews, finding threads, check statuses and merge state. Within a task worktree,
-PR body writers lock the state directory from the live read through the update.
+reviews, finding threads, check statuses and merge state. PR body writers hold a same-host lock keyed by repository and PR from
+the live read through the update, including writes from different checkouts.
 Review publication rechecks the round while holding a same-host lock keyed by
 repository and PR. The lock covers POST and lost-response read-back.
 CI and branch protection

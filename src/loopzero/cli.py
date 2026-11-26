@@ -540,14 +540,6 @@ def _append_review(body: str, result: ReviewResult) -> str:
 
 
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
-    try:
-        with _lock_task_state(wt):
-            _refresh_existing_pr_checks(wt, config)
-    except OSError as exc:
-        print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
-
-
-def _refresh_existing_pr_checks(wt: Path, config: Config) -> None:
     """Best-effort refresh only when local HEAD is the existing PR head."""
     argv = ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
     try:
@@ -557,7 +549,10 @@ def _refresh_existing_pr_checks(wt: Path, config: Config) -> None:
         branch, head = worktree.branch(wt), worktree.head(wt)
         pr = github.pr_for_branch(config.repo, branch, open_only=True)
         if pr is not None and pr.head_sha == head:
-            _update_pr_checks(wt, head, config, pr)
+            with github.pr_lock(config.repo, pr.number):
+                live = github.pr_view(config.repo, pr.number)
+                if live.state == "OPEN" and live.head_sha == head:
+                    _update_pr_checks(wt, head, config, live)
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
@@ -667,7 +662,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     push.append(branch)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
-        with _lock_task_state(wt):
+        with github.pr_lock(config.repo, pr.number):
             live = github.pr_view(config.repo, pr.number)
             if live.state != "OPEN":
                 raise CliError(f"PR #{pr.number} closed during publication")
@@ -796,7 +791,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             confirmed, _ = _recover_review(wt, config, pr, result,
                                                  publication["publisher"], token)
             if confirmed:
-                return _finish_review(wt, config, pr, result)
+                return _finish_review(config, pr, result)
         # Exact read-back above may confirm an older published note; a new post needs the current form.
         candidates = [family for family in config.reviewers if family not in authors]
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
@@ -851,12 +846,12 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
                     f"{exc} | publication unconfirmed; review saved at {path}; "
                     "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
                 ) from exc
-    return _finish_review(wt, config, pr, result)
+    return _finish_review(config, pr, result)
 
 
-def _finish_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult) -> int:
+def _finish_review(config: Config, pr: github.PR, result: ReviewResult) -> int:
     try:
-        with _lock_task_state(wt):
+        with github.pr_lock(config.repo, pr.number):
             live = github.pr_view(config.repo, pr.number)
             body = _append_review(live.body, result)
             if body != live.body:

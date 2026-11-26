@@ -9,8 +9,11 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from threading import Event, current_thread
 from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import quote
@@ -388,7 +391,8 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, push
         monkeypatch.setattr(github, "update_body", Mock(side_effect=timeout))
     code, out, err = run(capsys, "check")
     assert (code, out.splitlines()[-1]) == ((1, "FAIL") if stage_exit else (0, "PASS"))
-    assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS + (
+    reads = LOOKUP_CALLS + ([["api", endpoint]] if pushed else [])
+    assert [call["argv"][:2] for call in gh.calls] == reads + (
         [["api", endpoint]] if pushed and not refresh_timeout else [])
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert report["head"] == head_of(wt) and report["dirty"] is False
@@ -397,7 +401,7 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, push
     if refresh_timeout:
         assert f"note: could not refresh PR checks: PATCH {endpoint} timed out" in err
     if pushed and not refresh_timeout:
-        body = json.loads(gh.calls[len(LOOKUP_CALLS)]["--input"])["body"]
+        body = json.loads(gh.calls[len(reads)]["--input"])["body"]
         assert body.count("## Validation") == 1
         assert f"Recorded for `{head_of(wt)[:12]}`" in body
         assert "- `echo ok`: exit 0" in body
@@ -4784,3 +4788,44 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
     assert "unverified" not in draft
     assert f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0" in draft
     assert "Manual validation evidence." in draft
+
+
+def test_cross_checkout_check_refresh_keeps_review_summary(wt, repo, head, monkeypatch):
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    cfg = config.load(wt / "workflow.toml")
+    result = ReviewResult("claude", head, "primary", "approve", (), "")
+    body = "# T1\n\n## Notes\nKeep this prose\n"
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    patch_started, review_attempted = Event(), Event()
+    reviewer = current_thread()
+    lock = github.pr_lock
+
+    @contextmanager
+    def observe_lock(*args):
+        if current_thread() is reviewer:
+            review_attempted.set()
+        with lock(*args):
+            yield
+
+    def patch(_repo, _number, updated):
+        nonlocal body
+        if current_thread() is reviewer:
+            body = updated
+            review_attempted.set()
+        else:
+            patch_started.set()
+            assert review_attempted.wait(10)
+            body = updated
+
+    monkeypatch.setattr(github, "pr_lock", observe_lock)
+    monkeypatch.setattr(github, "pr_for_branch", lambda *a, **k: replace(pr, body=body))
+    monkeypatch.setattr(github, "pr_view", lambda *a: replace(pr, body=body))
+    monkeypatch.setattr(github, "update_body", patch)
+    with ThreadPoolExecutor() as pool:
+        check = pool.submit(cli._refresh_pr_checks, wt, cfg)
+        assert patch_started.wait(10)
+        monkeypatch.chdir(repo)
+        assert cli._finish_review(cfg, pr, result) == 0
+        check.result(timeout=10)
+    assert cli._CHECKS_START in body and "Keep this prose" in body
+    assert f"- primary, claude, {head[:12]}, approve" in body
