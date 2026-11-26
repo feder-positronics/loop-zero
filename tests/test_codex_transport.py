@@ -18,6 +18,7 @@ from tests.conftest import commit_file, git
 fake_bwrap = test_runners.fake_bwrap
 gh = test_cli.gh
 APPROVE = test_runners.APPROVE
+BYTE_LIMIT_REVIEW = test_runners._native_codex_result("a" * 40)
 
 
 @pytest.fixture
@@ -577,26 +578,33 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
     assert public == proof
 
 
-@pytest.mark.parametrize("separator,overflow,tightened", [
-    *((separator, overflow, False)
-      for separator in ("\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
-      for overflow in (0, 1, 2)),
-    pytest.param("\n", 1, True, id="adjudication-counts-toward-tightened-budget"),
-])
-def test_raw_leading_utf8_span_at_limit_and_overflow(native, separator, overflow, tightened, monkeypatch):
+def test_entire_leading_block_budget_includes_adjudication(native, monkeypatch):
     result = native[0]()
+    marker = cli.review_marker(result.head, result.kind)
+    header = runners.encode_codex_evidence(runners.codex_evidence(result))
+    suffix = "\n<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
+    limit = len((marker + "\n" + header).encode())
+    oversized = marker + "\n" + header + suffix + "\n**approve**"
+    monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", limit)
+    assert projection(result, oversized) == (True, None)
+    with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):
+        github._review_body(result, [], marker + suffix)
+
+
+@pytest.mark.parametrize(
+    "separator",
+    ["\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
+)
+@pytest.mark.parametrize("overflow", [0, 1, 2])
+def test_raw_leading_utf8_span_at_limit_and_overflow(separator, overflow):
+    result = BYTE_LIMIT_REVIEW
     marker = cli.review_marker(result.head, result.kind)
     header = runners.encode_codex_evidence(runners.codex_evidence(result))
     adjudication = "<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
     span = separator.join((marker, header, adjudication))
-    padded = marker
-    if tightened:
-        monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", len((marker + "\n" + header).encode()))
-    else:
-        padding = 8192 + overflow - len(span.encode("utf-8"))
-        padded = marker[:-3] + " " * padding + marker[-3:]
-        span = separator.join((padded, header, adjudication))
-        assert len(span.encode("utf-8")) == 8192 + overflow
+    padded = marker[:-3] + " " * (8192 + overflow - len(span.encode("utf-8"))) + marker[-3:]
+    span = separator.join((padded, header, adjudication))
+    assert len(span.encode("utf-8")) == 8192 + overflow
     rendered = span + separator + "**approve**"
     present, evidence = projection(result, rendered)
     assert present and (evidence is not None) is (overflow == 0)
