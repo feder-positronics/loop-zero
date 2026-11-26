@@ -1092,7 +1092,7 @@ def test_bwrap_unavailable_fails_closed(fake_bin, tmp_path, monkeypatch, fake_to
 
 
 def _plant_skills(repo: Path) -> None:
-    for skill in (repo / ".agents/skills/a/b", repo / ".codex/skills/c", repo / "docs/d"):
+    for skill in (repo / ".agents/skills/a/b", repo / ".agents/skills/e\x7f", repo / ".codex/skills/c", repo / "docs/d"):
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\nname: planted\ndescription: planted\n---\n")
     (repo / ".agents/skills/linked").symlink_to(repo / "docs/d")
@@ -1110,7 +1110,7 @@ def test_codex_ignores_repository_instructions_and_skills(repo, fake_bin: Path, 
     disabled = tomllib.loads(override)["skills"]["config"]
     real = repo.resolve()
     assert disabled == [{"path": str(path), "enabled": False} for path in (
-        real / ".agents/skills/a/b/SKILL.md", real / ".codex/skills/c/SKILL.md",
+        real / ".agents/skills/a/b/SKILL.md", real / ".agents/skills/e\x7f/SKILL.md", real / ".codex/skills/c/SKILL.md",
         real / "docs/d/SKILL.md",
     )]
 
@@ -1145,16 +1145,21 @@ def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
     assert not calls.exists()
 
 
-@pytest.mark.parametrize("plant", ["too_many", "loop", "undecodable"])
+@pytest.mark.parametrize("plant", [
+    "too_many", "loop", "undecodable", "dangling", "root_loop:.agents/skills", "root_loop:.codex/skills"])
 def test_codex_skill_lists_it_cannot_disable_fail_before_any_codex_call(
     repo, fake_bin: Path, fake_tool, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, plant: str,
 ) -> None:
     if plant == "too_many":
         _plant_skills(repo)
         monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
-    elif plant == "loop":
+    elif plant in ("loop", "dangling"):
         (repo / ".agents/skills").mkdir(parents=True)
-        (repo / ".agents/skills/self").symlink_to("self")
+        (repo / ".agents/skills/x").symlink_to("x" if plant == "loop" else "/nonexistent/skills")
+    elif plant.startswith("root_loop:"):
+        root = repo / plant.partition(":")[2]
+        root.parent.mkdir(parents=True)
+        root.symlink_to(root.name)
     else:
         skill = repo / ".codex/skills" / os.fsdecode(b"\xff")
         skill.mkdir(parents=True)

@@ -501,7 +501,9 @@ def _codex_repository_skill_overrides(cwd: Path) -> list[str]:
     try:
         paths = _repository_skill_paths(cwd)
         entries = ",".join(
-            f"{{path={json.dumps(path, ensure_ascii=False)},enabled=false}}" for path in sorted(paths)
+            # TOML basic strings forbid a literal DEL, which JSON leaves unescaped.
+            f"{{path={json.dumps(path, ensure_ascii=False).replace(chr(127), '\\u007f')},enabled=false}}"
+            for path in sorted(paths)
         )
         size = len(f"skills.config=[{entries}]".encode())
     except (OSError, RuntimeError, UnicodeError) as exc:
@@ -515,22 +517,23 @@ def _repository_skill_paths(cwd: Path) -> set[str]:
     tree, paths, seen = cwd.resolve(), set(), set()
     pending = [cwd / ".agents" / "skills", cwd / ".codex" / "skills"]
     while pending:
-        directory = pending.pop()
-        if not directory.is_dir():
+        path = pending.pop()
+        if not os.path.lexists(path):
             continue
-        real = directory.resolve(strict=True)
-        # Checked before scanning: a link leaving the checkout stays visible to Codex.
+        # Strict: a looping or dangling link fails closed; Codex might resolve it elsewhere.
+        real = path.resolve(strict=True)
         if not real.is_relative_to(tree):
-            raise RunnerBadOutput(f"codex: skill directory {directory} links outside the checkout")
+            raise RunnerBadOutput(f"codex: skill directory {path} links outside the checkout")
+        if not real.is_dir():
+            if path.name == "SKILL.md":
+                paths.add(str(real))
+            continue
         if real in seen:
             continue
         seen.add(real)
         with os.scandir(real) as entries:
-            for entry in entries:
-                if entry.is_dir():
-                    pending.append(directory / entry.name)
-                elif entry.name == "SKILL.md":
-                    paths.add(os.path.realpath(entry.path))
+            pending.extend(path / entry.name for entry in entries
+                           if entry.is_symlink() or entry.is_dir() or entry.name == "SKILL.md")
     return paths
 
 
