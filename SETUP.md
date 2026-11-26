@@ -39,6 +39,21 @@ As a dev dependency of your repository:
 uv add --dev "loopzero @ git+https://github.com/feder-positronics/loop-zero@<sha>"
 ```
 
+For a verified CI install, check out the full commit SHA and run these commands
+from its repository root. The build constraints verify Hatchling and its build dependencies.
+The lock export supplies the hashes for the runtime dependencies.
+
+```sh
+install_dir=$(mktemp -d)
+uv build --python 3.14 --build-constraints build-constraints.txt --require-hashes --wheel --out-dir "$install_dir"
+uv export --locked --no-dev --no-emit-project -o "$install_dir/runtime.txt"
+uv venv --python 3.14 "$install_dir/venv"
+python="$install_dir/venv/bin/python"
+uv pip install --python "$python" --require-hashes -r "$install_dir/runtime.txt"
+uv pip install --python "$python" --no-deps "$install_dir"/*.whl
+"$install_dir/venv/bin/loopzero" --help
+```
+
 Installing the CLI does not provision API keys or install agent skills. Continue
 with agent setup, repository configuration, and the optional credential setup
 below. For an existing installation, keep its working credentials; upgrading
@@ -123,13 +138,21 @@ to the base branch before starting your first task. If the base has a
 `[checks]` is absent. To try task-side changes explicitly, run
 `loopzero --config workflow.toml check` from the task worktree. Then:
 
-- Run `[checks] commands` as described in the [delivery steps](core/CONTRACT.md#the-six-steps).
-  For uv projects, `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
+- Before pushing the base, set `checks.commands` to checks your project can run.
+  For a shell-only first check, use `commands = ["test -f greeting.txt"]` under
+  `[checks]` and commit `greeting.txt` in your first task. Replace or omit the
+  example's uv-specific `scratch`, `env`, `writable`, and `ro_paths` entries
+  to match your tools. With just shell checks, you can omit all four.
 - Configure hosted check names, mounts, scratch and environment in the
   [commented workflow example](workflow.example.toml). See the contract's
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
+- Check, review, ready, merge, and status load the workflow from the
+  remote-tracking delivery branch selected by `[repo] base` in the workflow
+  at `origin/HEAD`. Missing trusted policy blocks these commands. Fetch and
+  run `git remote set-head origin --auto` if the local default-branch pointer
+  is missing. Supply `--config <path>` during bootstrap or to override policy.
 - For offline checks, warm the configured writable uv cache on the host with
   `UV_CACHE_DIR=<configured-cache> uv sync --group dev` (use the groups your
   checks require). This also fetches build backends such as hatchling.
@@ -223,10 +246,12 @@ Lock the vault and remove `BW_SESSION` before starting the agent.
 ### Several subscription accounts (optional)
 
 `scripts/ai-accounts/` rotates Claude and Codex subscription accounts behind the plain
-`claude`, `codex` and `loopzero` commands. Install the monitor and its three shims:
+`claude`, `codex` and `loopzero` commands. Install the monitor and its three shims
+from the [pinned source checkout](#connect-your-agent):
 
 ```sh
-install -m 755 scripts/ai-accounts/ai-accounts ~/.local/bin/
+ACCOUNTS=~/.local/share/loopzero/source/scripts/ai-accounts
+install -m 755 "$ACCOUNTS/ai-accounts" ~/.local/bin/
 mkdir -p ~/.local/lib/ai-accounts/bin
 for n in claude codex loopzero; do ln -sf ~/.local/bin/ai-accounts ~/.local/lib/ai-accounts/bin/$n; done
 ```
@@ -234,8 +259,9 @@ for n in claude codex loopzero; do ln -sf ~/.local/bin/ai-accounts ~/.local/lib/
 Put the shims first on PATH by making this the last line of `~/.profile` and
 `~/.bashrc`, after anything that prepends `~/.local/bin`:
 `export PATH="$HOME/.local/lib/ai-accounts/bin:$PATH"`. Point an agent host's binary
-path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Enable the monitor by copying
-the two systemd units to `~/.config/systemd/user/`, then
+path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Copy
+`"$ACCOUNTS/ai-accounts.service"` and `"$ACCOUNTS/ai-accounts.timer"` to
+`~/.config/systemd/user/`, then run
 `systemctl --user enable --now ai-accounts.timer`.
 
 - Claude accounts are long-lived tokens: run `claude setup-token` per account and
@@ -307,10 +333,11 @@ loopzero start hello-loopzero        # new worktree + branch; cd to the printed 
 $EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
 ```
 
-Use the [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) to navigate
-the contract's [six steps](core/CONTRACT.md#the-six-steps). Run `loopzero status`
-to see the next step. See [Blockers](core/CONTRACT.md#blockers) for how to
-resolve review findings.
+Make and commit a change in the task worktree, then run `loopzero check` there.
+Afterward, `loopzero status` shows the next step and requires authenticated
+access to the configured GitHub repository even before a PR exists. See the
+[workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) and
+[Blockers](core/CONTRACT.md#blockers) for the rest of the workflow.
 
 ## Removing an abandoned task worktree
 

@@ -153,11 +153,11 @@ For a Codex executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable and its existing sibling
 `codex-code-mode-host`, read-only. Neighboring history and configuration remain
 hidden; helper aliases into protected state and explicit state mounts fail closed.
-At native review launch the CLI pins checks, publishers and
-`delivery.reviewer_ro_paths` to one remote PR-base revision. A missing remote ref
-or workflow blocks launch. Bootstrap requires an explicit `--config`, which
-still undergoes validation. Reposts and other commands retain their fallback
-policy. Runners validate the complete mount plan against private review state and
+Check, review, ready, merge, and status use the workflow at one remote-tracking
+delivery revision selected by the workflow at Git's local `origin/HEAD`.
+Missing trusted refs or workflows block these commands. An explicit
+`--config` supplies validated policy for bootstrap or operator overrides.
+Runners validate the complete mount plan against private review state and
 known standard/custom native state roots. Existing file-backed auth mounts remain
 explicit exceptions. Claude's environment routes are `ANTHROPIC_API_KEY` and
 `CLAUDE_CODE_OAUTH_TOKEN`: a nonempty value (whitespace included) is forwarded
@@ -477,8 +477,10 @@ every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
 the authoritative `checks.json` receipt. Writers lock the task state directory
 while rechecking HEAD and atomically replacing the receipt from a synced sibling
-temporary file. Runners cannot select stages or
-mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
+temporary file. Successful keyed stages are checkpointed in the same receipt
+for reuse. The checkpoint cannot satisfy readiness before final worktree
+validation. Runners cannot select stages or mint receipts. Stage admission
+belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 

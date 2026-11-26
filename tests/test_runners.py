@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import sandbox
+from loopzero import sandbox, worktree
 from loopzero.runners import (
     REVIEW_SCHEMA,
     RunnerAuthFailed,
@@ -1232,6 +1232,25 @@ def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
     chunks = split_diff(deleted + added, 100)
     assert all(len(chunk.encode()) <= 100 for chunk in chunks)
     assert any("gone.py: deleted, 3 lines" in chunk for chunk in chunks)
+
+
+@pytest.mark.parametrize("name", ["zażółć gęślą.txt", "gone with spaces.txt", "gone.txt"])
+def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str) -> None:
+    git(git_repo, "config", "core.quotePath", "true")
+    path = git_repo / name
+    path.write_text("deleted line\n" * 600)
+    git(git_repo, "add", "--", name)
+    git(git_repo, "commit", "-qm", "add file")
+    base = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "rm", "--", name)
+    git(git_repo, "commit", "-qm", "delete file")
+    diff = worktree.diff_since(git_repo, base)
+
+    chunks = split_diff(diff, 4096)
+
+    assert all(len(chunk.encode()) <= 4096 for chunk in chunks)
+    assert any(f"{name}: deleted, 600 lines" in chunk for chunk in chunks)
+    assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
 
 
 # ----------------------------------------------------------------- family detection
