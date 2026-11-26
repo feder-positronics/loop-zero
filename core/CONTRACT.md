@@ -171,11 +171,12 @@ check on a published head, run `loopzero ready` and reuse any receipt it accepts
 The session the brief assigns verification to (the worker, or under parent
 verification the parent or the integration executor it names) runs each full
 local check once and records its command,
-exact head SHA, settings fingerprint (the CLI computes it and records it in the
-check receipt), result, time and log path. Workers, reviewers and coordinators
-reuse green receipts at the same head and settings fingerprint. Rerun only if
-head or inputs changed (including rebase), the settings fingerprint
-changed or cannot be shown, or the receipt is missing, red, partial or unverifiable.
+exact head SHA, result, time and log path; a `loopzero check` receipt also
+carries the settings fingerprint the CLI computes. Workers, reviewers and
+coordinators reuse green results at the same head (and, for `loopzero check`,
+the same settings fingerprint). Rerun only if head or inputs changed (including
+rebase), a `loopzero check` receipt's settings fingerprint changed or is
+missing, or the result is missing, red, partial or unverifiable.
 Reviewers still verify tests prove the claimed behavior. Hosted CI and sandboxed
 receipt requirements remain.
 
