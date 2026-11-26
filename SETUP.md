@@ -122,8 +122,9 @@ folder-level `AGENTS.md` files, and the docs it links ("when X, read Y"). Projec
 docs add project detail; they never relax the contract. Point your agent's
 repository's `AGENTS.md` at the shared [skill guide](https://github.com/feder-positronics/loop-zero/blob/main/core/skills/README.md)
 and [credential guidance](https://github.com/feder-positronics/loop-zero/blob/main/core/CREDENTIALS.md).
-Codex and Claude Code (v2.1.277 or
-later) both read it directly. Do not add a `CLAUDE.md`, `.claude/CLAUDE.md` or
+These links follow `main`. For guidance that matches a pinned CLI, open the
+same GitHub pages at the installed commit SHA. Codex and Claude Code (v2.1.277
+or later) both read `AGENTS.md` directly. Do not add a `CLAUDE.md`, `.claude/CLAUDE.md` or
 `CLAUDE.local.md` on the same path; Claude reads any of them instead of
 `AGENTS.md`. Claude cannot read `AGENTS.md` directly with third-party providers
 such as Bedrock, with telemetry or the `agents-md` plugin disabled, or in the

@@ -243,9 +243,10 @@ Outside that confirmed scope, retain all-writer trailers.
 
 Local checks run with read-only source/Git, scratch writes, isolated HOME, only
 configured `[checks].ro_paths`/`[checks].writable` home paths, no network unless
-`[checks].network = true`, and allowlisted environment (default
-`PATH LANG LC_ALL TERM`) plus `[checks].env`. The sandbox sets `HOME` to
-`/tmp/home`.
+`[checks].network = true`, and allowlisted environment plus `[checks].env`.
+The configured default allowlist is `PATH HOME LANG LC_ALL TERM`. Within the
+sandbox, the default forwarded host variables are `PATH LANG LC_ALL TERM` and
+`HOME` is set to `/tmp/home`.
 
 Local checks and native reviews require working `bwrap` and fail without it.
 A configured [stage runner](../docs/ARCHITECTURE.md#check-stage-runners) can
