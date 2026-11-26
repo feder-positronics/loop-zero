@@ -35,12 +35,10 @@ receipt under the [contract's reuse rules](../../CONTRACT.md#gate-execution-and-
 
 Run commands expected to take more than about two minutes detached as in
 [Long-running jobs](../../../docs/DELEGATION.md#long-running-jobs).
-For builds, tests, CI, review, ready and merge, Codex exec/write_stdin yields
->=120 s (>=30 s otherwise); Claude uses a background completion notification
-or `t3_background_wait`. Read the completed result once; never use
-`t3_thread_read` or `task_status` for liveness. Cap returned output at the
-producer: `gh api --jq` selected fields, shell `| head -c 2000`, thread reads
-limit <=2, maxCharsPerItem <=600 and runLimit 1. Do not end the turn, settle or
+Use the [wait limits](../../../docs/DELEGATION.md#briefs-and-ownership) and
+[output limits](../../../docs/DELEGATION.md#coordinator-rollover); set
+`runLimit 1` for thread reads.
+Do not end the turn, settle or
 report done while a job you started has no `LOG.exit`, unless the unit is gone
 and you report the job as killed and the result as failed. If the turn must
 end, first schedule a one-shot wakeup (T3 `schedule:{type:once,runAt:<ISO time>}`)
