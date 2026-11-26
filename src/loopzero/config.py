@@ -112,13 +112,22 @@ def _has_replacement_refs(common_dir: Path) -> bool:
 
 
 def _remote_workflow(
-    worktree: Path, branch: str, previous: Config | None, *, require_ci: bool,
+    worktree: Path, branch: str, previous: Config | None, *, refresh: bool, require_ci: bool,
 ) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
+    ref = f"refs/remotes/origin/{branch}"
+    if refresh:
+        fetched = _proc.run(
+            ["git", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+             "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:{ref}"],
+            cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+        )
+        if fetched.exit_code != 0:
+            raise ConfigError(f"could not refresh origin/{branch}. {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
     resolved = _proc.run(
-        ["git", "rev-parse", *directory_args, "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+        ["git", "rev-parse", *directory_args, "--verify", f"{ref}^{{commit}}"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
     )
     if resolved.exit_code != 0:
@@ -149,7 +158,7 @@ def _remote_workflow(
 
 
 def load_trusted(
-    worktree: Path, *, previous: Config | None = None, require_ci: bool = False,
+    worktree: Path, *, previous: Config | None = None, refresh: bool = False, require_ci: bool = False,
 ) -> Config:
     """Select the trusted origin workflow, reusing a prior load with the same validation."""
     prefix = "refs/remotes/origin/"
@@ -164,10 +173,10 @@ def load_trusted(
             "or supply --config for bootstrap or an override."
         )
     branch = ref.removeprefix(prefix)
-    policy, revision = _remote_workflow(worktree, branch, previous, require_ci=require_ci)
+    policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh, require_ci=require_ci)
     if policy.base_branch == branch:
         return replace(policy, trusted_base_revision=revision)
-    base, revision = _remote_workflow(worktree, policy.base_branch, previous, require_ci=require_ci)
+    base, revision = _remote_workflow(worktree, policy.base_branch, previous, refresh=refresh, require_ci=require_ci)
     if base.base_branch != policy.base_branch:
         raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
     return replace(base, trusted_base_revision=revision)
