@@ -2863,12 +2863,20 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
-@pytest.mark.parametrize("draft,condition", [
-    *((False, condition) for condition in
-      ("missing", "wrong-head", "failed", "dirty", "wrong-commands", "legacy", "incompatible", "matching")),
-    *((True, condition) for condition in ("stale", "red", "dirty", "commands", "empty", "checkpoint")),
+@pytest.mark.parametrize("draft,condition,reason", [
+    (False, "missing", "run loopzero check at this head"),
+    *((False, condition, "check receipt") for condition in ("wrong-head", "failed", "dirty")),
+    (False, "wrong-commands", "check receipt's plan differs from the trusted workflow."),
+    (False, "legacy", "check receipt is missing its settings fingerprint."),
+    (False, "incompatible", "check receipt has an incompatible settings fingerprint."),
+    (False, "matching", None),
+    (True, "stale", "check receipt is for aaaaaaaaaaaa."),
+    (True, "red", "check receipt records a failed stage."),
+    (True, "dirty", "check receipt was recorded in a dirty worktree."),
+    (True, "commands", "check receipt's plan differs from the trusted workflow."),
+    *((True, condition, "check receipt is incomplete.") for condition in ("empty", "checkpoint")),
 ])
-def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, condition, head, draft):
+def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, condition, head, draft, reason):
     arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=draft, readiness={
         "local_exit": int(condition == "failed"), "dirty": condition == "dirty",
     })
@@ -2895,28 +2903,14 @@ def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, co
             report["settings_sha256"] = "0" * 64
         path.write_text(json.dumps(report))
 
-    out, _ = expect_cli(capsys, 0 if condition == "matching" else 1, "ready")
-    if draft:
-        reason = {
-            "stale": "check receipt is for aaaaaaaaaaaa.",
-            "red": "check receipt records a failed stage.",
-            "dirty": "check receipt was recorded in a dirty worktree.",
-            "commands": "check receipt's plan differs from the trusted workflow.",
-            "empty": "check receipt is incomplete.",
-            "checkpoint": "check receipt is incomplete.",
-        }[condition]
+    out, _ = expect_cli(capsys, int(reason is not None), "ready")
+    if reason:
         assert f"not ready: {reason}" in out
+    if draft:
         assert "receipt accepted:" not in out
-    elif condition in {"legacy", "incompatible"}:
-        reason = ("check receipt is missing its settings fingerprint" if condition == "legacy"
-                  else "check receipt has an incompatible settings fingerprint")
-        assert f"not ready: {reason}." in out
+    if condition in {"legacy", "incompatible"}:
         assert ("Run loopzero check in this worktree at this head with the same current CLI and effective "
                 "settings as ready, using a local coordinator for delegated stages." in out)
-    elif condition == "wrong-commands":
-        assert "not ready: check receipt's plan differs from the trusted workflow." in out
-    elif condition != "matching":
-        assert ("not ready: run loopzero check at this head" if condition == "missing" else "not ready: check receipt") in out
 
 
 @pytest.fixture

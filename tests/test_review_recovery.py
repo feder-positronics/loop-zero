@@ -95,13 +95,11 @@ def test_accepted_publication_recovers_saved_verdict(
     lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict,
                interrupted=interrupted is True, timeout=interrupted == "timeout")
     if interrupted is True:
-        assert run(capsys, "review")[0] == 130
+        expect_cli(capsys, 130, "review")
         (fake_bin / "claude.stdin").unlink()
-        code, out, err = run(capsys, "review", "--repost")
+    out, _ = expect_cli(capsys, verdict, "review", *(("--repost",) if interrupted is True else ()))
+    if interrupted is True:
         assert not (fake_bin / "claude.stdin").exists(), "recovery must not launch a reviewer"
-    else:
-        code, out, err = run(capsys, "review")
-    assert code == verdict, err
     assert out.splitlines()[-1].startswith(f"{kind} review by claude")
     assert interrupted is True or out.startswith("reviewer paths pinned to origin/main@")
     assert_single_publication(gh, fake_bin)
@@ -151,11 +149,9 @@ def test_recovery_requires_exact_live_publication(
                 gh.fail(reviews_key(2), "not logged in" if change == "auth" else "HTTP 429")
     lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5, mutate=mutate,
                interrupted=interrupted)
-    code, out, err = run(capsys, "review")
     if interrupted:
-        assert code == 130
-        code, out, err = run(capsys, "review", "--repost")
-    assert code == (5 if change == "duplicates" else 1), err
+        expect_cli(capsys, 130, "review")
+    out, _ = expect_cli(capsys, 5 if change == "duplicates" else 1, "review", *(("--repost",) if interrupted else ()))
     if change != "duplicates":
         assert not out if interrupted else (
             out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
@@ -337,11 +333,8 @@ def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
     data = json.loads(receipt.read_text())
     assert data["fallback"] == "independent reviewers failed: codex: not authenticated"
     receipt.write_text(json.dumps({**data, "fallback": legacy}))
-    code, _out, err = run(capsys, "review", "--repost")
-    if published:
-        assert code == 0, err
-    else:
-        assert code == 1 and "not in the published form" in err
+    errors = () if published else ("not in the published form",)
+    expect_cli(capsys, 0 if published else 1, "review", "--repost", stderr_contains=errors)
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
 
