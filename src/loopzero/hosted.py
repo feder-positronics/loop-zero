@@ -116,7 +116,7 @@ def _run(cfg: Config) -> int:
             return 0
         state, message = (("success", "All attested candidate sources are reviewed") if candidate
                           else _source_status(result, current))
-    except (github.GhUnavailable, github.ProcTimeout) as exc:
+    except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable) as exc:
         print(f"Eligibility pending: evidence unavailable ({exc})", file=sys.stderr)
         return 0
     except (Exception, Terminated) as exc:
