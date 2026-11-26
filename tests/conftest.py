@@ -16,6 +16,7 @@ GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 
 @pytest.fixture(autouse=True)
 def no_real_app_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(github, "PR_LOCK_DIR", tmp_path / "pr-locks")
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token", raising=False)
     monkeypatch.setattr(github, "_app_token_cache", ("", 0.0), raising=False)
 

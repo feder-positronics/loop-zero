@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -25,6 +26,7 @@ from loopzero.types import BLOCKING, Finding, ReviewResult
 
 GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
+PR_LOCK_DIR = Path.home() / ".cache/loopzero/pr-locks"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
 MARKER_RE = re.compile(
@@ -278,6 +280,16 @@ def _cached_app_token() -> str:
     token, minted = _app_token_cache
     now = _app_token_clock() if token else None
     return token if now is not None and 0 <= now - minted < 3000 else ""
+
+
+@contextmanager
+def pr_lock(repo: str, number: int) -> Iterator[None]:
+    """Serialize a GitHub write across local checkouts for this PR."""
+    key = hashlib.sha256(f"{repo.casefold()}#{number}".encode()).hexdigest()
+    PR_LOCK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (PR_LOCK_DIR / key).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def app_token() -> str:
