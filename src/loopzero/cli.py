@@ -1344,9 +1344,10 @@ def _wait_for_checks(
             initial = None
         else:
             current = github.pr_view(config.repo, pr.number)
-            _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
             if allow_merged and current.state == "MERGED":
+                _verify_wait_snapshot(None, wt, config, pr.head_sha, current.head_sha)
                 return current, None, kicked
+            _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
             readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
@@ -1679,6 +1680,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)")
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
+    config_mod.require_readiness(config)
     reviews = _pr_reviews(config.repo, pr.number)
     readiness = _readiness(wt, config, pr, head, reviews)
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)

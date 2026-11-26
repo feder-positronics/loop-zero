@@ -2354,6 +2354,7 @@ def test_ready_requires_explicit_ci_policy(wt, gh, capsys, head, required_ci):
     arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
 
     if not required_ci:
+        gh.fail(reviews_key(), "HTTP 503 reviews unavailable")
         for command in ("ready", "merge", "status"):
             code, _, err = run(capsys, command)
             assert code == 1
@@ -3249,6 +3250,17 @@ def test_merge_wait_waits_out_a_pending_check_then_merges(
     gh.append(f"api repos/{REPO}/pulls/7", *polls)
     gh.respond("api -X", "")
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
+
+    if already_landed:
+        pr_view = cli.github.pr_view
+
+        def view_after_policy_change(*args, **kwargs):
+            pr = pr_view(*args, **kwargs)
+            if pr.state == "MERGED":
+                publish_workflow(wt, WORKFLOW.replace(PUBLISHERS, ""))
+            return pr
+
+        monkeypatch.setattr(cli.github, "pr_view", view_after_policy_change)
 
     code, out, err = run(capsys, "merge", "--wait")
 
