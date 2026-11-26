@@ -480,8 +480,7 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
 
 
 def check_environment(config: Config) -> dict[str, str]:
-    inherited = _proc.build_env(config.env_allowlist, dict(config.env))
-    return SANDBOX_ENV | inherited | {"HOME": SANDBOX_HOME}
+    return SANDBOX_ENV | _proc.build_env(config.env_allowlist, dict(config.env)) | {"HOME": SANDBOX_HOME}
 
 
 def _run_bwrap(
@@ -514,12 +513,9 @@ def bwrap_argv(
     clearenv: bool = True,
     writable_binds: tuple[tuple[Path, Path], ...] = (),
 ) -> list[str]:
-    """Build the bwrap command line up to and including the `--` separator.
+    """Build mounts and environment options before the command separator.
 
-    Checks clear the environment and supply their settings through a file
-    descriptor. With ``clearenv=False`` the reviewer inherits its filtered
-    process environment and applies its sandbox defaults.
-    ``writable_binds`` overlays specific paths inside the otherwise private HOME.
+    Reviewers inherit their filtered environment and apply sandbox defaults.
     """
     argv = [
         "bwrap", "--die-with-parent", "--new-session", "--unshare-all",
@@ -562,8 +558,7 @@ def bwrap_argv(
     if not clearenv:
         for key, value in check_environment(config).items():
             argv += ["--setenv", key, value]
-    argv.append("--")
-    return argv
+    return [*argv, "--"]
 
 
 def _git(config: Config, worktree: Path, *args: str) -> str:
