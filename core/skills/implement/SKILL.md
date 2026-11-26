@@ -32,6 +32,9 @@ Leave unobserved acceptance open with a next-action owner. Record revision,
 observations, trade-offs and limits in Notes or human Validation.
 Primary review requires a completed passing `loopzero check` receipt at the pushed head.
 Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
+If readiness rejects the receipt plan or settings fingerprint, align the CLI
+version and effective check settings with readiness, including the trusted
+workflow and stage coordinator, before retrying the slotted check.
 
 Follow [long-running jobs](../../../docs/DELEGATION.md#long-running-jobs) for commands
 expected to exceed about two minutes, and the [wait/output](../../../docs/DELEGATION.md#briefs-and-ownership)
