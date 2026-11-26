@@ -52,7 +52,7 @@ class ConfigError(LoopZeroError):
     """The configuration file is missing, unreadable, or has invalid content."""
 
 
-def load(path: Path | str) -> Config:
+def load(path: Path | str, *, readiness: bool = False) -> Config:
     """Load and validate a workflow file."""
     path = Path(path)
     try:
@@ -70,7 +70,10 @@ def load(path: Path | str) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     try:
-        return _build(data)
+        config = _build(data)
+        if readiness:
+            _validate_readiness(config, data)
+        return config
     except ConfigError as exc:
         raise ConfigError(f"{path}: {exc}") from None
 
@@ -89,7 +92,7 @@ def base_revision(worktree: Path, base_branch: str) -> str:
     raise ConfigError(f"git rev-parse origin/{base_branch} failed: {message}")
 
 
-def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
+def _remote_workflow(worktree: Path, branch: str, *, readiness: bool) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
     resolved = _proc.run(
@@ -110,12 +113,15 @@ def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{source}: invalid TOML: {exc}. {hint}") from None
     try:
-        return _build(data), revision
+        config = _build(data)
+        if readiness and config.base_branch == branch:
+            _validate_readiness(config, data)
+        return config, revision
     except ConfigError as exc:
         raise ConfigError(f"{source}: {exc}. {hint}") from None
 
 
-def load_trusted(worktree: Path) -> Config:
+def load_trusted(worktree: Path, *, readiness: bool = False) -> Config:
     """Select delivery policy using Git's origin default and its trusted workflow."""
     prefix = "refs/remotes/origin/"
     default = _proc.run(
@@ -129,13 +135,21 @@ def load_trusted(worktree: Path) -> Config:
             "or supply --config for bootstrap or an override."
         )
     branch = ref.removeprefix(prefix)
-    policy, revision = _remote_workflow(worktree, branch)
+    policy, revision = _remote_workflow(worktree, branch, readiness=readiness)
     if policy.base_branch == branch:
         return replace(policy, trusted_base_revision=revision)
-    base, revision = _remote_workflow(worktree, policy.base_branch)
+    base, revision = _remote_workflow(worktree, policy.base_branch, readiness=readiness)
     if base.base_branch != policy.base_branch:
         raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
     return replace(base, trusted_base_revision=revision)
+
+
+def _validate_readiness(config: Config, data: dict[str, Any]) -> None:
+    if not config.review_publishers:
+        raise ConfigError("delivery.review_publishers must list the intended publisher logins")
+    if "required_ci" not in data.get("checks", {}):
+        raise ConfigError("checks.required_ci must list the required contexts or explicitly set "
+                          "required_ci = [] if none are required")
 
 
 def _build(data: dict[str, Any]) -> Config:

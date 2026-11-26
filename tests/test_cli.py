@@ -50,6 +50,7 @@ PR_LIST_READ = pr_list_key().split()
 LOOKUP_CALLS = [BRANCH_READ, PR_LIST_READ, ["api", f"repos/{REPO}/pulls/7"]]
 HISTORY_CALLS = [BRANCH_READ, branch_history_key().split()]
 LOGIN = "lz-bot"
+PUBLISHERS = f'review_publishers = ["{LOGIN}"]'
 WORKFLOW = f"""
 [repo]
 name = "{REPO}"
@@ -62,6 +63,7 @@ required_ci = ["checks"]
 [delivery]
 merge = "squash"
 reviewers = ["claude", "codex"]
+{PUBLISHERS}
 """
 
 
@@ -1879,7 +1881,7 @@ def test_review_publisher_check_uses_app_identity(
     helper.write_text("#!/bin/sh\necho synthetic-app-token\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]\n'))
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     prepare_review(wt, gh, fake_bin, post_id=3)
@@ -1903,7 +1905,7 @@ def test_review_reminted_app_token_keeps_publisher(
     wall, run_review = [1_000_000.0], cli._run_review
     monkeypatch.setattr(github.time, "time", lambda: wall[0])
     monkeypatch.setattr(cli, "_run_review", lambda *a, **k: (run_review(*a, **k), wall.append(wall.pop() + 3601))[0])
-    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["app[bot]"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, 'review_publishers = ["app[bot]"]\n'))
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     head = prepare_review(wt, gh, fake_bin, post_id=3)
@@ -1923,7 +1925,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     monkeypatch.setattr(github, "app_token", lambda: tokens[0])  # flips after the publisher check
     monkeypatch.setattr(github, "login", lambda token=None, f=github.login: (
         f(token), len(tokens) > 1 and tokens.pop(0))[0])
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]\n'))
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     prepare_review(wt, gh, fake_bin, post_id=3)
@@ -1939,7 +1941,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
 
 @pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])
 def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher) -> None:
-    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["lz-bot", "other"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, 'review_publishers = ["lz-bot", "other"]\n'))
     git(wt, "add", "workflow.toml")
     git(wt, "commit", "-qm", "configure trusted publishers")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
@@ -2323,6 +2325,41 @@ def test_ready_uses_base_required_ci_when_worktree_empties_it(
     out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
     assert out == "not ready: required check 'checks' is failure\n"
+
+
+@pytest.mark.parametrize("publishers", ["", "review_publishers = []", 'review_publishers = ["app[bot]"]'])
+def test_ready_requires_explicit_review_publishers(wt, gh, capsys, head, publishers):
+    publish_workflow(wt, WORKFLOW.replace(PUBLISHERS, publishers))
+    login = "app[bot]" if "app[bot]" in publishers else LOGIN
+    arm_approved_pr_with_check_result(gh, head, wt, "success", review_login=login, isDraft=False)
+
+    if login == "app[bot]":
+        assert run(capsys, "ready")[0] == 0
+    else:
+        for command in ("ready", "merge"):
+            code, _, err = run(capsys, command)
+            assert code == 1
+            assert "origin/main:workflow.toml: delivery.review_publishers" in err
+            assert "list the intended publisher logins" in err
+
+
+@pytest.mark.parametrize("required_ci", ["", "required_ci = []", 'required_ci = ["checks"]'])
+def test_ready_requires_explicit_ci_policy(wt, gh, capsys, head, required_ci):
+    publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', required_ci))
+    arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
+
+    if not required_ci:
+        for command in ("ready", "merge"):
+            code, _, err = run(capsys, command)
+            assert code == 1
+            assert "origin/main:workflow.toml: checks.required_ci" in err
+            assert "required_ci = []" in err
+    else:
+        code, out, _ = run(capsys, "ready")
+        if required_ci.endswith("[]"):
+            assert code == 0
+        else:
+            assert code == 1 and "required check 'checks' is failure" in out
 
 
 def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -4196,7 +4233,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     gh.respond("api graphql", threads_json())
     assert eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is expected
     cfg = wt / ".loopzero" / "hosted.toml"
-    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    cfg.write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{LOGIN}"]\n'))
     gh.respond(f"api repos/{REPO}/statuses/{head}", {})
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head,
                              "--publish"]) == (0 if expected else 1)
@@ -4208,7 +4245,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
 
 @pytest.mark.parametrize("publisher", ["stranger", "lz-bot"])
 def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, f'review_publishers = ["{publisher}"]\n'))
     arm_approved_pr_with_check_result(
         gh, head, wt, "success", review_login=publisher, isDraft=False
     )
