@@ -2174,6 +2174,37 @@ def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypat
     ]
 
 
+@pytest.mark.parametrize("settles", [True, False])
+def test_ready_wait_resumes_after_draft_transition(wt, gh, capsys, monkeypatch, head, settles):
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=True)
+    gh.respond("pr ready", "")
+    original_mark_ready = github.mark_ready
+
+    def interrupt_after_mark_ready(*args):
+        original_mark_ready(*args)
+        arm_pr(gh, head, isDraft=False)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(github, "mark_ready", interrupt_after_mark_ready)
+    skipped = [{"name": "checks", "status": "completed", "conclusion": "skipped"}]
+    pending = [{"name": "checks", "status": "in_progress"}]
+    success = [{"name": "checks", "status": "completed", "conclusion": "success"}]
+    snapshots = (skipped, skipped, skipped, pending, success) if settles else (skipped,)
+    arm_check_runs(gh, head, *snapshots)
+    monkeypatch.setattr(cli, "WAIT_INTERVAL", 1.0)
+    monkeypatch.setattr(cli, "_sleep", lambda _: None)
+    wait = "--wait=30" if settles else "--wait=0"
+
+    assert run(capsys, "ready", wait)[0] == 130
+    code, out, err = run(capsys, "ready", wait)
+
+    assert err == ""
+    assert code == (0 if settles else 3)
+    assert ("waiting: required check 'checks' is pending" in out) == settles
+    assert ("timed out waiting for required checks" in out) != settles
+    assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
+
+
 @pytest.mark.parametrize("settled", ["success", "skipped"])
 def test_ready_waits_for_checks_on_original_head(
     wt: Path, gh: FakeGh, capsys, monkeypatch, settled: str, head
