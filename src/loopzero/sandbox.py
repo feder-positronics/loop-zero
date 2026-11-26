@@ -47,6 +47,14 @@ SANDBOX_ENV = {
     "PYTEST_ADDOPTS": "-p no:cacheprovider",
 }
 
+_CHECK_CONTEXT_ENV = {*Config.env_allowlist, "TMP", "TEMP", "TMPDIR", "UV_PYTHON_INSTALL_DIR",
+                      *(name for name in SANDBOX_ENV if name.endswith("_CACHE_DIR"))}
+_CHECK_MODES = {"development", "production", "staging", "testing"}
+_CREDENTIAL_ENV = re.compile(
+    r"PASSWORD|PASSWD|PASSPHRASE|(?:^|_)(?:PWD|PIN|PAT|AUTH|TOKEN|SECRET|CREDENTIALS?|COOKIE|"
+    r"(?:API|ACCESS|PRIVATE)_KEY)(?:_|$)", re.IGNORECASE,
+)
+
 
 class SandboxUnavailable(LoopZeroError):
     """bubblewrap is missing or cannot create a sandbox on this host."""
@@ -439,13 +447,25 @@ def _cap_limit(requested: int, resource_limit: int) -> int:
     return requested if hard == resource.RLIM_INFINITY else min(requested, hard)
 
 
+def _private_check_value(name: str, value: str) -> bool:
+    if name in _CHECK_CONTEXT_ENV or value == SANDBOX_ENV.get(name):
+        return False
+    normalized = value.strip()
+    if not normalized:
+        return False
+    if _CREDENTIAL_ENV.search(name):
+        return True
+    mode = name == "ENV" or name.endswith(("_ENV", "_ENVIRONMENT", "_MODE"))
+    return len(normalized) >= 6 and not (mode and normalized.casefold() in _CHECK_MODES)
+
+
 def _redact_check_output(config: Config, text: str) -> str:
-    # These variables carry runtime context, such as flags and cache paths.
-    public = {"PATH", "HOME", "LANG", "LC_ALL", "TERM", "CI", "FORCE_COLOR", "NO_COLOR",
-              "PYTHONUNBUFFERED", "TMP", "TEMP", "TMPDIR", "UV_CACHE_DIR",
-              "UV_PYTHON_INSTALL_DIR", "RUFF_CACHE_DIR"}
-    supplied = (*_proc.build_env(config.env_allowlist).items(), *config.env)
-    return _proc.redact_values(text, (value for name, value in supplied if name not in public))
+    stage_env = _runner_environment(config) if config.check_runner else _sandbox_environment(config)
+    wrapper_env = _proc.build_env(config.env_allowlist)
+    secrets = {value for env in (stage_env, wrapper_env) for name, value in env.items()
+               if _private_check_value(name, value)}
+    pattern = "|".join(map(re.escape, sorted(secrets, key=len, reverse=True)))
+    return re.sub(pattern, "[REDACTED]", text) if pattern else text
 
 
 def _check_tail(text: str, config: Config | None = None, *, suffix: str = "") -> str:
@@ -497,6 +517,10 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         if any(word in probe_error for word in ("permission", "user namespace", "userns")):
             remedy = "\nsudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
         raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}{remedy}")
+
+
+def _runner_environment(config: Config) -> dict[str, str]:
+    return {**SANDBOX_ENV, **dict(config.env)}
 
 
 def _sandbox_environment(config: Config) -> dict[str, str]:
@@ -621,7 +645,7 @@ def _stage_frame(stdout: str, binding: dict) -> dict:
 def _dispatch_one(
     config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
 ) -> CheckResult:
-    env = {**SANDBOX_ENV, **dict(config.env)}
+    env = _runner_environment(config)
     binding = {"worktree": str(worktree.resolve()), "head": head, "base": base, "command": command, "network": config.network,
                "env_sha256": hashlib.sha256(json.dumps(
                    env, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()}

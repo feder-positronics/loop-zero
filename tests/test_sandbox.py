@@ -521,9 +521,12 @@ def test_silent_stage_reports_live_metadata_then_completion(
 
     monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
     observed, events, reporters = threading.Event(), [], set()
-    monkeypatch.setenv("AUDIT_TOKEN", "credential-value")
-    command = f'echo "$AUDIT_TOKEN"; echo "private-stderr $FORCE_COLOR" >&2; exit {exit_code}'
-    cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN"), env=(("FORCE_COLOR", "1"),))
+    monkeypatch.setenv("AUDIT_TOKEN", "p1n")
+    monkeypatch.setenv("RUST_BACKTRACE", "1")
+    command = (f'echo "$AUDIT_TOKEN"; echo "tests/test_example.py:12: $RUST_BACKTRACE $NODE_ENV $DJANGO_DEBUG" >&2; '
+               f'exit {exit_code}')
+    cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN", "RUST_BACKTRACE"),
+                      env=(("NODE_ENV", "test"), ("DJANGO_DEBUG", "true")))
     run_one = sandbox._run_one
 
     def run_stage(config, worktree, prefix, stage_command, timeout):
@@ -542,7 +545,7 @@ def test_silent_stage_reports_live_metadata_then_completion(
     monkeypatch.setattr(sandbox, "_run_one", run_stage)
     report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
     assert report.results[0].exit_code == exit_code
-    assert report.results[0].tail == "[REDACTED]\nprivate-stderr 1"
+    assert report.results[0].tail == "[REDACTED]\ntests/test_example.py:12: 1 test true"
     statuses = [event for event in events if event not in cfg.checks]
     heartbeats = [event for event in statuses if "running" in event]
     assert heartbeats and all(re.fullmatch(
@@ -550,7 +553,7 @@ def test_silent_stage_reports_live_metadata_then_completion(
     ) for event in heartbeats)
     completion = next(event for event in statuses if f"exit {exit_code}" in event)
     assert re.fullmatch(rf"stage 1/2: exit {exit_code} \([0-9]+\.[0-9]s\)", completion)
-    assert all("private" not in event and "credential-value" not in event for event in statuses)
+    assert all("tests/test_example.py" not in event and "p1n" not in event for event in statuses)
     assert any(event.startswith("stage 1/2: running") for event in statuses)
     assert all(not event.startswith("stage 1/2: running")
                for event in events[events.index(completion) + 1:])
@@ -724,7 +727,7 @@ def fetched_base(git_repo):
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change):
-    cfg = make_config(checks=('echo one', 'echo two'), env=(("AUDIT_TOKEN", "fake-cached-token"),),
+    cfg = make_config(checks=('echo one', 'echo two'), env=(("AUDIT_TOKEN", "fake-cached-token"), ("NODE_ENV", "test")),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
         assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted', fetched_base) is None
@@ -732,7 +735,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     key = sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     assert key is not None
     first = sandbox.run_checks(cfg, git_repo)
-    original_tails = tuple(replace(r, tail=f"{r.tail} fake-cached-token") for r in first.results)
+    original_tails = tuple(replace(r, tail=f"{r.tail} tests/test_example.py:12 fake-cached-token") for r in first.results)
     _save_report(git_repo, replace(first, results=original_tails))
     receipt = git_repo / '.loopzero/checks.json'
     git(git_repo, 'config', 'core.excludesFile', str(git_repo / '.git/info/exclude'))
@@ -770,7 +773,9 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     assert [r.command for r in report.results] == list(cfg.checks)
     assert all(bool(r.reused_from) == (change == 'other') for r in report.results)
     if change == 'other':
-        assert [r.tail for r in report.results] == ['one [REDACTED]', 'two [REDACTED]']
+        assert [r.tail for r in report.results] == [
+            'one tests/test_example.py:12 [REDACTED]', 'two tests/test_example.py:12 [REDACTED]',
+        ]
     assert any('reused ' in m for m in messages) == (change == 'other')
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 

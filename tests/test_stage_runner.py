@@ -14,7 +14,8 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
 
 @pytest.mark.parametrize('base_ref', ['stale', 'missing', 'recorded'])
 @pytest.mark.parametrize('body,verdict,tails', [
-    ('r["tail"]=env["UV_CACHE_DIR"]+" "+env["AUDIT_VALUE"];print(json.dumps(r))', True, ['/operator/cache [REDACTED]'] * 2),
+    ('r["tail"]=" ".join((env["UV_CACHE_DIR"],env["NODE_ENV"],env["AUDIT_VALUE"],os.environ["AUDIT_VALUE"]));print(json.dumps(r))',
+     True, ['/operator/cache production [REDACTED] [REDACTED]'] * 2),
     ('r["exit_code"]=7;r["tail"]="ok "+env["AUDIT_VALUE"];print(json.dumps(r))', False, ['ok [REDACTED]']),
     ('print("x" * 3000 + "worker socket unavailable " + env["AUDIT_VALUE"], file=sys.stderr);sys.exit(42)', False, None),
     ('r["exit_code"]=7;r["tail"]=env["AUDIT_VALUE"]+"Ω"*8183+" newest";print(json.dumps(r))', False,
@@ -33,7 +34,7 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
         *[f'r["{field}"]="wrong";print(json.dumps(r))' for field in ('head', 'base', 'command', 'env_sha256', 'network', 'worktree')],
     ]],
 ])
-def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref):  # noqa: F811
+def test_runner(git_repo, tmp_path, bwrap_log, monkeypatch, body, verdict, tails, base_ref):  # noqa: F811
     git(git_repo, 'switch', '-c', 'task')
     git(git_repo, 'commit', '--allow-empty', '-m', 'advance')
     base = git(git_repo, 'rev-parse', 'HEAD').strip()
@@ -45,7 +46,8 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         git(git_repo, 'update-ref', 'refs/remotes/origin/main', base)
     if base_ref == 'missing':
         git(git_repo, 'branch', '-D', 'main')
-    configured = {"UV_CACHE_DIR": "/operator/cache", "AUDIT_VALUE": "opaque-fake-db-password"}
+    monkeypatch.setenv("AUDIT_VALUE", "opaque-fake-wrapper-password")
+    configured = {"UV_CACHE_DIR": "/operator/cache", "NODE_ENV": "production", "AUDIT_VALUE": "opaque-fake-db-password"}
     body = (f'repo=r["worktree"]\nassert r["base"] == "{base}"\n'
             'assert not Path.cwd().is_relative_to(Path(repo))\n'
             f'env=r.pop("env");assert env == {dict(sandbox.SANDBOX_ENV, **configured)!r}\n'
@@ -54,10 +56,10 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
             f'{dict(sandbox.SANDBOX_ENV, **configured)!r},'
             'sort_keys=True,separators=(",", ":")).encode()).hexdigest()\n' + body)
     path = tmp_path / 'runner.py'
-    path.write_text('import hashlib,json,sys,subprocess\nfrom pathlib import Path\nr=json.load(sys.stdin)\nr.update(exit_code=0,duration_s=0.1,not_started=False,tail="ok")\n' + body)
+    path.write_text('import hashlib,json,os,sys,subprocess\nfrom pathlib import Path\nr=json.load(sys.stdin)\nr.update(exit_code=0,duration_s=0.1,not_started=False,tail="ok")\n' + body)
     calls = []
     report = sandbox.run_checks(make_config(checks=('echo one', 'echo two'),
-                                env=tuple(configured.items()), network=True,
+                                env=tuple(configured.items()), env_allowlist=("PATH", "AUDIT_VALUE"), network=True,
                                 check_runner=(sys.executable, str(path))), git_repo, progress=calls.append)
     assert report.ok is verdict
     if 'exit_code"]=7' in body:
