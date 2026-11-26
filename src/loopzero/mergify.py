@@ -140,7 +140,8 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
 def queue_predecessors(repo: str, branch: str, queue: str, number: int) -> tuple[int, ...]:
     """Identify a single chain of one-PR batches ahead of a new request."""
     status = api_get(repo, f"/merge-queue/status?branch={quote(branch, safe='')}")
-    if not isinstance(status, dict) or status.get("mode") != "serial":
+    if (not isinstance(status, dict) or status.get("mode") != "serial"
+            or status.get("waiting_pull_requests") != [] or status.get("forming_batches") != []):
         return ()
     try:
         batches = candidate.flatten_batches(status)

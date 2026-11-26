@@ -4745,14 +4745,19 @@ def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, co
     assert not (wt / "src/loopzero/upstream.py").exists()
 
 
-@pytest.mark.parametrize("queue_state", ["ordered", "empty", "ambiguous", "unavailable"])
-def test_prequeue_size_warning_replays_1238(wt, repo, gh, capsys, monkeypatch, queue_state):
+@pytest.mark.parametrize(("command", "queue_state"), [
+    ("ready", "ordered"), ("merge", "ordered"), ("resume", "ordered"),
+    ("ready", "empty"), ("ready", "ambiguous"), ("ready", "unavailable"),
+    ("ready", "waiting"), ("ready", "conflicting"),
+])
+def test_prequeue_size_warning_replays_1238(wt, repo, gh, capsys, monkeypatch, command, queue_state):
     cap = size_budget_fixture(wt, repo, 48)
     main = head_of(repo)
     batches = []
     for number, parents in [(1146, []), (1219, ["1146"])]:
         git(repo, "switch", "--detach", main)
-        path = repo / f"src/loopzero/pr_{number}.py"
+        name = "feature" if number == 1219 and queue_state == "conflicting" else f"pr_{number}"
+        path = repo / f"src/loopzero/{name}.py"
         path.write_text("# counted line\n" * 13)
         git(repo, "add", str(path))
         git(repo, "commit", "-qm", f"PR {number}")
@@ -4766,18 +4771,27 @@ def test_prequeue_size_warning_replays_1238(wt, repo, gh, capsys, monkeypatch, q
             raise mergify.MergifyError("queue status unavailable")
         if queue_state == "ambiguous":
             batches[1]["parent_ids"] = []
-        return {"mode": "serial", "batches": [] if queue_state == "empty" else batches[::-1]}
+        return {
+            "mode": "serial", "batches": [] if queue_state == "empty" else batches[::-1],
+            "waiting_pull_requests": [{"number": 1220}] if queue_state == "waiting" else [],
+            "forming_batches": [],
+        }
 
     head = head_of(wt)
     arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "markers", lambda *_: (command == "resume", False))
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
     monkeypatch.setattr(mergify, "api_get", snapshot)
-    code, out, err = run(capsys, "ready")
+    requested = []
+    monkeypatch.setattr(mergify, "request", lambda *args: requested.append(args))
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+    args = ("merge", "--wait=0") if command == "resume" else (command,)
+    code, out, err = run(capsys, *args)
 
-    assert code == 0 and f"ready: {URL}" in out
-    if queue_state == "ordered":
+    assert code == (3 if command == "resume" else 0)
+    assert requested == ([(REPO, 7, head, "main")] if command == "merge" else [])
+    if queue_state == "ordered" and command != "resume":
         assert "#1146, #1219" in out + err
         assert f"src={cap + 4} (base 26, delta {cap - 22}, cap {cap}" in out + err
     else:

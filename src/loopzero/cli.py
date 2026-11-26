@@ -1153,7 +1153,7 @@ _SIZE_BUDGET = "scripts/size_budget.sh"
 
 
 def _prequeue_size_budget(
-    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness, *, project: bool = False,
+    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness,
 ) -> None:
     if not readiness.ready or config.merge_strategy != "mergify" or _SIZE_BUDGET not in config.checks:
         return
@@ -1180,8 +1180,7 @@ def _prequeue_size_budget(
         result = evaluate(base)
         if result.exit_code:
             raise CliError("current target size budget failed:\n" + result.stdout.rstrip())
-        if project:
-            _warn_queue_size(config, pr, root, origin, base, git, evaluate)
+        _warn_queue_size(config, pr, root, origin, base, git, evaluate)
 
 
 def _warn_queue_size(
@@ -1235,7 +1234,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
             return 3
         pr, readiness, kicked = waited
     assert readiness is not None
-    _prequeue_size_budget(wt, config, pr, readiness, project=True)
+    _prequeue_size_budget(wt, config, pr, readiness)
     if readiness.ready and pr.is_draft and not kicked:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
