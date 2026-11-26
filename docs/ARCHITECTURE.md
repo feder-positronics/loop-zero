@@ -101,7 +101,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
-   head or an eligible review covering an ancestor, blocking findings,
+   head or an eligible review covering an ancestor, blocking findings
+   (unresolved threads a review publisher opened with a head-bound marker line),
    target branch and required CI. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
