@@ -3789,7 +3789,7 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     gh.respond_pr_list([])
     out, _ = expect_cli(capsys, 0, "status")
     assert "branch:   lz/t1" in out and f"head:     {head}" in out and "dirty:    no" in out
-    assert "pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)" in out
+    assert "pr:       none (commit changes, then open with `loopzero pr` before a long check)" in out
     arm_approved_pr_with_check_result(gh, head, wt, "pending")
     (wt / "scratch").write_text("x")
     git_calls.clear()
@@ -4772,6 +4772,8 @@ def test_task_state_lock_times_out_with_a_live_holder(git_repo, monkeypatch):
         ):
             pytest.fail("contender acquired a held directory lock")
         assert now == 60
+        cli.worktree.write_local_state(git_repo, "review.json", "receipt", private=True)
+        assert cli.worktree.read_local_state(git_repo, "review.json") == "receipt"
     with cli.worktree.lock_local_state(git_repo):
         assert now == 60
 
