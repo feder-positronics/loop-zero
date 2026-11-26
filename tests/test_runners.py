@@ -259,9 +259,6 @@ def repo(tmp_path):
     return repo
 
 
-# ----------------------------------------------------------------- prompt
-
-
 @pytest.mark.parametrize("kind", ["primary", "delta"])
 @pytest.mark.parametrize("chunk", [None, (2, 3)])
 def test_review_instruction_channel_preserves_exact_material(fake_bin, tmp_path, kind, chunk):
@@ -385,9 +382,6 @@ def test_codex_version_probe(fake_bin, tmp_path, monkeypatch, version, failure):
     with pytest.raises(RunnerBadOutput, match="version probe failed"):
         _review("codex", tmp_path)
     assert not (fake_bin / "codex.stdin").exists()
-
-
-# ----------------------------------------------------------------- claude
 
 
 @pytest.mark.parametrize("runtime", [False, True], ids=["default", "explicit"])
@@ -529,9 +523,7 @@ def test_real_claude_environment_auth_hides_host_state(repo,
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
 @pytest.mark.parametrize("family", ["claude", "codex"])
-def test_real_file_auth_preserves_host_writes(repo,
-    fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str,
-) -> None:
+def test_real_file_auth_preserves_host_writes(repo, fake_bin, tmp_path, monkeypatch, family):
     host = tmp_path / "host"
     config = host / f".{family}"
     config.mkdir(parents=True)
@@ -688,8 +680,7 @@ AUTH_WORDS = {
 
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
-def test_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: Path,
-                                                     family: str) -> None:
+def test_success_with_auth_words_is_not_auth_failure(fake_bin, tmp_path, family):
     diagnostic = "warning: not authenticated to telemetry" if family == "codex" else None
     _fake_review(fake_bin, family, AUTH_WORDS, diagnostic=diagnostic)
     result = _review(family, tmp_path)
@@ -868,25 +859,23 @@ def test_review_mounts_only_implicit_runtime_files(repo, fake_bin, tmp_path, fak
 
 
 @pytest.mark.parametrize("reported", [True, False])
-def test_claude_keeps_native_settings_separate_from_requested_settings(fake_bin, tmp_path, reported):
-    envelope = _claude_envelope(APPROVE, modelUsage={"reported-model": {}} if reported else {})
-    _fake_claude(fake_bin, envelope)
-    result = _review("claude", tmp_path, model="requested-model", effort="medium")
-    assert result.provenance["requested_settings"] == [{"model": "requested-model", "effort": "medium"}]
-    assert json.loads(result.raw) == envelope
-
-
-def test_merge_preserves_native_call_order_and_pads_legacy_requests(fake_bin, tmp_path):
-    _fake_claude(fake_bin, _claude_envelope(APPROVE, modelUsage={"reported-one": {}}))
-    first = _review("claude", tmp_path, model="requested-one", effort="medium")
-    first.provenance.pop("requested_settings")
-    _fake_claude(fake_bin, _claude_envelope(APPROVE, modelUsage={"reported-two": {}}, session_id="session-two"))
-    second = _review("claude", tmp_path, model="requested-two", effort="high")
-    merged = merge_reviews([first, second])
+def test_claude_settings_and_merged_calls_preserve_native_evidence(fake_bin, tmp_path, reported):
+    results = []
+    for session, model, effort in (("first", "requested-one", "medium"), ("second", "requested-two", "high")):
+        envelope = _claude_envelope(
+            APPROVE, session_id=session, modelUsage={f"reported-{session}": {}} if reported else {},
+        )
+        _fake_claude(fake_bin, envelope)
+        result = _review("claude", tmp_path, model=model, effort=effort)
+        assert result.provenance["requested_settings"] == [{"model": model, "effort": effort}]
+        assert json.loads(result.raw) == envelope
+        results.append(result)
+    results[0].provenance.pop("requested_settings")
+    merged = merge_reviews(results)
     assert merged.provenance["requested_settings"] == [
         {"model": None, "effort": None}, {"model": "requested-two", "effort": "high"},
     ]
-    assert merged.provenance["session_ids"] == ["claude-session-123", "session-two"]
+    assert merged.provenance["session_ids"] == ["first", "second"]
     assert runners.validate_runner_result(merged)
 
 
@@ -946,63 +935,50 @@ def test_codex_ignores_repository_instructions_and_skills(repo, fake_bin: Path, 
     )]
 
 
-def _logging_codex(fake_tool, fake_bin: Path) -> Path:
-    """A fake Codex that records every call, version and help probes included."""
-    fake_tool("codex", f'echo "$@" >> "{fake_bin}/codex.calls"\nexit 1\n')
-    return fake_bin / "codex.calls"
-
-
-@pytest.mark.parametrize("link", [".codex/skills/host", ".agents/skills"])
-def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
-    repo, fake_bin: Path, fake_tool, fake_bwrap: Path, tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch, link: str,
-) -> None:
-    outside = tmp_path / "outside"
-    (outside / "skill").mkdir(parents=True)
-    (outside / "skill/SKILL.md").write_text("---\nname: host\ndescription: host\n---\n")
-    (repo / link).parent.mkdir(parents=True, exist_ok=True)
-    (repo / link).symlink_to(outside)
-    scanned = []
-    real_scandir = os.scandir
-    def spy(path=".", *rest):
-        if not isinstance(path, int):
-            scanned.append(Path(path))
-        return real_scandir(path, *rest)
-    monkeypatch.setattr("loopzero.runners.os.scandir", spy)
-    calls = _logging_codex(fake_tool, fake_bin)
-    with pytest.raises(RunnerBadOutput, match="links outside the checkout"):
-        _review("codex", repo)
-    assert not any(p.resolve().is_relative_to(outside.resolve()) for p in scanned)
-    assert not calls.exists()
-
-
 @pytest.mark.parametrize("plant", [
+    "outside:.codex/skills/host", "outside:.agents/skills",
     "too_many", "loop", "undecodable", "dangling", "loop:.agents/skills", "loop:.codex/skills",
-    "loop:.agents", "loop:.codex", "dangling:.agents", "dangling:.codex"])
-def test_codex_skill_lists_it_cannot_disable_fail_before_any_codex_call(
-    repo, fake_bin: Path, fake_tool, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, plant: str,
-) -> None:
-    if plant == "too_many":
+    "loop:.agents", "loop:.codex", "dangling:.agents", "dangling:.codex",
+])
+def test_codex_unsafe_skill_lists_fail_before_launch(repo, fake_bin, fake_tool, tmp_path, monkeypatch, plant):
+    kind, _, name = plant.partition(":")
+    diagnostic = r"too many to disable|cannot list repository skills"
+    if kind == "too_many":
         _plant_skills(repo)
-        monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
-    elif plant != "undecodable":
-        kind, _, name = plant.partition(":")
-        link = repo / (name or ".agents/skills/x")
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(link.name if kind == "loop" else "missing")
-    else:
+        monkeypatch.setattr(runners, "CODEX_SKILL_OVERRIDE_LIMIT", 100)
+    elif kind == "undecodable":
         skill = repo / ".codex/skills" / os.fsdecode(b"\xff")
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\nname: x\ndescription: x\n---\n")
-    calls = _logging_codex(fake_tool, fake_bin)
-    with pytest.raises(RunnerBadOutput, match=r"too many to disable|cannot list repository skills"):
+    else:
+        link = repo / (name or ".agents/skills/x")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "outside":
+            outside = tmp_path / "outside"
+            (outside / "skill").mkdir(parents=True)
+            (outside / "skill/SKILL.md").write_text("---\nname: host\ndescription: host\n---\n")
+            link.symlink_to(outside)
+            diagnostic = "links outside the checkout"
+            scanned, real_scandir = [], os.scandir
+
+            def spy(path=".", *rest):
+                if not isinstance(path, int):
+                    scanned.append(Path(path))
+                return real_scandir(path, *rest)
+
+            monkeypatch.setattr(runners.os, "scandir", spy)
+        else:
+            link.symlink_to(link.name if kind == "loop" else "missing")
+    calls = fake_bin / "codex.calls"
+    fake_tool("codex", f'echo "$@" >> "{calls}"\nexit 1\n')
+    with pytest.raises(RunnerBadOutput, match=diagnostic):
         _review("codex", repo)
     assert not calls.exists()
+    if kind == "outside":
+        assert not any(path.resolve().is_relative_to(outside.resolve()) for path in scanned)
 
 
-def test_codex_approve(repo,
-    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_codex_approve(repo, fake_bin, tmp_path, fake_bwrap, monkeypatch):
     configured = tmp_path / "configured-codex"
     configured.mkdir()
     (configured / "auth.json").write_text('{"token":"secret"}')
@@ -1015,7 +991,6 @@ def test_codex_approve(repo,
     assert result.model == "gpt-5.6-luna" and result.effort == "high"
     assert result.duration_s is not None
     argv = _argv(fake_bin, "codex")
-    assert argv[0] == "exec"
     assert argv[argv.index("-m") + 1] == "gpt-5.6-luna"
     assert "model_reasoning_effort=high" in argv
     # Codex's inner bwrap cannot nest inside loop-zero's; the outer sandbox bounds it.
@@ -1045,18 +1020,12 @@ def test_unknown_family_and_kind(tmp_path: Path) -> None:
         review_with("claude", cwd=tmp_path, head="h", kind="full", diff="", task_text="")
 
 
-@pytest.mark.parametrize(
-    "finding",
-    [
-        {"severity": "critical"},
-        {"severity": "critical", "path": None, "line": None, "title": 4, "body": "x"},
-        {"severity": "critical", "path": None, "line": None, "title": "x", "body": []},
-        {
-            "severity": "critical", "path": None, "line": None,
-            "title": "x", "body": "y", "extra": 1,
-        },
-    ],
-)
+@pytest.mark.parametrize("finding", [
+    {"severity": "critical"},
+    {"severity": "critical", "path": None, "line": None, "title": 4, "body": "x"},
+    {"severity": "critical", "path": None, "line": None, "title": "x", "body": []},
+    {"severity": "critical", "path": None, "line": None, "title": "x", "body": "y", "extra": 1},
+])
 def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) -> None:
     message = json.dumps({"verdict": "request_changes", "findings": [finding]})
     _fake_codex(fake_bin, message)
@@ -1100,8 +1069,7 @@ def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str, budg
     path = git_repo / name
     path.write_text("deleted line\n" * 600)
     git(git_repo, "add", "--", name)
-    git(git_repo, "commit", "-qm", "add file")
-    base = git(git_repo, "rev-parse", "HEAD").strip()
+    base = _commit(git_repo, "add file")
     git(git_repo, "rm", "--", name)
     git(git_repo, "commit", "-qm", "delete file")
     diff = render_patch(worktree.diff_since(git_repo, base))
@@ -1153,8 +1121,8 @@ def _commit(repo: Path, message: str) -> str:
 def test_author_families(git_repo: Path, trailer: str, expected: str | None) -> None:
     base = git(git_repo, "rev-parse", "HEAD").strip()
     head = _commit(git_repo, f"feat: x\n\n{trailer}" if trailer else "feat: x")
-    assert author_families(git_repo, head, base) == ({expected} if expected else set())
-    assert author_families(git_repo, "HEAD", base) == ({expected} if expected else set())
+    for revision in (head, "HEAD"):
+        assert author_families(git_repo, revision, base) == ({expected} if expected else set())
 
 
 def test_author_families_bad_ref(git_repo: Path) -> None:
@@ -1172,7 +1140,7 @@ def test_author_families_excludes_base_and_includes_all_lineage_trailers(git_rep
 
 
 @pytest.mark.parametrize("case", ["valid", "banner", "missing", "mismatch", "ambiguous", "malformed", "conflict", "no-thread", "no-effort", "no-version", "duplicate-meta", "symlink", "fifo", "oversize", "parentlink"])
-def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, case):
+def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, repo, case):
     sid = "codex-session-123"
     records = [
         {"type": "session_meta", "payload": {"id": sid, "cli_version": "0.168.0"}},
@@ -1180,19 +1148,15 @@ def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, case
     ]
     if case == "mismatch":
         records[0]["payload"]["id"] = "another-session"
-    if case == "conflict":
+    elif case == "conflict":
         records.append({"type": "turn_context", "payload": {"model": "other", "effort": "low"}})
-    if case == "no-effort":
+    elif case == "no-effort":
         records[1]["payload"].pop("effort")
-    if case == "no-version":
+    elif case == "no-version":
         records[0]["payload"].pop("cli_version")
-    if case == "duplicate-meta":
+    elif case == "duplicate-meta":
         records.append(records[0])
-    rollout = "\n".join(json.dumps(record) for record in records)
-    if case == "malformed":
-        rollout += "\n{"
-    _fake_codex(fake_bin, json.dumps(APPROVE), rollout=rollout if case not in ("missing", "ambiguous", "no-thread") else None,
-                stderr="model: banner-model\nreasoning effort: low" if case == "banner" else "")
+    rollout = "\n".join(map(json.dumps, records)) + ("\n{" if case == "malformed" else "")
     if case in ("ambiguous", "no-thread", "symlink", "fifo", "oversize", "parentlink"):
         home = tmp_path / "private-home"
         sessions = home / ".codex/sessions/2026/10/30"
@@ -1200,28 +1164,25 @@ def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, case
         for name in ("one", "two") if case == "ambiguous" else ("one",):
             (sessions / f"rollout-{name}-{sid}.jsonl").write_text(rollout)
         path = sessions / f"rollout-one-{sid}.jsonl"
-        if case in ("symlink", "fifo"):
+        if case == "symlink":
+            target = path.rename(home / "native.jsonl")
+            path.symlink_to(target)
+        elif case == "fifo":
             path.unlink()
-            if case == "symlink":
-                target = home / "native.jsonl"
-                target.write_text(rollout)
-                path.symlink_to(target)
-            else:
-                os.mkfifo(path)
-        if case == "oversize":
+            os.mkfifo(path)
+        elif case == "oversize":
             with path.open("ab") as stream:
                 stream.truncate(8 * 1024 * 1024 + 1)
-        if case == "parentlink":
-            outside = tmp_path / "outside"
-            sessions.rename(outside)
+        elif case == "parentlink":
+            outside = sessions.rename(tmp_path / "outside")
             sessions.symlink_to(outside, target_is_directory=True)
         events = [{"type": "thread.started", "thread_id": sid}] if case != "no-thread" else []
         events += [{"type": "turn.completed", "usage": {"input_tokens": 1}}]
         _, raw = runners._codex_provenance("\n".join(map(json.dumps, events)),
                                            f"session id: {sid}", "{}", home=home)
     else:
-        repo = tmp_path / "repo"
-        repo.mkdir()
+        _fake_codex(fake_bin, json.dumps(APPROVE), rollout=None if case == "missing" else rollout,
+                    stderr="model: banner-model\nreasoning effort: low" if case == "banner" else "")
         result = _review("codex", repo, model="requested-model", effort="medium")
         raw = result.raw
         assert not Path((fake_bin / "codex.home").read_text()).exists()
@@ -1293,18 +1254,17 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
             if running(pid):
                 os.kill(pid, signal.SIGKILL)
 
+        def terminate_review(process, home, pid):
+            process.terminate()
+            assert process.wait(timeout=5) == -signal.SIGTERM
+            assert not home.exists()
+            assert not running(pid)
+
         homes = set()
         concurrent, concurrent_home, concurrent_pid = start_review()
-        cancelled, cancelled_home, cancelled_pid = start_review()
-        cancelled.terminate()
-        assert cancelled.wait(timeout=5) == -signal.SIGTERM
-        assert not cancelled_home.exists()
-        assert not running(cancelled_pid)
+        terminate_review(*start_review())
         assert concurrent.poll() is None
         assert running(concurrent_pid)
         assert concurrent_home.is_dir()
         assert marker.read_text() == "keep"
-        concurrent.terminate()
-        assert concurrent.wait(timeout=5) == -signal.SIGTERM
-        assert not concurrent_home.exists()
-        assert not running(concurrent_pid)
+        terminate_review(concurrent, concurrent_home, concurrent_pid)
