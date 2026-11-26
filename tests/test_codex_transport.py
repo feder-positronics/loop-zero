@@ -5,6 +5,7 @@ import copy
 import dataclasses
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -40,8 +41,8 @@ print(json.dumps({'type':'thread.started','thread_id':session,'session_id':sessi
 for index,argv in enumerate([['git','-C',cwd,'rev-parse','HEAD'],['git','-C',cwd,'diff','--no-color',BASE,HEAD]]):
  command=' '.join(argv);item={'id':'read-'+str(index),'type':'command_execution','command':command}
  print(json.dumps({'type':'item.started','item':dict(item,status='in_progress')}))
- done=subprocess.run(argv,capture_output=True,text=True)
- print(json.dumps({'type':'item.completed','item':dict(item,status='completed',exit_code=done.returncode,aggregated_output=done.stdout)}))
+ done=subprocess.run(argv,capture_output=True)
+ print(json.dumps({'type':'item.completed','item':dict(item,status='completed',exit_code=done.returncode,aggregated_output=done.stdout.decode())}))
 message=json.dumps({'verdict':'approve','findings':[]})
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(message)
 print(json.dumps({'type':'item.completed','item':{'id':'final','type':'agent_message','text':message}}))
@@ -361,7 +362,8 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
     cfg = Config(repo, "main", ("true",), (), "squash", ("codex",), review_publishers=("bot",))
     if kind.startswith("delta"):
         reviewed, merge_base = result.head, native[1]["base"]
-        (native[2] / "delta.txt").write_text("delta only\n")
+        git(native[2], "config", "core.autocrlf", "false")
+        (native[2] / "delta.txt").write_bytes(b"delta only\r\n")
         git(native[2], "add", "delta.txt")
         git(native[2], "commit", "-qm", "delta repair")
         head = git(native[2], "rev-parse", "HEAD").strip()
@@ -376,7 +378,11 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
                                  publication=(repo, 7, "bot"))
         proof = runners.codex_evidence(result)
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
-        delta_diff = git(native[2], "diff", "--no-color", reviewed, head).strip().encode()
+        delta_diff = subprocess.check_output(
+            ["git", "diff", "--no-color", reviewed, head], cwd=native[2]
+        )
+        assert b"+delta only\r\n" in delta_diff
+        assert proof["calls"][0]["inspection"] == "verified"
         assert proof["calls"][0]["diff_sha256"] == hashlib.sha256(delta_diff).hexdigest()
     head = result.head
     prefix = (
