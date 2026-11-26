@@ -147,12 +147,12 @@ def test_start_reports_handoff_publication_failure(repo, monkeypatch, capsys, li
     monkeypatch.chdir(repo)
     task = repo / ".worktrees" / "t1" / ".loopzero" / "task.md"
 
-    def fail_link(path, source):
+    def fail_link(*_args, **_kwargs):
         if link_error == errno.EEXIST:
-            path.write_text("existing handoff")
+            task.write_text("existing handoff")
         raise OSError(link_error, "link failed")
 
-    monkeypatch.setattr(Path, "hardlink_to", fail_link)
+    monkeypatch.setattr(cli.worktree.os, "link", fail_link)
     assert cli.main(["start", "t1"]) == 1
     error = capsys.readouterr().err
     assert str(task) in error
@@ -427,11 +427,17 @@ def test_start_without_config(git_repo: Path, monkeypatch, capsys) -> None:
     assert code == 1 and "workflow.toml" in err and err.count("\n") == 1
 
 
-def test_check_pass_writes_report(wt: Path, gh: FakeGh, capsys) -> None:
+@pytest.mark.parametrize("dirty", [False, True])
+def test_check_pass_writes_report(wt: Path, gh: FakeGh, capsys, dirty) -> None:
+    if dirty:
+        (wt / "README.md").write_text("uncommitted content")
     code, out, _ = run(capsys, "check")
     assert gh.calls == []
     lines = out.splitlines()
     assert code == 0 and lines[-1] == "PASS"
+    if dirty:
+        assert "receipt produced:" not in out
+        return
     assert lines[0].startswith("checks pinned to origin/main@")
     assert lines[1] == "running: echo ok"
     assert lines[2].startswith("stage 1/2: exit 0 (")
@@ -446,6 +452,9 @@ def test_check_pass_writes_report(wt: Path, gh: FakeGh, capsys) -> None:
     assert [(r["command"], r["exit_code"]) for r in report["results"]] == [
         ("echo ok", 0), ("test -f README.md", 0)]
     assert report["results"][0]["tail"] == "ok"
+    cli._load_report(wt)
+    cli._validation_section(wt, report["head"], config.load(wt / "workflow.toml"))
+    assert "receipt " not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("state", [None, "CLOSED", "MERGED"])
@@ -835,6 +844,39 @@ def test_invalid_workflow_utf8_names_file(wt, capsys, trusted):
     assert "Traceback" not in err
 
 
+@pytest.mark.parametrize("command,state_file", [
+    ("check", None), ("review", None), ("repost", None), ("ready", None),
+    ("check", "checks.json"), ("review", "task.md"), ("ready", "checks.json"), ("check", "tracked"),
+    ("review", "review-{head}-primary.json"), ("repost", "review-{head}-primary.json"),
+])
+def test_commands_refuse_linked_local_state(wt, gh, capsys, tmp_path, command, state_file, head):
+    if command == "ready":
+        arm_approved_ready_pr(gh, head, wt)
+    state, sentinel = wt / ".loopzero", tmp_path / "external"
+    tracked = state_file == "tracked"
+    if tracked:
+        sentinel = state / "task.md"
+        git(wt, "add", "-f", str(sentinel))
+    else:
+        target = state / state_file.format(head=head[:12]) if state_file else state
+        if state_file and not target.exists():
+            target.write_text("local state")
+        target.rename(sentinel)
+        target.symlink_to(sentinel, target_is_directory=state_file is None)
+    directory = state if state_file else sentinel
+    directory.chmod(0o755)
+
+    def snapshot():
+        return {f.name: f.read_bytes() for f in (directory.iterdir() if not state_file else (sentinel,))}
+
+    original = snapshot()
+    args = ("review", "--repost") if command == "repost" else (command,)
+    diagnostic = "repository-tracked local state" if tracked else "symbolic link"
+    expect_cli(capsys, 1, *args, stderr_contains=(diagnostic,))
+    assert snapshot() == original and (tracked or target.is_symlink())
+    assert directory.stat().st_mode & 0o777 == 0o755
+
+
 def test_check_uses_base_commands_when_worktree_weakens_them(wt: Path, capsys) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"'))
     out, _ = expect_cli(capsys, 0, "check", stderr="")
@@ -935,16 +977,11 @@ def test_check_rejects_invalid_base_workflow(wt, repo, capsys, workflow, error):
     out, _ = expect_cli(capsys, 1, "check", stderr_contains=(f"origin/main:workflow.toml: {error}",))
     assert "PASS" not in out if workflow is None else out == ""
     assert not (wt / ".loopzero" / "checks.json").exists()
-
-
-def test_readiness_rejects_existing_empty_check_receipt(wt: Path, repo: Path) -> None:
-    advance_checks(repo, [])
-    args = SimpleNamespace(config=None, command="ready")
-    config = cli._load_config(args, wt, pin_checks=True)
-    head = head_of(wt)
-    cli._save_report(wt, CheckReport(head, False, (), cli.sandbox.settings_fingerprint(config, wt)))
-
-    assert cli._current_check_report(wt, config, head) is None
+    if workflow is None:
+        cfg = cli._load_config(SimpleNamespace(config=None, command="ready"), wt, pin_checks=True)
+        head = head_of(wt)
+        cli._save_report(wt, CheckReport(head, False, (), cli.sandbox.settings_fingerprint(cfg, wt)))
+        assert cli._current_check_report(wt, cfg, head) is None
 
 
 # --- pr ------------------------------------------------------------------------------------
@@ -1439,7 +1476,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
-    assert_git_cost(git_calls, 14, 1)
+    assert_git_cost(git_calls, 18, 1)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -1719,46 +1756,29 @@ def test_interrupted_review_save_preserves_previous_receipt(wt, gh, fake_bin, ca
         assert not saved.exists()
 
 
-def test_repost_refuses_retired_paired_review(
-    wt: Path, gh: FakeGh, fake_bin: Path, capsys
-) -> None:
-    head = prepare_review(wt, gh, fake_bin)
-    code, _, err = run(capsys, "review")
-    assert (code, err) == (0, "")
-    saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
-    data = json.loads(saved.read_text())
-    data["members"] = [{"family": "claude"}]
-    saved.write_text(json.dumps(data))
-    (fake_bin / "claude.stdin").unlink()
-    _fake_codex(fake_bin, json.dumps(APPROVE))
+@pytest.mark.parametrize("saved_state", ["missing", "stale", "hand-written", "retired"])
+def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_state, head):
+    saved = cli._review_file(wt, head, "primary")
+    if saved_state == "retired":
+        prepare_review(wt, gh, fake_bin)
+        expect_cli(capsys, 0, "review", stderr="")
+        saved.write_text(json.dumps(json.loads(saved.read_text()) | {"members": [{"family": "claude"}]}))
+        (fake_bin / "claude.stdin").unlink()
+        _fake_codex(fake_bin, json.dumps(APPROVE))
+    else:
+        arm_empty_primary_review_history(gh, head)
+        if saved_state != "missing":
+            saved.write_text(json.dumps({
+                "family": "claude", "head": "0" * 40 if saved_state == "stale" else head,
+                "kind": "primary", "verdict": "approve", "findings": [],
+                "raw": "" if saved_state == "stale" else json.dumps(_claude_envelope(APPROVE)),
+            }))
     prior_calls = len(gh.calls)
-
-    _, err = expect_cli(capsys, 1, "review", "--repost")
-    assert "invalid saved review" in err
-    assert not (fake_bin / "claude.stdin").exists()
-    assert not (fake_bin / "codex.stdin").exists()
-    assert not any(
-        call["argv"][:2] == post_key().split() for call in gh.calls[prior_calls:]
-    )
-
-
-@pytest.mark.parametrize("saved_state", ["missing", "stale", "hand-written"])
-def test_repost_refuses_missing_stale_or_hand_written_review(
-    wt: Path, gh: FakeGh, capsys, saved_state: str, head
-) -> None:
-    arm_empty_primary_review_history(gh, head)
-    if saved_state != "missing":
-        saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
-        saved.write_text(json.dumps({
-            "family": "claude", "head": "0" * 40 if saved_state == "stale" else head,
-            "kind": "primary", "verdict": "approve", "findings": [],
-            "raw": "" if saved_state == "stale" else json.dumps(_claude_envelope(APPROVE)),
-        }))
-    code, out, err = run(capsys, "review", "--repost")
     expected = {"missing": "no saved primary review", "stale": f"not HEAD {head[:12]}",
-                "hand-written": "not runner-produced"}
-    assert code == 1 and out == "" and expected[saved_state] in err
-    assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
+                "hand-written": "not runner-produced", "retired": "invalid saved review"}
+    expect_cli(capsys, 1, "review", "--repost", stdout="", stderr_contains=(expected[saved_state],))
+    assert all(not (fake_bin / f"{family}.stdin").exists() for family in ("claude", "codex"))
+    assert all(call["argv"][:2] != post_key().split() for call in gh.calls[prior_calls:])
 
 
 @pytest.mark.parametrize("chunk_auth", [False, True])
@@ -2166,7 +2186,7 @@ def test_review_observes_new_codex_version_in_saved_receipt(
     _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
     _, err = expect_cli(capsys, 0, "review", stdout_contains=("review by codex",))
     assert "reviewer codex unavailable:" not in err
-    result = cli._load_review(wt, git(wt, "rev-parse", "HEAD").strip(), "primary")
+    result, _ = cli._load_review(wt, git(wt, "rev-parse", "HEAD").strip(), "primary")
     assert result.provenance["cli_version"] == version
 
 
@@ -2181,9 +2201,9 @@ def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monke
 
     monkeypatch.setattr(cli.runners, "review_with", malformed)
     if not save:
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise PermissionError("diagnostic write denied")
-        monkeypatch.setattr(cli, "_write_json_atomically", fail)
+        monkeypatch.setattr(cli.worktree, "write_local_state", fail)
     code, out, err = run(capsys, "review")
     size = len((out + err).encode())
     assert size < 650, size
@@ -2367,7 +2387,8 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch, git
     gh.respond("pr ready", "")
     git_calls.clear()
     code, out, err = run(capsys, "ready")
-    assert_git_cost(git_calls, 8, 1)
+    assert_git_cost(git_calls, 9, 1)
+    assert ["ls-files", "-z", "--", ".loopzero"] in git_calls
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
@@ -3052,13 +3073,13 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
 @pytest.mark.parametrize("condition,reason", [
-    ("missing", "run loopzero check at this head"), ("head", "check receipt is for aaaaaaaaaaaa."),
+    *((case, "run loopzero check at this head") for case in ("missing", "during-gates", "transient")),
+    ("head", "check receipt is for aaaaaaaaaaaa."),
     ("failed", "check receipt records a failed stage."), ("dirty", "check receipt was recorded in a dirty worktree."),
     ("plan", "check receipt's plan differs from the trusted workflow."),
     ("legacy", "check receipt is missing its settings fingerprint."),
     ("incompatible", "check receipt has an incompatible settings fingerprint."),
     ("empty", "check receipt is incomplete."), ("checkpoint", "check receipt is incomplete."),
-    ("during-gates", "run loopzero check at this head"), ("transient", "run loopzero check at this head"),
 ])
 def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, command, condition, reason):
     head = commit_mergify_configuration(wt) if command == "merge" else head
@@ -3106,35 +3127,45 @@ def check_environment(wt, gh, head, tmp_path):
     return path, policy, ("--config", str(path))
 
 
-@pytest.mark.parametrize("wait_for,fresh", [(None, False), ("ready", False), ("merge", True)])
-def test_ready_requires_receipt_from_current_check_environment(wt, gh, capsys, head, monkeypatch, wait_for, fresh, check_environment):
+@pytest.mark.parametrize("case", ["explicit", "ready", "merge", "fresh", "inherited", "fixed"])
+def test_ready_checks_effective_receipt_environment(wt, gh, capsys, head, monkeypatch, case, check_environment):
     config_path, config, args = check_environment
-    config = config.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "old" }')
+    inherited = case in {"inherited", "fixed"}
+    if inherited:
+        config = config.replace("[checks]", '[checks]\nenv_allowlist = ["PATH", "CHECK_POLICY"]')
+        monkeypatch.setenv("CHECK_POLICY", "old")
+    if case != "inherited":
+        config = config.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "old" }')
     config_path.write_text(config)
+    expect_cli(capsys, 0, *args, "check")
+    expect_cli(capsys, 0, *args, "ready")
 
-    assert run(capsys, *args, "check")[0] == 0
-    assert run(capsys, *args, "ready")[0] == 0
-
-    new_config = config.replace('CHECK_POLICY = "old"', 'CHECK_POLICY = "new"')
-    if wait_for:
-        arm_check_progress(gh, head, "pending")
-
-        def change_policy(_seconds):
-            config_path.write_text(new_config)
-            if fresh:
-                cfg = cli._load_config(SimpleNamespace(config=config_path, command=wait_for), wt, pin_checks=True)
-                cli._save_report(wt, CheckReport(head, False, tuple(CheckResult(c, 0, 0, "") for c in cfg.checks),
-                                                 cli.sandbox.settings_fingerprint(cfg, wt)))
-
-        monkeypatch.setattr(cli, "_sleep", change_policy)
-        hint = "retry with the current settings" if fresh else "run loopzero check"
-        expect_cli(capsys, 1, *args, wait_for, "--wait", stderr_contains=(f"workflow settings changed while waiting; {hint}",))
-        arm_check_progress(gh, head, "success")
+    if inherited:
+        monkeypatch.setenv("CHECK_POLICY", "new")
     else:
-        config_path.write_text(new_config)
-    out, _ = expect_cli(capsys, int(not fresh), *args, "ready")
-    assert ("not ready: check receipt has an incompatible settings fingerprint." in out) is not fresh
-    assert run(capsys, *args, "check")[0] == 1
+        new_config = config.replace('CHECK_POLICY = "old"', 'CHECK_POLICY = "new"')
+        if case in {"ready", "merge", "fresh"}:
+            arm_check_progress(gh, head, "pending")
+            command = "merge" if case == "fresh" else case
+
+            def change_policy(_seconds):
+                config_path.write_text(new_config)
+                if case == "fresh":
+                    cfg = cli._load_config(SimpleNamespace(config=config_path, command=command), wt, pin_checks=True)
+                    cli._save_report(wt, cli.dataclasses.replace(cli._load_report(wt),
+                                     settings_sha256=cli.sandbox.settings_fingerprint(cfg, wt)))
+
+            monkeypatch.setattr(cli, "_sleep", change_policy)
+            hint = "retry with the current settings" if case == "fresh" else "run loopzero check"
+            expect_cli(capsys, 1, *args, command, "--wait", stderr_contains=(f"workflow settings changed while waiting; {hint}",))
+            arm_check_progress(gh, head, "success")
+        else:
+            config_path.write_text(new_config)
+    passing = case in {"fixed", "fresh"}
+    out, _ = expect_cli(capsys, int(not passing), *args, "ready")
+    assert passing or "not ready: check receipt has an incompatible settings fingerprint." in out
+    if not (passing or inherited):
+        expect_cli(capsys, 1, *args, "check")
 
 
 def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, head, tmp_path):
@@ -3187,24 +3218,6 @@ def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
             cli._verify_wait_snapshot(args, wt, config, head, head)
     else:
         cli._verify_wait_snapshot(args, wt, config, head, head)
-
-
-@pytest.mark.parametrize("fixed", [False, True])
-def test_ready_matches_effective_inherited_check_environment(capsys, monkeypatch, fixed, check_environment):
-    config_path, config, args = check_environment
-    config = config.replace("[checks]", '[checks]\nenv_allowlist = ["PATH", "CHECK_POLICY"]')
-    if fixed:
-        config = config.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "old" }')
-    config_path.write_text(config)
-
-    monkeypatch.setenv("CHECK_POLICY", "old")
-    assert run(capsys, *args, "check")[0] == 0
-    monkeypatch.setenv("CHECK_POLICY", "new")
-    code, out, _ = run(capsys, *args, "ready")
-    if fixed:
-        assert code == 0
-    else:
-        assert code == 1 and "not ready: check receipt has an incompatible settings fingerprint." in out
 
 
 @pytest.mark.parametrize("worker", ["legacy", "different-environment", "matching"])
@@ -3722,7 +3735,7 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     (wt / "scratch").write_text("x")
     git_calls.clear()
     code, out, _ = run(capsys, "status")
-    assert_git_cost(git_calls, 7, 1)
+    assert_git_cost(git_calls, 8, 1)
     assert code == 0 and "dirty:    yes" in out
     assert f"pr:       #7 {URL} (draft, OPEN)" in out
     assert f"review:   primary on {head[:12]} (approved)" in out
@@ -4628,7 +4641,7 @@ def test_review_discloses_fallback_for_all_contributing_families(wt, gh, fake_bi
     assert not (fake_bin / "codex.stdin").exists()
     assert f"Same-family fallback: {reason}. Cross-family review is preferred." in posted_review(gh)["body"]
     kind = "delta" if lineage == "delta" else "primary"
-    assert cli._load_review(wt, head, kind).fallback == reason
+    assert cli._load_review(wt, head, kind)[0].fallback == reason
 
 
 def test_repost_rejects_saved_contributor_review(
@@ -4705,20 +4718,6 @@ def test_load_report_requires_integer_exit_code(wt, head, capsys, exit_code, ok)
         assert report.head == head
 
 
-def test_passive_receipt_load_is_silent(wt, gh, capsys, head):
-    arm_approved_ready_pr(gh, head, wt)
-    cli._load_report(wt)
-    cli._validation_section(wt, head, cli.config_mod.load(wt / "workflow.toml"))
-    assert "receipt " not in capsys.readouterr().out
-
-
-def test_dirty_check_does_not_claim_committed_receipt(wt, capsys):
-    (wt / "README.md").write_text("uncommitted content")
-    code, out, _ = run(capsys, "check")
-    assert code == 0 and out.endswith("PASS\n")
-    assert "receipt produced:" not in out
-
-
 @pytest.mark.parametrize("case", ["dirty", "unpushed", "after-head-read"])
 def test_cleanup_preserves_local_work(wt, case, capsys, monkeypatch):
     pr = SimpleNamespace(head_sha=cli.worktree.head(wt))
@@ -4769,11 +4768,11 @@ def test_wait_rechecks_closed_unmerged_pr(monkeypatch, final) -> None:
 
 
 @pytest.mark.parametrize("redirected", [False, True])
-def test_checks_report_survives_failed_publication(tmp_path, monkeypatch, redirected):
-    path = tmp_path / cli.CHECKS_FILE
+def test_checks_report_survives_failed_publication(git_repo, tmp_path, monkeypatch, redirected):
+    path = git_repo / cli.CHECKS_FILE
     monkeypatch.setattr(cli.worktree, "head", lambda _: next(heads))
     heads = iter(("a" * 40, "b" * 40))
-    cli._save_report(tmp_path, CheckReport("a" * 40, False, ()))
+    cli._save_report(git_repo, CheckReport("a" * 40, False, ()))
 
     def interrupt(staged, dest, *, src_dir_fd, dst_dir_fd):
         assert src_dir_fd == dst_dir_fd and dest == path.name
@@ -4785,17 +4784,18 @@ def test_checks_report_survives_failed_publication(tmp_path, monkeypatch, redire
         external = path.parent.rename(tmp_path / "external")
         path.parent.symlink_to(external, target_is_directory=True)
     monkeypatch.setattr(cli.os, "replace", interrupt)
-    with pytest.raises(OSError, match="Not a directory" if redirected else "publication interrupted"):
-        cli._save_report(tmp_path, CheckReport("b" * 40, False, ()))
+    error = cli.worktree.WorktreeError if redirected else OSError
+    with pytest.raises(error, match="symbolic link" if redirected else "publication interrupted"):
+        cli._save_report(git_repo, CheckReport("b" * 40, False, ()))
     assert json.loads(path.read_text())["head"] == "a" * 40
     assert list(path.parent.iterdir()) == [path]
     if redirected:
         external.chmod(0o755)
         review = ReviewResult("claude", "a" * 40, "primary", "approve", (), "")
-        receipt = cli._review_file(tmp_path, review.head, review.kind)
+        receipt = cli._review_file(git_repo, review.head, review.kind)
         receipt.write_text("user file")
-        with pytest.raises(OSError, match="Not a directory"):
-            cli._save_review(tmp_path, review)
+        with pytest.raises(cli.worktree.WorktreeError, match="symbolic link"):
+            cli._save_review(git_repo, review)
         assert receipt.read_text() == "user file" and external.stat().st_mode & 0o777 == 0o755
 
 
