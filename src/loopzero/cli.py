@@ -108,11 +108,10 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     path = args.config or root / "workflow.toml"
     if not pin_checks:
         return config_mod.load(path)
-    readiness = args.command in {"ready", "merge", "status"} and not getattr(args, "cancel", False)
     if args.config:
         print("checks are unpinned because --config was provided")
-        return config_mod.load(path, readiness=readiness)
-    config = config_mod.load_trusted(root, readiness=readiness)
+        return config_mod.load(path)
+    config = config_mod.load_trusted(root)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
@@ -259,6 +258,7 @@ def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
 ) -> github.Readiness:
+    config_mod.require_readiness(config)
     if "hold" in pr.labels:
         reason = f"PR #{pr.number} {github.MERGE_HOLD_MESSAGE}"
         return github.Readiness(ready=False, reasons=(reason,))
@@ -1315,6 +1315,7 @@ def _verify_wait_snapshot(
     if args is None:
         return
     latest = _load_config(args, wt, pin_checks=True)
+    config_mod.require_readiness(latest)
     changed = "workflow settings"
     if latest == config:
         if (latest.trusted_base_revision == config.trusted_base_revision
@@ -1679,13 +1680,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     reviews = _pr_reviews(config.repo, pr.number)
+    readiness = _readiness(wt, config, pr, head, reviews)
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         print("review:   none on this PR")
-    readiness = _readiness(wt, config, pr, head, reviews)
     print(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         print(f"  - {reason}")

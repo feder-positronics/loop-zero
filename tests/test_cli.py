@@ -2347,6 +2347,10 @@ def test_ready_requires_explicit_review_publishers(wt, gh, capsys, head, publish
 def test_ready_requires_explicit_ci_policy(wt, gh, capsys, head, required_ci):
     if required_ci != 'required_ci = ["checks"]':
         publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', required_ci))
+    if not required_ci:
+        gh.respond_pr_list([])
+        code, out, err = run(capsys, "status")
+        assert code == 0 and "pr:       none" in out and not err
     arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
 
     if not required_ci:
@@ -4724,6 +4728,7 @@ def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
 
 
 def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head):
+    publish_workflow(wt, WORKFLOW.replace(PUBLISHERS, ""))
     (wt / ".loopzero" / "review-existing.json").write_text("{broken")
     arm_pr(gh, head, isDraft=False, state="MERGED")
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="c" * 40))

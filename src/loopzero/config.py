@@ -52,7 +52,7 @@ class ConfigError(LoopZeroError):
     """The configuration file is missing, unreadable, or has invalid content."""
 
 
-def load(path: Path | str, *, readiness: bool = False) -> Config:
+def load(path: Path | str) -> Config:
     """Load and validate a workflow file."""
     path = Path(path)
     try:
@@ -70,10 +70,7 @@ def load(path: Path | str, *, readiness: bool = False) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     try:
-        config = _build(data)
-        if readiness:
-            _validate_readiness(config, data)
-        return config
+        return _build(data, path)
     except ConfigError as exc:
         raise ConfigError(f"{path}: {exc}") from None
 
@@ -92,7 +89,7 @@ def base_revision(worktree: Path, base_branch: str) -> str:
     raise ConfigError(f"git rev-parse origin/{base_branch} failed: {message}")
 
 
-def _remote_workflow(worktree: Path, branch: str, *, readiness: bool) -> tuple[Config, str]:
+def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
     resolved = _proc.run(
@@ -113,15 +110,12 @@ def _remote_workflow(worktree: Path, branch: str, *, readiness: bool) -> tuple[C
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{source}: invalid TOML: {exc}. {hint}") from None
     try:
-        config = _build(data)
-        if readiness and config.base_branch == branch:
-            _validate_readiness(config, data)
-        return config, revision
+        return _build(data, source), revision
     except ConfigError as exc:
         raise ConfigError(f"{source}: {exc}. {hint}") from None
 
 
-def load_trusted(worktree: Path, *, readiness: bool = False) -> Config:
+def load_trusted(worktree: Path) -> Config:
     """Select delivery policy using Git's origin default and its trusted workflow."""
     prefix = "refs/remotes/origin/"
     default = _proc.run(
@@ -135,24 +129,30 @@ def load_trusted(worktree: Path, *, readiness: bool = False) -> Config:
             "or supply --config for bootstrap or an override."
         )
     branch = ref.removeprefix(prefix)
-    policy, revision = _remote_workflow(worktree, branch, readiness=readiness)
+    policy, revision = _remote_workflow(worktree, branch)
     if policy.base_branch == branch:
         return replace(policy, trusted_base_revision=revision)
-    base, revision = _remote_workflow(worktree, policy.base_branch, readiness=readiness)
+    base, revision = _remote_workflow(worktree, policy.base_branch)
     if base.base_branch != policy.base_branch:
         raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
     return replace(base, trusted_base_revision=revision)
 
 
-def _validate_readiness(config: Config, data: dict[str, Any]) -> None:
-    if not config.review_publishers:
-        raise ConfigError("delivery.review_publishers must list the intended publisher logins")
-    if "required_ci" not in data.get("checks", {}):
-        raise ConfigError("checks.required_ci must list the required contexts or explicitly set "
-                          "required_ci = [] if none are required")
+def require_readiness(config: Config) -> None:
+    if config.readiness_error:
+        raise ConfigError(config.readiness_error)
 
 
-def _build(data: dict[str, Any]) -> Config:
+def _readiness_error(source: str | Path, publishers: tuple[str, ...], checks: dict[str, Any]) -> str:
+    if not publishers:
+        return f"{source}: delivery.review_publishers must list the intended publisher logins"
+    if "required_ci" not in checks:
+        return (f"{source}: checks.required_ci must list the required contexts or explicitly set "
+                "required_ci = [] if none are required")
+    return ""
+
+
+def _build(data: dict[str, Any], source: str | Path) -> Config:
     _reject_unknown("top level", data, _SECTIONS)
     for section, keys in _SECTIONS.items():
         table = data.get(section, {})
@@ -246,6 +246,7 @@ def _build(data: dict[str, Any]) -> Config:
     reviewer_ro_paths = _host_paths(
         "delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])
     )
+    publishers = _strings("delivery.review_publishers", delivery.get("review_publishers", []))
     return Config(
         repo=name,
         base_branch=base,
@@ -254,8 +255,8 @@ def _build(data: dict[str, Any]) -> Config:
         merge_strategy=merge,
         mergify_queue=mergify_queue,
         reviewers=reviewers,
-        review_publishers=_strings("delivery.review_publishers",
-                                   delivery.get("review_publishers", [])),
+        review_publishers=publishers,
+        readiness_error=_readiness_error(source, publishers, checks),
         review=review,
         reviewer_ro_paths=reviewer_ro_paths,
         review_chunk_bytes=review_chunk_bytes,
