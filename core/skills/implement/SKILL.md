@@ -28,8 +28,10 @@ and map each to a test or recorded evidence. Observe required UI/runtime behavio
 proof for UI changes per [Reporting](../../CONTRACT.md#reporting). Required
 acceptance that remains unobserved stays open
 with a next-action owner. Record the tested revision, observations, trade-offs
-and limits in Notes or human Validation. Follow the contract's
-[gate receipt fields and reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
+and limits in Notes or human Validation. Start primary review only with a
+completed passing `loopzero check` receipt for the exact pushed head. Focused
+tests and running checks are intermediate evidence. Reuse a passing same-head
+receipt under the [contract's reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
 
 Run commands expected to take more than about two minutes detached as in
 [Long-running jobs](../../../docs/DELEGATION.md#long-running-jobs).
