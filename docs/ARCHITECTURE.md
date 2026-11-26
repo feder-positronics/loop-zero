@@ -121,8 +121,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    environment values. For local sandbox receipts it omits inherited `PATH`,
    `LANG`, `LC_ALL`, `TERM`, and `HEAVY_SLOT_GRANTED_CORES` so readiness can
    run in a different host environment. Explicit settings, delegated runner
-   environments, and stage reuse keys still bind these values. Waiters check
-   for policy changes on every poll.
+   environments, and stage reuse keys still bind these values. A receipt for
+   delegated or input-keyed checks binds the configured base branch. Only the
+   stage reuse key binds the exact base revision. Waiters check for policy
+   changes on every poll.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree

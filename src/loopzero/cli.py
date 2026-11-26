@@ -298,7 +298,7 @@ def _readiness(
         publishers=publishers,
     )
     report = _load_report(wt)
-    receipt_problem = _check_report_problem(report, wt, config, head)
+    receipt_problem = _check_report_problem(report, config, head)
     if receipt_problem:
         result = github.Readiness(False, (*result.reasons, receipt_problem))
     elif announce_receipt:
@@ -330,7 +330,7 @@ def _readiness(
 
 
 def _check_report_problem(
-    report: CheckReport | None, wt: Path, config: Config, head: str, *, require_pass: bool = True,
+    report: CheckReport | None, config: Config, head: str, *, require_pass: bool = True,
 ) -> str | None:
     if report is None:
         return "run loopzero check at this head"
@@ -352,14 +352,14 @@ def _check_report_problem(
                 "settings as ready, using a local coordinator for delegated stages.")
     if report.settings_sha256 is None:
         return f"check receipt is missing its settings fingerprint. {recovery}"
-    if report.settings_sha256 != sandbox.settings_fingerprint(config, wt):
+    if report.settings_sha256 != sandbox.settings_fingerprint(config):
         return f"check receipt has an incompatible settings fingerprint. {recovery}"
     return None
 
 
 def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
     report = _load_report(wt)
-    return None if _check_report_problem(report, wt, config, head) else report
+    return None if _check_report_problem(report, config, head) else report
 
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
@@ -444,7 +444,7 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
         return "(no `loopzero check` run recorded)"
     recorded, results = loaded.head, loaded.results
     lines = [f"Recorded for `{recorded[:12]}`" + ("" if recorded == head else " (not current head)")]
-    if _check_report_problem(loaded, wt, config, head, require_pass=False):
+    if _check_report_problem(loaded, config, head, require_pass=False):
         lines[0] += " (unverified, run `loopzero check`)"
     lines += [f"- `{github.redact_credentials(r.command)}`: exit {r.exit_code}"
               for r in results] or ["- (no check commands configured)"]
@@ -1469,15 +1469,11 @@ def _verify_wait_snapshot(
     if args is None:
         return config
     latest = _load_config(args, wt, pin_checks=True, previous=previous or config)
-    changed = "workflow settings"
     if latest == config:
-        if (latest.trusted_base_revision == config.trusted_base_revision
-                or not (config.check_runner or config.inputs)):
-            return latest
-        changed = "check base"
+        return latest
     if _current_check_report(wt, latest, head) is None:
-        raise CliError(f"{changed} changed while waiting; run loopzero check and retry")
-    raise CliError(f"{changed} changed while waiting; retry with the current settings")
+        raise CliError("workflow settings changed while waiting; run loopzero check and retry")
+    raise CliError("workflow settings changed while waiting; retry with the current settings")
 
 
 def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> None:

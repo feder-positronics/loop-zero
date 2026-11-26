@@ -419,7 +419,7 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
     cli._save_review(native[2], result)
     cli._save_report(
         native[2], CheckReport(head, False, (CheckResult("true", 0, 0, ""),),
-                               cli.sandbox.settings_fingerprint(cfg, native[2]))
+                               cli.sandbox.settings_fingerprint(cfg))
     )
     pr = github.pr_view(repo, 7)
     assert (

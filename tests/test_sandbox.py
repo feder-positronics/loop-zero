@@ -874,14 +874,16 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, c
         [result] = sandbox.run_checks(config, git_repo).results
         assert (result.exit_code, result.input_key, result.reused_from) == (0, None, None)
         return
-    assert _current_check_report(git_repo, config, head) is not None
+    previous = _current_check_report(git_repo, config, head)
+    assert previous is not None
 
     tree = git(git_repo, "rev-parse", "HEAD^{tree}").strip()
     new_base = git(git_repo, "commit-tree", tree, "-p", head, "-m", "advance base").strip()
     git(git_repo, "update-ref", base_ref, new_base)
     report = sandbox.run_checks(config, git_repo)
     assert report.ok and report.head == head and not report.dirty
-    assert (report.results[0].reused_from, _current_check_report(git_repo, config, head)) == (None, None)
+    assert report.results[0].reused_from is None
+    assert _current_check_report(git_repo, config, head) == previous
 
 
 def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fetched_base, receipt_path):
@@ -947,7 +949,7 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     _save_report(git_repo, CheckReport(
         git(git_repo, 'rev-parse', 'HEAD').strip(), False,
         (CheckResult(command, 0, 0.0, 'forged pass', key),),
-        sandbox.settings_fingerprint(cfg, git_repo),
+        sandbox.settings_fingerprint(cfg),
     ))
     if symlink:
         (git_repo / '.loopzero').rename(git_repo / 'forged')
@@ -984,15 +986,15 @@ def test_input_key_distinguishes_runners(git_repo, fetched_base, tmp_path):
     assert len(keys) == 3
 
 
-def test_receipt_settings_distinguish_runner_paths(git_repo, monkeypatch, tmp_path):
+def test_receipt_settings_distinguish_runner_paths(monkeypatch, tmp_path):
     cfg = make_config(check_runner=("runner",), env_allowlist=())
     first, second = tmp_path / "first", tmp_path / "second"
     first.touch()
     second.touch()
     monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(first))
-    original = sandbox.settings_fingerprint(cfg, git_repo, base="base")
+    original = sandbox.settings_fingerprint(cfg)
     monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(second))
-    assert sandbox.settings_fingerprint(cfg, git_repo, base="base") != original
+    assert sandbox.settings_fingerprint(cfg) != original
 
 
 @pytest.mark.parametrize("change", ["target", "content"])

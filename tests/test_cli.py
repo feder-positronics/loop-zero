@@ -297,7 +297,7 @@ def arm_readiness(
         config = cli._load_config(SimpleNamespace(config=None, command="ready"), wt, pin_checks=True)
         results = tuple(CheckResult(command, local_exit, 0.1, "") for command in config.checks)
         cli._save_report(
-            wt, CheckReport(head, dirty, results, cli.sandbox.settings_fingerprint(config, wt))
+            wt, CheckReport(head, dirty, results, cli.sandbox.settings_fingerprint(config))
         )
 
 
@@ -554,7 +554,7 @@ def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, ca
         cli._save_report(wt, CheckReport(head, False, (
             CheckResult("echo ok", 0, 999.0, "ok"),
             CheckResult("test -f README.md", 0, 999.0, ""),
-        ), cli.sandbox.settings_fingerprint(config, wt)))
+        ), cli.sandbox.settings_fingerprint(config)))
     arm_pr_body_patch(gh, head)
     assert run(capsys, "pr")[0] == 0
     body = json.loads(gh.calls[-1]["--input"])["body"]
@@ -673,7 +673,7 @@ def test_check_hour_long_stage_transcript(wt, head, gh, capsys, monkeypatch):
                 pass
             status(f"stage {ordinal}/24: exit 0 ({duration:.1f}s)")
             results.append(CheckResult(command, 0, duration, ""))
-        return CheckReport(head, False, tuple(results), sandbox.settings_fingerprint(cfg, path))
+        return CheckReport(head, False, tuple(results), sandbox.settings_fingerprint(cfg))
 
     monkeypatch.setattr(sandbox, "run_checks", run_checks)
     code, out, err = run(capsys, "check")
@@ -942,7 +942,7 @@ def test_readiness_rejects_existing_empty_check_receipt(wt: Path, repo: Path) ->
     args = SimpleNamespace(config=None, command="ready")
     config = cli._load_config(args, wt, pin_checks=True)
     head = head_of(wt)
-    cli._save_report(wt, CheckReport(head, False, (), cli.sandbox.settings_fingerprint(config, wt)))
+    cli._save_report(wt, CheckReport(head, False, (), cli.sandbox.settings_fingerprint(config)))
 
     assert cli._current_check_report(wt, config, head) is None
 
@@ -1071,7 +1071,7 @@ def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, 
     cfg = config.load(private)
     head = head_of(wt)
     results = (CheckResult(command, 7, 0.1, ""), CheckResult("test -f README.md", 0, 0.1, ""))
-    cli._save_report(wt, CheckReport(head, False, results, cli.sandbox.settings_fingerprint(cfg, wt)))
+    cli._save_report(wt, CheckReport(head, False, results, cli.sandbox.settings_fingerprint(cfg)))
 
     if refresh:
         git(wt, "push", "-q", "-u", "origin", "lz/t1")
@@ -3173,6 +3173,20 @@ def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, 
     assert run(capsys, "ready")[0] == 0
 
 
+def test_ready_receipt_follows_effective_policy_when_main_advances(wt, repo, gh, head, capsys):
+    policy = WORKFLOW.replace("[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]')
+    publish_workflow(wt, policy)
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    expect_cli(capsys, 0, "check", stdout_contains=("receipt produced:",))
+
+    git(repo, "commit", "-qm", "advance main without changing policy", "--allow-empty")
+    git(repo, "push", "-q", "origin", "main")
+    expect_cli(capsys, 0, "ready", stdout_contains=("receipt accepted:",))
+
+    publish_workflow(wt, policy.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "changed" }'))
+    expect_cli(capsys, 1, "ready", stdout_contains=("incompatible settings fingerprint",))
+
+
 @pytest.mark.parametrize("base_sensitive", [False, True])
 def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     if base_sensitive:
@@ -3183,11 +3197,8 @@ def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     git(repo, "commit", "-qm", "advance base without editing policy", "--allow-empty")
     git(repo, "push", "-q", "origin", "main")
 
-    if base_sensitive:
-        with pytest.raises(cli.CliError, match="check base changed while waiting; run loopzero check"):
-            cli._verify_wait_snapshot(args, wt, config, head, head)
-    else:
-        cli._verify_wait_snapshot(args, wt, config, head, head)
+    latest = cli._verify_wait_snapshot(args, wt, config, head, head)
+    assert latest == config and latest.trusted_base_revision != config.trusted_base_revision
 
 
 @pytest.mark.parametrize("fixed", [False, True])
