@@ -358,7 +358,6 @@ def expect_cli(capsys, exit_code, *argv, stdout=None, stderr=None, stdout_contai
     return out, err
 
 
-# Transcript size regressions
 # --- start / check --------------------------------------------------------------------
 
 
