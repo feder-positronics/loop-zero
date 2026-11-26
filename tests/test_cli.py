@@ -1981,7 +1981,7 @@ def conflict_merge(wt, repo):
     return reviewed
 
 
-@pytest.mark.parametrize("case", ["verified", "unverified", "second parent", "rewritten"])
+@pytest.mark.parametrize("case", ["verified", "unverified", "second parent", "rewritten", "empty"])
 def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isolated_git, case):
     if case == "second parent":
         reviewed = head_of(wt)
@@ -1992,6 +1992,11 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
     elif case == "rewritten":
         base = reviewed = head_of(wt)
         git(wt, "commit", "--amend", "-qm", "rewritten feature")
+    elif case == "empty":
+        reviewed = head_of(wt)
+        commit_file(repo, "new-base.txt", "new base\n", "advance base cleanly")
+        base = head_of(repo)
+        git(wt, "merge", "--no-ff", "--no-edit", base)
     else:
         reviewed = conflict_merge(wt, repo)
         (wt / ".gitmodules").write_text('[submodule "dep"]\npath = dep\nurl = ../dep\nignore = all\n')
@@ -2009,6 +2014,8 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
             assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
             assert "git reflog" in err and "open a new PR" in err
             assert "run `loopzero pr`, then `loopzero review` before merging main" in err
+        elif case == "empty":
+            assert f"nothing to review since {reviewed[:12]}" in err and "`loopzero ready`" in err
         else:
             assert f"{reviewed[:12]} must be on the first-parent history" in err
             assert "GitHub objects may be unavailable or exceed verification limits" in err
@@ -2123,18 +2130,20 @@ def configure_review_publisher(wt, publisher):
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
 
 
-@pytest.mark.parametrize("publisher, allowed", [("app[bot]", True), (LOGIN, False)])
+@pytest.mark.parametrize("publisher, allowed", [("app[bot]", True), (LOGIN, False), ("other[bot]", False)])
 def test_review_publisher_check_uses_app_identity(
     wt: Path, gh: FakeGh, fake_bin: Path, app_token_helper, capsys,
     publisher: str, allowed: bool,
 ) -> None:
-    app_token_helper()
+    app_token_helper("exit 1" if publisher == "other[bot]" else "echo synthetic-app-token")
     configure_review_publisher(wt, publisher)
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
     _, err = expect_cli(capsys, 0 if allowed else 1, "review")
     if not allowed:
-        assert "not a configured review publisher" in err
+        assert "GitHub login 'app[bot]' is not a configured review publisher" in err
+        assert f"Configured publishers: {publisher}" in err
+        assert ("App token helper" in err) is (publisher == "other[bot]")
 
 
 @pytest.mark.parametrize("after_review", ["app[bot]", "other[bot]", "helper fails"])
@@ -4157,15 +4166,18 @@ REPLY_ACCEPTED = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id":
 THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
 
 
-@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "retry", "unknown"])
-def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, monkeypatch, outcome) -> None:
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "retry", "unknown", "missing", "missing-required"])
+def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh: FakeGh, capsys, monkeypatch, outcome) -> None:
+    if outcome == "missing-required":
+        publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', 'required_ci = ["Loop-zero Eligibility"]'))
     sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
     finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
     listing, backoffs = threads_json({**finding_pr, "path": "src/Łódź.py"}), []
     gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
                listing if outcome == "remaining" else threads_json())
     transient = outcome in {"applied", "retry", "unknown"}
-    gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": "HTTP 503" if transient else "HTTP 403"} if transient or outcome == "denied" else "", "")
+    error_status = 503 if transient else {"denied": 403, "missing": 404, "missing-required": 404}.get(outcome)
+    gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": f"HTTP {error_status}"} if error_status else "", "")
     monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
     runs = [] if outcome == "retry" else [{"display_title": "Refresh eligibility for PR #7" if outcome == "applied" else "unknown"}]
     monkeypatch.setattr(github.time, "time", lambda: 1795640554)
@@ -4183,12 +4195,15 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: Fak
     dispatches = [c["argv"] for c in gh.calls if ELIGIBILITY_DISPATCH in c["argv"]]
     assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "retry": 2}.get(outcome, 1)
     assert backoffs == ([5] if transient else [])
-    if outcome in {"denied", "unknown"}:
+    if outcome == "missing-required":
+        assert code == 1 and "Check that eligibility.yml exists" in err and "before retrying" not in err
+    elif outcome in {"denied", "unknown"}:
         assert code == 1 and "is resolved." in err and ("HTTP 403" if outcome == "denied" else "identify all recent refresh runs") in err
         assert f"gh api -X POST {ELIGIBILITY_DISPATCH} -f ref=main -f 'inputs[pr]=7'" in err
     else:
         assert (code, err) == (0, "")
-        assert out.splitlines()[1:] == ([] if outcome == "remaining" else ["refreshed Loop-zero Eligibility for PR #7"])
+        status = {"remaining": [], "missing": ["Hosted eligibility workflow could not be found. Finding resolution is complete."]}
+        assert out.splitlines()[1:] == status.get(outcome, ["refreshed Loop-zero Eligibility for PR #7"])
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])

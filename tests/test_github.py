@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import pytest
 
-from loopzero import github
+from loopzero import eligibility, github
 from loopzero.types import Finding, ReviewResult
 
 REPO = "acme/widgets"
@@ -476,16 +476,29 @@ def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: s
     ([{"filename": "img.png"}, {"filename": "src/d.py", "patch": "@@ -3,0 +4,2 @@\n+p\n+q"}],
      "important", ("src/d.py", 4)),
     ([{"filename": "img.png"}], "critical", None),
-], ids=["skip-image", "no-hunks"])
-def test_post_review_requires_diff_hunk(gh: FakeGh, files, severity, anchor):
+    ([{"filename": "removed.py", "patch": "@@ -1 +0,0 @@\n-old"}], "critical", None),
+], ids=["skip-image", "no-hunks", "deletion-only"])
+def test_post_review_preserves_blocking_findings_without_an_anchor(gh: FakeGh, monkeypatch, files, severity, anchor):
     arm_review(gh, files=files)
     result = review(findings=(Finding(severity, None, None, "G", ""),))
+    marker = f"<!-- loopzero:review v=1 head={HEAD} kind=primary source=model -->"
+    github.post_review(REPO, 7, HEAD, result, marker)
     if anchor is None:
-        with pytest.raises(github.GhError, match="no diff hunks"):
-            github.post_review(REPO, 7, HEAD, result)
-        assert calls_for(gh, REVIEWS_KEY) == []
+        payload, = review_payloads(gh)
+        assert payload["comments"] == [] and payload["body"].startswith(github.BODY_BLOCKERS)
+        assert "**critical**: G" in payload["body"]
+        published = {"body": payload["body"], "user": {"login": "publisher"},
+                     "state": "COMMENTED", "commit_id": HEAD}
+        assert eligibility.eligible_review([published], HEAD, ("publisher",)) is published
+        monkeypatch.setattr(github, "open_blocking_findings", lambda *_: [])
+        for head in (HEAD, "b" * 40):
+            evidence = eligibility.readiness_review([published], head, ("publisher",), repo=REPO, number=7,
+                                                     base_branch="main")
+            pr = github.PR(7, f"https://github.com/{REPO}/pull/7", head, "main", False, "OPEN", "MERGEABLE")
+            result = github.readiness(REPO, pr, "main", (), head, publishers=("publisher",),
+                                      review_blocker=eligibility.body_blocker(evidence))
+            assert not result.ready and "blocking findings in the review body" in result.reasons[0]
     else:
-        github.post_review(REPO, 7, HEAD, result)
         (comment,) = comments_posted(gh)
         assert (comment["path"], comment["line"]) == anchor
         assert "subject_type" not in comment
@@ -1061,7 +1074,7 @@ def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
 
 
 @pytest.mark.parametrize(("metadata", "reason"), [
-    ({"mergeStateStatus": "BEHIND"}, "PR #7 is behind main. Finish any pending delta review, then run `git fetch origin main`, `git merge origin/main`, `loopzero check` and `loopzero pr` before retrying readiness."),
+    ({"mergeStateStatus": "BEHIND"}, "PR #7 is behind main. Run `git fetch origin main`, `git merge origin/main`, `loopzero check` and `loopzero pr` before retrying readiness."),
     ({"mergeable": "CONFLICTING"}, "PR #7 has merge conflicts with main"),
     ({"state": "MERGED"}, "PR #7 is MERGED, not open"),
 ], ids=["behind-base", "merge-conflict", "merged-pr"])

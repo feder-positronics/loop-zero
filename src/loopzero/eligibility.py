@@ -22,7 +22,7 @@ CONTEXT = "Loop-zero Eligibility"
 
 def leading_marker(body: str) -> re.Match[str] | None:
     """The review marker opening the publisher's leading machine block; prose never counts."""
-    block, span = runners.leading_review_block(body if isinstance(body, str) else "")
+    block, span = runners.leading_review_block(body.removeprefix(github.BODY_BLOCKERS) if isinstance(body, str) else "")
     if not block or len(REVIEW_MARKER_RE.findall(span)) != 1:
         return None
     return REVIEW_MARKER_RE.fullmatch(block[0])
@@ -47,7 +47,7 @@ def review_envelopes(body: str) -> tuple[str, list[dict]]:
 def review_projection(review: dict, head: str, repo: str, number: int):
     """Only the anchored leading machine block; model prose/fences are never searched."""
     body = review.get("body") or ""
-    block, span = runners.leading_review_block(body)
+    block, span = runners.leading_review_block(body.removeprefix(github.BODY_BLOCKERS))
     positions = [i for i, line in enumerate(block) if line.lstrip().startswith("<!-- loopzero:codex-evidence")]
     # Retired pair markers must never fall back to ordinary review evidence.
     if any("source=pair" in marker[0] for marker in REVIEW_MARKER_RE.finditer(span)):
@@ -166,9 +166,15 @@ def approved_delta(reviews: list[dict], head: str, publishers: tuple[str, ...], 
                 and _summary_verdict(review["body"], "delta").startswith("approve** ("))
 
 
+def body_blocker(review: dict | None) -> str | None:
+    if review and review["body"].startswith(github.BODY_BLOCKERS):
+        return "blocking findings in the review body; push fixes before requesting another review"
+    return None
+
+
 def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
                      repo: str, number: int, base_branch: str) -> dict | None:
-    """An eligible review at the current head or an ancestor that covers it."""
+    """The review that covers or explicitly blocks this head."""
     trusted = {login.casefold() for login in publishers}
     marked = [r for r in reviews if (r.get("user") or {}).get("login", "").casefold() in trusted
               and "loopzero:review" in (r.get("body") or "")]
@@ -181,6 +187,8 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     reviewed = marker[1]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
         return None
+    if body_blocker(latest):
+        return latest
     if marker[2] == "primary":
         verdict = _summary_verdict(latest["body"], "primary")
         state = latest.get("state")
@@ -235,7 +243,7 @@ def evaluate(repo: str, number: int, head: str, base: str,
     review = readiness_review(reviews, head, publishers, repo=repo, number=number, base_branch=base)
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head,
-                              publishers=publishers)
+                              review_blocker=body_blocker(review), publishers=publishers)
     current = github.pr_view(repo, number) if snapshot is None else pr
     if snapshot is None and source_fingerprint(current) != source_fingerprint(pr):
         return github.Readiness(False, ("source changed during eligibility refresh",))

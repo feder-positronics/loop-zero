@@ -19,7 +19,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    block. Drafts need no approving review.
 4. `loopzero review` runs a reviewer model's own CLI (a native review), by
    default from a family independent of the writers, on the exact head and posts
-   one GitHub review with inline findings. Approval exits 0, changes requested 5.
+   one GitHub review with inline findings. If there is no commentable line,
+   blocking findings go in the review body and need a reviewed fix. Approval
+   exits 0, changes requested 5.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
    passes. A PR whose only blockers are missing or skipped required checks
    (with or without pending mergeability) also leaves draft but is not ready

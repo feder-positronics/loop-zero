@@ -301,7 +301,7 @@ def _readiness(
         review_age = 0  # HTTP Date rounds down to the second.
     result = github.readiness(
         config.repo, pr, config.base_branch, config.required_ci,
-        head if review else None, review_at=review_at,
+        head if review else None, review_at=review_at, review_blocker=eligibility.body_blocker(review),
         ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
@@ -795,7 +795,9 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     if config.review_publishers and publisher.casefold() not in {
         login.casefold() for login in config.review_publishers
     }:
-        raise CliError("current GitHub login is not a configured review publisher")
+        helper = " The App token helper ~/.config/loopzero/app-token did not supply a token." if not token else ""
+        raise CliError(f"GitHub login {publisher!r} is not a configured review publisher. "
+                       f"Configured publishers: {', '.join(config.review_publishers)}.{helper}")
     saved = [kind for kind, exists in zip(kinds, saved_files, strict=True) if exists] if args.repost else []
     if len(saved) > 1:
         raise CliError("multiple saved reviews for HEAD; publication is ambiguous")
@@ -1032,16 +1034,19 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
             f"run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR"
         )
     if not worktree.merges_since(wt, since):
-        return worktree.diff_since(wt, since)
-    patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
-             if number is not None else None)
-    if patch is None:
-        raise CliError(
-            f"could not verify merge history: {since[:12]} must be on the first-parent history and "
-            f"merged parents must come from {config.base_branch}. Check the first-parent log and merged parents. "
-            "If the history is correct, GitHub objects may be unavailable or exceed verification limits. "
-            "Open a new PR from the current base for a fresh review if verification still fails."
-        )
+        patch = worktree.diff_since(wt, since)
+    else:
+        patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
+                 if number is not None else None)
+        if patch is None:
+            raise CliError(
+                f"could not verify merge history: {since[:12]} must be on the first-parent history and "
+                f"merged parents must come from {config.base_branch}. Check the first-parent log and merged parents. "
+                "If the history is correct, GitHub objects may be unavailable or exceed verification limits. "
+                "Open a new PR from the current base for a fresh review if verification still fails."
+            )
+    if not patch:
+        raise CliError(f"nothing to review since {since[:12]}; run `loopzero ready` or push the fixes first")
     return patch
 
 
@@ -1905,8 +1910,11 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             f"Then, if no findings remain, run `{retry}`."
         ) from exc
     if not remaining:
-        github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers)
-        print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
+        if github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers,
+                                      required=eligibility.CONTEXT in config.required_ci):
+            print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
+        else:
+            print("Hosted eligibility workflow could not be found. Finding resolution is complete.")
     return 0
 
 
