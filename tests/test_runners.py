@@ -625,7 +625,7 @@ def test_claude_bad_severity(fake_bin: Path, tmp_path: Path) -> None:
 
 CLAUDE_EXPIRED_OAUTH = {
     "is_error": True, "api_error_status": 401, "terminal_reason": "api_error",
-    "result": "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.",
+    "result": "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue. Token sk-ant-FAKE0123.",
 }
 
 
@@ -653,6 +653,8 @@ def test_claude_classifies_error_envelopes(fake_bin, tmp_path, exit_code, output
         _review("claude", tmp_path)
     if error is RunnerBadOutput:
         assert not isinstance(raised.value, RunnerUsageLimit)
+    if output is CLAUDE_EXPIRED_OAUTH:
+        assert "Token [REDACTED]." in str(raised.value)
 
 
 @pytest.mark.parametrize("family,message", [

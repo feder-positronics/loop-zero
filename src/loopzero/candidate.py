@@ -80,6 +80,14 @@ def _require(condition: bool, message: str, error: type[CandidateError] = Candid
         raise error(message)
 
 
+def _field(value: object, name: str) -> object:
+    return value.get(name) if isinstance(value, dict) else None
+
+
+def _matches(pattern: re.Pattern[str], value: object) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
 def _identity(actor: object) -> tuple[object, object, object, object]:
     if not isinstance(actor, dict):
         return (None, None, None, None)
@@ -151,8 +159,8 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
     return candidate_id, sorted(source_numbers), sorted(missing)
 
 
-def _repo_identity(repo: JsonObject) -> tuple[object, object]:
-    return repo.get("id"), repo.get("full_name")
+def _repo_identity(repo: object) -> tuple[object, object]:
+    return _field(repo, "id"), _field(repo, "full_name")
 
 
 def _candidate_snapshot(
@@ -179,25 +187,14 @@ def _candidate_snapshot(
 
 
 def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
-    head = source.get("head")
     base = source.get("base")
-    base = base if isinstance(base, dict) else {}
-    base_repo = base.get("repo")
+    base_repo = _field(base, "repo")
     labels = source.get("labels", [])
     if not isinstance(labels, list) or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels):
         raise CandidateError("invalid source PR labels")
-    return (
-        source.get("number"),
-        source.get("merged"),
-        source.get("mergeable") is False,
-        tuple(label["name"] for label in labels),
-        source.get("state"),
-        source.get("draft"),
-        source.get("body"),
-        head.get("sha") if isinstance(head, dict) else None,
-        base.get("ref"),
-        *_repo_identity(base_repo if isinstance(base_repo, dict) else {}),
-    )
+    return (source.get("number"), source.get("merged"), source.get("mergeable") is False,
+            tuple(label["name"] for label in labels), source.get("state"), source.get("draft"), source.get("body"),
+            _field(source.get("head"), "sha"), _field(base, "ref"), *_repo_identity(base_repo))
 
 
 def _lookup_source(github_get: GitHubGet, repo: str, number: int) -> JsonObject:
@@ -220,12 +217,8 @@ def _attest_source(
         f"source PR #{number} is not open",
         CandidateRaceError if source.get("merged") is True else CandidateError,
     )
-    head = source.get("head")
-    base = source.get("base")
-    _require(
-        isinstance(head, dict) and isinstance(base, dict),
-        f"source PR #{number} refs are missing",
-    )
+    head, base = source.get("head"), source.get("base")
+    _require(isinstance(head, dict) and isinstance(base, dict), f"source PR #{number} refs are missing")
     base_repo = base.get("repo")
     _require(
         base.get("ref") == base_branch
@@ -234,17 +227,13 @@ def _attest_source(
         f"source PR #{number} does not target this repository's {base_branch} branch",
     )
     source_sha = head.get("sha")
-    _require(
-        isinstance(source_sha, str) and _SHA.fullmatch(source_sha) is not None,
-        f"source PR #{number} has an invalid head",
-    )
+    _require(_matches(_SHA, source_sha), f"source PR #{number} has an invalid head")
     comparison = _object(
         github_get(f"/repos/{repository['full_name']}/compare/{source_sha}...{candidate_sha}"),
         "GitHub compare returned an invalid payload",
     )
-    merge_base = comparison.get("merge_base_commit")
     _require(comparison.get("status") in {"ahead", "identical"}
-             and isinstance(merge_base, dict) and merge_base.get("sha") == source_sha,
+             and _field(comparison.get("merge_base_commit"), "sha") == source_sha,
              f"source PR #{number} head {source_sha} is not an ancestor of the candidate")
     return source_sha
 
@@ -426,8 +415,7 @@ def _attest_candidate_once(
     _require(event.get("action") in {"opened", "synchronize"},
              "Candidate attestation requires its creation or head-update event")
     full_name = repository.get("full_name")
-    _require(isinstance(full_name, str) and _REPOSITORY.fullmatch(full_name) is not None,
-             "GitHub event repository name is invalid")
+    _require(_matches(_REPOSITORY, full_name), "GitHub event repository name is invalid")
     event_head = _object(event_pr.get("head"), "GitHub event candidate head is missing")
     event_ref = event_head.get("ref")
     _require(isinstance(event_ref, str) and event_ref.startswith(QUEUE_BRANCH_PREFIX),
@@ -435,9 +423,8 @@ def _attest_candidate_once(
     owner, repo = full_name.split("/", 1)
 
     app = _object(github_get("/apps/mergify"), "GitHub App lookup is invalid")
-    app_owner = app.get("owner")
     _require(app.get("id") == MERGIFY_APP_ID and app.get("slug") == "mergify"
-             and isinstance(app_owner, dict) and app_owner.get("login") == MERGIFY_APP_OWNER,
+             and _field(app.get("owner"), "login") == MERGIFY_APP_OWNER,
              "Could not resolve the official Mergify GitHub App")
     expected_identity = _identity(_object(github_get("/users/mergify%5Bbot%5D"), "GitHub bot lookup is invalid"))
     _require(expected_identity == (MERGIFY_BOT_ID, MERGIFY_BOT_LOGIN, "Bot", MERGIFY_APP_URL),
@@ -450,8 +437,7 @@ def _attest_candidate_once(
     candidate_number = event_pr.get("number")
     candidate_sha = event_head.get("sha")
     _require(isinstance(candidate_number, int) and candidate_number > 0, "Candidate PR number is invalid")
-    _require(isinstance(candidate_sha, str) and _SHA.fullmatch(candidate_sha) is not None,
-             "Candidate head SHA is invalid")
+    _require(_matches(_SHA, candidate_sha), "Candidate head SHA is invalid")
     candidate_path = f"/repos/{full_name}/pulls/{candidate_number}"
     def recheck_candidate(message: str = "GitHub candidate lookup returned an invalid payload") -> None:
         candidate = _object(github_get(candidate_path), message)
@@ -498,8 +484,7 @@ def _attest_candidate_once(
             with contextlib.suppress(Exception):
                 current = _lookup_source(github_get, full_name, number)
             if (isinstance(current, dict) and current.get("merged") is True
-                    and isinstance(current.get("head"), dict)
-                    and current["head"].get("sha") == source_sha):
+                    and _field(current.get("head"), "sha") == source_sha):
                 raise CandidateRaceError(f"source PR #{number} landed during attestation") from exc
             raise
 
@@ -507,7 +492,7 @@ def _attest_candidate_once(
         try:
             base_ref = _object(base_before, f"{base_branch} ref unavailable")
             base_sha = _object(base_ref.get("object"), f"{base_branch} object unavailable").get("sha")
-            _require(isinstance(base_sha, str) and _SHA.fullmatch(base_sha) is not None, f"invalid {base_branch} head")
+            _require(_matches(_SHA, base_sha), f"invalid {base_branch} head")
             _verify_tree(full_name, base_sha, candidate_sha,
                          [snapshot[0] for snapshot in source_snapshots.values()])
             _require(
@@ -531,11 +516,8 @@ def _attest_candidate_once(
     recheck_candidate()
     for number, (expected_sha, expected_fingerprint) in source_snapshots.items():
         current = _lookup_source(github_get, full_name, number)
-        current_head = current.get("head")
-        _require(
-            isinstance(current_head, dict) and current_head.get("sha") == expected_sha,
-            f"source PR #{number} head changed during attestation",
-        )
+        _require(_field(current.get("head"), "sha") == expected_sha,
+                 f"source PR #{number} head changed during attestation")
         _require(
             _source_fingerprint(current) == expected_fingerprint,
             f"source PR #{number} metadata changed during attestation",

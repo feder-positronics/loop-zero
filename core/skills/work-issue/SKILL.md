@@ -29,6 +29,9 @@ include required completion in the closing delivery. A child does not own its pa
 Recheck collisions, live acceptance, prior delivery and ownership before
 publication and merge. Reconcile changes before proceeding.
 On approval, run readiness at the approved head and defer optional changes.
+Before queueing, check the candidate merged with the current base against
+every repository size cap, including the combined effect of any batch.
+Verify the replacement is installed and works before retiring a deployment workaround.
 Before a source edit for [delta](../../CONTRACT.md#review-budget), name the unmet
 criterion or verified defect. Own review, CI and post-merge acceptance waits.
 Use the [acceptance evidence](reference.md#acceptance-evidence) and
