@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -73,7 +74,11 @@ _retry_sleep = time.sleep
 
 
 def _open(request: urllib.request.Request):
-    return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    try:
+        return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    except ValueError:
+        # The HTTP client can include the Authorization value in a header error.
+        raise MergifyError("Mergify API request has an invalid URL or header") from None
 
 
 def api_get(repo: str, suffix: str) -> object | None:
@@ -96,7 +101,11 @@ def api_get(repo: str, suffix: str) -> object | None:
                 return None
             if delay is None or not (exc.code >= 500 or exc.code == 429):
                 raise MergifyError(f"Mergify queue lookup failed with HTTP {exc.code}") from exc
-        except (OSError, ValueError, http.client.IncompleteRead) as exc:
+        except (OSError, http.client.IncompleteRead) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if delay is None or isinstance(reason, ssl.SSLCertVerificationError):
+                raise MergifyError(f"Mergify queue transport failed: {reason}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             if delay is None:
                 raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
         _retry_sleep(delay)
@@ -300,6 +309,8 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
         ("**The failure is in this pull request.** It failed tested alone on top of ", "isolated"),
         ("**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.", "stacked"),
     ) if any(line.startswith(prefix) for line in body.splitlines())), "")
+    if isinstance(reason, dict) and reason.get("code") == "CONFLICT_WITH_BASE_BRANCH":
+        attribution = "base_conflict"
     return Departure(f"{url}{latest['id']}", names, attribution)
 
 
