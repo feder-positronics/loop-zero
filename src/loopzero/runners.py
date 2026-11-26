@@ -1398,17 +1398,11 @@ def _summarize_deleted(block: str) -> str:
     if "\ndeleted file mode " not in block and "\n+++ /dev/null" not in block:
         return block
     header = block.partition("\n")[0]
-    # Both sides of a deletion header spell the same path.
-    match = re.fullmatch(r'diff --git (?:"a/(?P<quoted>.*)" "b/(?P=quoted)"|a/(?P<plain>.*) b/(?P=plain))', header)
-    path = "(unknown file)"
-    if match:
-        quoted = match["quoted"]
-        path = (codecs.escape_decode(quoted.encode())[0].decode(errors="replace")
-                if quoted is not None else match["plain"])
-    deleted = sum(
-        1 for line in block.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-    )
+    match = re.fullmatch(r'diff --git ("?)a/(.*)\1 \1b/\2\1', header)
+    path = match[2] if match else "(unknown file)"
+    if match and match[1]:
+        path = codecs.escape_decode(path.encode())[0].decode(errors="replace")
+    deleted = sum(line.startswith("-") and not line.startswith("---") for line in block.splitlines())
     return f"{header}\n{path}: deleted, {deleted} lines\n"
 
 
