@@ -204,8 +204,7 @@ def test_hosted_review_coverage_after_source_head_changes(
 
     ordinary = change == "ordinary"
     state = ("failure" if candidate else "pending") if ordinary else "success"
-    check_source(publisher, ["pending", state], error=hosted.LoopZeroError if state == "failure" else None,
-                 match="no review recorded")
+    check_source(publisher, ["pending", state])
 
 
 def test_merged_source_refresh_publishes_nothing(publisher):
@@ -296,8 +295,8 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
 
 
 @pytest.mark.parametrize("case,error,message", [
-    ("valid", None, ""), ("trunk", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
-    ("hold", hosted.LoopZeroError, "source #101: PR #101 has a merge-authority hold"),
+    ("valid", None, ""), ("trunk", None, ""), ("policy", None, ""),
+    ("hold", None, ""),
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
@@ -374,6 +373,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         assert hosted.main() == int(case in {"api", "mergify"})
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
               "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
+    rejected = {"policy": "source #101: no review recorded", "hold": "source #101: PR #101 has a merge-authority hold"}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":
@@ -385,7 +385,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         assert [call[-1] for call in published] == [
             "Refreshing live source review evidence", "All attested candidate sources are reviewed"]
     elif case not in states:
-        assert published[-1][-1] == "Eligibility refresh failed; inspect workflow logs"
+        assert published[-1][-1].startswith(rejected[case]) if case in rejected else published[-1][-1] == "Eligibility refresh failed; inspect workflow logs"
 
 
 def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
