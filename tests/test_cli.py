@@ -3739,7 +3739,7 @@ sys.exit(cli.main(["status"]))
         child = None
         try:
             # Read until the supervisor enters communicate on the offline gh child.
-            for _ in range(6):
+            for _ in range(7):
                 assert select([process.stdout], [], [], 5)[0]
                 line = process.stdout.readline().strip()
                 if line.isdigit():
