@@ -1133,10 +1133,9 @@ def _save_review_failure_output(wt: Path, head: str, kind: str, errors: dict[str
         return ""
     path = wt / ".loopzero" / f"reviewer-output-{head[:12]}-{kind}.json"
     try:
-        with _lock_task_state(wt) as directory:
-            _write_json_atomically(directory, path.name, fragments)
-    except OSError as exc:
-        return f"\nCould not save reviewer output: {exc.strerror or exc}"
+        worktree.write_local_state(wt, path.name, json.dumps(fragments, indent=2) + "\n", private=True)
+    except (OSError, worktree.WorktreeError) as exc:
+        return f"\nCould not save reviewer output: {_one_line(exc)}"
     return f"\nReviewer output: {path.relative_to(wt)}"
 
 
