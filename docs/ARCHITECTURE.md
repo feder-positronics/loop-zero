@@ -98,10 +98,11 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
-3. Branch PR lookup starts with the remote head and GitHub's commit-to-PR
-   endpoint. It matches the source branch and repository, then re-reads PR
-   detail. Lookup falls back to listing open PRs if the branch or matching open
-   PR is absent, then checks the newest closed PR when requested. Check refresh
+3. Branch PR lookup uses GitHub's commit-to-PR endpoint. Ready and merge start
+   with the local HEAD and verify it still matches the PR. Other branch lookups
+   resolve the remote head. Lookup matches the source branch and repository,
+   then re-reads PR detail. It falls back to listing open PRs if the branch or a
+   matching open PR is absent, then checks the newest closed PR when requested. Check refresh
    is open-only. Before pushing
    or writing, `pr` requires a confirmed merge or a complete closed-history read
    through GitHub REST. A confirmed merge completes that branch even when a
@@ -131,13 +132,13 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    (unresolved threads a review publisher opened with a head-bound marker line),
    target branch and required CI. Readiness compares parsed instants for verdict
    freshness and uses a valid GitHub response Date during waits. The receipt must record a clean passing run
-   at that head with the current commands and check settings digest. Ready and
+   at that head with the current commands and settings fingerprint. Ready and
    merge validate the PR, head and hold before checking the local receipt.
    An invalid receipt stops the command before it fetches remote readiness
    evidence. Writes to advance readiness or merging recheck the receipt.
    Status continues to collect all readiness diagnostics. A settings
-   change or an older receipt without the digest requires a fresh check. The
-   digest covers execution and stage reuse settings without recording raw
+   change or an older receipt without the fingerprint requires a fresh check. The
+   fingerprint covers execution and stage reuse settings without recording raw
    environment values. For local sandbox receipts it omits inherited `PATH`,
    `LANG`, `LC_ALL`, `TERM`, and `HEAVY_SLOT_GRANTED_CORES` so readiness can
    run in a different host environment. Explicit settings, delegated runner
@@ -156,7 +157,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    that requested changes also requires resolved findings at the reviewed head.
    For check runs with the same name, the latest run (by run ID, then start
    time) decides; a retry supersedes a failure only when it starts after that
-   failure completed. After its own draft-to-ready write, `ready --wait`
+   failure completed. After its own write taking the PR out of draft, `ready --wait`
    revalidates through the same waiter, policy refresh and original deadline.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in

@@ -171,8 +171,8 @@ def _require_task_branch(config: Config, branch: str) -> None:
         raise CliError(f"branch {branch!r} is the configured base; use a task branch")
 
 
-def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, list_only: bool = False) -> github.PR:
-    pr = github.pr_for_branch(config.repo, branch, list_only=list_only)
+def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, head_sha: str | None = None) -> github.PR:
+    pr = github.pr_for_branch(config.repo, branch, head_sha=head_sha)
     if pr is None:
         raise CliError(f"no pull request for {branch}; run `loopzero pr` first")
     if pr.state != "OPEN" and not (allow_merged and pr.state == "MERGED"):
@@ -1213,7 +1213,7 @@ def _pr_readiness(
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
     head = worktree.head(wt)
     _require_task_branch(config, branch)
-    pr = _require_pr(config, branch, allow_merged=allow_merged, list_only=True)
+    pr = _require_pr(config, branch, allow_merged=allow_merged, head_sha=head)
     _require_pushed(pr, head)
     readiness = None if pr.state == "MERGED" else _readiness(
         wt, config, pr, head, workflow_wait=workflow_wait, announce_receipt=True,
@@ -1231,7 +1231,7 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         _repo_root(wt)
         name = worktree.branch(wt)
         worktree.cleanup(wt, pr.head_sha)
-    except (worktree.WorktreeError, OSError) as exc:
+    except (worktree.WorktreeError, CliError, OSError, _proc.ProcTimeout) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
             retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"
