@@ -325,9 +325,22 @@ def _readiness(
 def _check_report_problem(
     report: CheckReport | None, wt: Path, config: Config, head: str, *, require_pass: bool = True,
 ) -> str | None:
-    if (report is None or report.head != head or report.dirty or (require_pass and not report.ok)
-            or tuple(result.command for result in report.results) != config.checks):
+    if report is None:
         return "run loopzero check at this head"
+    if report.head != head:
+        return f"check receipt is for {report.head[:12]}. Run `loopzero check` at {head[:12]}."
+    if report.dirty:
+        return ("check receipt was recorded in a dirty worktree. Run `git status --short`, "
+                "settle the changes, then run `loopzero check`.")
+    commands = tuple(result.command for result in report.results)
+    if (require_pass and not report.ok) or commands != config.checks:
+        if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
+            return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
+        if require_pass and not report.ok:
+            return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
+                    "Retry unchanged only if the failure was transient.")
+        return ("check receipt's plan differs from the trusted workflow. "
+                "Run `loopzero check` with the current workflow.")
     recovery = ("Run loopzero check in this worktree at this head with the same current CLI and effective "
                 "settings as ready, using a local coordinator for delegated stages.")
     if report.settings_sha256 is None:
