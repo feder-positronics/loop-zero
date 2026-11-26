@@ -186,16 +186,13 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
                     "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", "echo hello"]
 
 
-def test_probe_uses_real_flags(git_repo, bwrap_log):
-    sandbox.run_checks(make_config(checks=(), network=True), git_repo)
-    argv = argv_of(bwrap_log)  # only the probe ran
-    assert argv[argv.index("--") + 1 :] == ["true"]
-    assert argv.index("--unshare-all") < argv.index("--share-net") < argv.index("--clearenv")
-
-
-def test_network_binds_resolv_conf_after_run_tmpfs(git_repo, bwrap_log):
-    sandbox.run_checks(make_config(network=True), git_repo)
+@pytest.mark.parametrize("checks", [(), ("echo hello",)], ids=["probe", "stage"])
+def test_network_binds_resolv_conf_after_run_tmpfs(git_repo, bwrap_log, checks):
+    sandbox.run_checks(make_config(checks=checks, network=True), git_repo)
     argv = argv_of(bwrap_log)
+    if not checks:
+        assert argv[argv.index("--") + 1 :] == ["true"]
+    assert argv.index("--unshare-all") < argv.index("--share-net") < argv.index("--clearenv")
     resolv_conf = Path("/etc/resolv.conf")
     resolved = resolv_conf.resolve()
     if resolv_conf.is_symlink() and any(
@@ -204,14 +201,8 @@ def test_network_binds_resolv_conf_after_run_tmpfs(git_repo, bwrap_log):
         source = destination = str(resolved.parent)
     else:
         source, destination = str(resolved), str(resolv_conf)
-    bind_at = next(
-        i
-        for i in range(len(argv) - 2)
-        if argv[i : i + 3] == ["--ro-bind", source, destination]
-    )
-    run_tmpfs_at = next(
-        i for i in range(len(argv) - 1) if argv[i : i + 2] == ["--tmpfs", "/run"]
-    )
+    bind_at = next(i for i, flag in enumerate(argv) if flag == "--ro-bind" and argv[i + 1:i + 3] == [source, destination])
+    run_tmpfs_at = next(i for i, pair in enumerate(itertools.pairwise(argv)) if pair == ("--tmpfs", "/run"))
     assert bind_at > run_tmpfs_at
 
 
@@ -729,11 +720,14 @@ def fetched_base(git_repo):
 
 
 @pytest.fixture
-def cache_check(git_repo):
-    exclude = git_repo / ".git/info/exclude"
-    with exclude.open("a") as stream:
+def receipt_path(git_repo):
+    with (git_repo / ".git/info/exclude").open("a") as stream:
         stream.write("\n.loopzero/\n")
+    return git_repo / ".loopzero/checks.json"
 
+
+@pytest.fixture
+def cache_check(git_repo, receipt_path):
     def cache(config, *, clean=False, verify_reuse=False):
         report = sandbox.run_checks(config, git_repo)
         assert report.ok
@@ -750,7 +744,7 @@ def cache_check(git_repo):
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy'])
-def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change):
+def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change, cache_check, receipt_path):
     cfg = make_config(checks=('echo one', 'echo two'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
@@ -758,11 +752,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     whole = replace(cfg, inputs={'*': ('.',)})
     key = sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     assert key is not None
-    _save_report(git_repo, sandbox.run_checks(cfg, git_repo))
-    receipt = git_repo / '.loopzero/checks.json'
-    git(git_repo, 'config', 'core.excludesFile', str(git_repo / '.git/info/exclude'))
-    with (git_repo / '.git/info/exclude').open('a') as stream:
-        stream.write('\n.loopzero/\n')
+    cache_check(cfg, clean=True)
     if change in {'other', 'input', 'shared', 'dirty_tree'}:
         path = 'README.md' if change in {'input', 'dirty_tree'} else 'src.py' if change == 'other' else change
         (git_repo / path).write_text('new content')
@@ -779,7 +769,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     elif change == 'version':
         monkeypatch.setattr(sandbox, '__version__', 'new')
     else:
-        data = json.loads(receipt.read_text())
+        data = json.loads(receipt_path.read_text())
         if change in {'failed', 'boolean_exit_code'}:
             for row in data['results']:
                 row['exit_code'] = False if change == 'boolean_exit_code' else 1
@@ -790,7 +780,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
         else:
             for row in data['results']:
                 row.pop('input_key')
-        receipt.write_text(json.dumps(data))
+        receipt_path.write_text(json.dumps(data))
     report = sandbox.run_checks(cfg, git_repo, status=(messages := []).append)
     assert [r.command for r in report.results] == list(cfg.checks)
     assert all(bool(r.reused_from) == (change == 'other') for r in report.results)
@@ -850,21 +840,23 @@ def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_ba
     assert report.results[0].reused_from is None
 
 
-@pytest.mark.parametrize("recorded_base", [False, True])
-def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, recorded_base):
-    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+@pytest.mark.parametrize("base", ["tracked", "recorded", "absent"])
+def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, cache_check):
     head = git(git_repo, "rev-parse", "HEAD").strip()
     base_ref = "refs/remotes/origin/main"
-    if recorded_base:
+    if base == "recorded":
         (git_repo / ".loopzero").mkdir()
         (git_repo / ".loopzero/task.md").write_text(f"Base: {head}\n")
-    else:
+    elif base == "tracked":
         git(git_repo, "update-ref", base_ref, head)
 
     config = make_config(inputs={"*": (".",)})
-    _save_report(git_repo, sandbox.run_checks(config, git_repo))
+    cache_check(config, clean=True, verify_reuse=base != "absent")
+    if base == "absent":
+        [result] = sandbox.run_checks(config, git_repo).results
+        assert (result.exit_code, result.input_key, result.reused_from) == (0, None, None)
+        return
     assert _current_check_report(git_repo, config, head) is not None
-    assert sandbox.run_checks(config, git_repo).results[0].reused_from == head
 
     tree = git(git_repo, "rev-parse", "HEAD^{tree}").strip()
     new_base = git(git_repo, "commit-tree", tree, "-p", head, "-m", "advance base").strip()
@@ -874,12 +866,10 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, recorde
     assert (report.results[0].reused_from, _current_check_report(git_repo, config, head)) == (None, None)
 
 
-def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fetched_base):
+def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fetched_base, receipt_path):
     marker = "CHECK_INTEGRATION_SHARD []"
     command = f"echo '{marker}'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
-    with (git_repo / ".git/info/exclude").open("a") as stream:
-        stream.write("\n.loopzero/\n")
     original = sandbox.run_checks(config, git_repo)
     assert original.ok
     legacy = replace(original.results[0], tail=f"{'x' * 20_000}\n{marker}")
@@ -888,7 +878,7 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     git(git_repo, "commit", "--allow-empty", "-m", "advance head")
     _save_report(git_repo, sandbox.run_checks(config, git_repo))
 
-    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
+    receipt = json.loads(receipt_path.read_text())
     assert receipt["head"] == git(git_repo, "rev-parse", "HEAD").strip()
     [result] = receipt["results"]
     assert result["reused_from"] == original.head
@@ -927,16 +917,6 @@ def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkey
     receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
     [saved] = receipt["results"]
     assert saved.get("input_key") is None and saved.get("reused_from") is None
-
-
-def test_local_checks_run_fresh_without_a_base(git_repo, bwrap_log, cache_check):
-    config = make_config(inputs={"*": (".",)})
-    cache_check(config)
-
-    second = sandbox.run_checks(config, git_repo)
-    assert second.ok
-    assert second.results[0].input_key is None
-    assert second.results[0].reused_from is None
 
 
 @pytest.mark.parametrize('symlink', [False, True])
