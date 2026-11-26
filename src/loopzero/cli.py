@@ -301,9 +301,11 @@ def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
 ) -> github.Readiness:
-    headers: dict[str, str] = {}
     if reviews is None:
+        headers: dict[str, str] = {}
         reviews = _pr_reviews(config.repo, pr.number, response_headers=headers if workflow_wait else None)
+    else:
+        headers = {}
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
