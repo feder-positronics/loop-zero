@@ -13,6 +13,10 @@ from loopzero import config, eligibility, github, mergify
 from loopzero.types import Config, LoopZeroError
 
 
+class _SourcePolicyRejection(candidate_mod.CandidateError, LoopZeroError):
+    """An expected hosted policy rejection, eligible for the landing-race check."""
+
+
 def event_number(event: dict) -> int:
     """Use only GitHub event association or an explicit refresh input, never PR text."""
     if "pull_request" in event:
@@ -80,7 +84,7 @@ def _run(cfg: Config) -> int:
                 result = eligibility.evaluate(cfg.repo, source_number, source["head"]["sha"],
                                               cfg.base_branch, cfg.review_publishers)
                 if not result.ready:
-                    raise LoopZeroError(f"source #{source_number}: " + "; ".join(result.reasons))
+                    raise _SourcePolicyRejection(f"source #{source_number}: " + "; ".join(result.reasons))
             candidate_mod.attest_candidate(
                 event,
                 github_get=lambda path: github.api_get(path.lstrip("/")),

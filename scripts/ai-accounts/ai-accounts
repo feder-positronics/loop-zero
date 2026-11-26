@@ -1078,7 +1078,9 @@ def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None,
         t = threading.Thread(target=pump, daemon=True)
         t.start()
         code = proc.wait()
-        t.join()
+        t.join(timeout=1)
+        if t.is_alive():
+            return code
         text = b"".join(seen).decode("utf-8", "replace")
         retryable = code != 0 and (retry_exit is None or code in retry_exit)
         if (not retryable or attempt == 2 or not model or providers not in PROVIDERS

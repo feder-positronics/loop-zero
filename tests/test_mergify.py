@@ -5,6 +5,7 @@ import http.client
 import io
 import json
 import signal
+import ssl
 import subprocess
 import sys
 import traceback
@@ -41,61 +42,39 @@ def test_malformed_authorization_is_not_logged(monkeypatch, operation, args):
     assert fake_key not in "".join(traceback.format_exception(failure.value))
 
 
-def test_membership_uses_bearer_and_validates_queue(monkeypatch):
+@pytest.fixture
+def request_log(monkeypatch):
     monkeypatch.setenv("MERGIFY_API_KEY", "secret")
     seen = []
 
-    def open_(request):
-        seen.append(request)
-        return response({
-            "number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 2,
-        })
+    def install(payload=None, *, status=None):
+        def open_(request):
+            seen.append(request)
+            if status:
+                raise urllib.error.HTTPError(request.full_url, status, "test response", {}, None)
+            return response(payload)
+        monkeypatch.setattr(mergify, "_open", open_)
+        return seen
 
-    monkeypatch.setattr(mergify, "_open", open_)
+    return install
+
+
+def test_membership_uses_bearer_and_validates_queue(request_log):
+    seen = request_log({"number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 2})
     assert mergify.membership("acme/widgets", 7, "main") == mergify.Membership()
     assert seen[0].full_url == "https://api.mergify.com/v1/repos/acme/widgets/merge-queue/pull/7"
     assert seen[0].headers["Authorization"] == "Bearer secret"
     assert seen[0].headers["User-agent"] == "loopzero"
 
 
-def test_membership_maps_404_only_to_absent(monkeypatch):
-    monkeypatch.setenv("MERGIFY_API_KEY", "secret")
-
-    def missing(request):
-        raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, None)
-
-    monkeypatch.setattr(mergify, "_open", missing)
-    assert mergify.membership("acme/widgets", 7, "main") is None
-
-    def forbidden(request):
-        raise urllib.error.HTTPError(request.full_url, 403, "forbidden", {}, None)
-
-    monkeypatch.setattr(mergify, "_open", forbidden)
-    with pytest.raises(mergify.MergifyError, match="HTTP 403"):
-        mergify.membership("acme/widgets", 7, "main")
-
-
-@pytest.mark.parametrize("phase", ["headers", "body"])
-def test_request_deadline_covers_headers_and_body(monkeypatch, phase):
-    handler = signal.getsignal(signal.SIGALRM)
-
-    def expire():
-        assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= 30
-        signal.raise_signal(signal.SIGALRM)
-
-    def open_(*args, **kwargs):
-        if phase == "headers":
-            expire()
-        return io.BytesIO(b"{}")
-
-    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_))
-    with (
-        pytest.raises(TimeoutError, match="Mergify HTTP request timed out"),
-        mergify._open(urllib.request.Request("https://example.invalid")),
-    ):
-        expire()
-    assert signal.getsignal(signal.SIGALRM) is handler
-    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+@pytest.mark.parametrize("status", [404, 403])
+def test_membership_maps_404_only_to_absent(request_log, status):
+    request_log(status=status)
+    if status == 404:
+        assert mergify.membership("acme/widgets", 7, "main") is None
+    else:
+        with pytest.raises(mergify.MergifyError, match="HTTP 403"):
+            mergify.membership("acme/widgets", 7, "main")
 
 
 def test_api_get_rejects_paths_outside_repository():
@@ -105,15 +84,8 @@ def test_api_get_rejects_paths_outside_repository():
         mergify.api_get("acme/widgets", "/../other")
 
 
-def test_dequeue_posts_to_documented_endpoint(monkeypatch):
-    monkeypatch.setenv("MERGIFY_API_KEY", "secret")
-    seen = []
-
-    def open_(request):  # a transient failure must not repeat the write
-        seen.append(request)
-        raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
-
-    monkeypatch.setattr(mergify, "_open", open_)
+def test_dequeue_posts_to_documented_endpoint(request_log):
+    seen = request_log(status=503)  # a transient failure must not repeat the write
     with pytest.raises(mergify.MergifyError):
         mergify.dequeue("acme/widgets", 7)
     assert (len(seen), seen[0].method, seen[0].full_url.endswith("/pull/7/dequeue")) == (1, "POST", True)
@@ -121,11 +93,12 @@ def test_dequeue_posts_to_documented_endpoint(monkeypatch):
 
 @pytest.fixture
 def queue_api(monkeypatch):
-    monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix: (
-        {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status") else
-        {"configuration": [{"name": "main", "config": {"allow_inplace_checks": True}}]}
-    ))
-    def github_config(text, *, default="main", changed=False, file_overrides=None):
+    def github_config(text, *, default="main", changed=False, file_overrides=None, queues=True, inplace=True):
+        rows = [{"name": "main", "config": {"allow_inplace_checks": inplace}}] if queues else []
+        monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix: (
+            {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status")
+            else {"configuration": rows}
+        ))
         reads = 0
         def get(path):
             nonlocal reads
@@ -162,6 +135,8 @@ UNSAFE_CONFIGS = [
     *((text, {}, False) for text in UNSAFE_CONFIGS),
     (SAFE_CONFIG, {"default": "other"}, False),
     (SAFE_CONFIG, {"changed": True}, False),
+    (SAFE_CONFIG, {"queues": False}, False),
+    (ONE_CHECK, {"inplace": False}, False),
     *((SAFE_CONFIG, {"file_overrides": {key: value}}, False)
       for key, value in (("encoding", "none"), ("type", "symlink"), ("sha", None),
                          ("sha", "z" * 40), ("content", None), ("content", "!"))),
@@ -169,21 +144,6 @@ UNSAFE_CONFIGS = [
 def test_configured_validates_canonical_github_config(queue_api, text, options, accepted):
     queue_api(text, **options)
     assert mergify.configured("acme/widgets", "main", "main") == accepted
-
-
-def test_configured_still_requires_vendor_queue_identity(queue_api, monkeypatch):
-    queue_api(SAFE_CONFIG)
-    monkeypatch.setattr(mergify, "api_get", lambda *_: {"batches": [], "mode": "serial", "configuration": []})
-    assert not mergify.configured("acme/widgets", "main", "main")
-
-
-def test_legacy_false_does_not_license_single_check_source_updates(queue_api, monkeypatch):
-    queue_api(SAFE_CONFIG.replace("checks: 3", "checks: 1"))
-    monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix: (
-        {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status") else
-        {"configuration": [{"name": "main", "config": {"allow_inplace_checks": False}}]}
-    ))
-    assert not mergify.configured("acme/widgets", "main", "main")
 
 
 def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
@@ -275,3 +235,43 @@ def test_api_get_retries_transient_reads(monkeypatch, failure):
     monkeypatch.setattr(mergify, "_credential", lambda: "k")
     assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
     assert calls == ["GET", "GET"]
+
+@pytest.mark.parametrize("reason, expected_sleeps", [
+    ("DNS lookup failed", [2.0, 5.0]),
+    (ssl.SSLCertVerificationError("certificate verification failed"), []),
+])
+def test_api_get_classifies_terminal_transport_failure(monkeypatch, reason, expected_sleeps):
+    sleeps = []
+
+    def fail(_request):
+        raise urllib.error.URLError(reason)
+
+    monkeypatch.setattr(mergify, "_open", fail)
+    monkeypatch.setattr(mergify, "_retry_sleep", sleeps.append)
+    monkeypatch.setattr(mergify, "_credential", lambda: "k")
+    with pytest.raises(mergify.MergifyError, match="transport failed") as info:
+        mergify.api_get("acme/widgets", "/merge-queue/status")
+    assert str(reason) in str(info.value) and sleeps == expected_sleeps
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_request_deadline_covers_headers_and_body(monkeypatch, phase):
+    handler = signal.getsignal(signal.SIGALRM)
+
+    def expire():
+        assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= 30
+        signal.raise_signal(signal.SIGALRM)
+
+    def open_(*args, **kwargs):
+        if phase == "headers":
+            expire()
+        return io.BytesIO(b"{}")
+
+    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_))
+    with (
+        pytest.raises(TimeoutError, match="Mergify HTTP request timed out"),
+        mergify._open(urllib.request.Request("https://example.invalid")),
+    ):
+        expire()
+    assert signal.getsignal(signal.SIGALRM) is handler
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
