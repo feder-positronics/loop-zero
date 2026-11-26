@@ -11,11 +11,13 @@ import shutil
 import signal
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, replace
 from email.utils import formatdate
 from pathlib import Path
 from select import select
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import quote
@@ -2378,32 +2380,27 @@ def test_late_check_preserves_receipt_when_head_moves(wt, gh, capsys, monkeypatc
     old_head, receipt = head_of(wt), wt / ".loopzero/checks.json"
     refreshed = []
     monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *_: refreshed.append(head_of(wt)))
-    if phase != "stage":
-        expect_cli(capsys, 0, "check")
-        saved_receipt = receipt.read_bytes()
+    expect_cli(capsys, 0, "check")
+    saved_receipt = receipt.read_bytes()
     run_stage, run_checks, save_report = cli.sandbox._run_one, cli.sandbox.run_checks, cli._save_report
 
-    def advance_head(*, rerun=True):
-        nonlocal saved_receipt
+    def advance_head():
         git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
-        if rerun:
-            expect_cli(capsys, 0, "check")
-            saved_receipt = receipt.read_bytes()
 
     def during_stage(*args):
         monkeypatch.setattr(cli.sandbox, "_run_one", run_stage)
         advance_head()
         return run_stage(*args)
 
-    def before_save(path, report):
+    def before_save(path, report, **kwargs):
         if report.head == old_head:
             advance_head()
-        return save_report(path, report)
+        return save_report(path, report, **kwargs)
 
     def after_checks(*args, **kwargs):
         report = run_checks(*args, **kwargs)
         assert report.ok
-        advance_head(rerun=False)
+        advance_head()
         return report
 
     if phase == "stage":
@@ -2416,17 +2413,44 @@ def test_late_check_preserves_receipt_when_head_moves(wt, gh, capsys, monkeypatc
     out, err = expect_cli(capsys, 1, "check")
     head = head_of(wt)
     assert receipt.read_bytes() == saved_receipt
+    assert "PASS" not in out and "discarded" in err and old_head in err and head in err
+    assert refreshed == [old_head]
     if phase == "stage":
         assert f"HEAD before: {old_head}; HEAD after: {head}" in err
-        assert refreshed == [head]
+        expect_cli(capsys, 0, "check")
         arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None})
         gh.respond("pr ready", "")
         ready, _ = expect_cli(capsys, 0, "ready", stderr="")
         assert "receipt accepted:" in ready
-    else:
-        assert "PASS" not in out
-        assert "discarded" in err and old_head in err and head in err
-        assert refreshed == ([old_head, head] if phase == "save" else [old_head])
+
+
+@pytest.mark.parametrize("first_exit", [0, 1])
+def test_overlapping_checks_share_only_a_pass(wt, capsys, monkeypatch, first_exit):
+    started, waiting = Event(), Event()
+    original_flock = cli.worktree.fcntl.flock
+
+    def flock(fd, op):
+        if started.is_set():
+            waiting.set()
+        return original_flock(fd, op)
+
+    def stage(_config, _wt, _prefix, command, _timeout):
+        started.set()
+        assert waiting.wait(5)
+        return CheckResult(command, first_exit if run_stage.call_count == 1 else 0, 1.0, "")
+
+    run_stage = Mock(side_effect=stage)
+    monkeypatch.setattr(cli.worktree.fcntl, "flock", flock)
+    monkeypatch.setattr(cli.sandbox, "_run_one", run_stage)
+    monkeypatch.setattr(cli, "_refresh_pr_checks", Mock())
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(cli.main, ["check"])
+        assert started.wait(5)
+        second = pool.submit(cli.main, ["check"])
+        assert (first.result(timeout=10), second.result(timeout=10)) == (first_exit, 0)
+
+    assert [call.args[3] for call in run_stage.call_args_list] == ["echo ok"] * (1 + first_exit) + ["test -f README.md"]
+    assert ("receipt reused:" in capsys.readouterr().out) == (first_exit == 0)
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -4816,19 +4840,20 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys, refresh):
 
 def test_late_checkpoint_preserves_completed_pass(wt, gh, capsys, head, monkeypatch):
     def run_checks(cfg, path, *, progress, status, checkpoint, workflow):
+        locked_fd = checkpoint.keywords["locked_fd"]
         results = tuple(CheckResult(c, 0, 0, "", input_key="key") for c in cfg.checks)
         passed = CheckReport(head, False, results, cli.sandbox.settings_fingerprint(cfg))
         incomplete = CheckResult(cli.sandbox.INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
         partial = replace(passed, results=(results[0], incomplete))
         checkpoint(partial)
         assert cli._load_report(wt) == partial
-        cli._save_report(wt, passed)
+        cli._save_report(wt, passed, locked_fd=locked_fd)
         checkpoint(partial)
         assert cli._current_check_report(wt, cfg, head) == passed
-        cli._save_report(wt, replace(passed, results=results[:1]))
+        cli._save_report(wt, replace(passed, results=results[:1]), locked_fd=locked_fd)
         checkpoint(partial)
         assert cli._load_report(wt) == partial
-        cli._save_report(wt, passed)
+        cli._save_report(wt, passed, locked_fd=locked_fd)
         return replace(passed, results=(replace(results[0], exit_code=1),))
 
     monkeypatch.setattr(cli.sandbox, "run_checks", run_checks)

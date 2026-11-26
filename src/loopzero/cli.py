@@ -417,7 +417,9 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
               f"config=commands-sha256:{digest} environment=unknown")
 
 
-def _save_report(wt: Path, report: CheckReport, *, checkpoint_checks: tuple[str, ...] | None = None) -> str | None:
+def _save_report(
+    wt: Path, report: CheckReport, *, checkpoint_checks: tuple[str, ...] | None = None, locked_fd: int | None = None,
+) -> str | None:
     """Publish the receipt or return the current HEAD if the result is stale."""
     results = [
         {k: v for k, v in dataclasses.asdict(result).items()
@@ -434,7 +436,7 @@ def _save_report(wt: Path, report: CheckReport, *, checkpoint_checks: tuple[str,
                 and tuple(result.command for result in saved.results) == checkpoint_checks)
 
     return worktree.write_local_state(
-        wt, CHECKS_FILE.name, json.dumps(payload, indent=2) + "\n", expected_head=report.head,
+        wt, CHECKS_FILE.name, json.dumps(payload, indent=2) + "\n", expected_head=report.head, locked_fd=locked_fd,
         preserve=preserve_pass if checkpoint_checks is not None else None,
     )
 
@@ -628,12 +630,31 @@ def cmd_check(args: argparse.Namespace) -> int:
     worktree.local_state_files(wt, CHECKS_FILE.name)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
-    report = sandbox.run_checks(
-        config, wt, progress=lambda command: print(f"running: {github.redact_credentials(command)}", flush=True),
-        status=lambda message: print(message, flush=True),
-        checkpoint=lambda partial: _save_report(wt, partial, checkpoint_checks=config.checks),
-        workflow=args.config or f"origin/{config.base_branch}:workflow.toml",
-    )
+    before = _receipt_inode(wt / CHECKS_FILE)
+    with worktree.lock_local_state(wt) as fd:
+        if (_receipt_inode(wt / CHECKS_FILE) != before
+                and (report := _current_check_report(wt, config, worktree.head(wt))) is not None
+                and not worktree.is_dirty(wt) and sandbox.check_inputs_match(config, wt, report)):
+            _print_receipt(wt, report, "reused")
+            print("PASS")
+            return 0
+        report = sandbox.run_checks(
+            config, wt, progress=lambda command: print(f"running: {github.redact_credentials(command)}", flush=True),
+            status=lambda message: print(message, flush=True),
+            checkpoint=partial(_save_report, wt, checkpoint_checks=config.checks, locked_fd=fd),
+            workflow=args.config or f"origin/{config.base_branch}:workflow.toml",
+        )
+        return _finish_check(wt, config, report, fd)
+
+
+def _receipt_inode(path: Path) -> int | None:
+    try:
+        return path.lstat().st_ino
+    except FileNotFoundError:
+        return None
+
+
+def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int) -> int:
     shortened = False
     for result in report.results:
         if result.exit_code != 0:
@@ -653,10 +674,11 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "(use the required groups) so the cache under `[checks] writable` is warm, "
                     "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
                 )
-    if (current_head := _save_report(wt, report)) is not None:
+    if (current_head := _save_report(wt, report, locked_fd=locked_fd)) is not None:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
               file=sys.stderr)
         return 1
+    fcntl.flock(locked_fd, fcntl.LOCK_UN)
     if shortened:
         print(f"Full diagnostic tail: {CHECKS_FILE} (head {report.head})", file=sys.stderr)
     verified = not report.ok or report.settings_sha256 is not None
