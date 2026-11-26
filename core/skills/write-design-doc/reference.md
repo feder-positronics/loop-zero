@@ -4,14 +4,11 @@ Apply at the depth appropriate to the artifact and next action.
 
 ## Grounding
 
-Read the request, complete existing artifact, linked issue or task, upstream
-decisions, repository guidance, and enough code to verify current-state claims,
-including claimed component capabilities. Separate facts from assumptions.
-Requester decisions stay settled unless evidence invalidates their premise;
-assumptions remain vetoable; deferred decisions become open questions.
-
-Repository changes follow [the delivery contract](../../CONTRACT.md) in the
-task worktree.
+Read the request, complete existing artifact, linked issue or task, upstream decisions,
+repository guidance and code needed to verify current claims and capabilities.
+Separate facts from assumptions. Keep requester decisions settled unless evidence
+invalidates their premise. Keep assumptions vetoable and deferred decisions open.
+Follow [the delivery contract](../../CONTRACT.md) in the task worktree.
 
 ## Artifact Choice
 
@@ -23,11 +20,10 @@ task worktree.
 | Specify bounded implementation | Blueprint |
 | Explain an existing procedure | Guide |
 
-Use repository paths, templates, frontmatter, terminology, and labels.
-Without a convention, choose and explain a descriptive Markdown path in the
-documentation tree; avoid a new hierarchy for one document.
-Link sources of truth instead of copying them. When replacing instructions with
-a link, point to the section that carries the same rule for the same actor.
+Use repository conventions for paths, templates, frontmatter, terms and labels.
+Without a convention, choose and explain a descriptive Markdown path in the docs
+tree and avoid a new hierarchy for one document. Replace copies with links to the
+section that carries the same rule for the same actor.
 
 ## Design Contract
 
