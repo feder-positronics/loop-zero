@@ -3114,6 +3114,41 @@ def test_merge_missing_receipt_skips_remote_gates(wt, gh, capsys, head, associat
     assert all("--method" not in call["argv"] and "--input" not in call["argv"] for call in gh.calls)
 
 
+@pytest.mark.parametrize("command", [("ready",), ("merge", "--wait")])
+def test_unreadable_receipt_does_not_mask_hold(wt, gh, capsys, head, command):
+    arm_pr(gh, head, isDraft=False, labels=[{"name": "hold"}])
+    (wt / ".loopzero/checks.json").mkdir()
+    code, out, err = run(capsys, *command)
+    assert code == 1 and "merge-authority hold" in out + err
+    assert "unreadable" not in err and "run loopzero check" not in out + err
+
+
+@pytest.mark.parametrize("command", ["ready", "merge"])
+def test_readiness_wait_stops_before_next_read_when_receipt_fails(wt, gh, head, capsys, monkeypatch, command):
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    calls_at_invalidation = []
+
+    def invalidate():
+        calls_at_invalidation.append(len(gh.calls))
+        (wt / ".loopzero/checks.json").unlink()
+
+    poll_clock(monkeypatch, jitter=1.0, after_sleep=invalidate)
+    code, out, err = run(capsys, command, "--wait=60")
+    assert code == 1 and "run loopzero check at this head" in out + err
+    assert calls_at_invalidation == [len(gh.calls)]
+
+
+@pytest.mark.parametrize("request_index", [0, 1])
+def test_invalid_receipt_discovery_does_not_retry(wt, gh, capsys, head, monkeypatch, request_index):
+    arm_pr(gh, head, isDraft=False)
+    requests = LOOKUP_CALLS[1:]
+    gh.respond(" ".join(requests[request_index]), {}, exit=1, stderr="HTTP 503")
+    monkeypatch.setattr(github, "_retry_sleep", lambda *_: pytest.fail("unexpected discovery retry"))
+    code, out, err = run(capsys, "merge", "--wait")
+    assert code == 1 and "HTTP 503" in out + err
+    assert [call["argv"][:2] for call in gh.calls] == requests[:request_index + 1]
+
+
 @pytest.fixture
 def check_environment(wt, gh, head, tmp_path):
     arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
@@ -3493,7 +3528,7 @@ def test_mergify_admission_rechecks_only_the_selected_pr(wt, gh, capsys, monkeyp
     code, out, err = run(capsys, "merge", *(["--wait=1"] if wait else []))
 
     calls = [c["argv"][:2] for c in gh.calls]
-    assert calls.count(LOOKUP_CALLS[0]) == 1
+    assert LOOKUP_CALLS[0] not in calls
     assert calls.count(detail.split()) == 2
     if outcome == "merged":
         assert (code, err) == (0, "") and out.splitlines()[-1] == merged_sha
@@ -3878,6 +3913,7 @@ def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
     for branch, number in (("lz/t1", 7), ("lz/other", 8)):
         arm_pr(gh, head_of(wt), branch=branch, number=number, state="MERGED", isDraft=False)
         gh.append(f"api repos/{REPO}/pulls/{number}", merge_json(state='MERGED', head='f' * 40 if changed else head_of(wt), sha='e' * 40))
+    (wt / ".loopzero/checks.json").mkdir()
     code, out, err = run(capsys, "merge")
     assert (code, collision.exists(), wt.exists()) == (int(changed), True, changed)
     if changed:

@@ -286,8 +286,11 @@ def _readiness(
 ) -> github.Readiness:
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
-    if reviews is None:
-        reviews = _pr_reviews(config.repo, pr.number)
+    report = _load_report(wt)
+    receipt_problem = _check_report_problem(report, wt, config, head)
+    if receipt_problem and reviews is None:
+        return github.Readiness(False, (receipt_problem,))
+    reviews = _pr_reviews(config.repo, pr.number) if reviews is None else reviews
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
@@ -309,8 +312,6 @@ def _readiness(
         ),
         publishers=publishers,
     )
-    report = _load_report(wt)
-    receipt_problem = _check_report_problem(report, wt, config, head)
     result = (github.Readiness(False, (*result.reasons, receipt_problem))
               if receipt_problem else result)
     if announce_receipt and not receipt_problem:
@@ -445,7 +446,7 @@ def _load_report(wt: Path) -> CheckReport | None:
             raise TypeError("dirty must be a bool")
         return CheckReport(head=str(data["head"]), dirty=dirty, results=results,
                            settings_sha256=data.get("settings_sha256"))
-    except (TypeError, KeyError, ValueError) as exc:
+    except (OSError, TypeError, KeyError, ValueError) as exc:
         print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
         return None
 
@@ -1247,13 +1248,11 @@ def _pr_readiness(
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
     head = worktree.head(wt)
     _require_task_branch(config, branch)
-    problem = _check_report_problem(_load_report(wt), wt, config, head)
-    pr = _require_pr(config, branch, allow_merged=allow_merged, list_only=bool(problem))
+    with github.bounded_reads(float("inf"), token=None):
+        pr = _require_pr(config, branch, allow_merged=allow_merged, list_only=True)
     _require_pushed(pr, head)
     if pr.state == "MERGED":
         return pr, None
-    if problem:
-        return pr, github.Readiness(False, (github.merge_hold(pr.number, pr.labels) or problem,))
     return pr, _readiness(wt, config, pr, head, workflow_wait=workflow_wait,
                           announce_receipt=True)
 
@@ -1539,8 +1538,9 @@ def _wait_for_checks(
     previous = config
     for _ in _poll_until(started, timeout, bounded=bounded):
         if initial is not None:
-            readiness = initial
-            initial = None
+            readiness, initial = initial, None
+        elif problem := _check_report_problem(_load_report(wt), wt, config, pr.head_sha):
+            return current, github.Readiness(False, (problem,)), kicked
         else:
             current = github.pr_view(config.repo, pr.number)
             previous = _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha, previous)
@@ -1558,8 +1558,7 @@ def _wait_for_checks(
         pending = _pending_checks(
             config, current, readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft),
         )
-        if pending or readiness.ready:
-            _print_wait_changes(shown, pending)
+        _print_wait_changes(shown, pending if pending or readiness.ready else shown)
         if not pending:
             return current, readiness, kicked
         shown = pending
