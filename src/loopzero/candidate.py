@@ -294,7 +294,8 @@ def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None
         from loopzero import github
 
         output.seek(0)
-        if github._transient_error(output.read(_TREE_OUTPUT).decode(errors="replace"), False):
+        diagnostic = output.read(_TREE_OUTPUT).decode(errors="replace")
+        if github._transient_error(diagnostic, False) or re.search(r"returned error: (?:429|5\d\d)", diagnostic):
             raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
     _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
              "resource bound hit, or integration conflict")
