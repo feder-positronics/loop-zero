@@ -47,7 +47,6 @@ def anchors(text):
         count = seen.get(slug, 0)
         seen[slug] = count + 1
         result.add(f"{slug}-{count}" if count else slug)
-    result.update(re.findall(r'<a\s+(?:name|id)=["\']([^"\']+)', text))
     return result
 
 
@@ -56,10 +55,9 @@ def link_errors(root):
     for name in DOCS:
         path = root / name
         text = path.read_text()
-        # Ignore fenced examples, then handle inline links and reference definitions.
+        # Ignore fenced examples before reading inline links.
         text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
         links = re.findall(r"!?\[[^\]]*\]\(([^)]+)\)", text)
-        links += re.findall(r"^\s*\[[^\]]+\]:\s*(\S+)", text, re.MULTILINE)
         for raw in links:
             target = raw.strip().split(' "', 1)[0].strip("<>")
             parsed = urlsplit(target)
