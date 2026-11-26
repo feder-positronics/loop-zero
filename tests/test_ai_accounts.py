@@ -2,6 +2,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
@@ -593,3 +594,27 @@ def test_account_lock_preserves_existing_file_and_rejects_symlink(helper):
     with pytest.raises(OSError), helper._locked(".codex-sync.lock"):
         pytest.fail("redirected lock opened")
     assert lock.read_text() == "preserve"
+
+
+@pytest.mark.parametrize("outcome", ["published", "copy failed"])
+def test_account_env_moves_shared_entry_across_devices(helper, monkeypatch, outcome):
+    if not Path("/dev/shm").is_dir() or Path("/dev/shm").stat().st_dev == helper.STATE.stat().st_dev:
+        pytest.skip("requires two filesystems")
+    entry = helper.codex_home("extra") / "session-index.jsonl"
+    helper.write_private(entry, "original")
+    helper.write_private(entry.with_name("auth.json"), "{}")
+    copy = helper.shutil.copy2
+    with tempfile.TemporaryDirectory(dir="/dev/shm") as main:
+        monkeypatch.setattr(helper, "CODEX_MAIN", Path(main))
+        def stage(src, dst, **kwargs):
+            copy(src, dst, **kwargs)
+            if outcome == "copy failed":
+                raise OSError("copy interrupted")
+        monkeypatch.setattr(helper.shutil, "copy2", stage)
+        if outcome == "copy failed":
+            with pytest.raises(OSError, match="copy interrupted"):
+                helper.account_env("codex", "extra")
+        else:
+            helper.account_env("codex", "extra")
+        assert entry.read_text() == "original" and entry.is_symlink() == (outcome == "published")
+        assert list(Path(main).iterdir()) == ([] if outcome == "copy failed" else [Path(main) / entry.name])
