@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
-from tests.conftest import commit_file, git, git_environment
+from tests.conftest import commit_file, git, git_environment, init_git_repo
 
 
 @pytest.fixture
@@ -34,13 +34,18 @@ def commit_on_origin(repo: Path, name: str) -> str:
     return git(clone, "rev-parse", "HEAD").strip()
 
 
-def test_branch_preserves_unicode_whitespace(repo: Path, monkeypatch) -> None:
-    ambient = repo.parent / "ambient.git"
+def test_git_fixture_ignores_inherited_directory(tmp_path, monkeypatch):
+    ambient = tmp_path / "ambient.git"
     monkeypatch.setenv("GIT_DIR", str(ambient))
+    checkout = init_git_repo(tmp_path / "checkout")
+    assert (checkout / ".git").is_dir() and not ambient.exists()
+
+
+def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
     name = worktree.branch_name(repo, "zażółć\u00a0")
     git(repo, "switch", "-c", name)
 
-    assert worktree.branch(repo) == "lz/zażółć\u00a0" and not ambient.exists()
+    assert worktree.branch(repo) == "lz/zażółć\u00a0"
 
 
 def test_branch_refuses_detached_head(repo: Path) -> None:
