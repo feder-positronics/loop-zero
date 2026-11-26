@@ -119,7 +119,7 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
 
     def lose_reply(repo, head, context, value, description):
         post(repo, head, context, value, description)
-        if description.startswith("Refreshing") or description.startswith("Eligibility refresh failed"):
+        if description.startswith(("Refreshing", "Eligibility refresh failed")):
             return
         accepted = {"context": context, "state": value, "description": description,
                     "creator": {"login": "github-actions[bot]"}}
