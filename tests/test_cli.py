@@ -12,7 +12,7 @@ import signal
 import subprocess
 import sys
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from select import select
 from types import SimpleNamespace
@@ -2866,7 +2866,7 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
 @pytest.mark.parametrize("draft,condition", [
     *((False, condition) for condition in
       ("missing", "wrong-head", "failed", "dirty", "wrong-commands", "legacy", "incompatible", "matching")),
-    *((True, condition) for condition in ("stale", "red", "dirty", "commands")),
+    *((True, condition) for condition in ("stale", "red", "dirty", "commands", "empty", "checkpoint")),
 ])
 def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, condition, head, draft):
     arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=draft, readiness={
@@ -2879,8 +2879,14 @@ def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, co
         report = json.loads(path.read_text())
         if condition in {"wrong-head", "stale"}:
             report["head"] = ("a" if draft else "0") * 40
-        elif condition in {"wrong-commands", "commands"}:
-            report["results"][0]["command"] = "changed" if draft else "true"
+        elif condition == "wrong-commands":
+            report["results"].pop()
+        elif condition == "commands":
+            report["results"][0]["command"] = "changed"
+        elif condition == "empty":
+            report["results"] = []
+        elif condition == "checkpoint":
+            report["results"].append(asdict(CheckResult("<checks incomplete>", 1, 0.0, "")))
         elif condition == "red":
             report["results"][0]["exit_code"] = 1
         elif condition == "legacy":
@@ -2891,7 +2897,15 @@ def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, co
 
     out, _ = expect_cli(capsys, 0 if condition == "matching" else 1, "ready")
     if draft:
-        assert "run loopzero check at this head" in out
+        reason = {
+            "stale": "check receipt is for aaaaaaaaaaaa.",
+            "red": "check receipt records a failed stage.",
+            "dirty": "check receipt was recorded in a dirty worktree.",
+            "commands": "check receipt's plan differs from the trusted workflow.",
+            "empty": "check receipt is incomplete.",
+            "checkpoint": "check receipt is incomplete.",
+        }[condition]
+        assert f"not ready: {reason}" in out
         assert "receipt accepted:" not in out
     elif condition in {"legacy", "incompatible"}:
         reason = ("check receipt is missing its settings fingerprint" if condition == "legacy"
@@ -2899,8 +2913,10 @@ def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, co
         assert f"not ready: {reason}." in out
         assert ("Run loopzero check in this worktree at this head with the same current CLI and effective "
                 "settings as ready, using a local coordinator for delegated stages." in out)
+    elif condition == "wrong-commands":
+        assert "not ready: check receipt's plan differs from the trusted workflow." in out
     elif condition != "matching":
-        assert out.endswith("not ready: run loopzero check at this head\n")
+        assert ("not ready: run loopzero check at this head" if condition == "missing" else "not ready: check receipt") in out
 
 
 @pytest.fixture
@@ -3588,7 +3604,7 @@ def test_status_silently_ignores_legacy_report_without_dirty(
 
     out, _ = expect_cli(capsys, 0, "status", stderr="")
     assert "ready:    no" in out
-    assert "  - run loopzero check at this head" in out
+    assert "  - check receipt was recorded in a dirty worktree." in out
 
 
 def test_gh_errors_are_one_line_on_stderr(wt: Path, gh: FakeGh, capsys) -> None:
