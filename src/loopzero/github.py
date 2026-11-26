@@ -1462,6 +1462,14 @@ def commit_status(repo: str, head: str, context: str, state: str, description: s
         raise
 
 
+def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
+    statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
+    latest = next((row for row in statuses if row.get("context") == context), {})
+    creator = latest.get("creator")
+    return (isinstance(creator, dict) and creator.get("login") == "github-actions[bot]"
+            and (latest.get("state"), latest.get("description")) == (state, description))
+
+
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:
     # A validation error alone does not prove exhaustion.
     with suppress(GhError, ProcTimeout, OSError):
