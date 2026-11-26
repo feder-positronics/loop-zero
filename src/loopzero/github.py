@@ -1010,17 +1010,22 @@ def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
 def finding_preview(findings: list[tuple[str | None, Finding]], url: str) -> list[str]:
     shown = []
     shortened = False
+    remaining = 1200
     for marker, finding in findings[:4]:
         path = finding.path or "-"
-        if len(path.encode()) > 112:
-            path = "…/" + preview(path.rsplit("/", 1)[-1], 108)
+        if "/" in path and len(path.encode()) > 112:
+            path = "…/" + path.rsplit("/", 1)[-1]
         title = preview(finding.title, 128)
         shortened |= path != (finding.path or "-") or title != finding.title
         if marker is not None:
-            shown.append(f"{marker}  {finding.severity}  {path}:{finding.line or '-'}  {title}")
+            row = f"{marker}  {finding.severity}  {path}:{finding.line or '-'}  {title}"
         else:
             where = f"{path}:{finding.line}" if finding.path else "(no location)"
-            shown.append(f"open {finding.severity} finding at {where}: {title}")
+            row = f"open {finding.severity} finding at {where}: {title}"
+        remaining -= len(row.encode()) + 1
+        if remaining < 0:
+            break
+        shown.append(row)
     omitted = len(findings) - len(shown)
     if omitted:
         shown.append(f"{omitted} more blocking findings. See {url}")

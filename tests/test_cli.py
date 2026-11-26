@@ -2995,15 +2995,18 @@ def test_wait_keeps_waiting_when_a_sibling_required_check_is_running(
 @pytest.mark.parametrize("count", [1, 40])
 def test_blocking_finding_output_stays_bounded(wt, gh, capsys, head, command, count):
     findings = [_finding_thread(f"{i:08x}", head) for i in range(count)]
-    findings[0]["path"] = "directory/" * 100 + "a.py" if count == 40 else "src/a.py"
-    body = findings[0]["comments"]["nodes"][0]
-    body["body"] = body["body"].replace("Off by one", "界" * 3000)
+    basename = "module_" * 35 + "a.py"
+    for finding in findings[:4]:
+        finding["path"] = "directory/" * 100 + basename if count == 40 else "src/a.py"
+        body = finding["comments"]["nodes"][0]
+        body["body"] = body["body"].replace("Off by one", "界" * 3000)
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", readiness={"threads": findings})
     code, out, err = run(capsys, command)
     output = out + err
     assert code == int(command in {"ready", "merge"})
-    assert len(output.encode()) < 2048 and ("…/a.py:3" if count == 40 else "src/a.py:3") in output and "/pull/7" in output
-    assert ("36 more" in output) == (count == 40)
+    assert len(output.encode()) < 2048 and "/pull/7" in output
+    assert (f"…/{basename}:3" if count == 40 else "src/a.py:3") in output
+    assert ("38 more" in output) == (count == 40)
     assert all(c["argv"][:2] not in (["pr", "ready"], ["pr", "merge"]) for c in gh.calls)
 
 
@@ -4014,17 +4017,21 @@ THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": Tru
 
 @pytest.mark.parametrize("outcome", ["refreshed", "remaining", "dispatch failed"])
 def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, outcome) -> None:
+    if outcome == "remaining":
+        comment = finding_pr["comments"]["nodes"][0]
+        comment["body"] = comment["body"].replace("Off by one", "Off by one" + "界" * 3000)
     listing = threads_json(finding_pr)
     remaining = listing if outcome == "remaining" else threads_json()
     gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED, remaining)
     gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
 
     code, out, err = run(capsys, "resolve")
-    assert (code, err) == (0, "") and out == "0b9b59e7  important  src/a.py:3  Off by one\n"
+    assert (code, err) == (0, "") and out.startswith("0b9b59e7  important  src/a.py:3  Off by one")
     assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
 
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
-    assert out.splitlines()[0] == "resolved 0b9b59e7: Off by one"
+    assert out.startswith("resolved 0b9b59e7: Off by one") and len(out.encode()) < 2048
+    assert ("… (see " + URL + ")" in out) == (outcome == "remaining")
     calls = [c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"]][2:]
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
