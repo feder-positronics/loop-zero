@@ -387,9 +387,8 @@ profile. Avoid blind retries or repeating successful work for reassurance.
 
 ## Author lineage and independent review
 
-The contract's [review budget](../core/CONTRACT.md#review-budget) and
-[owner-approved exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
-govern authorship and reviewer selection. When applying a supplied patch
+The contract's [review budget](../core/CONTRACT.md#review-budget) governs
+authorship and reviewer selection. When applying a supplied patch
 verbatim, credit the patch's writer.
 Formal delivery review is `loopzero review`.
 

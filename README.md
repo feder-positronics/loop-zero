@@ -10,8 +10,8 @@ record.
 It exists for people and coding agents who ship many small PRs and want the
 same discipline on every one of them: checks run in a sandbox with read-only
 Git metadata and no network by default, a reviewer reads the exact head (from a
-different family by default, subject to the contract's bounded owner-approved
-contributor-review exception), and a PR needs an eligible review, resolved
+different family by default, with a disclosed same-family fallback when none
+can run), and a PR needs an eligible review, resolved
 blocking findings and green required CI to merge. The full rules fit in
 [core/CONTRACT.md](core/CONTRACT.md).
 
