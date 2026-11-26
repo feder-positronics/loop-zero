@@ -643,7 +643,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(preview, file=sys.stderr)
             if not config.network and (result.command.startswith("uv sync --offline --locked")
                                        or OFFLINE_FAILURE_RE.search(tail)):
-                env = sandbox.SANDBOX_ENV | _proc.build_env(config.env_allowlist) | dict(config.env)
+                env = sandbox.check_environment(config)
                 print(
                     "\nThe sandbox has no network because `[checks] network = false`; "
                     f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "

@@ -38,6 +38,10 @@ with open("{log}", "w", encoding="utf-8") as stream:
 separator = args.index("--")
 options, command = args[:separator], args[separator + 1:]
 env = {{}} if "--clearenv" in options else dict(os.environ)
+if "--args" in options:
+    index = options.index("--args")
+    with os.fdopen(int(options[index + 1]), "rb") as arguments:
+        options[index:index + 2] = list(map(os.fsdecode, arguments.read().split(b"\\0")[:-1]))
 home_source = None
 i = 0
 while i < len(options):
@@ -147,7 +151,8 @@ def test_check_pipeline_verdict(git_repo, bwrap_log, monkeypatch, capsys, comman
 def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     monkeypatch.setenv("LZ_KEEP", "kept")
     monkeypatch.setenv("LZ_DROP", "dropped")
-    sandbox.run_checks(make_config(), git_repo)
+    values = 'printf "%s\\n" "$PATH" "$LZ_KEEP" "${LZ_DROP-unset}" "$UV_CACHE_DIR" "$PYTHONDONTWRITEBYTECODE"'
+    (result,) = sandbox.run_checks(make_config(checks=(values,)), git_repo).results
     argv = argv_of(bwrap_log)
     head, tail = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
     for flag in ("--die-with-parent", "--new-session", "--unshare-all", "--clearenv"):
@@ -162,11 +167,8 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert all(("--tmpfs", p) in windows for p in ("/tmp", "/run", "/var/run"))
     assert ("--dev", "/dev") in windows and ("--proc", "/proc") in windows
     assert head[head.index("--chdir") + 1] == str(git_repo)
-    setenv = dict(_pairs(head, "--setenv"))
-    assert setenv["PATH"] == os.environ["PATH"] and setenv["LZ_KEEP"] == "kept"
-    assert "LZ_DROP" not in setenv
-    assert setenv["HOME"] == sandbox.SANDBOX_HOME
-    assert setenv["UV_CACHE_DIR"] == "/tmp/uv-cache" and setenv["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert "--args" in head and "--setenv" not in head and "kept" not in head
+    assert result.tail.splitlines() == [os.environ["PATH"], "kept", "unset", "/tmp/uv-cache", "1"]
     binds = _pairs(head, "--bind")
     home_src, home_dst = binds[0]
     assert home_dst == sandbox.SANDBOX_HOME and Path(home_src).name.startswith("loopzero-home-")
@@ -183,7 +185,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert head.index("--tmpfs") < head.index(str(git_repo))
     assert tail == ["prlimit", f"--as={sandbox._cap_limit(4096 << 20, resource.RLIMIT_AS)}",
                     f"--fsize={sandbox._cap_limit(2048 << 20, resource.RLIMIT_FSIZE)}",
-                    "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", "echo hello"]
+                    "--", *sandbox.CHECK_SHELL, values]
 
 
 @pytest.mark.parametrize("checks", [(), ("echo hello",)], ids=["probe", "stage"])
@@ -210,15 +212,17 @@ def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch
     extra, cache = tmp_path / "ro", tmp_path / "rw"
     monkeypatch.setenv("UV_CACHE_DIR", str(cache))
     monkeypatch.setenv("RUFF_CACHE_DIR", "host-ruff")
-    cfg = make_config(sandbox_ro=(str(extra),), writable=(str(cache),), scratch=())
-    cfg = Config(**{**cfg.__dict__, "env_allowlist": ("PATH", "UV_CACHE_DIR", "RUFF_CACHE_DIR")})
-    sandbox.run_checks(Config(**{**cfg.__dict__, "env": (("RUFF_CACHE_DIR", "cfg"),)}), git_repo)
+    cfg = make_config(
+        sandbox_ro=(str(extra),), writable=(str(cache),), scratch=(),
+        env_allowlist=("PATH", "UV_CACHE_DIR", "RUFF_CACHE_DIR"), env=(("RUFF_CACHE_DIR", "cfg"),),
+        checks=('printf "%s\\n" "$UV_CACHE_DIR" "$RUFF_CACHE_DIR"',),
+    )
+    (result,) = sandbox.run_checks(cfg, git_repo).results
     argv = argv_of(bwrap_log)
     assert _pairs(argv, "--ro-bind-try") == [(str(extra),) * 2]
     assert _pairs(argv, "--bind-try") == [(str(cache),) * 2]
     assert len(_pairs(argv, "--bind")) == 1  # only HOME; no scratch
-    setenv = dict(_pairs(argv, "--setenv"))  # defaults < host allowlist < config.env
-    assert (setenv["UV_CACHE_DIR"], setenv["RUFF_CACHE_DIR"]) == (str(cache), "cfg")
+    assert result.tail.splitlines() == [str(cache), "cfg"]
 
 
 def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
@@ -235,7 +239,7 @@ def inject_check_timeout(monkeypatch, output, before_timeout=None):
     monkeypatch.setattr(sandbox._proc, "_read_output_tail", read_output_tail)
 
 
-def test_verbose_stage_bounds_parent_memory(git_repo):
+def test_verbose_stage_bounds_parent_memory(git_repo, bwrap_log):
     command = shlex.join([sys.executable, "-c", """
 import os
 import sys
@@ -252,7 +256,7 @@ sys.exit(7)
     try:
         tracemalloc.reset_peak()
         baseline, _ = tracemalloc.get_traced_memory()
-        result = sandbox._run_one(make_config(), git_repo, [], command, 30)
+        result = sandbox._run_one(make_config(), git_repo, ["bwrap", "--chdir", str(git_repo), "--"], command, 30)
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
