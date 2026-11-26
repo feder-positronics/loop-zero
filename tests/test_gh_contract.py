@@ -60,7 +60,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
         result = ReviewResult("codex", HEAD, "primary", "request_changes",
                               (Finding("important", "src/a.py", 10, "Problem", "Details"),), "raw")
         github.post_review(REPO, 7, HEAD, result)
-        github.open_blocking_findings(REPO, 7, HEAD)
+        github.open_blocking_findings(REPO, 7, HEAD, ("bot-user",))
         github._check_signals(REPO, HEAD)
         github.mark_ready(REPO, 7)
         github.merge(REPO, 7, "squash", HEAD)

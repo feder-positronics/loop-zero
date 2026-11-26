@@ -1138,20 +1138,19 @@ def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
 
 
 @pytest.mark.parametrize("plant", [
-    "too_many", "loop", "undecodable", "dangling", "root_loop:.agents/skills", "root_loop:.codex/skills"])
+    "too_many", "loop", "undecodable", "dangling", "loop:.agents/skills", "loop:.codex/skills",
+    "loop:.agents", "loop:.codex", "dangling:.agents", "dangling:.codex"])
 def test_codex_skill_lists_it_cannot_disable_fail_before_any_codex_call(
     repo, fake_bin: Path, fake_tool, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, plant: str,
 ) -> None:
     if plant == "too_many":
         _plant_skills(repo)
         monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
-    elif plant in ("loop", "dangling"):
-        (repo / ".agents/skills").mkdir(parents=True)
-        (repo / ".agents/skills/x").symlink_to("x" if plant == "loop" else "/nonexistent/skills")
-    elif plant.startswith("root_loop:"):
-        root = repo / plant.partition(":")[2]
-        root.parent.mkdir(parents=True)
-        root.symlink_to(root.name)
+    elif plant != "undecodable":
+        kind, _, name = plant.partition(":")
+        link = repo / (name or ".agents/skills/x")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(link.name if kind == "loop" else "missing")
     else:
         skill = repo / ".codex/skills" / os.fsdecode(b"\xff")
         skill.mkdir(parents=True)
@@ -1247,6 +1246,12 @@ def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap,
     assert reason.startswith("claude: timed out after ") and detail.endswith("waiting for proxy")
     assert "partial reviewer output" not in info.value.tail and "waiting for proxy" not in fallback
     assert len(detail.encode()) < 450 and ("…" in detail) == bool(size)
+
+
+def test_inspection_accepts_the_reviewer_patch_command() -> None:
+    command = (f"git -C /repo diff --no-color --no-ext-diff --no-textconv --text "
+               f"--ignore-submodules=none --submodule=short {'a' * 40} {'b' * 40}")
+    assert runners._inspection_commands(command, "/repo") == [("diff", "a" * 40, "b" * 40)]
 
 
 def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:

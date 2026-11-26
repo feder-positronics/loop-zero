@@ -28,9 +28,8 @@ APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
 MARKER_RE = re.compile(
-    r"<!--\s*loopzero:finding\s+(?:v=(?P<version>1)\s+)?"
-    r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"
-    r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
+    r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
+    r"head=(?P<head>[0-9a-f]{40}) id=(?P<id>[0-9a-f]{8}) -->"
 )
 PAGE = 100
 PR_FILE_LIMIT = 3_000
@@ -50,7 +49,9 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id isResolved isOutdated path line
-          comments(first: 1) { nodes { body } pageInfo { hasNextPage endCursor } }
+          comments(first: 1) {
+            nodes { body author { __typename login } } pageInfo { hasNextPage endCursor }
+          }
         }
       }
     }
@@ -68,7 +69,11 @@ class GhError(Exception):
         super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
 
 
-class ReadDeadline(GhError):
+class GhUnavailable(GhError):
+    """GitHub could not supply a result because of a transient fault or limit."""
+
+
+class ReadDeadline(GhUnavailable):
     """A shared GitHub read deadline elapsed."""
 
 
@@ -305,10 +310,20 @@ def _select_token(token: str | None, scope: tuple[float, str | None, bool] | Non
     return selected if selected is not None else (app_token() if read_only else "")
 
 
-def _transient_error(tail: str, retry_idempotent: bool) -> bool:
-    return bool(TRANSIENT_RE.search(tail)) or (
+def _transient_error(tail: str, retry_idempotent: bool, status: str | None = None) -> bool:
+    return (status or "").startswith("5") or bool(TRANSIENT_RE.search(tail)) or (
         retry_idempotent and "something went wrong while executing your query" in tail.lower()
     )
+
+
+def _request_error(transient: bool) -> type[GhError]:
+    return GhUnavailable if transient else GhError
+
+
+def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> bool:
+    return (status == "429"
+            or (status == "403" and (headers.get("x-ratelimit-remaining") == "0" or "retry-after" in headers))
+            or bool(re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)))
 
 
 def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
@@ -355,16 +370,16 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         status, headers, body = (_included_response(done.stdout) if rest_api or diagnostic_api
                                  else (None, {}, done.stdout))
         tail = "\n".join(part for part in (done.stderr, body if rest_api else done.stdout) if part)
-        if done.exit_code and ((rest_api and status == "429")
-                               or re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)):
+        if done.exit_code and _rate_limited(status, headers, tail):
             guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api
                         else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
             if diagnostic_api or patch_error:
                 detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                            message_tail=None if diagnostic_api else tail)
-                raise GhError(("GitHub API request",), detail, token=selected, guidance=guidance)
-            raise GhError(argv, tail, token=selected, guidance=guidance)
-        if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
+                raise GhUnavailable(("GitHub API request",), detail, token=selected, guidance=guidance)
+            raise GhUnavailable(argv, tail, token=selected, guidance=guidance)
+        transient = _transient_error(tail, retry_idempotent, status)
+        if done.exit_code == 0 or delay is None or not retryable or not transient:
             break
         _retry_sleep(_read_timeout(delay) if scope else delay)
     if done.exit_code != 0:
@@ -375,7 +390,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
-        raise GhError(error_command, error_tail, token=selected, guidance=guidance)
+        raise _request_error(transient)(error_command, error_tail, token=selected, guidance=guidance)
     return body
 
 
@@ -965,22 +980,29 @@ def _title_of(text: str) -> str:
     return re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
 
 
-def _parse_thread(node: dict, current_head: str | None) -> Finding | None:
+def _thread_marker(node: dict, publishers: tuple[str, ...]) -> re.Match[str] | None:
+    """The v=1 marker opening a thread's first comment, if a review publisher wrote it."""
     comments = node.get("comments", {}).get("nodes") or []
     if not comments:
         return None
-    first = comments[0]
-    body = first.get("body") or ""
-    match = MARKER_RE.search(body)
+    author = comments[0].get("author") or {}
+    login = str(author.get("login") or "")
+    # GraphQL names an App's bot account without REST's "[bot]" suffix.
+    if author.get("__typename") == "Bot":
+        login += "[bot]"
+    if not login or login.casefold() not in {p.casefold() for p in publishers}:
+        return None
+    # The publisher writes the marker as the whole first line, exactly as finding_marker does.
+    return MARKER_RE.fullmatch((comments[0].get("body") or "").partition("\n")[0])
+
+
+def _parse_thread(node: dict, current_head: str | None,
+                  publishers: tuple[str, ...]) -> Finding | None:
+    match = _thread_marker(node, publishers)
     if not match or match.group("severity") not in BLOCKING:
         return None
-    version = match.group("version")
+    body = node["comments"]["nodes"][0]["body"]
     marker_head = match.group("head")
-    marker_id = match.group("id")
-    if version and (not marker_head or not marker_id):
-        return None
-    if not version and marker_id:
-        return None
     if current_head is not None and marker_head != current_head and node.get("isOutdated"):
         return None
     severity = match.group("severity")
@@ -998,12 +1020,13 @@ _RESOLVE_MUTATION = (
 )
 
 
-def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
+def open_findings(repo: str, number: int,
+                  publishers: tuple[str, ...]) -> list[tuple[str, str, Finding]]:
     """(marker id, thread id, finding) for every unresolved blocking thread, any head."""
     return [
-        (MARKER_RE.search(node["comments"]["nodes"][0]["body"]).group("id") or node["id"], node["id"], f)
+        (_thread_marker(node, publishers).group("id"), node["id"], f)
         for node in _unresolved_threads(repo, number)
-        if (f := _parse_thread(node, None))
+        if (f := _parse_thread(node, None, publishers))
     ]
 
 
@@ -1037,16 +1060,16 @@ def _has_thread_reply(node: dict, reply: str) -> bool:
     return False
 
 
-def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Finding:
+def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
+                    publishers: tuple[str, ...]) -> Finding:
     """Reply to a blocking finding, or resume an identical resolution."""
     threads = _review_threads(repo, number, include_resolved=True)
     for node in sorted(threads, key=lambda node: bool(node.get("isResolved"))):
-        finding = _parse_thread(node, None)
+        finding = _parse_thread(node, None, publishers)
         if finding is None:
             continue
-        marker = MARKER_RE.search(node["comments"]["nodes"][0]["body"])
         thread_id = node["id"]
-        if (marker.group("id") or thread_id) != finding_id:
+        if _thread_marker(node, publishers).group("id") != finding_id:
             continue
         confirmed = _has_thread_reply(node, reply)
         if node.get("isResolved"):
@@ -1093,15 +1116,17 @@ def refresh_eligibility(repo: str, number: int, base: str) -> None:
 
 
 def open_blocking_findings(
-    repo: str, number: int, current_head: str | None = None
+    repo: str, number: int, current_head: str | None, publishers: tuple[str, ...],
 ) -> list[Finding]:
-    """Findings from unresolved review threads whose first comment carries a blocking marker.
+    """Findings from unresolved review threads whose first comment opens with a blocking marker.
 
-    Only explicit critical and important markers block. When `current_head` is supplied, an
-    outdated thread is ignored unless its marker names that head.
+    Only critical and important v=1 markers on the first line of a comment written by a
+    review publisher block. When `current_head` is supplied, an outdated thread is ignored
+    unless its marker names that head.
     """
     return [
-        f for node in _unresolved_threads(repo, number) if (f := _parse_thread(node, current_head))
+        f for node in _unresolved_threads(repo, number)
+        if (f := _parse_thread(node, current_head, publishers))
     ]
 
 
@@ -1289,6 +1314,7 @@ def readiness(
     review_grace: bool = False,
     workflow_wait: bool = False,
     stale_verdict_grace: bool = False,
+    publishers: tuple[str, ...],
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
     reasons: list[str] = []
@@ -1304,7 +1330,8 @@ def readiness(
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha):
+    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha,
+                                    publishers):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
     checks, stale, stale_verdicts, capped = (_check_signals(

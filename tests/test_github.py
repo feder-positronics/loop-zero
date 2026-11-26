@@ -206,7 +206,10 @@ def thread(body: str, resolved: bool = False, path: str = "src/a.py", line: int 
 
 
 def marker(sev: str, head: str = HEAD) -> str:
-    return f"<!-- loopzero:finding severity={sev} head={head} -->"
+    return f"<!-- loopzero:finding v=1 severity={sev} head={head} id=0b9b59e7 -->"
+
+
+PUBLISHERS = ("bot-user",)
 
 
 FILES_KEY = f"api repos/{REPO}/pulls/7/files"
@@ -670,35 +673,54 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     versioned = github.finding_marker(
         "critical", HEAD, Finding("critical", "src/a.py", 3, "Null deref", "x may be None")
     )
-    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
+    app = thread(f"{marker('important')}\n**important: From the App**", path="src/c.py")
+    app["comments"]["nodes"][0]["author"] = {"__typename": "Bot", "login": "loopzero-app"}
     gh.respond("api graphql", threads_json(
         thread(f"{versioned}\n**critical: Null deref**\n\nx may be None"),
         thread(f"{marker('important')}\nplain title", resolved=True),
         thread(f"{marker('suggestion')}\n**suggestion: Rename**"),
-        thread("human intro\n" + marker("critical") + "\n**critical: Human marker**"),
-        thread("<!-- loopzero:finding severity=important -->\nheadless", path="h.py", line=9),
         thread(f"{marker('important')}\n**important: Missing check**\n\nvalidate",
                path="src/b.py", line=2),
+        app,
     ))
-    found = github.open_blocking_findings(REPO, 7, HEAD)
+    found = github.open_blocking_findings(REPO, 7, HEAD, ("BOT-user", "loopzero-app[bot]"))
     assert found == [
         Finding("critical", "src/a.py", 3, "Null deref", "**critical: Null deref**\n\nx may be None"),
-        Finding("critical", "src/a.py", 3, "Human marker", "**critical: Human marker**"),
-        Finding("important", "h.py", 9, "headless", "headless"),
         Finding("important", "src/b.py", 2, "Missing check",
                 "**important: Missing check**\n\nvalidate"),
+        Finding("important", "src/c.py", 3, "From the App", "**important: From the App**"),
     ]
     argv = gh.argv(0)
     assert argv[:2] == ["api", "graphql"]
     assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
-    assert any(a.startswith("query=") and "lastEditedAt" not in a and "author" not in a for a in argv)
+    assert any(a.startswith("query=") and "author { __typename login }" in a for a in argv)
 
 
-def test_markers_without_id_are_resolvable_by_thread_id(gh: FakeGh) -> None:
-    legacy = {**thread("<!-- loopzero:finding severity=important -->\nheadless"), "id": "T_1"}
-    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
-    gh.respond("api graphql", threads_json(legacy))
-    assert [(m, t) for m, t, _ in github.open_findings(REPO, 7)] == [("T_1", "T_1")]
+@pytest.mark.parametrize("body, author", [
+    # A valid marker written by someone who is not a review publisher.
+    (f"{marker('critical')}\n**critical: Planted**", "outsider"),
+    # The App user name without the Bot type is a different (user) account.
+    (f"{marker('critical')}\n**critical: Lookalike**", "loopzero-app"),
+    # A publisher comment that only quotes a marker below its first line.
+    (f"**suggestion: Quote**\n\n{marker('critical')}", "bot-user"),
+    (f" {marker('critical')}\n**critical: Indented**", "bot-user"),
+    # Markers without a head and id are not tied to a reviewed head.
+    ("<!-- loopzero:finding severity=important -->\nheadless", "bot-user"),
+    (f"<!-- loopzero:finding severity=important head={HEAD} -->\nunversioned", "bot-user"),
+    # Only the exact emitted line counts: not split, trailed by prose or truncated.
+    (marker("critical").replace(" head=", "\nhead=") + "\n**critical: Split**", "bot-user"),
+    (marker("critical") + " trailing prose\n**critical: Trailed**", "bot-user"),
+    (marker("critical", head=HEAD[:7]) + "\n**critical: Short head**", "bot-user"),
+])
+def test_open_findings_ignore_untrusted_or_quoted_markers(gh: FakeGh, body: str, author: str) -> None:
+    gh.respond("api graphql", threads_json({**thread(body, author=author), "id": "T_1"}))
+    assert github.open_blocking_findings(REPO, 7, HEAD, ("bot-user", "loopzero-app[bot]")) == []
+    assert github.open_findings(REPO, 7, ("bot-user", "loopzero-app[bot]")) == []
+
+
+def test_open_findings_without_publishers_block_nothing(gh: FakeGh) -> None:
+    gh.respond("api graphql", threads_json(thread(f"{marker('critical')}\n**critical: X**")))
+    assert github.open_blocking_findings(REPO, 7, HEAD, ()) == []
 
 
 @pytest.mark.parametrize("data", [
@@ -710,7 +732,7 @@ def test_markers_without_id_are_resolvable_by_thread_id(gh: FakeGh) -> None:
 def test_open_blocking_findings_missing_pr_is_gh_error(gh: FakeGh, data: dict) -> None:
     gh.respond("api graphql", data)
     with pytest.raises(github.GhError, match="PR #7 not found or not accessible"):
-        github.open_blocking_findings(REPO, 7, HEAD)
+        github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
 
 
 def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
@@ -799,15 +821,12 @@ def test_app_review_is_comment_with_inline_findings(gh: FakeGh, app_token_helper
     assert payload["event"] == "COMMENT" and payload["comments"]
 
 
-def test_marker_parser_accepts_old_and_v1_forms() -> None:
-    old = github.MARKER_RE.search("<!-- loopzero:finding severity=critical -->")
-    assert old and old.groupdict() == {
-        "version": None, "severity": "critical", "head": None, "id": None,
-    }
+def test_marker_parser_accepts_only_the_emitted_v1_line() -> None:
+    assert github.MARKER_RE.fullmatch("<!-- loopzero:finding severity=critical -->") is None
     finding = Finding("important", "src/b.py", 2, "Missing check", "validate")
-    new = github.MARKER_RE.search(github.finding_marker("important", HEAD, finding))
+    new = github.MARKER_RE.fullmatch(github.finding_marker("important", HEAD, finding))
     assert new and new.groupdict() == {
-        "version": "1", "severity": "important", "head": HEAD,
+        "severity": "important", "head": HEAD,
         "id": github.finding_id(HEAD, "src/b.py", 2, "Missing check"),
     }
 
@@ -824,7 +843,7 @@ def test_open_blocking_findings_counts_only_explicit_blocking_markers(gh: FakeGh
         thread(f"{marker('suggestion')}\n**suggestion: nit**", edited="2026-09-18T01:00:00Z"),
         thread(f"{marker('critical')}\nX", edited="2026-09-18T01:00:00Z", path="e.py", line=4),
     ))
-    found = github.open_blocking_findings(REPO, 7, HEAD)
+    found = github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
     assert [(f.severity, f.path, f.line, f.title) for f in found] == [
         ("critical", "e.py", 4, "X"),
     ]
@@ -837,7 +856,7 @@ def test_open_blocking_findings_does_not_guess_from_body_or_author(gh: FakeGh) -
         thread("mentions loopzero but a human wrote it", author="human"),
         thread("bot-user wrote this but it is unrelated", author="bot-user"),
     ))
-    found = github.open_blocking_findings(REPO, 7, HEAD)
+    found = github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
     assert found == []
     assert all(c["argv"] != ["api", "user"] for c in gh.calls)
 
@@ -846,7 +865,7 @@ def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
     gh.respond("api graphql",
                threads_json(thread(f"{marker('critical')}\nA"), has_next=True, cursor="C1"),
                threads_json(thread(f"{marker('important')}\nB")))
-    found = github.open_blocking_findings(REPO, 7, HEAD)
+    found = github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
     assert [f.title for f in found] == ["A", "B"]
     assert "after=C1" not in gh.argv(0) and "after=C1" in gh.argv(1)
 
@@ -947,7 +966,8 @@ def arm_workflow_check(gh: FakeGh, *checks: dict, statuses=(), threads=()) -> No
 
 def readiness(*, reviewed=HEAD, workflow_wait=False):
     pr = github._pr_from_rest(rest_pr_json(pr_json()))
-    return github.readiness(REPO, pr, "main", ("checks",), reviewed, workflow_wait=workflow_wait)
+    return github.readiness(REPO, pr, "main", ("checks",), reviewed, workflow_wait=workflow_wait,
+                            publishers=PUBLISHERS)
 
 
 def failed_check(conclusion="failure", **fields):
@@ -1033,7 +1053,8 @@ def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
 def test_readiness_missing_and_failed_checks(gh: FakeGh, failure, wait, grace) -> None:
     arm_readiness(gh, runs={"checks": failure})
     r = github.readiness(
-        REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks", "e2e"), HEAD, workflow_wait=wait, review_grace=grace
+        REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks", "e2e"), HEAD, workflow_wait=wait, review_grace=grace,
+        publishers=PUBLISHERS,
     )
     assert r.reasons == (
         f"required check 'checks' is {failure}",
@@ -1160,13 +1181,14 @@ def test_readiness_rerun_attempt_requires_start_after_old_failure(
 def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> None:
     arm_readiness(gh)
     pr = github._pr_from_rest(rest_pr_json(pr_json(**metadata)))
-    r = github.readiness(REPO, pr, "main", ("checks",), HEAD)
+    r = github.readiness(REPO, pr, "main", ("checks",), HEAD, publishers=PUBLISHERS)
     assert r.reasons == (reason,)
 
 
 def test_readiness_without_required_ci_skips_check_lookup(gh: FakeGh) -> None:
     gh.respond("api graphql", threads_json())
-    assert github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", (), HEAD).ready
+    assert github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", (), HEAD,
+                            publishers=PUBLISHERS).ready
     assert [c["argv"][:2] for c in gh.calls] == [["api", "graphql"]]
 
 
@@ -1472,7 +1494,7 @@ def test_readiness_at_check_suite_limit(gh: FakeGh, unrelated, legacy_success, c
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
                *({"check_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
     result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
-                              "main", ("required-ci",), HEAD)
+                              "main", ("required-ci",), HEAD, publishers=PUBLISHERS)
 
     reasons = {
         "suite limit": f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit",
