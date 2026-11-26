@@ -286,6 +286,7 @@ def _readiness(
             workflow_wait and review_age is not None
             and -MAX_REVIEW_CLOCK_SKEW <= review_age < STALE_VERDICT_GRACE
         ),
+        publishers=publishers,
     )
     report = _load_report(wt)
     receipt_problem = _check_report_problem(report, wt, config, head)
@@ -325,9 +326,22 @@ def _readiness(
 def _check_report_problem(
     report: CheckReport | None, wt: Path, config: Config, head: str, *, require_pass: bool = True,
 ) -> str | None:
-    if (report is None or report.head != head or report.dirty or (require_pass and not report.ok)
-            or tuple(result.command for result in report.results) != config.checks):
+    if report is None:
         return "run loopzero check at this head"
+    if report.head != head:
+        return f"check receipt is for {report.head[:12]}. Run `loopzero check` at {head[:12]}."
+    if report.dirty:
+        return ("check receipt was recorded in a dirty worktree. Run `git status --short`, "
+                "settle the changes, then run `loopzero check`.")
+    commands = tuple(result.command for result in report.results)
+    if (require_pass and not report.ok) or commands != config.checks:
+        if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
+            return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
+        if require_pass and not report.ok:
+            return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
+                    "Retry unchanged only if the failure was transient.")
+        return ("check receipt's plan differs from the trusted workflow. "
+                "Run `loopzero check` with the current workflow.")
     recovery = ("Run loopzero check in this worktree at this head with the same current CLI and effective "
                 "settings as ready, using a local coordinator for delegated stages.")
     if report.settings_sha256 is None:
@@ -1463,7 +1477,12 @@ def _mergify_timeout_detail(
     )
     detail = f"still queued in {queue}. {location}"
     if state.unmet_conditions:
-        detail += ". Unmet candidate conditions: " + "; ".join(state.unmet_conditions)
+        labels = [label.encode() for label in state.unmet_conditions[:4]]
+        shown = [label[:160].decode(errors="ignore") + ("…" if len(label) > 160 else "")
+                 for label in labels]
+        detail += ". Unmet candidate conditions: " + "; ".join(shown)
+        if omitted := len(state.unmet_conditions) - len(shown):
+            detail += f"; {omitted} more"
     return detail
 
 
@@ -1686,17 +1705,20 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
 
 def cmd_resolve(args: argparse.Namespace) -> int:
     """List open blocking findings, or reply to one with what changed and resolve its thread."""
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
     pr = _require_pr(config, worktree.branch(wt))
+    if pr.base_ref != config.base_branch:  # trusted publishers belong to the configured base
+        raise CliError(f"PR #{pr.number} targets {pr.base_ref}, configured base is {config.base_branch}")
+    publishers = config.review_publishers or (github.login(),)
     if not args.finding:
-        for marker_id, _thread, f in github.open_findings(config.repo, pr.number):
+        for marker_id, _thread, f in github.open_findings(config.repo, pr.number, publishers):
             print(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}")
         return 0
-    finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
+    finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply, publishers)
     print(f"resolved {args.finding}: {finding.title}")
     try:
         with github.api_error_diagnostics():
-            remaining = github.open_blocking_findings(config.repo, pr.number)
+            remaining = github.open_blocking_findings(config.repo, pr.number, None, publishers)
     except (github.GhError, _proc.ProcTimeout, OSError) as exc:
         retry = shlex.join(("gh", *github.eligibility_dispatch_args(
             config.repo, pr.number, config.base_branch,

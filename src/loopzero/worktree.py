@@ -101,10 +101,12 @@ def _branch_exists(repo_root: Path, branch: str) -> bool:
 
 
 def _ensure_excludes(repo_root: Path) -> None:
-    common = Path(_git(repo_root, *_ABSOLUTE_COMMON_DIR))
-    exclude = common / "info" / "exclude"
+    common = Path(_git(repo_root, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True)).resolve()
+    info = (common / "info").resolve()
+    exclude = (info / "exclude").resolve()
+    if not info.is_relative_to(common) or not exclude.is_relative_to(common):
+        raise WorktreeError(f"Git exclude is outside its Git directory: {exclude}")
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    exclude = exclude.resolve()
     while True:
         fd = os.open(exclude, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o666)
         with os.fdopen(fd, "rb") as stream:
@@ -135,9 +137,14 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
-    base_ref = f"refs/remotes/origin/{base_branch}"
+    remote_ref = f"refs/heads/{base_branch}"
+    lookup = ("ls-remote", "--refs", "origin", remote_ref)
     try:
-        _git(repo_root, "fetch", "--quiet", "origin", f"+refs/heads/{base_branch}:{base_ref}")
+        advertised = _git(repo_root, *lookup)
+        base, _, ref = advertised.partition("\t")
+        if ref != remote_ref:
+            raise GitError(("git", *lookup), f"origin did not report a unique {remote_ref}")
+        _git(repo_root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", base)
     except GitError:
         if "origin" not in _git(repo_root, "remote").splitlines():
             raise WorktreeError(
@@ -146,7 +153,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
                 "with `git remote rename <name> origin`."
             ) from None
         raise
-    base = _git(repo_root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
+    _git(repo_root, "update-ref", "--no-deref", f"refs/remotes/origin/{base_branch}", base)
     if existing:
         existing_head = _resumable_head(repo_root, wt, branch)
         if existing_head is None:
@@ -248,7 +255,10 @@ def is_dirty(wt: Path) -> bool:
 
 
 def diff_since(wt: Path, sha: str) -> bytes:
-    diff = _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
+    # Show every file as text, whatever attributes or NUL bytes the reviewed head adds,
+    # without diff drivers, and keep submodule pointers even if .gitmodules ignores them.
+    diff = _git(Path(wt), "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                "--ignore-submodules=none", "--submodule=short", sha, "HEAD", preserve_newlines=True)
     return diff.encode("utf-8", errors="surrogateescape")
 
 
@@ -258,12 +268,23 @@ def merges_since(wt: Path, sha: str) -> list[str]:
 
 
 def cleanup(wt: Path) -> None:
-    """Remove the worktree and its branch. Refuses when the worktree is dirty."""
+    """Remove the worktree and branch if there are no local user files."""
     wt = Path(wt).absolute()
     if not wt.exists():
         raise WorktreeError(f"no such worktree: {wt}")
     if is_dirty(wt):
         raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
+    ignored = _git(
+        wt, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", preserve_newlines=True
+    )
+    for path in ignored.split("\0")[:-1]:
+        if (
+            (path in {".loopzero/task.md", ".loopzero/checks.json"}
+             or re.fullmatch(r"\.loopzero/review-[0-9a-f]{12}-(primary|delta)\.json", path))
+            and not (wt / path).is_symlink()
+        ):
+            continue
+        raise WorktreeError(f"worktree contains ignored file {path!r}, refusing to remove: {wt}")
     name, gd = branch(wt), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
     _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
     try:

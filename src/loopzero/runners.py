@@ -502,10 +502,13 @@ def _codex_repository_skill_overrides(cwd: Path) -> list[str]:
 
 def _repository_skill_paths(cwd: Path) -> set[str]:
     tree, paths, seen = cwd.resolve(), set(), set()
-    pending = [cwd / ".agents" / "skills", cwd / ".codex" / "skills"]
+    roots = (cwd / ".agents", cwd / ".codex")
+    pending = list(roots)
     while pending:
         path = pending.pop()
-        if not os.path.lexists(path):
+        try:
+            path.lstat()
+        except FileNotFoundError:
             continue
         # Strict: a looping or dangling link fails closed; Codex might resolve it elsewhere.
         real = path.resolve(strict=True)
@@ -514,6 +517,9 @@ def _repository_skill_paths(cwd: Path) -> set[str]:
         if not real.is_dir():
             if path.name == "SKILL.md":
                 paths.add(str(real))
+            continue
+        if path in roots:
+            pending.append(path / "skills")
             continue
         if real in seen:
             continue
@@ -813,7 +819,8 @@ def _inspection_commands(command, cwd):
                 args = [
                     part
                     for part in group[1:]
-                    if part not in {"--no-color", "--no-ext-diff", "--no-textconv"}
+                    if part not in {"--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                                    "--ignore-submodules=none", "--submodule=short"}
                 ]
                 if len(args) != 2 or not all(_hex(part, 40) for part in args):
                     return []
@@ -1384,7 +1391,8 @@ def split_diff(diff: str, budget: int) -> list[str]:
 
 
 def _summarize_deleted(block: str) -> str:
-    if "\ndeleted file mode " not in block and "\n+++ /dev/null" not in block:
+    # Judge deletion from git's header lines only; hunk lines are the PR's own text.
+    if not re.search(r"(?m)^deleted file mode [0-7]{6}$", block.partition("\n@@")[0]):
         return block
     header = block.partition("\n")[0]
     match = re.fullmatch(r'diff --git ("?)a/(.*)\1 \1b/\2\1', header)

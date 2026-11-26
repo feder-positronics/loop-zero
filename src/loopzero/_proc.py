@@ -100,8 +100,7 @@ def build_env(
 ) -> dict[str, str]:
     """Copy only allowlisted variables from the current environment, then apply extras."""
     env = {key: os.environ[key] for key in env_allowlist if key in os.environ}
-    if extra_env:
-        env.update(extra_env)
+    env.update(extra_env or {})
     return env
 
 
@@ -138,7 +137,6 @@ def run(
             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
-            text=not preserve_newlines,
             encoding=None if preserve_newlines else encoding,
             errors=None if preserve_newlines else "replace",
             start_new_session=os.name == "posix",
