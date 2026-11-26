@@ -188,22 +188,15 @@ def run(
     stdin = input.encode(raw_encoding) if preserve_newlines and input is not None else input
     try:
         with subprocess.Popen(
-            argv,
-            cwd=str(cwd),
-            env=build_env(env_allowlist, extra_env),
-            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
+            argv, cwd=str(cwd), env=build_env(env_allowlist, extra_env),
+            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
-            encoding=None if preserve_newlines else encoding,
-            errors=None if preserve_newlines else "replace",
-            pass_fds=pass_fds,
-            start_new_session=os.name == "posix",
+            encoding=None if preserve_newlines else encoding, errors=None if preserve_newlines else "replace",
+            pass_fds=pass_fds, start_new_session=os.name == "posix",
         ) as proc:
             try:
-                if tail_chars is None:
-                    stdout, stderr = proc.communicate(stdin, timeout=timeout)
-                else:
-                    stdout, stderr = _read_output_tail(proc, tail_chars, timeout), ""
+                stdout, stderr = (proc.communicate(stdin, timeout=timeout) if tail_chars is None
+                                  else (_read_output_tail(proc, tail_chars, timeout), ""))
             except BaseException:
                 if os.name == "posix":
                     with suppress(ProcessLookupError):
@@ -221,19 +214,10 @@ def run(
         out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
         elapsed = time.monotonic() - started
-        raise ProcTimeout(
-            f"{' '.join(argv)}: timed out after {timeout:g}s\n{tail(out)}",
-            out,
-            stderr=err or "",
-            duration_s=elapsed,
-        ) from exc
+        message = f"{' '.join(argv)}: timed out after {timeout:g}s\n{tail(out)}"
+        raise ProcTimeout(message, out, stderr=err or "", duration_s=elapsed) from exc
     if isinstance(stdout, bytes):
         stdout = stdout.decode(raw_encoding, errors="surrogateescape")
     if isinstance(stderr, bytes):
         stderr = stderr.decode(raw_encoding, errors="replace")
-    return Completed(
-        exit_code=proc.returncode,
-        stdout=stdout or "",
-        stderr=stderr or "",
-        duration_s=time.monotonic() - started,
-    )
+    return Completed(proc.returncode, stdout or "", stderr or "", time.monotonic() - started)
