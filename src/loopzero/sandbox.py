@@ -33,6 +33,7 @@ CHECK_SHELL = ("/bin/bash", "--posix", "-o", "pipefail", "-c")
 CHECK_TAIL_BYTES = 16 * 1024
 FIRST_HEARTBEAT_DELAY = 30.0
 HEARTBEAT_INTERVAL = 300.0
+EXCLUSION_PATHSPEC = re.compile(r"^:(?:[/!^]*[!^]|\((?:[^,)]*,)*exclude(?:[,)]))")
 SANDBOX_HOME = "/tmp/home"
 # Only these system directories are exposed read-only by default; home tool paths
 # require explicit `[checks] ro_paths`. Host homes, sockets and processes stay hidden.
@@ -184,8 +185,22 @@ def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
         checkpoint(replace(report, results=(*report.results, *unvisited, incomplete)))
 
 
+def has_untracked_task_state(config: Config, worktree: Path) -> bool:
+    return not _git(config, worktree, "ls-files", "--", ".loopzero")
+
+
+def receipt_checkout_matches(config: Config, worktree: Path, report: CheckReport) -> bool:
+    if not _stage_unchanged(config, worktree, report.head):
+        return False
+    base = _check_base(config, worktree)
+    return all(
+        result.input_key is not None and result.input_key == _input_key(config, worktree, result.command, base)
+        for result in report.results if result.command in config.inputs or "*" in config.inputs
+    ) and _stage_unchanged(config, worktree, report.head)
+
+
 def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
-    if _git(config, worktree, "ls-files", "--", ".loopzero"):
+    if not has_untracked_task_state(config, worktree):
         return {}
     try:
         data = json.loads((worktree / ".loopzero/checks.json").read_text())
@@ -275,22 +290,41 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
         raise
 
 
+def _has_inputs(config: Config, command: str) -> bool:
+    return command in config.inputs or "." in config.inputs.get("*", ())
+
+
+def _pathspec_matches(config: Config, worktree: Path, path: str) -> bool:
+    blobs = _input_blobs(config, worktree, (path,))
+    if EXCLUSION_PATHSPEC.match(path):
+        # Git applies an exclusion-only pathspec to the whole tree.
+        whole = _input_blobs(config, worktree, (".",))
+        return blobs is not None and whole is not None and blobs != whole
+    return bool(blobs)
+
+
 def _input_key(config: Config, worktree: Path, command: str, base: str, *,
                status: Callable[[str], None] | None = None,
                workflow: str | Path = "workflow.toml") -> str | None:
-    if command not in config.inputs and "." not in config.inputs.get("*", ()):
+    if not _has_inputs(config, command):
         return None
     if not base and status is None:
         return None
     entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
+    paths = tuple(path for group in entries.values() for path in group)
     try:
-        blobs = _input_blobs(config, worktree, tuple(path for paths in entries.values() for path in paths))
+        blobs = _input_blobs(config, worktree, paths)
+        if blobs and not all(
+            _pathspec_matches(config, worktree, path)
+            for path in paths if len(paths) > 1 or EXCLUSION_PATHSPEC.match(path)
+        ):
+            blobs = ""
     except (SandboxUnavailable, _proc.ProcTimeout, OSError, ValueError):
         if not base:
             return None
         raise
     if blobs == "" and status:
-        status(f"{workflow}: checks.inputs for {command!r} matches no files in HEAD. "
+        status(f"{workflow}: checks.inputs for {command!r} is empty or has a pathspec that matches no files in HEAD. "
                f"Correct these entries: {entries!r}. Running the check fresh.")
     if not blobs or not base:
         return None
