@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import candidate, github
-from .types import LoopZeroError
+from .types import LoopZeroError, is_sha
 
 API = "https://api.mergify.com/v1"
 REQUEST = "loopzero:mergify-request"
@@ -245,7 +245,7 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
     blob = github.api_get(path)
     try:
         if (blob["type"] != "file" or blob["encoding"] != "base64"
-                or not isinstance(blob["sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", blob["sha"])
+                or not is_sha(blob["sha"])
                 or not isinstance(blob["content"], str) or len(blob["content"]) > 90000):
             return False
         document = yaml.load(base64.b64decode("".join(blob["content"].split()), validate=True),
@@ -348,7 +348,7 @@ def _departure_payload(body: str, queue: str) -> dict:
 def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
     """Use a bot report only when it identifies the latest command and current head."""
     try:
-        comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+        comments = github.paged(f"repos/{repo}/issues/{number}/comments")
     except github.GhError:
         return None
     comments = [item for item in comments if type(item.get("id")) is int and item["id"] > 0]
@@ -388,7 +388,7 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
 def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
     login, requested, confirmed = github.login(token=""), False, False
     requested_at = ""
-    comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+    comments = github.paged(f"repos/{repo}/issues/{number}/comments")
     for item in _comments_by(comments, login):
         body = str(item.get("body") or "")
         lines, requeue = body.splitlines(), _queue_command(body, queue)

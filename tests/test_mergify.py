@@ -149,7 +149,7 @@ def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
     for later, requeued in [("", False), ("@mergifyio queued", False), ("@mergifyio requeued", False),
             ("@mergifyio queue dev", False), ("@Mergifyio queue main", True), ("@mergify requeue", True)]:
         comments = [{"body": b, "user": {"login": who}} for who, b in [*rows, ("trusted", later)]]
-        monkeypatch.setattr(mergify.github, "_paged", lambda *_, c=comments: c)
+        monkeypatch.setattr(mergify.github, "paged", lambda *_, c=comments: c)
         assert mergify.markers("acme/widgets", 7, head, "main") == (requeued, not requeued), later
 
 
