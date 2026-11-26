@@ -554,7 +554,7 @@ def _git(config: Config, worktree: Path, *args: str) -> str:
 
 
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
-    raw = Path(_git(config, worktree, "rev-parse", flag).strip())
+    raw = Path(_git(config, worktree, "rev-parse", flag).removesuffix("\n"))
     return (raw if raw.is_absolute() else worktree / raw).resolve()
 
 

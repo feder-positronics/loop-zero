@@ -766,7 +766,7 @@ def _lock_review(run_review: Callable[[argparse.Namespace, Path, Config], int]):
     @wraps(run_review)
     def locked(args: argparse.Namespace) -> int:
         wt, config = _context(args, pin_checks=True)
-        git_dir = _git(wt, "rev-parse", "--absolute-git-dir")
+        git_dir = _git(wt, "rev-parse", "--absolute-git-dir", paths=True).removesuffix("\n")
         fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
         try:
             try:

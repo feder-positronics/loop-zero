@@ -612,7 +612,7 @@ def test_reviewer_does_not_bind_missing_auth_paths(repo, fake_bin, tmp_path, fak
     assert all(destination == SANDBOX_HOME for _, destination in _pairs(_bwrap_argv(fake_bwrap), "--bind"))
 
 
-@pytest.mark.parametrize("repo_name", ["repo", "repo\ncommon"], ids=["ordinary", "newline"])
+@pytest.mark.parametrize("repo_name", ["repo", "repo\ncommon", "repo\rcommon"])
 def test_linked_worktree_and_git_directory_are_read_only(
     git_repo: Path, tmp_path: Path, fake_bin: Path, monkeypatch, repo_name: str,
 ) -> None:
@@ -626,6 +626,7 @@ def test_linked_worktree_and_git_directory_are_read_only(
 
     def record(config, cwd, home, common_dir, git_dir, **kwargs):
         assert (common_dir, git_dir) == (common, common / "worktrees" / linked.name)
+        assert sandbox._git_dir(config, cwd, "--git-common-dir") == common
         argv = bwrap_argv(config, cwd, home, common_dir, git_dir, **kwargs)
         captured.extend(argv)
         return argv
@@ -634,8 +635,7 @@ def test_linked_worktree_and_git_directory_are_read_only(
     _fake_review(fake_bin, "claude")
     assert _review("claude", linked).verdict == "approve"
     binds = _pairs(captured, "--ro-bind")
-    assert (str(linked.resolve()),) * 2 in binds
-    assert (str(common),) * 2 in binds
+    assert all((str(path),) * 2 in binds for path in (linked.resolve(), common))
 
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
