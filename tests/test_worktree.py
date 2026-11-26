@@ -248,12 +248,12 @@ def test_task_helpers_errors(repo: Path) -> None:
 
 
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
-    wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
+    wt, calls, real = worktree.start(repo, "zażółć", "main"), [], worktree._git
     monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
     (wt / f".loopzero/reviewer-output-{worktree.head(wt)[:12]}-primary.json").write_text("{}")
     worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
-    assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
+    assert not wt.exists() and not git(repo, "branch", "--list", "lz/zażółć") and "zażółć" not in git(repo, "worktree", "list")
 
 
 @pytest.mark.parametrize("file", ["scratch.txt", "local.env", ".loopzero/user-notes.md"])

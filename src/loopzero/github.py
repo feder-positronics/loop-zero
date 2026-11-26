@@ -375,7 +375,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout, scoped=read_only))
+                       timeout=_read_timeout(timeout, scoped=read_only), encoding="utf-8")
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
@@ -1465,7 +1465,7 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     current = _remote_branch_head(endpoint)
     if current != expected_head:
         return current is None
-    ref = f"refs/heads/{branch}"
+    ref = os.fsdecode(f"refs/heads/{branch}".encode("utf-8", "surrogateescape"))
     argv = ("git", "-c", "credential.helper=!gh auth git-credential",
             "push", f"--force-with-lease={ref}:{expected_head}",
             f"https://github.com/{repo}.git", f":{ref}")

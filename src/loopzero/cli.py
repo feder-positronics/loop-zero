@@ -697,6 +697,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
     body = _pr_body(wt, head, config, existing)
     force_lease = False
+    git_branch = os.fsdecode(branch.encode("utf-8", "surrogateescape"))
     push = ["push", "-u", "origin"]
     if pr is not None and pr.state == "OPEN":
         known = config_mod.run_git(wt, "cat-file", "-e", f"{pr.head_sha}^{{commit}}")
@@ -706,13 +707,13 @@ def cmd_pr(args: argparse.Namespace) -> int:
             )
         force_lease = pr.head_sha != head and not _is_ancestor(wt, pr.head_sha, head)
         if force_lease:
-            previous_heads = _git(wt, "reflog", "show", "--format=%H", f"refs/heads/{branch}").splitlines()
+            previous_heads = _git(wt, "reflog", "show", "--format=%H", f"refs/heads/{git_branch}").splitlines()
             if not any(_is_ancestor(wt, pr.head_sha, previous) for previous in previous_heads):
                 raise CliError(
                     f"PR head {pr.head_sha[:12]} is absent from this task branch's history; integrate it first"
                 )
-            push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
-    push.append(branch)
+            push.extend(("--porcelain", f"--force-with-lease={git_branch}:{pr.head_sha}"))
+    push.append(git_branch)
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
@@ -1826,10 +1827,10 @@ def _cleanup_remote_refs(wt: Path, config: Config, branch: str, expected_head: s
 def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
     if not branch.startswith("lz/") or branch.count("/") != 1:
         return
-    ref = f"refs/remotes/origin/{branch}"
+    ref = os.fsdecode(f"refs/remotes/origin/{branch}".encode("utf-8", "surrogateescape"))
     try:
         _repo_root(wt)
-        current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref)
+        current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref, paths=True).rstrip(" ")
         if current == f"{expected_head} {ref}":
             _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
     except (CliError, OSError, _proc.ProcTimeout) as exc:
@@ -1872,10 +1873,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     wt = _toplevel()
     config = _load_config(args, wt, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
-    print(f"worktree: {wt}")
-    print(f"branch:   {branch}")
-    print(f"head:     {head}")
-    print(f"base:     {config.base_branch}")
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    identity = f"worktree: {wt}\nbranch:   {branch}\nhead:     {head}\nbase:     {config.base_branch}"
+    print(identity.encode(encoding, "backslashreplace").decode(encoding))
     print(f"dirty:    {'yes' if worktree.is_dirty(wt) else 'no'}")
     pr = github.pr_for_branch(config.repo, branch)
     if pr is None:
