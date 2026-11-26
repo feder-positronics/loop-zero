@@ -104,7 +104,7 @@ Settings and semantics the example does not spell out:
 | --- | --- |
 | `checks.required_ci` | Names may be check runs or commit statuses; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
 | `checks.writable` | The forbidden-path rules from `checks.ro_paths` apply. |
-| `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers and require local execution without `checks.runner`. |
+| `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers. |
 | `checks.env_allowlist` | Host environment variables passed into the sandbox. To forward a launcher-provided variable, append its name to `[checks].env_allowlist` in the base branch’s `workflow.toml`. An explicit list replaces the defaults (`PATH HOME LANG LC_ALL TERM`). |
 
 ## What it deliberately does not do

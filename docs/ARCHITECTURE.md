@@ -525,7 +525,7 @@ the status of its rightmost failed member, or zero when all members succeed.
 The local shell is part of the receipt and stage reuse fingerprints.
 
 The coordinator resolves stages, aggregates them in order, stops on failure and
-verifies the head is unchanged and clean after execution. Only the coordinator
+verifies that HEAD and the clean/dirty state match their starting values. Only the coordinator
 writes the authoritative `checks.json` receipt. Checks lock the task state directory
 through execution and receipt publication. A waiter can reuse a newly published
 passing receipt when HEAD, settings and declared inputs match. Writers recheck
