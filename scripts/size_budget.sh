@@ -13,7 +13,7 @@ set -euo pipefail
 # Measured 2026-11-25: 1406 core Markdown / 600 delegation Markdown lines.
 # Allow ~10% growth, rounded up, so small fixes do not require cap changes.
 SRC_CAP=8250
-TESTS_CAP=13500
+TESTS_CAP=13850
 CORE_DOCS_CAP=1500
 DELEGATION_DOC_CAP=660
 COMPLEXITY_CAP=10

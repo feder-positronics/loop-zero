@@ -34,90 +34,85 @@ def test_executable_scripts_keep_lf_in_autocrlf_checkout(git_repo, tmp_path):
     assert all(line.split()[1] == "w/lf" for line in eol)
 
 
-def test_size_budget_batches_base_blobs(git_repo, tmp_path, fake_tool):
-    source = git_repo / "src/loopzero"
-    source.mkdir(parents=True)
-    for index in range(160):
-        (source / f"é {index}\nmodule.py").write_text("def f():\n    return 1\n")
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
-    (source / "untracked.py").write_text("def f():\n    return 2")
-    calls = tmp_path / "git-calls"
-    fake_tool("git", 'echo git >> "$GIT_CALLS"\n' f'exec {shutil.which("git")} "$@"\n')
-
-    done = subprocess.run(
-        ["bash", str(SCRIPT), base], cwd=git_repo,
-        env={**os.environ, "PYTHON": sys.executable, "GIT_CALLS": str(calls)},
-        capture_output=True, text=True, check=False,
-    )
-    assert done.returncode == 0, done.stdout + done.stderr
-    assert done.stdout.startswith("src=321 (base 320, delta 1,")
-    assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
-    assert len(calls.read_text().splitlines()) <= 10
-
-
 def _branchy(name: str, branches: int) -> str:
     body = "".join(f"    if x == {i}:\n        return {i}\n" for i in range(branches))
     return f"def {name}(x):\n{body}    return -1\n"
 
 
 @pytest.mark.parametrize("failure", [None, "deleted", "batch"])
-def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_tool, failure):
-    source = git_repo / "src/loopzero" / ("a.py" if failure else "é space\nname.py")
+def test_size_budget_counts_unicode_and_propagates_read_errors(
+    git_repo, tmp_path, fake_tool, monkeypatch, failure,
+):
+    source = git_repo / "src/loopzero" / ("a.py" if failure else os.fsdecode(b"\xc3\xa9 space\nname.py"))
     source.parent.mkdir(parents=True)
     source.write_text("one\ntwo\n")
     source.with_name("z.py").write_text("three\n")
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
-    if failure == "deleted":  # unstaged deletion: skipped, not an error
+    if failure is None:
+        for index in range(160):
+            source.with_name(f"module{index}.py").write_text("def f():\n    return 1\n")
+    base = stage_tree(git_repo)
+    calls = tmp_path / "git-calls"
+    if failure is None:
+        source.with_name("untracked.py").write_text("def f():\n    return 2")
+        monkeypatch.setenv("GIT_CALLS", str(calls))
+        fake_tool("git", 'echo git >> "$GIT_CALLS"\n' f'exec {shutil.which("git")} "$@"\n')
+    elif failure == "deleted":  # unstaged deletion: skipped, not an error
         source.unlink()
     elif failure == "batch":
         fake_tool("git", 'if [ "$1" = cat-file ]; then exit 1; fi\n'
                   f'exec {shutil.which("git")} "$@"\n')
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
+    done = run_budget(git_repo, base)
     assert bool(done.returncode) is (failure == "batch")
-    if failure != "batch":
-        assert done.stdout.startswith("src=1 (base 3," if failure else "src=3 (base 3, delta 0,")
+    if failure is None:
+        assert done.stdout.startswith("src=324 (base 323, delta 1,")
+        assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
+        assert len(calls.read_text().splitlines()) <= 10
+    elif failure == "deleted":
+        assert done.stdout.startswith("src=1 (base 3,")
 
 
-@pytest.mark.parametrize("case,expected_rc", [
-    ("new_over_cap", 1),
-    ("existing_hold", 0),
-    ("existing_shrink", 0),
-    ("existing_grow", 1),
-])
-def test_complexity_ratchet(git_repo, case, expected_rc):
-    src = git_repo / "src/loopzero/mod.py"
-    src.parent.mkdir(parents=True)
-    if case == "new_over_cap":
-        src.write_text("def ok():\n    return 1\n")
-    else:
-        src.write_text(_branchy("hot", 11))  # CC = 12 > 10
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
-
-    if case == "new_over_cap":
-        src.write_text(_branchy("new_hot", 10))  # CC = 11 > 10
-    elif case == "existing_shrink":
-        src.write_text(_branchy("hot", 10))  # CC = 11 <= 12
-    elif case == "existing_grow":
-        src.write_text(_branchy("hot", 12))  # CC = 13 > 12
-
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
+def run_budget(repo, base, *, python=sys.executable):
+    return subprocess.run(["bash", str(SCRIPT), base], cwd=repo,
+                          env={**os.environ, "PYTHON": python},
                           capture_output=True, text=True, check=False)
+
+
+def stage_tree(repo):
+    git(repo, "add", ".")
+    return git(repo, "write-tree").strip()
+
+
+@pytest.fixture
+def module_path(git_repo):
+    path = git_repo / "src/loopzero/mod.py"
+    path.parent.mkdir(parents=True)
+    return path
+
+
+_SIMPLE_FUNCTION = "def ok():\n    return 1\n"
+_HOT_FUNCTION = _branchy("hot", 11)
+
+
+@pytest.mark.parametrize("before,after,expected_rc", [
+    pytest.param(_SIMPLE_FUNCTION, _branchy("new_hot", 10), 1, id="new_over_cap"),
+    pytest.param(_HOT_FUNCTION, _HOT_FUNCTION, 0, id="existing_hold"),
+    pytest.param(_HOT_FUNCTION, _branchy("hot", 10), 0, id="existing_shrink"),
+    pytest.param(_HOT_FUNCTION, _branchy("hot", 12), 1, id="existing_grow"),
+])
+def test_complexity_ratchet(git_repo, module_path, before, after, expected_rc):
+    module_path.write_text(before)
+    base = stage_tree(git_repo)
+    if after != before:
+        module_path.write_text(after)
+    done = run_budget(git_repo, base)
     assert done.returncode == expected_rc, done.stdout + done.stderr
     assert ("complexity=FAIL" if expected_rc else "complexity=PASS") in done.stdout
 
 
-def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo):
-    src = git_repo / "src/loopzero/mod.py"
-    src.parent.mkdir(parents=True)
+def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo, module_path):
     with_blocks = "".join(f"    with contextlib.suppress(ValueError):\n        y = {i}\n"
                           for i in range(11))
-    src.write_text(
+    module_path.write_text(
         "import contextlib\n"
         "def pep758(x):\n"
         f"{with_blocks}"
@@ -126,21 +121,15 @@ def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo):
         "    except KeyError, TypeError:\n"
         "        return 0\n"
     )
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
+    base = stage_tree(git_repo)
+    done = run_budget(git_repo, base)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
 
 
-def test_complexity_rejects_old_python(git_repo, tmp_path):
-    src = git_repo / "src/loopzero/mod.py"
-    src.parent.mkdir(parents=True)
-    src.write_text("def ok():\n    return 1\n")
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
+def test_complexity_rejects_old_python(git_repo, module_path, tmp_path):
+    module_path.write_text(_SIMPLE_FUNCTION)
+    base = stage_tree(git_repo)
     fake_py = tmp_path / "old-python"
     fake_py.write_text(
         f"#!{sys.executable}\n"
@@ -150,9 +139,7 @@ def test_complexity_rejects_old_python(git_repo, tmp_path):
         "exec(compile(sys.stdin.read(), '<size_budget>', 'exec'), {'__name__': '__main__'})\n"
     )
     fake_py.chmod(0o755)
-    env = {**os.environ, "PYTHON": str(fake_py)}
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo, env=env,
-                          capture_output=True, text=True, check=False)
+    done = run_budget(git_repo, base, python=str(fake_py))
     assert done.returncode == 1
     assert "requires Python 3.14+" in done.stderr
 
@@ -167,11 +154,8 @@ def test_markdown_doc_budgets(git_repo, path, cap, grew, expected_rc):
     doc = git_repo / path
     doc.parent.mkdir(parents=True)
     doc.write_text("line\n" * (cap + 5))
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
+    base = stage_tree(git_repo)
     if grew:
         doc.write_text("line\n" * (cap + 6))
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
+    done = run_budget(git_repo, base)
     assert done.returncode == expected_rc, done.stdout + done.stderr
