@@ -230,8 +230,9 @@ def _execution_settings(config: Config, base: str) -> dict:
         settings["base"] = base
     if config.check_runner:
         settings["runner_executable"] = _runner_identity(config)
-    settings["environment"] = (_proc.build_env(config.env_allowlist) if config.check_runner
-                               else check_environment(config))
+        settings["environment"] = _proc.build_env(config.env_allowlist)
+    else:
+        settings["environment"] = check_environment(config)
     return settings
 
 
