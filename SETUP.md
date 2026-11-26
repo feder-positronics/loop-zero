@@ -39,6 +39,21 @@ As a dev dependency of your repository:
 uv add --dev "loopzero @ git+https://github.com/feder-positronics/loop-zero@<sha>"
 ```
 
+For a verified CI install, check out the full commit SHA and run these commands
+from its repository root. The build constraints verify Hatchling and its build dependencies.
+The lock export supplies the hashes for the runtime dependencies.
+
+```sh
+install_dir=$(mktemp -d)
+uv build --python 3.14 --build-constraints build-constraints.txt --require-hashes --wheel --out-dir "$install_dir"
+uv export --locked --no-dev --no-emit-project -o "$install_dir/runtime.txt"
+uv venv --python 3.14 "$install_dir/venv"
+python="$install_dir/venv/bin/python"
+uv pip install --python "$python" --require-hashes -r "$install_dir/runtime.txt"
+uv pip install --python "$python" --no-deps "$install_dir"/*.whl
+"$install_dir/venv/bin/loopzero" --help
+```
+
 Installing the CLI does not provision API keys or install agent skills. Continue
 with agent setup, repository configuration, and the optional credential setup
 below. For an existing installation, keep its working credentials; upgrading
@@ -117,12 +132,17 @@ Point it at the GitHub repository you set in `[repo] name`. Use
 if you already configured it under a different name.
 
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
-repository root and set `[repo] name`. `loopzero check` uses the base branch's
-`[checks]` when present: edited commands take effect after merging; `--config`
-unpins them. Then:
+repository root, set `[repo] name`, and commit your initial `[checks]` commands
+to the base branch before starting your first task. If the base has a
+`workflow.toml`, `loopzero check` uses its checks configuration even when
+`[checks]` is absent. To try task-side changes explicitly, run
+`loopzero --config workflow.toml check` from the task worktree. Then:
 
-- Run `[checks] commands` as described in the [delivery steps](core/CONTRACT.md#the-six-steps).
-  For uv projects, `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
+- Before pushing the base, set `checks.commands` to checks your project can run.
+  For a shell-only first check, use `commands = ["test -f greeting.txt"]` under
+  `[checks]` and commit `greeting.txt` in your first task. Replace or omit the
+  example's uv-specific `scratch`, `env`, `writable`, and `ro_paths` entries
+  to match your tools. With just shell checks, you can omit all four.
 - Configure hosted check names, mounts, scratch and environment in the
   [commented workflow example](workflow.example.toml). See the contract's
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
