@@ -30,6 +30,7 @@ def no_retry_delay(monkeypatch):
     clock = [0.0]
     monkeypatch.setattr("loopzero.candidate._retry_clock", lambda: clock[0])
     monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    return clock
 
 
 def event(head: str = "c" * 40) -> dict:
@@ -125,7 +126,7 @@ def run_attestation(
 ):
     candidate_event = candidate_event or event()
     reads, values = (
-        cycle(status_reads or [status(), status()]),
+        cycle(status_reads or [status()]),
         github_payloads or payloads(candidate_event),
     )
     return run(
@@ -163,17 +164,15 @@ def test_rejects_forged_bot_or_prefix(mutation, message: str) -> None:
         run_attestation(candidate_event=candidate_event, github_payloads=original_payloads)
 
 
-def test_rejects_missing_live_status_as_candidate_error() -> None:
-    with pytest.raises(CandidateError, match="status is not an object"):
-        run_attestation(status_reads=[None])
-
-
-def test_rejects_source_head_missing_from_candidate_history() -> None:
+@pytest.mark.parametrize("case,diagnostic", [
+    ("missing status", "status is not an object"), ("missing ancestor", "not an ancestor"),
+])
+def test_rejects_invalid_attestation_evidence(case, diagnostic):
     values = payloads(event())
-    comparison = values[f"/repos/owner/repo/compare/{'2' * 40}...{'c' * 40}"]
-    comparison.update(status="diverged", merge_base_commit={"sha": "0" * 40})
-    with pytest.raises(CandidateError, match="not an ancestor"):
-        run_attestation(github_payloads=values)
+    if case == "missing ancestor":
+        values[f"/repos/owner/repo/compare/{'2' * 40}...{'c' * 40}"]["status"] = "diverged"
+    with pytest.raises(CandidateError, match=diagnostic):
+        run_attestation(github_payloads=values, status_reads=[None] if case == "missing status" else None)
 
 
 @pytest.mark.parametrize(
@@ -182,8 +181,7 @@ def test_rejects_source_head_missing_from_candidate_history() -> None:
     ids=["source-head", "candidate-head"],
 )
 def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str) -> None:
-    candidate_event = event()
-    values = payloads(candidate_event)
+    values = payloads(event())
     calls = 0
 
     def github_get(path: str):
@@ -195,10 +193,8 @@ def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str)
                 result["head"]["sha"] = "9" * 40
         return result
 
-    reads = iter([status(), status()])
     with pytest.raises(CandidateError, match=diagnostic):
-        run_attestation(candidate_event, github_get=github_get,
-                        mergify_status=lambda *_: deepcopy(next(reads)))
+        run_attestation(github_get=github_get)
 
 
 def test_same_head_still_obeys_source_policy() -> None:
@@ -339,9 +335,13 @@ def test_candidate_transport_configuration_is_scoped_to_fetch(tree_candidate, mo
     assert seen == {"fetch", "non-fetch"}
 
 
-@pytest.mark.parametrize("mutation", ["replaced", "withdrawn", "extra", "tampered", "missing"])
-def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation):
-    attest, git, commit, base, _, _, candidate_sha = tree_candidate
+@pytest.mark.parametrize("mutation,diagnostic", [
+    ("replaced", "tree mismatch"), ("withdrawn", "tree mismatch"), ("extra", "tree mismatch|objects unavailable"),
+    ("tampered", "tree mismatch"), ("missing", "objects unavailable"),
+    ("octopus", "ambiguous"), ("main conflict", "integration conflict"),
+])
+def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation, diagnostic):
+    attest, git, commit, base, parent, source, candidate_sha = tree_candidate
     kwargs = {}
     if mutation == "replaced":
         kwargs["main_head"] = commit("parent", "H2\n")
@@ -349,6 +349,10 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation):
         kwargs["main_head"] = base
     elif mutation == "missing":
         kwargs["main_head"] = "f" * 40
+    elif mutation == "main conflict":
+        kwargs["main_head"] = commit("source", "conflicting main content\n")
+    elif mutation == "octopus":
+        kwargs["head"] = tree_commit(git, candidate_sha, base, parent, source, subject="octopus")
     else:
         git("checkout", "candidate")
         changed = commit("injected", "unreviewed\n")
@@ -357,8 +361,7 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation):
             parents = git("show", "-s", "--format=%P", candidate_sha).split()
             changed = tree_commit(git, changed, *parents, subject="forged merge")
         kwargs["head"] = changed
-    with pytest.raises(CandidateError, match=r"Missing Mergify parent batches parent:.*"
-                       r"(tree mismatch|objects unavailable)"):
+    with pytest.raises(CandidateError, match=rf"Missing Mergify parent batches parent:.*({diagnostic})"):
         attest(**kwargs)
 
 
@@ -374,13 +377,6 @@ def test_vanished_parent_rejects_main_change(tree_candidate):
     with pytest.raises(CandidateRaceError, match="main changed"):
         tree_candidate[0](main_after=tree_candidate[3], policy=lambda n, _: seen.append(n))
     assert seen == [102, 102, 102]
-
-
-def test_vanished_parent_rejects_ambiguous_topology(tree_candidate):
-    attest, git, _, base, parent, source, candidate_sha = tree_candidate
-    head = tree_commit(git, candidate_sha, base, parent, source, subject="octopus")
-    with pytest.raises(CandidateError, match="parent: ambiguous"):
-        attest(head=head)
 
 
 @pytest.fixture
@@ -465,13 +461,6 @@ def test_intelflo_wrapper_applies_source_policy(tree_candidate, intelflo_policy)
     wrapper = import_module("check_mergify_candidate_policy")
     with pytest.raises(wrapper.PolicyError, match="source PR #102 has a hold label"):
         tree_candidate[0](run=run, lineage="stacked", held_source=102)
-
-
-def test_vanished_parent_rejects_conflicting_current_main(tree_candidate):
-    attest, _, commit, *_ = tree_candidate
-    main = commit("source", "conflicting main content\n")
-    with pytest.raises(CandidateError, match=r"parent:.*integration conflict"):
-        attest(main_head=main)
 
 
 @pytest.mark.parametrize("timing", ["metadata", "policy", "initial", TypeError, AttributeError, KeyError])
@@ -611,9 +600,9 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
     [(0, 0, 3), (29, 0, 1), (0, 30, 1)],
 )
 def test_persistent_race_preserves_last_error_and_bounds_retry(
-    monkeypatch, elapsed, oversleep, attempt_count
+    monkeypatch, no_retry_delay, elapsed, oversleep, attempt_count
 ):
-    attempts, sleeps, clock = [], [], [0]
+    attempts, sleeps, clock = [], [], no_retry_delay
 
     def race(*_, **__):
         error = CandidateRaceError("Mergify candidate membership changed during attestation")
@@ -626,7 +615,6 @@ def test_persistent_race_preserves_last_error_and_bounds_retry(
         clock[0] += seconds + oversleep
 
     monkeypatch.setattr(candidate, "_attest_candidate_once", race)
-    monkeypatch.setattr(candidate, "_retry_clock", lambda: clock[0])
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     with pytest.raises(CandidateRaceError, match="membership changed") as caught:
         run_attestation(github_get=lambda _: None, status_reads=[None])
@@ -642,8 +630,8 @@ def test_membership_drift_is_a_retryable_race():
 
 
 @pytest.mark.parametrize("matches,second,stop", [(n, s, t) for n in (0, 2) for s in (False, True) for t in ("settled", "ambiguous", "closed", "slow", "oversleep", "changed")])
-def test_rebuild_wait(monkeypatch, matches, second, stop):
-    clock, sleeps, reads, values, seen = [0], [], [], payloads(event()), []
+def test_rebuild_wait(monkeypatch, no_retry_delay, matches, second, stop):
+    clock, sleeps, reads, values, seen = no_retry_delay, [], [], payloads(event()), []
     ambiguous = {"batches": [{"id": str(i), "queue_pull_request_number": 900} for i in range(matches)]}
     def sleep(delay):
         sleeps.append(delay)
@@ -662,7 +650,6 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
             or (stop == "settled" and len(reads) > 1 + second)
             or (stop == "changed" and len(reads) >= 6)
         ) else ambiguous
-    monkeypatch.setattr(candidate, "_retry_clock", lambda: clock[0])
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     def run():
         return run_attestation(github_payloads=values, mergify_status=read_status,
