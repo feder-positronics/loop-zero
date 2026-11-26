@@ -17,6 +17,8 @@ though state broadcasts still reach every owner. Before resetting, start heavy o
 described in [Long-running jobs](#long-running-jobs) and name the unit, log and
 exit file in the handoff.
 
+### Handoff and output caps
+
 Cap the whole handoff at 2,000 characters, holding active links and up to
 three numbered first acts: only references needed for the next action, pending results or questions,
 binding decision links and the reply target. Link rules and rulings; omit
@@ -101,7 +103,7 @@ authorized.
 ## Team roles
 
 A long-running team gives each role one current owner. Owners read state from
-the owning issue and the live decision record, not from earlier sessions.
+the owning issue and open `p0` issues, not from earlier sessions.
 Address each role at its permanent thread; an in-place reset keeps that
 address, and a campaign owner is found from its tracking issue. Only a
 [provider move](#provider-portable-handoff) changes an address: after one,
@@ -147,12 +149,7 @@ A schedule firing or a relayed go-ahead grants no new authority.
   issue is open, and ends when it closes. Self-dispatches within approved scope
   and allocated host capacity without per-launch coordinator permission. Reports
   on the tracking issue; messages the coordinator only for blockers.
-- **Worker:** one bounded delivery under a brief (see
-  [Briefs and ownership](#briefs-and-ownership)); returns acceptance evidence
-  or one named blocker. An unattended worker never uses an ask-the-user or
-  request-input tool: send one message with any blocker or question to its
-  parent (or the owner named in the brief), then end the turn. A delegate that
-  asks directly is treated as blocked.
+- **Worker:** see [Worker](#worker).
 - **QA:** a round files reproducible defects in commissioned states, with every
   occurrence. A retest checks every recorded occurrence at the exact merged
   revision; the issue closes only on PASS, so repairs use `Refs`. A missing
@@ -164,6 +161,16 @@ A schedule firing or a relayed go-ahead grants no new authority.
   or nudge per new finding, and never decide for an owner. A periodic review
   first asks why an existing mechanism failed and repairs it before adding one.
 
+### Worker
+
+One bounded delivery under a brief (see
+[Briefs and ownership](#briefs-and-ownership)); returns acceptance evidence
+or one named blocker. An unattended worker never uses an ask-the-user or
+request-input tool: it ends its turn with the blocker or question as its final
+message. A delegate that asks directly is treated as blocked.
+
+### Dispatch authority
+
 Each task has one dispatch authority: the campaign owner within its
 commission or, for the remainder, the coordinator or the dispatcher it names.
 Record that partition on the existing owning issue or PR. Before commissioning
@@ -173,9 +180,11 @@ launches. A claim comment is evidence, not an atomic lock: one authority per
 task prevents races.
 Do not add a claim ledger, service or label system.
 
+### Team practices
+
 Fresh bounded runs send nothing when evidence is unchanged. Workers report deltas
-on the owning PR or issue, directly or through the parent, and message the parent
-mid-task only for a blocker. Combine notices to one recipient into one message;
+on the owning PR or issue, directly or through the parent, and report a blocker
+as in [Worker](#worker). Combine notices to one recipient into one message;
 request an acknowledgement only when confirming arrival changes the next action. Blockers
 and changed holds still go at once. Count productive work by verified activity (completed tool
 calls or output on the deliverable), including nested reviewers; report test-slot,
@@ -300,8 +309,7 @@ For the weekly workflow review, use the [retro skill](../core/skills/retro/SKILL
 **Goal first.** Each owner holds its commissioned outcome (for example
 "ordinary changes reach users") and treats its plan as replaceable; finishing
 a step, package or subtask never redefines success. Within the human owner's
-explicit priorities, recorded by the decisions owner in the live decision
-record, work on whatever most limits that outcome now: implementation,
+explicit priorities, work on whatever most limits that outcome now: implementation,
 readiness, CI, review recovery or deployment. Separate constraints (owner
 authority, a demonstrated hazard) from assumptions (an inherited sequence, a
 preferred tool, an estimated start time); repetition does not make an
@@ -418,10 +426,10 @@ Integration executor: <named executor for returned heads and one owner of any re
 Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
 Follow-ups: <ordered list of 1–2 already commissioned, bounded items, or none; assign only to delegates that can both write Git and post to GitHub themselves>
 Return: <authorized finish: evidence, readiness, or merge; deployment needs its own commission>. Continue until that boundary or a named blocker needs the parent; then follow only the preassigned list, otherwise return. Delegates that cannot do both: write Git and post to GitHub themselves (including sandboxed delegates, delegates without GitHub access, or delegates unable to write the shared Git directory) get no preassigned follow-ups and return after one item via their final Report. A progress summary is not completion.
-Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Message the parent mid-task only for a blocker.
+Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Report a blocker in this final message (see Worker).
 ```
 
-Follow the [Worker role](#team-roles) for blockers. An owner continues the
+Follow the [Worker role](#worker) for blockers. An owner continues the
 work a pending decision does not block and reports the blocker and next owner;
 silence is not approval.
 
@@ -489,7 +497,7 @@ again before concluding "still waiting".
 
 Split oversized scope in the plan rather than imposing brief line limits. Resume
 unfinished delegate sessions instead of restarting; reassess repeated repairs as
-in [Goal first](#team-roles). A repair brief lists every unresolved review
+in [Goal first](#team-practices). A repair brief lists every unresolved review
 finding and deterministic test failure on the failed head; an unrelated repair
 does not fix one.
 
@@ -508,7 +516,7 @@ Read-only work may share stable source. Sequence overlapping writers or
 integrate deliberately; never run them in one checkout. Do not pre-clear file
 overlap by message. Ask once, on the PR, only when both change the same function.
 Respect concurrency limits and avoid competing suites whose temporary-directory cleanup
-can interfere. Heavy commands take a test slot as in [Team roles](#team-roles).
+can interfere. Heavy commands take a test slot as in [Team practices](#team-practices).
 When the host is saturated, shed out-of-slot CPU
 commands before shedding agents; preserve their work. Grant only a needed cache
 directory (`--add-dir ~/.cache/uv`);
@@ -539,8 +547,9 @@ loopzero --config .loopzero/stack-workflow.toml review
 
 `--config` uses explicitly supplied settings instead of trusted-base pinning;
 the coordinator must verify the copy and its one-field difference. Keep the
-producer as the base through primary review. Retarget the consumer to main
-before running the producer's `loopzero merge`, which deletes its branch. After
+producer as the base through primary review and any delta covering a merge
+of the producer. Retarget to main before the producer's `loopzero merge`
+deletes its branch. After retargeting, take producer updates by merging main. After
 the producer lands, confirm the consumer is open against main, return to the
 canonical configuration, and use the supported CI trigger. Verify that all
 required checks pass on the current head against main before readiness.

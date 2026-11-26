@@ -351,7 +351,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
     for index, diff in enumerate(diffs, 1):
         results.append(review_with(
             "codex", cwd=tmp_path, head=head, kind=kind, diff=diff, task_text=task,
-            review_context=context, chunk=(index, len(diffs)) if split else None,
+            review_context=context, chunk=(index, len(diffs)),
         ))
         override = next(arg for arg in _argv(fake_bin, "codex")
                         if arg.startswith("developer_instructions="))
@@ -361,7 +361,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
         assert json.loads(header)["head"] == head and json.loads(header)["task_text"] == task
         assert raw_diff == diff.encode()
 
-    proof = codex_evidence(merge_reviews(results) if split else results[0])
+    proof = codex_evidence(merge_reviews(results))
     assert proof["complete"]
     assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
 
@@ -893,6 +893,7 @@ def test_claude_settings_and_merged_calls_preserve_native_evidence(fake_bin, tmp
         result = _review("claude", tmp_path, model=model, effort=effort)
         assert result.provenance["requested_settings"] == [{"model": model, "effort": effort}]
         assert json.loads(result.raw) == envelope
+        assert runners.validate_runner_result(merge_reviews([result]))
         results.append(result)
     results[0].provenance.pop("requested_settings")
     merged = merge_reviews(results)

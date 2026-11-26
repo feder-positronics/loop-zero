@@ -562,10 +562,17 @@ def test_raw_leading_utf8_span_at_limit_and_overflow(separator, overflow, tighte
         assert (eligible(row(result), row(result, rendered)) is not None) is (overflow == 0)
     if separator == "\n":  # Publication stays LF; readers count every accepted separator verbatim.
         if overflow:
-            with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):
+            with pytest.raises(runners.RunnerBadOutput, match=r"leading machine block.*split the PR"):
                 github._review_body(result, [], padded + "\n" + adjudication)
         else:
             assert github._review_body(result, [], padded + "\n" + adjudication).startswith(padded)
+
+
+def test_codex_overflow_names_the_recovery(monkeypatch):
+    evidence = runners.codex_evidence(SYNTHETIC_NATIVE)
+    monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", 100)
+    with pytest.raises(runners.RunnerBadOutput, match=r"evidence header.*split the PR"):
+        runners.encode_codex_evidence(evidence)
 
 
 @pytest.mark.parametrize("case", ["v1", "extended", "v2", "extra", "bad-settings", "too-long", "untrusted"])

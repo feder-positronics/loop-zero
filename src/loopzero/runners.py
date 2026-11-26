@@ -705,7 +705,7 @@ def _codex_header(value):
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     header = CODEX_HEADER + base64.urlsafe_b64encode(encoded).decode().rstrip("=") + " -->"
     if len(header.encode()) > CODEX_HEADER_LIMIT:
-        raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes; HOLD")
+        raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes. To publish a review, split the PR and review the smaller changes.")
     return header
 
 
@@ -1197,6 +1197,8 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     envelopes = [json.loads(result.raw) for result in results]
     if any(codex_fatal_startup(envelope) for envelope in envelopes):
         raise RunnerBadOutput("codex: fatal Code Mode startup failure")
+    if len(results) == 1:
+        return first
     sessions = [str(result.provenance["session_id"]) for result in results]
     settings = [call for result in results for call in review_settings(result)]
     provenance: dict[str, object] = {
