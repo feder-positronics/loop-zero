@@ -43,10 +43,11 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
-On start/resume, run `loopzero status` if the worktree exists. Resume a pending
-`--wait`; after queue ejection, read the departure reason before requeueing.
-If cleanup removed the worktree, verify the merge in GitHub. Notifications
-never replace the waiter.
+On start/resume, use `loopzero status` in an existing worktree to read Git, GitHub
+and the receipt. Rerun the last `--wait` if pending. After ejection, read the
+reason and follow [Mergify recovery](../SETUP.md#mergify). If cleanup removed the
+worktree, verify the merge in GitHub. Never yield waiting for a notice that
+may already have fired. Notifications never replace the waiter.
 Before yielding, record head, last exit code, awaited event and next command
 in one PR comment per owner. Post on first yield; update the existing comment ID
 with the full replacement Markdown from `body_file` on later yields:
