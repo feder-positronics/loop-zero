@@ -4017,82 +4017,6 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
-def test_prequeue_size_budget_reports_redacted_fetch_reason(wt, monkeypatch):
-    commit_mergify_configuration(wt)
-    config = replace(cli.config_mod.load_trusted(wt), checks=(cli._SIZE_BUDGET,))
-    pr = github.PR(7, URL, head_of(wt), "main", False, "OPEN", "MERGEABLE")
-    monkeypatch.setattr(cli, "_git", lambda *_args, **_kwargs: "origin")
-    detail = "fatal: Authentication failed for 'https://fake-token@example.com/repo'\n"
-    monkeypatch.setattr(cli._proc, "run", lambda *_args, **_kwargs: cli._proc.Completed(128, "", detail, 0))
-    with pytest.raises(cli.CliError, match="size budget check: fatal: Authentication failed") as caught:
-        cli._prequeue_size_budget(wt, config, pr, github.Readiness(True, ()))
-    assert "[REDACTED]@example.com" in str(caught.value)
-    assert "fake-token" not in str(caught.value)
-
-
-@pytest.mark.parametrize(("command", "queue"), [
-    ("ready", None), ("merge", None), ("resume", None), ("ready", "ordered"),
-    ("ready", "empty"), ("ready", "ambiguous"), ("ready", "unavailable"),
-])
-def test_mergify_checks_current_target_before_queueing_or_resumes(
-    wt: Path, repo: Path, gh: FakeGh, capsys, monkeypatch, command, queue
-) -> None:
-    commit_mergify_configuration(wt)
-    checker = (Path(__file__).resolve().parents[1] / "scripts/size_budget.sh").read_text()
-    (repo / "scripts").mkdir()
-    commit_file(repo, "scripts/size_budget.sh", re.sub(r"(?m)^SRC_CAP=\d+$", f"SRC_CAP={5 if queue else 3}", checker), "add budget")
-    publish_workflow(wt, (repo / "workflow.toml").read_text().replace(
-        'commands = ["echo ok", "test -f README.md"]', 'commands = ["scripts/size_budget.sh"]'))
-    for checkout, filename in ((wt, "feature"), (repo, "upstream")):
-        (checkout / "src/loopzero").mkdir(parents=True)
-        commit_file(checkout, f"src/loopzero/{filename}.py", "# first line\n# second line\n", filename)
-    commit_file(wt, "ast.py", "raise AssertionError('loaded candidate module')\n", "add candidate module")
-    git(repo, "push", str(repo.parent / "origin.git"), "main")  # leave origin/main stale locally
-    if queue:
-        main = head_of(repo)
-        batches = []
-        for number in (1146, 1219):
-            git(repo, "switch", "--detach", main)
-            commit_file(repo, f"src/loopzero/pr_{number}.py", "# predecessor\n", f"PR {number}")
-            git(repo, "push", str(repo.parent / "origin.git"), f"HEAD:refs/pull/{number}/head")
-            batches.append({"id": str(number), "parent_ids": [batches[0]["id"]] if batches else [],
-                            "queue_rule_name": "main", "pull_requests": [{"number": number}]})
-        if queue == "ambiguous":
-            batches[1]["parent_ids"] = []
-
-        def snapshot(_repo, endpoint):
-            assert endpoint == "/merge-queue/status?branch=main"
-            if queue == "unavailable":
-                raise mergify.MergifyError("snapshot unavailable")
-            return {"mode": "serial", "waiting_pull_requests": [], "forming_batches": [],
-                    "batches": [] if queue == "empty" else batches}
-
-        monkeypatch.setattr(mergify, "api_get", snapshot)
-    head = head_of(wt)
-    arm_approved_ready_pr(gh, head, wt, isDraft=False)
-    gh.append(f"api repos/{REPO}/pulls/7", open_pr_snapshot(head))
-    gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=head, sha=None))
-    monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (command == "resume",) * 2)
-    monkeypatch.setattr(mergify, "membership", lambda *_: None)
-    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("must not submit a queue request"))
-
-    args = ("merge", "--wait=60") if command == "resume" else (command,)
-    code, out, err = run(capsys, *args)
-    assert head_of(wt) == head and not (wt / "src/loopzero/upstream.py").exists()
-    if queue:
-        assert code == 0 and not err
-        assert ("warning: projected size budget after #1146, #1219:\nsrc=6 (base 2, delta 4, cap 5" in out
-                if queue == "ordered" else "warning: projected size budget" not in out)
-        return
-    if command != "resume":
-        assert code == 1 and "src=4 (base 2, delta 2, cap 3" in err and "loaded candidate module" not in err
-        return
-
-    assert 'Read Mergify\'s "Left the queue" comment' in err
-    assert code == 1 and "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`" in err
-
-
 @pytest.mark.parametrize("outcome", [
     "merged", "ejected", "landed-on-ejection", "head-changed-early", "head-changed-late",
     "closed-then-merged", "still-closed",
@@ -4361,10 +4285,19 @@ def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, monkeypatch, c
         git(wt, "switch", "-q", "--detach")
     monkeypatch.chdir(wt / ".loopzero")
     _, err = expect_cli(capsys, 1, "start", "nested", stdout="", stderr_contains=("already inside task worktree",))
-    assert "run start from the main checkout" in err
+    assert "run start from the checkout that created it" in err
     assert not (repo / ".worktrees" / "nested").exists()
     assert not (wt / ".worktrees" / "nested").exists()
     assert "lz/nested" not in git(repo, "branch", "--list", "lz/nested")
+
+
+def test_start_accepts_detached_harness_worktree(repo: Path, tmp_path: Path, monkeypatch, capsys) -> None:
+    harness = tmp_path / "harness"
+    git(repo, "worktree", "add", "-q", "--detach", str(harness))
+    monkeypatch.chdir(harness)
+    out, _ = expect_cli(capsys, 0, "start", "nested")
+    assert out.strip() == str(harness / ".worktrees" / "nested")
+    assert "lz/nested" in git(repo, "branch", "--list", "lz/nested")
 
 
 def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys, head) -> None:

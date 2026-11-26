@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-from . import candidate, github
+from . import github
 from .types import LoopZeroError
 
 API = "https://api.mergify.com/v1"
@@ -186,43 +186,6 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise MergifyError("invalid Mergify queue membership response") from exc
-
-
-def queue_predecessors(repo: str, branch: str, queue: str, number: int) -> tuple[int, ...]:
-    """Identify a single chain of one-PR batches ahead of a new request."""
-    status = api_get(repo, f"/merge-queue/status?branch={quote(branch, safe='')}")
-    if (not isinstance(status, dict) or status.get("mode") != "serial"
-            or status.get("waiting_pull_requests") != [] or status.get("forming_batches") != []):
-        return ()
-    try:
-        batches = candidate.flatten_batches(status)
-        successors: dict[str | None, tuple[str, int]] = {}
-        for batch_id, batch in batches.items():
-            pulls, parents = batch["pull_requests"], batch["parent_ids"]
-            if pulls == [] and batch.get("sub_batches"):
-                continue  # Container batches carry no direct source.
-            if (batch.get("queue_rule_name") != queue or not isinstance(pulls, list)
-                    or len(pulls) != 1 or not isinstance(parents, list) or len(parents) > 1):
-                return ()
-            source = pulls[0]["number"]
-            parent = next(iter(parents), None)
-            if type(source) is not int or source <= 0 or source == number or parent in successors:
-                return ()
-            successors[parent] = batch_id, source
-        return _ordered_sources(successors)
-    except (candidate.CandidateError, KeyError, TypeError, RecursionError):
-        return ()
-
-
-def _ordered_sources(successors: dict[str | None, tuple[str, int]]) -> tuple[int, ...]:
-    if len(successors) > 32:
-        return ()
-    sources = []
-    cursor = None
-    while cursor in successors:
-        cursor, source = successors.pop(cursor)
-        sources.append(source)
-    return tuple(sources) if not successors and len(sources) == len(set(sources)) else ()
 
 
 def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
