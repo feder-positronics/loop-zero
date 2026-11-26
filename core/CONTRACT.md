@@ -285,8 +285,8 @@ meta-directives; reviewers load no instruction files or skills from the reviewed
 Fail closed on missing tools and command errors, preserve the failing command
 and output tail, and keep a short, safe detail about the cause or stage when
 operator-facing code wraps an error. Stop on terminal failures or quota errors.
-Exit 3 means waiting: rerun the bounded waiter. Exit 5 means changes requested,
-not a crash.
+Exit 3 means waiting or timeout. Review exits 4 when independent review is
+unavailable and 5 when changes are requested. Interruption exits 130.
 
 **Never pipe a `loopzero` command, even with `set -o pipefail`: the pipeline
 can report the filter's exit code in place of the command's verdict.** Redirect
