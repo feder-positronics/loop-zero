@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import sandbox, worktree
+from loopzero import runners, sandbox, worktree
 from loopzero.runners import (
     REVIEW_SCHEMA,
     RunnerAuthFailed,
@@ -30,6 +30,7 @@ from loopzero.runners import (
     build_prompt,
     codex_evidence,
     merge_reviews,
+    render_patch,
     review_with,
     split_diff,
 )
@@ -114,8 +115,17 @@ def _bwrap_argv(log: Path) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def fake_bwrap(fake_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"):
+def fake_bwrap(fake_tool, tmp_path: Path, tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Keep reviewer state outside tmp_path, which many tests mount as the checkout.
+    home = tmp_path_factory.mktemp("reviewer-home")
+    monkeypatch.setenv("HOME", str(home))
+    for name in (
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        *runners.CLAUDE_AUTH_ENV,
+        *runners.CODEX_AUTH_ENV,
+    ):
         monkeypatch.delenv(name, raising=False)
     log = tmp_path / "review-bwrap.argv"
     fake_tool("bwrap", FAKE_BWRAP.format(log=log))
@@ -1207,7 +1217,7 @@ def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str) -> N
     base = git(git_repo, "rev-parse", "HEAD").strip()
     git(git_repo, "rm", "--", name)
     git(git_repo, "commit", "-qm", "delete file")
-    diff = worktree.diff_since(git_repo, base)
+    diff = render_patch(worktree.diff_since(git_repo, base))
 
     chunks = split_diff(diff, 4096)
 
