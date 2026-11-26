@@ -4,9 +4,11 @@ import base64
 import http.client
 import io
 import json
+import signal
 import subprocess
 import sys
 import traceback
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 
@@ -71,6 +73,29 @@ def test_membership_maps_404_only_to_absent(monkeypatch):
     monkeypatch.setattr(mergify, "_open", forbidden)
     with pytest.raises(mergify.MergifyError, match="HTTP 403"):
         mergify.membership("acme/widgets", 7, "main")
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_request_deadline_covers_headers_and_body(monkeypatch, phase):
+    handler = signal.getsignal(signal.SIGALRM)
+
+    def expire():
+        assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= 30
+        signal.raise_signal(signal.SIGALRM)
+
+    def open_(*args, **kwargs):
+        if phase == "headers":
+            expire()
+        return io.BytesIO(b"{}")
+
+    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_))
+    with (
+        pytest.raises(TimeoutError, match="Mergify HTTP request timed out"),
+        mergify._open(urllib.request.Request("https://example.invalid")),
+    ):
+        expire()
+    assert signal.getsignal(signal.SIGALRM) is handler
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
 
 
 def test_api_get_rejects_paths_outside_repository():

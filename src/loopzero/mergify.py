@@ -7,10 +7,12 @@ import http.client
 import json
 import os
 import re
+import signal
 import stat
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -19,6 +21,7 @@ from . import github
 from .types import LoopZeroError
 
 API = "https://api.mergify.com/v1"
+REQUEST_TIMEOUT = 30.0
 REQUEST = "loopzero:mergify-request"
 CONFIRMED = "loopzero:mergify-confirmed"
 
@@ -72,12 +75,27 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _retry_sleep = time.sleep
 
 
+@contextmanager
 def _open(request: urllib.request.Request):
+    """Keep the CLI main thread deadline armed through response consumption."""
+    def expire(_signum, _frame):
+        raise TimeoutError("Mergify HTTP request timed out")
+
+    if any(signal.getitimer(signal.ITIMER_REAL)):
+        raise TimeoutError("Mergify HTTP request cannot start with an active alarm")
+    handler = signal.signal(signal.SIGALRM, expire)
     try:
-        return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
-    except ValueError:
-        # The HTTP client can include the Authorization value in a header error.
-        raise MergifyError("Mergify API request has an invalid URL or header") from None
+        signal.setitimer(signal.ITIMER_REAL, REQUEST_TIMEOUT)
+        try:
+            response = urllib.request.build_opener(_NoRedirect).open(request, timeout=REQUEST_TIMEOUT)
+        except ValueError:
+            # The HTTP client can include the Authorization value in a header error.
+            raise MergifyError("Mergify API request has an invalid URL or header") from None
+        with response:
+            yield response
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, handler)
 
 
 def api_get(repo: str, suffix: str) -> object | None:

@@ -492,3 +492,28 @@ def test_status_prints_account_email_after_plan(helper, capsys, provider, email,
     result = {'tier': 0, 'plan': 'max', 'email': email, 'windows': [], 'unknown_reason': 'no data'}
     helper.print_status({'checked_at': helper.now(), 'providers': {provider: {'active': 'a', 'accounts': {'a': result}}}})
     assert shown in capsys.readouterr().out
+
+
+def test_provider_deadline_covers_http_error_body(helper, monkeypatch):
+    signal = helper.signal
+    handler = signal.getsignal(signal.SIGALRM)
+
+    class ErrorBody:
+        closed = False
+
+        def read(self):
+            assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= 1
+            signal.raise_signal(signal.SIGALRM)
+
+        def close(self):
+            pass
+
+    def open_error(request, *, timeout):
+        error = helper.urllib.error.HTTPError(request.full_url, 503, "Busy", {}, ErrorBody())
+        raise error
+
+    monkeypatch.setattr(helper.urllib.request, "urlopen", open_error)
+    with pytest.raises(TimeoutError, match="provider HTTP request timed out"):
+        helper._http(helper.urllib.request.Request("https://example.invalid"), timeout=1)
+    assert signal.getsignal(signal.SIGALRM) is handler
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
