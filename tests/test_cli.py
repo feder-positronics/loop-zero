@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -504,6 +505,88 @@ def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit
     assert err == f"--- {command} (exit {exit_code}) ---\n{tail}"
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert [result["command"] for result in report["results"]] == [command]
+
+
+@pytest.mark.parametrize("cut", ["second stage", "final validation"])
+def test_check_reuses_checkpoint_after_interruption(wt, gh, capsys, monkeypatch, cut):
+    original_context = cli._context
+    calls = []
+    interrupt = True
+
+    def context(*args, **kwargs):
+        path, settings = original_context(*args, **kwargs)
+        return path, replace(settings, check_runner=(sys.executable,),
+                             inputs={command: ("feature.py",) for command in settings.checks})
+
+    def dispatch(_config, _wt, _head, _base, command, _timeout):
+        calls.append(command)
+        if interrupt and cut == "second stage" and len(calls) == 2:
+            raise KeyboardInterrupt
+        return CheckResult(command, 0, 0.0, "")
+
+    original_git = cli.sandbox._git
+
+    def check_git(config, path, *args):
+        if interrupt and cut == "final validation" and len(calls) == 2 and args == ("rev-parse", "HEAD"):
+            raise KeyboardInterrupt
+        return original_git(config, path, *args)
+
+    monkeypatch.setattr(cli, "_context", context)
+    monkeypatch.setattr(cli.sandbox, "_dispatch_one", dispatch)
+    monkeypatch.setattr(cli.sandbox, "_git", check_git)
+
+    assert run(capsys, "check")[0] == 130
+    report = cli._load_report(wt)
+    assert report is not None and not report.ok
+    assert [result.command for result in report.results if result.input_key] == (
+        calls[:1] if cut == "second stage" else calls
+    )
+
+    interrupt = False
+    assert run(capsys, "check")[0] == 0
+    assert calls == ["echo ok", "test -f README.md"] + (
+        ["test -f README.md"] if cut == "second stage" else []
+    )
+    assert cli._load_report(wt).ok
+
+
+def test_check_checkpoint_preserves_unreached_reusable_stages(wt, gh, capsys, monkeypatch):
+    original_context = cli._context
+    calls = []
+    interrupt = False
+    commands = ("first", "second", "third")
+
+    def context(*args, **kwargs):
+        path, settings = original_context(*args, **kwargs)
+        return path, replace(
+            settings, check_runner=(sys.executable,), checks=commands,
+            inputs={"first": ("feature.py",), "second": ("feature.py",), "third": ("README.md",)},
+        )
+
+    def dispatch(_config, _wt, _head, _base, command, _timeout):
+        calls.append(command)
+        if interrupt and command == "second":
+            raise KeyboardInterrupt
+        return CheckResult(command, 0, 0.0, "")
+
+    monkeypatch.setattr(cli, "_context", context)
+    monkeypatch.setattr(cli.sandbox, "_dispatch_one", dispatch)
+    assert run(capsys, "check")[0] == 0
+    original_head = cli._load_report(wt).head
+
+    (wt / "feature.py").write_text("updated = True\n")
+    git(wt, "add", "feature.py")
+    git(wt, "commit", "-m", "Change the first two stages' inputs")
+    interrupt = True
+    assert run(capsys, "check")[0] == 130
+    assert not cli._load_report(wt).ok
+
+    interrupt = False
+    assert run(capsys, "check")[0] == 0
+    assert calls == [*commands, "first", "second", "second"]
+    report = cli._load_report(wt)
+    assert report.ok
+    assert report.results[-1].reused_from == original_head
 
 
 def advance_checks(repo, commands):
@@ -3129,6 +3212,51 @@ def test_merge_wait_rejects_verdicts_after_deadline(wt, gh, capsys, monkeypatch,
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("safe", [False, True])
+def test_merge_uses_one_queue_proof_for_admission(
+    wt, gh, capsys, monkeypatch, source_queue_api, pending, safe,
+):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending" if pending else "success", isDraft=False)
+    repo, config_path, vendor_calls = source_queue_api
+    requests = []
+    clock = 0.0
+    before_final = 0
+
+    def set_unsafe():
+        gh.respond(f"api {config_path}", {"type": "symlink"})
+
+    def sleep(delay):
+        nonlocal clock, before_final
+        clock += delay
+        before_final = len(gh.calls)
+        vendor_calls.clear()
+        arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
+        if not safe:
+            set_unsafe()
+
+    if not pending and not safe:
+        set_unsafe()
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(cli, "_sleep", sleep)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "request", lambda *args: requests.append(args))
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+
+    code, out, err = run(capsys, "merge", "--wait=90")
+
+    assert (clock > 0) == pending
+    assert requests == ([(REPO, 7, head, "main")] if safe else [])
+    assert code == (3 if safe else 1), out + err
+    assert ("Mergify queue configuration is unverified" in err) == (not safe)
+    paths = [call["argv"][1] for call in gh.calls[before_final:]]
+    assert paths.count(repo) == paths.count(config_path) == (2 if safe else 1)
+    assert vendor_calls == ["/merge-queue/status?branch=main", "/queues/configuration"]
+
+
 @pytest.mark.parametrize("wait", [False, True])
 @pytest.mark.parametrize("outcome", ["open", "changed", "closed", "invalid", "merged"])
 def test_mergify_admission_rechecks_only_the_selected_pr(wt, gh, capsys, monkeypatch, wait, outcome):
@@ -4086,7 +4214,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     configurations = []
     def configured(*_):
         configurations.append(True)
-        if len(configurations) > 2:
+        if len(configurations) > 1:
             if outcome == "config_error":
                 raise mergify.MergifyError("configuration HTTP 503")
             if outcome in {"unsafe_config", "unsafe_pending"}:
