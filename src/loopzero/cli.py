@@ -1851,7 +1851,7 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:
-    """List open blocking findings, or reply to one with what changed and resolve its thread."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
     wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
     pr = _require_pr(config, worktree.branch(wt))
     if pr.base_ref != config.base_branch:  # trusted publishers belong to the configured base
@@ -1859,10 +1859,10 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     publishers = config.review_publishers or (github.login(),)
     if not args.finding:
         for marker_id, _thread, f in github.open_findings(config.repo, pr.number, publishers):
-            print(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}")
+            print(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}".encode(encoding, "backslashreplace").decode(encoding))
         return 0
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply, publishers)
-    print(f"resolved {args.finding}: {finding.title}")
+    print(f"resolved {args.finding}: {finding.title}".encode(encoding, "backslashreplace").decode(encoding))
     try:
         with github.api_error_diagnostics():
             remaining = github.open_blocking_findings(config.repo, pr.number, None, publishers)
