@@ -105,55 +105,55 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
-    with _proc.unwind_on_sigterm(), _defer_runner_checkpoint(config, checkpoint) as checkpoint:
-        with _private_directories() as stack:
-            prefix = []
-            if not config.check_runner:
-                home = _enter_private_directory(stack, "loopzero-home-")
-                scratch_root = _enter_private_directory(stack, "loopzero-scratch-")
-                private_parent = Path(commonpath((home, scratch_root)))
-                for exposed in (*config.sandbox_ro, *config.writable):
-                    if private_parent.is_relative_to(Path(exposed).resolve()):
-                        raise SandboxUnavailable(
-                            f"sandbox path {exposed!r} would expose private check directories"
-                        )
-                scratch = {entry: scratch_root / entry for entry in config.scratch}
-                for entry, source in scratch.items():
-                    source.mkdir(parents=True)
-                    # Mount points must exist before bwrap binds the source read-only.
-                    (worktree / entry).mkdir(parents=True, exist_ok=True)
-                prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
-                probe(config, worktree, prefix)
-                _preflight_alternates(config, worktree, prefix)
-            missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
-            results = [missing] if missing else []
-            commands = () if missing else (*preparations, *config.checks)
-            for index, command in enumerate(commands):
-                if progress:
-                    progress(command)
-                key = _input_key(config, worktree, command, base) if not dirty else None
-                old = previous.get(command)
-                if key and old and old.input_key == key:
-                    result = old
-                    if status:
-                        status(f"reused {(old.reused_from or head)[:8]}")
-                else:
-                    with _stage_status(status, index + 1, len(commands)):
-                        result = (_dispatch_one(config, worktree, head, base, command, timeout)
-                                  if config.check_runner else _run_one(config, worktree, prefix, command, timeout))
-                    if key:
-                        result = replace(result, input_key=key)
-                if index >= len(preparations) or result.exit_code:
-                    results.append(result)
-                    _checkpoint_success(
-                        checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
-                        previous, commands[index + 1:],
+    with (_proc.unwind_on_sigterm(), _defer_runner_checkpoint(config, checkpoint) as checkpoint,
+          _private_directories() as stack):
+        prefix = []
+        if not config.check_runner:
+            home = _enter_private_directory(stack, "loopzero-home-")
+            scratch_root = _enter_private_directory(stack, "loopzero-scratch-")
+            private_parent = Path(commonpath((home, scratch_root)))
+            for exposed in (*config.sandbox_ro, *config.writable):
+                if private_parent.is_relative_to(Path(exposed).resolve()):
+                    raise SandboxUnavailable(
+                        f"sandbox path {exposed!r} would expose private check directories"
                     )
+            scratch = {entry: scratch_root / entry for entry in config.scratch}
+            for entry, source in scratch.items():
+                source.mkdir(parents=True)
+                # Mount points must exist before bwrap binds the source read-only.
+                (worktree / entry).mkdir(parents=True, exist_ok=True)
+            prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
+            probe(config, worktree, prefix)
+            _preflight_alternates(config, worktree, prefix)
+        missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
+        results = [missing] if missing else []
+        commands = () if missing else (*preparations, *config.checks)
+        for index, command in enumerate(commands):
+            if progress:
+                progress(command)
+            key = _input_key(config, worktree, command, base) if not dirty else None
+            old = previous.get(command)
+            if key and old and old.input_key == key:
+                result = old
                 if status:
-                    status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
-                           f"({result.duration_s:.1f}s)")
-                if result.exit_code != 0:
-                    break
+                    status(f"reused {(old.reused_from or head)[:8]}")
+            else:
+                with _stage_status(status, index + 1, len(commands)):
+                    result = (_dispatch_one(config, worktree, head, base, command, timeout)
+                              if config.check_runner else _run_one(config, worktree, prefix, command, timeout))
+                if key:
+                    result = replace(result, input_key=key)
+            if index >= len(preparations) or result.exit_code:
+                results.append(result)
+                _checkpoint_success(
+                    checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
+                    previous, commands[index + 1:],
+                )
+            if status:
+                status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
+                       f"({result.duration_s:.1f}s)")
+            if result.exit_code != 0:
+                break
         final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
         final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
         if (final_head, final_dirty) != (head, dirty):
