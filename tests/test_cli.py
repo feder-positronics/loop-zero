@@ -189,8 +189,8 @@ def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def wt(repo: Path, git_seed: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    path = cli.worktree.worktree_dir(repo, "t1")
+def wt(repo: Path, git_seed: Path, monkeypatch: pytest.MonkeyPatch, request) -> Path:
+    path = cli.worktree.worktree_dir(repo, getattr(request, "param", "t1"))
     git(repo, "worktree", "add", "-q", str(path), "lz/t1")
     shutil.copytree(git_seed / ".loopzero", cli.worktree.task_file(path).parent)
     monkeypatch.chdir(path)
@@ -1319,6 +1319,47 @@ def test_pr_uses_lease_for_rewritten_open_pr(wt, repo, gh, fake_tool, tmp_path, 
         assert (code, out, err) == (0, URL + "\n", "")
     assert pushes.read_text().strip() == f"push -u origin --porcelain --force-with-lease=lz/t1:{old} lz/t1"
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == (old if case == "hook-fails" else head)
+
+
+@pytest.mark.parametrize("wt", ["Łódź"], indirect=True)
+def test_legacy_locale_status_reflog_push_and_cleanup(wt, repo, gh, monkeypatch, rewritten_branch):
+    branch, head = "lz/Łódź", head_of(wt)
+    ref, origin = f"refs/heads/{branch}", repo.parent / "origin.git"
+    git(wt, "branch", "-m", branch)
+    git(origin, "update-ref", ref, rewritten_branch)
+    assert git(wt, "remote", "get-url", "origin").strip() == str(origin)
+    monkeypatch.chdir(repo)
+
+    gh.respond(branch_history_key(branch=branch), [])
+    gh.respond_pr_list([pr_json(headRefOid=rewritten_branch)], branch=branch)
+    gh.respond(reviews_key(), [])
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+    program = """
+from pathlib import Path
+from loopzero import cli, worktree
+
+cli._readiness = lambda *_, **__: cli.github.Readiness(False, ("check \\u0141 is pending",))
+assert cli.main(["status"]) == 0
+# The fixture verifies and uses a local bare remote.
+cli._require_push_target = lambda *_: None
+assert cli.main(["pr"]) == 0
+wt = Path.cwd()
+head = worktree.head(wt)
+cli._delete_tracking_ref(wt, worktree.branch(wt), head)
+worktree.cleanup(wt, head)
+"""
+    result = subprocess.run(
+        [sys.executable, "-X", "utf8=0", "-c", program], cwd=wt,
+        env={**os.environ, "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONIOENCODING": "ascii:strict"},
+        capture_output=True, encoding="ascii",
+    )
+    assert result.returncode == 0, result.stderr
+    escaped = branch.encode("ascii", "backslashreplace").decode("ascii")
+    assert f"branch:   {escaped}" in result.stdout
+    assert r"check \u0141 is pending" in result.stdout
+    assert any(pr_list_key(branch).removeprefix("api ") in call["argv"] for call in gh.calls)
+    assert git(origin, "rev-parse", ref).strip() == head
+    assert not wt.exists() and not git(repo, "branch", "-a", "--list", f"*{branch}")
 
 
 def test_pr_refuses_to_overwrite_a_pr_head_it_has_never_seen(
