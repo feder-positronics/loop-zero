@@ -1242,8 +1242,7 @@ def _pending_checks(
     """Wait for mergeability and required checks, including allowed draft skips."""
     states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if allow_skipped else [])]
     waitable = {f"required check '{n}' {state}" for n in config.required_ci for state in states}
-    waitable.update(readiness.waitable_failures)
-    waitable.add(MERGEABILITY_PENDING)
+    waitable.update(readiness.waitable_failures, (MERGEABILITY_PENDING,))
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
@@ -1334,7 +1333,6 @@ def _wait_for_checks(
     args: argparse.Namespace | None = None, bounded: bool = False, allow_merged: bool = False,
     allow_skipped: bool = False, initial: github.Readiness | None = None,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
-    """Poll the same head until it settles, omitting readiness for an allowed merge."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
     current = pr
@@ -1367,16 +1365,12 @@ def _wait_for_checks(
         shown = pending
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
-            print(
-                "waiting: required check verdict predates the review; awaiting refresh: "
-                + ", ".join(readiness.stale_verdicts)
-            )
+            print("waiting: required check verdict predates the review; awaiting refresh: "
+                  + ", ".join(readiness.stale_verdicts))
             stale_notice = True
         # Diagnose missing runs only when no visible check is still pending.
-        if (
-            elapsed >= MISSING_RUN_GRACE
-            and all(" missing on " in r for r in pending)
-            and not readiness.has_pending_checks
+        if elapsed >= MISSING_RUN_GRACE and not readiness.has_pending_checks and all(
+            " missing on " in reason for reason in pending
         ):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "
