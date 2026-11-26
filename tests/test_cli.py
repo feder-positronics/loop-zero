@@ -497,6 +497,45 @@ def test_check_reuses_checkpoint_after_interruption(wt, gh, capsys, monkeypatch,
     assert cli._load_report(wt).ok
 
 
+def test_check_checkpoint_preserves_unreached_reusable_stages(wt, gh, capsys, monkeypatch):
+    original_context = cli._context
+    calls = []
+    interrupt = False
+    commands = ("first", "second", "third")
+
+    def context(*args, **kwargs):
+        path, settings = original_context(*args, **kwargs)
+        return path, replace(
+            settings, check_runner=(sys.executable,), checks=commands,
+            inputs={"first": ("feature.py",), "second": ("feature.py",), "third": ("README.md",)},
+        )
+
+    def dispatch(_config, _wt, _head, _base, command, _timeout):
+        calls.append(command)
+        if interrupt and command == "second":
+            raise KeyboardInterrupt
+        return CheckResult(command, 0, 0.0, "")
+
+    monkeypatch.setattr(cli, "_context", context)
+    monkeypatch.setattr(cli.sandbox, "_dispatch_one", dispatch)
+    assert run(capsys, "check")[0] == 0
+    original_head = cli._load_report(wt).head
+
+    (wt / "feature.py").write_text("updated = True\n")
+    git(wt, "add", "feature.py")
+    git(wt, "commit", "-m", "Change the first two stages' inputs")
+    interrupt = True
+    assert run(capsys, "check")[0] == 130
+    assert not cli._load_report(wt).ok
+
+    interrupt = False
+    assert run(capsys, "check")[0] == 0
+    assert calls == [*commands, "first", "second", "second"]
+    report = cli._load_report(wt)
+    assert report.ok
+    assert report.results[-1].reused_from == original_head
+
+
 def advance_checks(repo, commands):
     (repo / "workflow.toml").write_text(WORKFLOW.replace(
         '["echo ok", "test -f README.md"]', json.dumps(commands)))

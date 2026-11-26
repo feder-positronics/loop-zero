@@ -171,11 +171,10 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 progress(command)
             key = _input_key(config, worktree, command, base) if not dirty else None
             old = previous.get(command)
-            if (key and old and old.get("input_key") == key
-                    and is_check_exit_code(old.get("exit_code")) and old["exit_code"] == 0):
-                result = CheckResult(command, 0, 0.0, _check_tail(old.get("tail", "")), key, old["head"])
+            if key and old and old.input_key == key:
+                result = old
                 if status:
-                    status(f"reused {old['head'][:8]}")
+                    status(f"reused {(old.reused_from or head)[:8]}")
             else:
                 with _stage_status(status, index + 1, len(commands)):
                     result = (_dispatch_one(config, worktree, head, base, command, timeout)
@@ -186,6 +185,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 results.append(result)
                 _checkpoint_success(
                     checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
+                    previous, commands[index + 1:],
                 )
             if status:
                 status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
@@ -204,15 +204,17 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
 
 
 def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
-                        report: CheckReport) -> None:
+                        report: CheckReport, previous: dict[str, CheckResult],
+                        remaining: tuple[str, ...]) -> None:
     stage = report.results[-1]
     if checkpoint is not None and stage.input_key and stage.exit_code == 0:
         # Even the last stage leaves a nonpassing receipt until final validation.
         incomplete = CheckResult("<checks incomplete>", 1, 0.0, "")
-        checkpoint(replace(report, results=(*report.results, incomplete)))
+        unvisited = tuple(previous[command] for command in remaining if command in previous)
+        checkpoint(replace(report, results=(*report.results, *unvisited, incomplete)))
 
 
-def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
+def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
     if _git(config, worktree, "ls-files", "--", ".loopzero"):
         return {}
     try:
@@ -220,8 +222,18 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
         if (data["dirty"] is not False or not isinstance(data["head"], str)
                 or data.get("settings_sha256") != settings_sha256):
             return {}
-        return {r["command"]: dict(r, head=data["head"]) for r in data["results"]
-                if isinstance(r.get("tail", ""), str)}
+        previous = {}
+        for result in data["results"]:
+            command, key = result.get("command"), result.get("input_key")
+            code, tail = result.get("exit_code"), result.get("tail", "")
+            if (isinstance(command, str) and isinstance(key, str) and key
+                    and is_check_exit_code(code) and code == 0 and isinstance(tail, str)):
+                source = result.get("reused_from")
+                previous[command] = CheckResult(
+                    command, 0, 0.0, _check_tail(tail), key,
+                    source if isinstance(source, str) else data["head"],
+                )
+        return previous
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {}
 
