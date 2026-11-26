@@ -191,7 +191,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch, limited):
         f"--as={sandbox._cap_limit(4096 << 20, resource.RLIMIT_AS)}",
         f"--fsize={sandbox._cap_limit(2048 << 20, resource.RLIMIT_FSIZE)}",
     ]
-    assert tail == ["prlimit", *limits, "--", *sandbox.CHECK_SHELL, values]
+    assert tail == ["prlimit", *limits, "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", values]
 
 
 @pytest.mark.parametrize("checks", [(), ("echo hello",)], ids=["probe", "stage"])
@@ -420,8 +420,10 @@ class TestRealSandbox:
             report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
             assert report.results[0].exit_code != 0, report
             assert not escaped.exists()
-        allowed = 'echo x > "$HOME/ok" && cat "$HOME/ok" && test ! -e /tmp/repo'
-        assert sandbox.run_checks(make_config(checks=(allowed,)), git_repo).ok
+        checks = ('echo x > "$HOME/ok" && cat "$HOME/ok" && test ! -e /tmp/repo',
+                  'test "$(pwd)" = "$PWD" && env | grep -c "^LZ_" ; true')
+        report = sandbox.run_checks(make_config(checks=checks), git_repo)
+        assert [r.exit_code for r in report.results] == [0, 0], report
 
     def test_real_sandbox_memory_limit_fails_check_and_preserves_report(self, git_repo):
         command = "/usr/bin/perl -e '$x = \"x\" x (64 * 1024 * 1024); print length($x)'"
@@ -852,7 +854,7 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     receipt = json.loads(receipt_path.read_text())
     assert receipt["head"] == git(git_repo, "rev-parse", "HEAD").strip()
     [result] = receipt["results"]
-    assert result["reused_from"] == original.head
+    assert original.ok and result["reused_from"] == original.head
     assert marker in result["tail"].splitlines()
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 

@@ -126,10 +126,8 @@ def run_attestation(
     run=attest_candidate,
 ):
     candidate_event = candidate_event or event()
-    reads, values = (
-        cycle(status_reads or [status()]),
-        github_payloads or payloads(candidate_event),
-    )
+    reads = cycle(status_reads or [status()])
+    values = github_payloads or payloads(candidate_event)
     return run(
         candidate_event,
         github_get=github_get or (lambda path: deepcopy(values[path])),
