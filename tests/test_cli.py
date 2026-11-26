@@ -1450,7 +1450,7 @@ def test_review_context_mismatch_names_the_recovery(wt, gh, capsys, head, monkey
     monkeypatch.setattr(cli, "_run_review", lambda *_args, **_kwargs: result)
     monkeypatch.setattr(cli, "_matches_publication", lambda *_: False)
     expect_cli(capsys, 1, "review", stderr_contains=("run loopzero review", "configured publisher"))
-    assert not any(call["argv"][:2] == post_key().split() for call in gh.calls)
+    assert not any(posted(call) for call in gh.calls)
 
 
 def arm_empty_primary_review_post(
