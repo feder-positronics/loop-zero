@@ -20,14 +20,14 @@ from loopzero.types import Finding, ReviewResult
 from tests.conftest import isolate_github_auth
 from tests.test_github import (
     HEAD,
-    PR_FILES,
     REPO,
     FakeGh,
     gh as gh,
     merge_json,
     pr_json,
     rest_pr_json,
-    threads_json,
+    arm_review,
+    arm_workflow_check,
 )
 
 REAL_GH = shutil.which("gh")
@@ -56,16 +56,12 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
     fake = FakeGh(tmp_path, tmp_path)
     merged = merge_json(state='MERGED', head=HEAD, sha='c' * 40)
     fake.respond_pr_list([pr_json()], branch="lz/x")
-    fake.respond_pr_view(pr_json(), pr_json(), branch="lz/x")
     fake.respond_pr_create(pr_json(), branch="lz/x")
+    arm_review(fake, branch="lz/x")
+    fake.respond_pr_view(pr_json(), branch="lz/x")
+    arm_workflow_check(fake)
     fake.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     fake.append(f"api repos/{REPO}/pulls/7", merged)
-    fake.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
-    fake.respond(f"api repos/{REPO}/pulls/7/files", PR_FILES)
-    fake.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
-    fake.respond("api graphql", threads_json())
-    fake.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
-    fake.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     fake.respond("pr ready", "")
     fake.respond("pr merge", "")
     fake.fail(f"api repos/{REPO}/git/ref/heads/lz/x", "gh: Not Found (HTTP 404)")
@@ -134,40 +130,35 @@ def test_contract_capture_covers_operations_with_rest_metadata(captured_argv: li
     assert any("?state=open&head=acme%3Alz%2Fx" in argv[1] for argv in calls)
 
 
-def test_captured_api_methods_match_the_wire(
-    captured_argv: list[dict], tmp_path: Path
-) -> None:
-    api_calls = [call for call in captured_argv if call["argv"][0] == "api"]
-    for index, call in enumerate(api_calls):
+def test_captured_methods_match_the_wire(captured_argv: list[dict], tmp_path: Path) -> None:
+    for index, call in enumerate(captured_argv):
         argv = call["argv"]
-        if any(flag in argv for flag in ("-F", "-f")) and argv[1] != "graphql":
-            assert argv[argv.index("--method") + 1] == "GET", argv
-
-        if argv[1] == "graphql":
-            expected = "POST"  # GitHub's GraphQL read transport is intentionally POST.
-        elif argv[1] == "-X":
-            expected = argv[2]
-        elif "--method" in argv:
-            expected = argv[argv.index("--method") + 1]
-        elif "--input" in argv:
+        if argv[0] == "pr":
+            assert argv[1] in {"ready", "merge"}
+            expected = "POST"
+        elif argv[1] == "graphql":
             expected = "POST"
         else:
-            expected = "GET"
+            if any(flag in argv for flag in ("-F", "-f")):
+                assert argv[argv.index("--method") + 1] == "GET", argv
+            if argv[1] == "-X":
+                expected = argv[2]
+            elif "--method" in argv:
+                expected = argv[argv.index("--method") + 1]
+            else:
+                expected = "POST" if "--input" in argv else "GET"
         output = offline_run(argv, tmp_path / str(index), call)
         methods = re.findall(r"^> (GET|POST|PATCH|PUT|DELETE) ", output, re.MULTILINE)
         assert methods and methods[0] == expected, (argv, expected, output)
 
 
-@pytest.mark.parametrize("command", ["ready", "merge"])
-def test_captured_pr_mutations_use_graphql_post(
-    captured_argv: list[dict], tmp_path: Path, command: str
-) -> None:
-    call = next(item for item in captured_argv if item["argv"][:2] == ["pr", command])
-    output = offline_run(call["argv"], tmp_path, call)
-    assert re.search(r"^> POST ", output, re.MULTILINE), output
-
-
-def test_strict_fake_rejects_exhausted_calls(gh: FakeGh) -> None:
+def test_strict_fake_checks_input_and_rejects_exhausted_calls(gh: FakeGh) -> None:
+    gh.expect(
+        ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH", "--input", "<temp-file>", "--include"],
+        {},
+        input_files={"--input": json.dumps({"body": "new body"})},
+    )
+    github.update_body(REPO, 7, "new body")
     gh.expect(
         ["api", f"repos/{REPO}/pulls/7", "--include"], rest_pr_json(pr_json()),
     )
@@ -181,13 +172,3 @@ def test_strict_fake_rejects_unexpected_argv(gh: FakeGh) -> None:
     gh.expect(["pr", "ready", "8", "--repo", REPO])
     with pytest.raises(github.GhError, match="unexpected argv"):
         github.mark_ready(REPO, 7)
-
-
-def test_strict_fake_matches_input_contents(gh: FakeGh) -> None:
-    gh.expect(
-        ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH", "--input", "<temp-file>", "--include"],
-        {},
-        input_files={"--input": json.dumps({"body": "new body"})},
-    )
-    github.update_body(REPO, 7, "new body")
-    gh.assert_complete()

@@ -2,7 +2,9 @@
 import importlib.machinery
 import importlib.util
 import json
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -491,3 +493,128 @@ def test_status_prints_account_email_after_plan(helper, capsys, provider, email,
     result = {'tier': 0, 'plan': 'max', 'email': email, 'windows': [], 'unknown_reason': 'no data'}
     helper.print_status({'checked_at': helper.now(), 'providers': {provider: {'active': 'a', 'accounts': {'a': result}}}})
     assert shown in capsys.readouterr().out
+
+
+def test_account_lock_timeout_leaves_files_untouched(helper, monkeypatch):
+    for name in ("main", "b", "c"):
+        auth = {"tokens": {"account_id": name, "access_token": "expiring"}}
+        helper.write_private(helper.codex_home(name) / "auth.json", json.dumps(auth))
+    helper.set_active("codex", "main")
+    status = helper.STATE / "status.json"
+    cooldown = {"exhausted": {helper.identity("codex", "main") + ":model": helper.now() + 300}}
+    helper.write_private(status, json.dumps(cooldown))
+    for key in (*helper.EXPLICIT_ROUTES["codex"], "CODEX_HOME"):
+        monkeypatch.delenv(key, raising=False)
+    elapsed = 0.0
+
+    def advance(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+
+    def premature_probe(*args):
+        pytest.fail("account probing started before the home lock was acquired")
+
+    monkeypatch.setattr(helper.time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(helper.time, "sleep", advance)
+    monkeypatch.setattr(helper, "check_claude", premature_probe)
+    monkeypatch.setattr(helper, "codex_in_use", lambda _: False)
+    monkeypatch.setattr(helper, "refresh_codex", premature_probe)
+    monkeypatch.setattr(helper, "_http", premature_probe)
+    with (helper.STATE / ".lock").open("a") as holder:
+        helper.fcntl.flock(holder, helper.fcntl.LOCK_EX)
+        with pytest.raises(helper.AccountLockTimeout, match=r"^\.lock is busy"):
+            helper.check(quiet=True)
+    with (helper.STATE / ".codex-sync.lock").open("a") as holder:
+        helper.fcntl.flock(holder, helper.fcntl.LOCK_EX)
+        operations = (
+            lambda: helper.check(quiet=True),
+            lambda: helper.launch("codex", "model", {}),
+            lambda: helper.cmd_add("codex", "new"),
+            lambda: helper.cmd_pinned_exec("codex", helper.identity("codex", "b"), ["unused"]),
+            lambda: helper.exhausted("codex", helper.identity("codex", "main"), "model", retry_env={}),
+        )
+        for operation in operations:
+            with pytest.raises(helper.AccountLockTimeout, match=r"\.codex-sync\.lock is busy"):
+                operation()
+    assert elapsed == 360
+    assert not helper.codex_home("new").exists()
+    assert helper.active("codex") == "main"
+    assert helper.active("claude") == "a"
+    assert json.loads(status.read_text()) == cooldown
+
+    acquire = helper._locked
+    home_lock_entries = []
+
+    def count_home_lock(name):
+        if name == ".codex-sync.lock":
+            home_lock_entries.append(name)
+        return acquire(name)
+
+    monkeypatch.setattr(helper, "_locked", count_home_lock)
+    monkeypatch.setattr(helper, "check_claude", lambda _: {"tier": -1})
+    monkeypatch.setattr(helper, "check_codex", lambda _: {"tier": -1})
+    helper.check(quiet=True)
+    assert home_lock_entries == [".codex-sync.lock"]
+    helper.set_active("codex", "b")
+    assert helper.with_accounts("codex,codex", {})["CODEX_HOME"] == str(helper.codex_home("b"))
+    assert home_lock_entries == [".codex-sync.lock"] * 2
+
+
+def test_provider_deadline_covers_http_error_body(helper, monkeypatch):
+    request = helper.urllib.request.Request("https://example.invalid")
+    body = BytesIO()
+    monkeypatch.setattr(body, "read", lambda: helper.signal.raise_signal(helper.signal.SIGALRM))
+
+    def open_(*args, **kwargs):
+        raise helper.urllib.error.HTTPError(request.full_url, 503, "Busy", {}, body)
+
+    monkeypatch.setattr(helper.urllib.request, "urlopen", open_)
+    with pytest.raises(TimeoutError, match="provider HTTP request timed out"):
+        helper._http(request, timeout=1)
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_account_staging_preserves_colliding_path(helper, tmp_path, symlink):
+    path = helper.STATE / "status.json"
+    staged = path.with_name(f"{path.name}.{helper.os.getpid()}.{helper.threading.get_ident()}.tmp")
+    target = tmp_path / "unrelated" if symlink else staged
+    target.write_text("preserve")
+    if symlink:
+        staged.symlink_to(target)
+    helper.write_private(path, "{}")
+    assert path.read_text() == "{}" and target.read_text() == "preserve"
+
+
+def test_account_lock_preserves_existing_file_and_rejects_symlink(helper):
+    lock = helper.STATE / ".lock"
+    lock.write_text("preserve")
+    with helper._locked(lock.name):
+        assert lock.read_text() == "preserve"
+    (helper.STATE / ".codex-sync.lock").symlink_to(lock)
+    with pytest.raises(OSError), helper._locked(".codex-sync.lock"):
+        pytest.fail("redirected lock opened")
+    assert lock.read_text() == "preserve"
+
+
+@pytest.mark.parametrize("outcome", ["published", "copy failed"])
+def test_account_env_moves_shared_entry_across_devices(helper, monkeypatch, outcome):
+    if not Path("/dev/shm").is_dir() or Path("/dev/shm").stat().st_dev == helper.STATE.stat().st_dev:
+        pytest.skip("requires two filesystems")
+    entry = helper.codex_home("extra") / "session-index.jsonl"
+    helper.write_private(entry, "original")
+    helper.write_private(entry.with_name("auth.json"), "{}")
+    copy = helper.shutil.copy2
+    with tempfile.TemporaryDirectory(dir="/dev/shm") as main:
+        monkeypatch.setattr(helper, "CODEX_MAIN", Path(main))
+        def stage(src, dst, **kwargs):
+            copy(src, dst, **kwargs)
+            if outcome == "copy failed":
+                raise OSError("copy interrupted")
+        monkeypatch.setattr(helper.shutil, "copy2", stage)
+        if outcome == "copy failed":
+            with pytest.raises(OSError, match="copy interrupted"):
+                helper.account_env("codex", "extra")
+        else:
+            helper.account_env("codex", "extra")
+        assert entry.read_text() == "original" and entry.is_symlink() == (outcome == "published")
+        assert list(Path(main).iterdir()) == ([] if outcome == "copy failed" else [Path(main) / entry.name])
