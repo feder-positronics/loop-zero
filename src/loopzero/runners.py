@@ -318,8 +318,7 @@ def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Conf
 
 
 def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
-    raw = _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag, paths=True)
-    return (cwd / raw).resolve()
+    return (cwd / _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag, paths=True)).resolve()
 
 
 def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str, paths: bool = False) -> str:

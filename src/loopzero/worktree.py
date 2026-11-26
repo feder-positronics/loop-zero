@@ -176,9 +176,8 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
 
 def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | None:
     registered = _git(repo_root, "worktree", "list", "--porcelain", "-z", preserve_whitespace=True).split("\0\0")
-    path_field = f"worktree {wt.resolve()}"
-    entry = next((item for item in registered if item.startswith(f"{path_field}\0")), "")
-    fields = entry.split("\0")
+    path_field = f"worktree {wt.resolve()}\0"
+    fields = next((item for item in registered if item.startswith(path_field)), "").split("\0")
     if (len(fields) != 3 or fields[2] != f"branch refs/heads/{expected_branch}"
             or not (wt / ".git").is_file()):
         return None
@@ -186,9 +185,7 @@ def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | No
     if _git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True) != common or branch(wt) != expected_branch:
         return None
     current_head = head(wt)
-    if fields[1] != f"HEAD {current_head}" or is_dirty(wt):
-        return None
-    return current_head
+    return current_head if fields[1] == f"HEAD {current_head}" and not is_dirty(wt) else None
 
 
 def _initialize_task(task: Path, text: str) -> None:
