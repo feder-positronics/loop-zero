@@ -23,6 +23,27 @@ def helper(tmp_path, monkeypatch):
     return module
 
 
+@pytest.mark.parametrize("name", [".lock", ".codex-sync.lock"])
+def test_account_lock_wait_is_bounded(helper, tmp_path, monkeypatch, name):
+    elapsed = 0.0
+
+    def advance(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+
+    monkeypatch.setattr(helper.time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(helper.time, "sleep", advance)
+    with (helper.STATE / name).open("a") as holder:
+        helper.fcntl.flock(holder, helper.fcntl.LOCK_EX)
+        with pytest.raises(helper.AccountLockTimeout, match=r"is busy.*retry"):
+            if name == ".lock":
+                helper.check(quiet=True)
+            else:
+                helper.sync_codex_home(tmp_path / "unreadable-home")
+    assert elapsed == 60
+    assert not (helper.STATE / "status.json").exists()
+
+
 @pytest.mark.parametrize('provider,key', [('claude', 'CLAUDE_CODE_OAUTH_TOKEN'), ('codex', 'CODEX_HOME')])
 def test_managed_credentials_rebind_and_preserve_explicit(helper, provider, key):
     if provider == 'codex':

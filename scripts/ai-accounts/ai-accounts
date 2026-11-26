@@ -163,6 +163,21 @@ def shared(entry: Path) -> bool:
     return entry.name not in CODEX_PRIVATE and not entry.name.endswith(".lock")
 
 
+class AccountLockTimeout(TimeoutError):
+    pass
+
+
+def _acquire_lock(lock) -> None:
+    deadline = time.monotonic() + 60
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(min(0.1, remaining))
+    raise AccountLockTimeout(f"{Path(lock.name).name} is busy; retry when the other command finishes")
+
+
 def sync_codex_home(home: Path) -> None:
     """Keep an extra CODEX_HOME a mirror of ~/.codex except its own auth.json.
 
@@ -173,7 +188,7 @@ def sync_codex_home(home: Path) -> None:
     # Own lock (check() holds .lock while calling this); Codex may still create entries
     # concurrently, so a lost race on one entry is skipped, not fatal.
     with open(STATE / ".codex-sync.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _acquire_lock(lock)
         for entry in home.iterdir():
             target = CODEX_MAIN / entry.name
             if shared(entry) and not entry.is_symlink() and not target.exists() \
@@ -719,7 +734,7 @@ def snapshot_fields(result: dict, instance: str, checked_at: float) -> None:
 def check(quiet: bool = False) -> dict:
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     with open(STATE / ".lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _acquire_lock(lock)
         try:
             previous = json.loads((STATE / "status.json").read_text())
         except (OSError, ValueError):
@@ -854,7 +869,7 @@ def cmd_exec(providers: str, argv: list[str]) -> int:
     if "claude" in providers.split(",") and not caller_credentials("claude", base):
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(STATE / ".lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            _acquire_lock(lock)
             name = active("claude")
             # The monitor switches only at the 95% margin; prefer any account under the reserve.
             if claude_exec_refusal(name) is not None:
@@ -901,7 +916,7 @@ def launch(provider: str, model: str, env: dict[str, str]) -> dict:
     if caller_credentials(provider, env) or not STATE.is_dir() or not accounts(provider):
         return result("unmanaged")
     with open(STATE / ".lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _acquire_lock(lock)
         try:
             status = json.loads((STATE / "status.json").read_text())
         except (OSError, ValueError):
@@ -943,7 +958,7 @@ def cmd_pinned_exec(provider: str, revision: str, argv: list[str]) -> int:
     name = None
     if provider in PROVIDERS and STATE.is_dir() and not caller_credentials(provider, env):
         with open(STATE / ".lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            _acquire_lock(lock)
             for candidate in accounts(provider):
                 try:
                     if identity(provider, candidate) == revision:
@@ -980,7 +995,7 @@ def exhausted(provider: str, failed_identity: str, model: str) -> dict:
     if not STATE.is_dir():
         return result("unmanaged")
     with open(STATE / ".lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _acquire_lock(lock)
         revisions = {}
         for name in accounts(provider):
             try:
@@ -1158,7 +1173,7 @@ def main(argv: list[str]) -> int:
             sys.exit(f"ai-accounts: unknown {argv[1]} account {argv[2]!r}")
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(STATE / ".lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            _acquire_lock(lock)
             set_active(argv[1], argv[2])
         log(f"{argv[1]}: manual -> {argv[2]}")
         print(f"{argv[1]} active: {argv[2]}")
@@ -1200,4 +1215,9 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     shim = Path(sys.argv[0]).name
-    sys.exit(cmd_shim(shim, sys.argv[1:]) if shim in SHIMS else main(sys.argv[1:]))
+    try:
+        code = cmd_shim(shim, sys.argv[1:]) if shim in SHIMS else main(sys.argv[1:])
+    except AccountLockTimeout as exc:
+        print(f"ai-accounts: {exc}", file=sys.stderr)
+        code = 1
+    sys.exit(code)
