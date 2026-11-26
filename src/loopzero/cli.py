@@ -563,8 +563,8 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         if upstream.exit_code != 0:
             return
         branch, head = worktree.branch(wt), worktree.head(wt)
-        pr = github.pr_for_branch(config.repo, branch)
-        if pr is not None and pr.state == "OPEN" and pr.head_sha == head:
+        pr = github.pr_for_branch(config.repo, branch, open_only=True)
+        if pr is not None and pr.head_sha == head:
             _update_pr_checks(wt, head, config, pr)
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)

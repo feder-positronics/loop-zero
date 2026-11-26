@@ -298,6 +298,26 @@ def test_check_pass_writes_report(wt: Path, gh: FakeGh, capsys) -> None:
     assert report["results"][0]["tail"] == "ok"
 
 
+@pytest.mark.parametrize("state", [None, "CLOSED", "MERGED"])
+def test_check_skips_closed_pr_history(wt, gh, capsys, head, state):
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    associated = (
+        [dict(rest_pr_json(pr_json(headRefOid=head, state=state)),
+              created_at="2026-11-25T00:00:00Z")] if state else []
+    )
+    commit_read = f"api repos/{REPO}/commits/{head}/pulls?per_page=100&page=1"
+    gh.respond(branch_head_key(), {"commit": {"sha": head}})
+    gh.respond(commit_read, associated)
+    gh.respond_pr_list([pr_json(headRefOid=head, state=state)] if state else [])
+
+    code, out, err = run(capsys, "check")
+
+    assert (code, err) == (0, "") and out.endswith("PASS\n")
+    assert [c["argv"][:2] for c in gh.calls] == [
+        BRANCH_READ, commit_read.split(), PR_LIST_READ,
+    ]
+
+
 @pytest.mark.parametrize("pushed,refresh_timeout,stage_exit", [
     (False, False, 0), (True, False, 0), (True, True, 0), (True, True, 124),
 ])
