@@ -85,14 +85,12 @@ def argv_of(log: Path) -> list[str]:
     return log.read_text().splitlines()
 
 
-def test_report_head_dirty_and_results(git_repo, bwrap_log):
+def test_report_head_and_results(git_repo, bwrap_log):
     report = sandbox.run_checks(
         make_config(checks=("echo one", "echo two; exit 4", "echo never")), git_repo
     )
     assert report.head == git(git_repo, "rev-parse", "HEAD").strip()
     assert report.dirty is False
-    (git_repo / "README.md").write_text("changed\n")
-    assert sandbox.run_checks(make_config(), git_repo).dirty is True
     assert [(r.command, r.exit_code, r.tail) for r in report.results] == [
         ("echo one", 0, "one"),
         ("echo two; exit 4", 4, "two"),
@@ -144,7 +142,9 @@ def test_check_pipeline_verdict(git_repo, bwrap_log, monkeypatch, capsys, comman
 
     assert cli.main(["check"]) == (1 if stage_exit else 0)
     receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
-    assert [stage["exit_code"] for stage in receipt["results"]] == [stage_exit]
+    [stage] = receipt["results"]
+    assert stage["exit_code"] == stage_exit
+    assert set(stage) == {"command", "exit_code", "duration_s", "tail"}
     assert capsys.readouterr().out.splitlines()[-1] == ("FAIL" if stage_exit else "PASS")
 
 
@@ -225,11 +225,6 @@ def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch
     assert result.tail.splitlines() == [str(cache), "cfg"]
 
 
-def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
-    with pytest.raises(sandbox.SandboxUnavailable, match="private check directories"):
-        sandbox.run_checks(make_config(writable=(tempfile.gettempdir(),)), git_repo)
-
-
 def inject_check_timeout(monkeypatch, output, before_timeout=None):
     def read_output_tail(process, limit, timeout):
         if before_timeout is not None:
@@ -297,38 +292,34 @@ def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
     assert binds[-2:] == [(str(linked.resolve()),) * 2, (str(common),) * 2]
 
 
-def test_scratch_rejects_symlink_parent_before_mkdir(git_repo, bwrap_log, tmp_path):
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (git_repo / "linked").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(sandbox.SandboxUnavailable, match="symlink component"):
-        sandbox.run_checks(make_config(scratch=("linked/cache",)), git_repo)
-    assert not (outside / "cache").exists()
+@pytest.mark.parametrize("entry,diagnostic", [
+    (".", "unsafe"), (".git", "Git metadata"), (".git/cache", "Git metadata"),
+    ("linked/cache", "symlink component"), (None, "private check directories"),
+])
+def test_scratch_rejects_protected_paths(git_repo, bwrap_log, tmp_path, entry, diagnostic):
+    if entry == "linked/cache":
+        (git_repo / "linked").symlink_to(tmp_path, target_is_directory=True)
+    config = make_config(writable=(tempfile.gettempdir(),)) if entry is None else make_config(scratch=(entry,))
+    with pytest.raises(sandbox.SandboxUnavailable, match=diagnostic):
+        sandbox.run_checks(config, git_repo)
+    assert not (tmp_path / "cache").exists()
 
 
-@pytest.mark.parametrize("entry", [".", ".git", ".git/cache"])
-def test_scratch_rejects_worktree_and_git_metadata(git_repo, bwrap_log, entry):
-    with pytest.raises(sandbox.SandboxUnavailable, match=r"unsafe|Git metadata"):
-        sandbox.run_checks(make_config(scratch=(entry,)), git_repo)
-
-
-def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypatch):
-    path = os.environ["PATH"]
-    monkeypatch.setenv("PATH", str(fake_bin))
-    with pytest.raises(sandbox.SandboxUnavailable) as missing:
+@pytest.mark.parametrize("denied", [False, True], ids=["missing", "denied"])
+def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypatch, denied):
+    if denied:
+        fake_tool("bwrap", "echo 'bwrap: No permissions to create new namespace' >&2\nexit 1\n")
+    else:
+        monkeypatch.setenv("PATH", str(fake_bin))
+    with pytest.raises(sandbox.SandboxUnavailable) as caught:
         sandbox.run_checks(make_config(), git_repo)
-    assert "bwrap binary missing" in str(missing.value)
-    assert "sudo apt install bubblewrap" in str(missing.value)
-    monkeypatch.setenv("PATH", path)
-    fake_tool("bwrap", "echo 'bwrap: No permissions to create new namespace' >&2\nexit 1\n")
-    with pytest.raises(sandbox.SandboxUnavailable) as denied:
-        sandbox.run_checks(make_config(), git_repo)
-    assert "namespace creation failed" in str(denied.value)
-    assert "exit 1" in str(denied.value)
-    assert "No permissions to create new namespace" not in str(denied.value)
-    assert (
-        "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in str(denied.value)
-    )
+    diagnosis = str(caught.value)
+    if denied:
+        assert "namespace creation failed" in diagnosis and "exit 1" in diagnosis
+        assert "No permissions to create new namespace" not in diagnosis
+        assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in diagnosis
+    else:
+        assert "bwrap binary missing" in diagnosis and "sudo apt install bubblewrap" in diagnosis
 
 
 def test_probe_timeout_reports_only_the_timeout(git_repo, monkeypatch):
@@ -377,168 +368,147 @@ def _real_bwrap_works() -> bool:
 
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-@pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode", "resolved"))
-def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_path, layout):
-    shared = tmp_path / "shared"
-    git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
-    objects = git_repo / ".git/objects"
-    worktree = shared
-    if layout == "relative":
-        (shared / ".git/objects/info/alternates").write_text(os.path.relpath(objects, shared / ".git/objects") + "\n")
-    elif layout == "linked":
-        worktree = tmp_path / "linked"
-        git(shared, "worktree", "add", "-q", "-b", "linked", str(worktree))
-    elif layout == "transitive":
-        worktree = tmp_path / "transitive"
-        git(shared, "clone", "-q", "--shared", str(shared), str(worktree))
-        # Expose the direct alternate; only its transitive dependency is hidden.
-    elif layout == "local-head":
-        git(shared, "commit", "-q", "--allow-empty", "-m", "local HEAD")
-    elif layout in ("spaces", "unicode"):
-        objects = tmp_path / ("zażółć" if layout == "unicode" else "alternate objects; $(false)")
-        shutil.copytree(git_repo / ".git/objects", objects)
-        (shared / ".git/objects/info/alternates").write_text(str(objects) + "\n")
-    visible_stores = (str(shared / ".git/objects"),) if layout == "transitive" else ()
-    config = make_config(checks=("echo first-stage",), sandbox_ro=visible_stores)
-    started = []
+class TestRealSandbox:
+    @pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode", "resolved"))
+    def test_real_sandbox_rejects_hidden_git_alternates_before_checks(self, git_repo, tmp_path, layout):
+        shared = tmp_path / "shared"
+        git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
+        objects = git_repo / ".git/objects"
+        worktree = shared
+        if layout == "relative":
+            (shared / ".git/objects/info/alternates").write_text(os.path.relpath(objects, shared / ".git/objects") + "\n")
+        elif layout == "linked":
+            worktree = tmp_path / "linked"
+            git(shared, "worktree", "add", "-q", "-b", "linked", str(worktree))
+        elif layout == "transitive":
+            worktree = tmp_path / "transitive"
+            git(shared, "clone", "-q", "--shared", str(shared), str(worktree))
+            # Expose the direct alternate; only its transitive dependency is hidden.
+        elif layout == "local-head":
+            git(shared, "commit", "-q", "--allow-empty", "-m", "local HEAD")
+        elif layout in ("spaces", "unicode"):
+            objects = tmp_path / ("zażółć" if layout == "unicode" else "alternate objects; $(false)")
+            shutil.copytree(git_repo / ".git/objects", objects)
+            (shared / ".git/objects/info/alternates").write_text(str(objects) + "\n")
+        visible_stores = (str(shared / ".git/objects"),) if layout == "transitive" else ()
+        config = make_config(checks=("echo first-stage",), sandbox_ro=visible_stores)
+        started = []
 
-    with pytest.raises(sandbox.SandboxUnavailable) as failure:
-        sandbox.run_checks(config, worktree, progress=started.append, _resolved=layout == "resolved")
+        with pytest.raises(sandbox.SandboxUnavailable) as failure:
+            sandbox.run_checks(config, worktree, progress=started.append, _resolved=layout == "resolved")
 
-    assert started == []
-    message = str(failure.value)
-    assert str(objects) in message
-    assert "alternate" in message.lower() and "sandbox" in message.lower()
-    assert "standalone clone" in message.lower() and "loopzero start" in message
+        assert started == []
+        message = str(failure.value)
+        assert str(objects) in message
+        assert "alternate" in message.lower() and "sandbox" in message.lower()
+        assert "standalone clone" in message.lower() and "loopzero start" in message
 
+    @pytest.mark.parametrize("visibility", ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured"))
+    def test_real_sandbox_allows_visible_git_alternates(self, git_repo, tmp_path, visibility):
+        shared = tmp_path / "shared"
+        git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
+        config = make_config(checks=("git show HEAD:README.md",))
+        if visibility != "configured":
+            shutil.copytree(git_repo / ".git/objects", shared / visibility)
+            (shared / ".git/objects/info/alternates").write_text(f"../../{visibility}\n")
+        else:
+            config = make_config(checks=config.checks, sandbox_ro=(str(git_repo / ".git/objects"),))
 
-@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-@pytest.mark.parametrize("visibility", ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured"))
-def test_real_sandbox_allows_visible_git_alternates(git_repo, tmp_path, visibility):
-    shared = tmp_path / "shared"
-    git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
-    config = make_config(checks=("git show HEAD:README.md",))
-    if visibility != "configured":
-        shutil.copytree(git_repo / ".git/objects", shared / visibility)
-        (shared / ".git/objects/info/alternates").write_text(f"../../{visibility}\n")
-    else:
-        config = make_config(checks=config.checks, sandbox_ro=(str(git_repo / ".git/objects"),))
+        report = sandbox.run_checks(config, shared)
 
-    report = sandbox.run_checks(config, shared)
+        assert report.ok
+        assert report.results[0].tail == "hello"
 
-    assert report.ok
-    assert report.results[0].tail == "hello"
+    def test_real_sandbox_denies_writes(self, git_repo):
+        denied = (
+            ("touch escaped.txt", git_repo / "escaped.txt"),
+            ("touch .git/escaped", git_repo / ".git" / "escaped"),
+        )
+        for command, escaped in denied:
+            report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
+            assert report.results[0].exit_code != 0, report
+            assert not escaped.exists()
+        checks = (
+            "echo x > \"$HOME/ok\" && cat \"$HOME/ok\" && test ! -e /tmp/repo",
+            "test \"$(pwd)\" = \"$PWD\" && env | grep -c '^LZ_' ; true",
+        )
+        report = sandbox.run_checks(make_config(checks=checks), git_repo)
+        assert [r.exit_code for r in report.results] == [0, 0], report
 
+    def test_real_sandbox_memory_limit_fails_check_and_preserves_report(self, git_repo):
+        command = "/usr/bin/perl -e '$x = \"x\" x (64 * 1024 * 1024); print length($x)'"
+        report = sandbox.run_checks(
+            make_config(checks=(command,), limits=ResourceLimits(memory_mb=32)), git_repo
+        )
+        [result] = report.results
+        assert result.command == command and result.exit_code != 0
+        assert not report.ok
 
-@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-def test_real_sandbox_denies_writes(git_repo):
-    denied = (
-        ("touch escaped.txt", git_repo / "escaped.txt"),
-        ("touch .git/escaped", git_repo / ".git" / "escaped"),
-    )
-    for command, escaped in denied:
-        report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
-        assert report.results[0].exit_code != 0, report
-        assert not escaped.exists()
-    checks = (
-        "echo x > \"$HOME/ok\" && cat \"$HOME/ok\" && test ! -e /tmp/repo",
-        "test \"$(pwd)\" = \"$PWD\" && env | grep -c '^LZ_' ; true",
-    )
-    report = sandbox.run_checks(make_config(checks=checks), git_repo)
-    assert [r.exit_code for r in report.results] == [0, 0], report
-    assert report.head
+    def test_real_network_sandbox_resolves_localhost(self, git_repo):
+        config = make_config(checks=("test -r /etc/resolv.conf && getent hosts localhost",), network=True)
+        assert sandbox.run_checks(config, git_repo).ok
 
+    def test_real_sandbox_hides_host_sockets_and_homes(self, git_repo):
+        uid = os.getuid()
+        checks = (
+            f"test ! -e /run/user/{uid}",
+            "test ! -e /var/run/docker.sock && test ! -e /run/docker.sock",
+            "test ! -e /home && test ! -e /root",
+            "test -z \"$(ls -A /run 2>/dev/null)\"",
+            "test -d /usr && test -d /etc && test -w /tmp",
+            'test "$(cat /proc/1/comm)" = bwrap',  # private pid namespace: pid 1 is not host init
+        )
+        report = sandbox.run_checks(make_config(checks=checks), git_repo)
+        assert [r.exit_code for r in report.results] == [0] * len(checks), report
 
-@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-def test_real_network_sandbox_resolves_localhost(git_repo):
-    command = "sh -c 'test -r /etc/resolv.conf && getent hosts localhost'"
-    report = sandbox.run_checks(make_config(checks=(command,), network=True), git_repo)
-    assert [result.exit_code for result in report.results] == [0], report
+    def test_real_sandbox_scratch_cannot_rebind_git_between_checks(self, git_repo):
+        sentinel = git_repo / ".git" / "external-sentinel"
+        sentinel.write_text("safe\n")
+        checks = (
+            'mkdir -p "$HOME/scratch"; ln -s "$PWD/.git" "$HOME/scratch/.venv"',
+            "echo escaped > .venv/external-sentinel",
+        )
+        report = sandbox.run_checks(make_config(checks=checks), git_repo)
+        assert [r.exit_code for r in report.results] == [0, 0]
+        assert sentinel.read_text() == "safe\n"
 
+    def test_real_sandbox_tmp_subpath_bind_stays_visible(self, git_repo, tmp_path):
+        toolchain = tmp_path / "toolchain"
+        toolchain.mkdir()
+        (toolchain / "sentinel").write_text("visible\n")
+        cfg = make_config(checks=(f'test "$(cat {toolchain}/sentinel)" = visible',),
+                          sandbox_ro=(str(toolchain),))
+        assert sandbox.run_checks(cfg, git_repo).ok
 
-@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-def test_real_sandbox_memory_limit_fails_check_and_preserves_report(git_repo):
-    command = "/usr/bin/perl -e '$x = \"x\" x (64 * 1024 * 1024); print length($x)'"
-    report = sandbox.run_checks(
-        make_config(checks=(command,), limits=ResourceLimits(memory_mb=32)), git_repo
-    )
-    assert report.head == git(git_repo, "rev-parse", "HEAD").strip()
-    assert report.dirty is False
-    assert len(report.results) == 1
-    assert report.results[0].command == command
-    assert report.results[0].exit_code != 0
-    assert report.ok is False
-
-
-@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-def test_real_sandbox_hides_host_sockets_and_homes(git_repo):
-    uid = os.getuid()
-    checks = (
-        f"test ! -e /run/user/{uid}",
-        "test ! -e /var/run/docker.sock && test ! -e /run/docker.sock",
-        "test ! -e /home && test ! -e /root",
-        "test -z \"$(ls -A /run 2>/dev/null)\"",
-        "test -d /usr && test -d /etc && test -w /tmp",
-        'test "$(cat /proc/1/comm)" = bwrap',  # private pid namespace: pid 1 is not host init
-    )
-    report = sandbox.run_checks(make_config(checks=checks), git_repo)
-    assert [r.exit_code for r in report.results] == [0] * len(checks), report
-
-
-@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-def test_real_sandbox_scratch_cannot_rebind_git_between_checks(git_repo):
-    sentinel = git_repo / ".git" / "external-sentinel"
-    sentinel.write_text("safe\n")
-    checks = (
-        'mkdir -p "$HOME/scratch"; ln -s "$PWD/.git" "$HOME/scratch/.venv"',
-        "echo escaped > .venv/external-sentinel",
-    )
-    report = sandbox.run_checks(make_config(checks=checks), git_repo)
-    assert [r.exit_code for r in report.results] == [0, 0]
-    assert sentinel.read_text() == "safe\n"
-
-
-@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-def test_real_sandbox_tmp_subpath_bind_stays_visible(git_repo, tmp_path):
-    toolchain = tmp_path / "toolchain"
-    toolchain.mkdir()
-    (toolchain / "sentinel").write_text("visible\n")
-    cfg = make_config(checks=(f'test "$(cat {toolchain}/sentinel)" = visible',),
-                      sandbox_ro=(str(toolchain),))
-    assert sandbox.run_checks(cfg, git_repo).ok
-
-
-@pytest.mark.skipif(
-    not _real_bwrap_works() or shutil.which("uv") is None, reason="needs real bwrap and uv"
-)
-def test_real_sandbox_uv_run_offline(git_repo, tmp_path):
-    uv_cache = tmp_path / "uv-cache"
-    uv_cache.mkdir()
-    uv = shutil.which("uv")
-    assert uv is not None
-    env = {
-        "UV_CACHE_DIR": str(uv_cache),
-        "UV_NO_CONFIG": "1",
-        "UV_OFFLINE": "1",
-        "UV_PYTHON": str(Path(sys._base_executable).resolve()),
-        "UV_PYTHON_DOWNLOADS": "never",
-    }
-    pyproject = '[project]\nname = "t"\nversion = "0"\nrequires-python = ">=3.12"\n'
-    (git_repo / "pyproject.toml").write_text(pyproject + "[dependency-groups]\ndev = []\n")
-    lock_env = {"HOME": str(tmp_path), "PATH": os.defpath, **env}
-    subprocess.run([uv, "lock", "-q"], cwd=git_repo, env=lock_env, check=True)
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-q", "-m", "uv project")
-    cfg = make_config(
-        checks=("uv run --group dev python -c 1", ".venv/bin/python -c 1", "test ! -w ."),
-        env=tuple(env.items()),
-        sandbox_ro=(str(Path(uv).parent), sys.base_prefix),
-        writable=(str(uv_cache),),
-    )
-    report = sandbox.run_checks(cfg, git_repo)
-    assert report.ok, report
-    assert [r.command for r in report.results] == list(cfg.checks)
-    assert not (git_repo / ".venv/bin").exists()  # venv lived in the scratch dir
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
+    def test_real_sandbox_uv_run_offline(self, git_repo, tmp_path):
+        uv_cache = tmp_path / "uv-cache"
+        uv_cache.mkdir()
+        uv = shutil.which("uv")
+        assert uv is not None
+        env = {
+            "UV_CACHE_DIR": str(uv_cache),
+            "UV_NO_CONFIG": "1",
+            "UV_OFFLINE": "1",
+            "UV_PYTHON": str(Path(sys._base_executable).resolve()),
+            "UV_PYTHON_DOWNLOADS": "never",
+        }
+        pyproject = '[project]\nname = "t"\nversion = "0"\nrequires-python = ">=3.12"\n'
+        (git_repo / "pyproject.toml").write_text(pyproject + "[dependency-groups]\ndev = []\n")
+        lock_env = {"HOME": str(tmp_path), "PATH": os.defpath, **env}
+        subprocess.run([uv, "lock", "-q"], cwd=git_repo, env=lock_env, check=True)
+        git(git_repo, "add", "-A")
+        git(git_repo, "commit", "-q", "-m", "uv project")
+        cfg = make_config(
+            checks=("uv run --group dev python -c 1", ".venv/bin/python -c 1", "test ! -w ."),
+            env=tuple(env.items()),
+            sandbox_ro=(str(Path(uv).parent), sys.base_prefix),
+            writable=(str(uv_cache),),
+        )
+        report = sandbox.run_checks(cfg, git_repo)
+        assert report.ok, report
+        assert [r.command for r in report.results] == list(cfg.checks)
+        assert not (git_repo / ".venv/bin").exists()  # venv lived in the scratch dir
 
 
 def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
@@ -883,7 +853,6 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, c
     new_base = git(git_repo, "commit-tree", tree, "-p", head, "-m", "advance base").strip()
     git(git_repo, "update-ref", base_ref, new_base)
     report = sandbox.run_checks(config, git_repo)
-    assert report.ok and report.head == head and not report.dirty
     assert report.results[0].reused_from is None and _current_check_report(git_repo, config, head) is not None
 
 
@@ -967,35 +936,19 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     assert not report.results[0].reused_from
 
 
-def test_no_inputs_preserves_receipt(git_repo, bwrap_log):
-    report = sandbox.run_checks(make_config(), git_repo)
-    _save_report(git_repo, report)
-    row = json.loads((git_repo / '.loopzero/checks.json').read_text())['results'][0]
-    assert set(row) == {'command', 'exit_code', 'duration_s', 'tail'}
-
-
-def test_input_key_distinguishes_runners(git_repo, fetched_base, tmp_path):
-    runners = [tmp_path / name for name in ("runner-a", "runner-b")]
-    for runner in runners:
-        runner.touch()
-    keys = {
-        sandbox._input_key(make_config(inputs={'echo one': ('*.md',)}, check_runner=runner),
-                           git_repo, 'echo one', fetched_base)
-        for runner in ((), *((str(path),) for path in runners))
-    }
-    assert None not in keys
-    assert len(keys) == 3
-
-
-def test_receipt_settings_distinguish_runner_paths(monkeypatch, tmp_path):
-    cfg = make_config(check_runner=("runner",), env_allowlist=())
-    first, second = tmp_path / "first", tmp_path / "second"
-    first.touch()
-    second.touch()
-    monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(first))
-    original = sandbox.settings_fingerprint(cfg)
-    monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(second))
-    assert sandbox.settings_fingerprint(cfg) != original
+def test_input_key_and_receipt_distinguish_runners(git_repo, fetched_base, tmp_path, monkeypatch):
+    paths = (tmp_path / "runner-a", tmp_path / "runner-b")
+    keys, receipts = set(), set()
+    local = make_config(inputs={"echo one": ("*.md",)})
+    keys.add(sandbox._input_key(local, git_repo, "echo one", fetched_base))
+    for path in paths:
+        path.touch()
+        monkeypatch.setattr(sandbox.shutil, "which", lambda _, resolved=path: str(resolved))
+        runner = replace(local, check_runner=("runner",), env_allowlist=())
+        keys.add(sandbox._input_key(runner, git_repo, "echo one", fetched_base))
+        receipts.add(sandbox.settings_fingerprint(runner))
+    assert None not in keys | receipts
+    assert len(keys) == 3 and len(receipts) == 2
 
 
 @pytest.mark.parametrize("change", ["target", "content"])

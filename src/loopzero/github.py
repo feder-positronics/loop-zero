@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ from loopzero.types import BLOCKING, Finding, ReviewResult
 GH_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_HOST")
 GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
+PR_LOCK_DIR = Path.home() / ".cache/loopzero/pr-locks"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
 MARKER_RE = re.compile(
@@ -289,6 +291,16 @@ def _cached_app_token() -> str:
     return token if now is not None and 0 <= now - minted < 3000 else ""
 
 
+@contextmanager
+def pr_lock(repo: str, number: int) -> Iterator[None]:
+    """Serialize a GitHub write across local checkouts for this PR."""
+    key = hashlib.sha256(f"{repo.casefold()}#{number}".encode()).hexdigest()
+    PR_LOCK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (PR_LOCK_DIR / key).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def app_token() -> str:
     global _app_token_cache
     if token := _cached_app_token():
@@ -333,15 +345,21 @@ def _retry_pause(delay: float | None, limit: float, *, scoped: bool = True) -> b
     return True
 
 
+def retry_after(value: str) -> float | None:
+    try:
+        if re.fullmatch(r"[0-9]{1,18}", value):
+            return float(value)
+        date = parsedate_to_datetime(value)
+        return max(0.0, date.timestamp() - time.time()) if date.tzinfo is not None else None
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _rate_limit_delay(headers: dict[str, str], delay: float | None) -> float | None:
     if delay is None or headers.get("x-ratelimit-remaining") == "0":
         return None
-    value = headers.get("retry-after", "")
-    try:
-        wait = int(value) if re.fullmatch(r"[0-9]{1,18}", value) else parsedate_to_datetime(value).timestamp() - time.time()
-    except (OverflowError, OSError, ValueError):
-        return None
-    return max(delay, wait)
+    wait = retry_after(headers.get("retry-after", ""))
+    return None if wait is None else max(delay, wait)
 
 
 def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
