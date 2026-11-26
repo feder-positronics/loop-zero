@@ -336,6 +336,8 @@ Implementation work does not require or reserve a test slot; a heavy command
 Host slot counts, load thresholds and quota guards belong in host policy.
 Tune dispatch from useful output, eligible work supply, review/test wait, rework
 and merge service; reduce new commissions when downstream work piles up.
+Commission whole ready outcomes; do not slice an outcome to occupy an idle
+builder, and sequence tasks likely to edit the same files.
 Give every addressable issue a next-action owner or a named dependency. Work on
 the current bottleneck gets dispatch and shared test slots first; other running
 work finishes or checkpoints its current heavy command and releases its slot.
