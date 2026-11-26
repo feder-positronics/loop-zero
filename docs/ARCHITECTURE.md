@@ -78,8 +78,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    prepares recognized uv dependency groups offline in that sandbox and prints
    progress before each command, metadata-only stage heartbeats every 30 seconds
    (including silent children), and exit code/duration immediately after each stage.
-   Heartbeats stop on completion or cancellation and never supply a verdict; child
-   streams remain captured for the existing final report and failing output tail.
+   Heartbeats stop on completion or cancellation and never supply a verdict.
+   Local stages drain merged child output and retain a bounded diagnostic tail.
    Trusted-base commands remain authoritative;
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
