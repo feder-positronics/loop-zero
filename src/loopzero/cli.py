@@ -598,6 +598,20 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_failure_preview(tail: str, limit: int) -> str:
+    """Fit recent complete lines in the terminal, skipping oversized payloads."""
+    lines = []
+    remaining = limit
+    for line in reversed(tail.splitlines()):
+        size = len(line.encode()) + 1
+        if size <= remaining:
+            lines.append(line)
+            remaining -= size
+    if any(lines):
+        return "\n".join(reversed(lines)).strip("\n")
+    return tail.encode()[:limit].decode(errors="ignore")
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
@@ -609,11 +623,18 @@ def cmd_check(args: argparse.Namespace) -> int:
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
+    preview_limit = 1536
+    shortened = False
     for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
-            print(tail, file=sys.stderr)
+            if len(tail.encode()) > preview_limit:
+                shortened = True
+                print(_check_failure_preview(tail, preview_limit), file=sys.stderr)
+                print("Output shortened.", file=sys.stderr)
+            else:
+                print(tail, file=sys.stderr)
             if not config.network and (result.command.startswith("uv sync --offline --locked")
                                        or OFFLINE_FAILURE_RE.search(tail)):
                 env = {
@@ -635,6 +656,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
               file=sys.stderr)
         return 1
+    if shortened:
+        print(f"Diagnostic tail: {CHECKS_FILE} (head {report.head})", file=sys.stderr)
     if report.ok and not report.dirty:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
@@ -987,6 +1010,7 @@ def _run_review(
     authors = runners.author_families(wt, head, lineage_base)
     candidates = [family for family in config.reviewers if family not in authors]
     failures: list[str] = []
+    errors: dict[str, Exception] = {}
     excluded = [family for family in config.reviewers if family in authors]
     def select(family: str) -> Callable[..., ReviewResult]:
         settings = config.review.get(family)
@@ -1043,19 +1067,40 @@ def _run_review(
         except RUNNER_FAILURES as exc:
             reason, detail, fallback_reason = _review_failure(family, exc)
             failures.append(detail)
+            errors[family] = exc
             reasons.append(f"{family}: {fallback_reason}")
             if any(next_family in selected for next_family in attempts[index + 1:]):
                 print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
             _independence_message(authors, excluded, failures)
+            + _save_review_failure_output(wt, head, kind, errors)
         )
     return dataclasses.replace(result, fallback=fallback)
 
 
+def _save_review_failure_output(
+    wt: Path, head: str, kind: str, errors: dict[str, Exception],
+) -> str:
+    fragments = {
+        family: exc.tail.encode()[-2000:].decode(errors="ignore")
+        for family, exc in errors.items()
+        if isinstance(exc, runners.RunnerMalformedOutput) and exc.tail
+    }
+    if not fragments:
+        return ""
+    path = wt / ".loopzero" / f"reviewer-output-{head[:12]}-{kind}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _write_json_atomically(path, fragments)
+    except OSError as exc:
+        return f"\nCould not save reviewer output: {exc.strerror or exc}"
+    return f"\nReviewer output: {path.relative_to(wt)}"
+
+
 def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
     lines = str(exc).splitlines()
-    detail = "\n".join(lines[:3])
+    detail = lines[0] if isinstance(exc, runners.RunnerMalformedOutput) else "\n".join(lines[:3])
     fallback_reason = _FALLBACK_REASONS[3]
     if isinstance(exc, runners.RunnerAuthFailed):
         login = "claude auth login" if family == "claude" else "codex login"
@@ -1309,6 +1354,24 @@ def _verify_wait_snapshot(
     raise CliError("workflow settings changed while waiting; retry with the current settings")
 
 
+def _wait_reason_key(reason: str) -> tuple[bool, str]:
+    prefix = "required check '"
+    if reason.startswith(prefix):
+        return True, reason.removeprefix(prefix).rpartition("' ")[0]
+    return False, reason
+
+
+def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> None:
+    previous = {_wait_reason_key(reason): reason for reason in shown}
+    current = {_wait_reason_key(reason): reason for reason in pending}
+    changed = [reason for key, reason in current.items() if previous.get(key) != reason]
+    cleared = [name for is_check, name in previous if (is_check, name) not in current]
+    if changed:
+        print("waiting: " + "; ".join(changed))
+    if cleared:
+        print("cleared: " + "; ".join(cleared))
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
@@ -1339,11 +1402,11 @@ def _wait_for_checks(
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
+        if pending or readiness.ready:
+            _print_wait_changes(shown, pending)
         if not pending:
             return current, readiness, kicked
-        if pending != shown:
-            print("waiting: " + "; ".join(pending))
-            shown = pending
+        shown = pending
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
             print(

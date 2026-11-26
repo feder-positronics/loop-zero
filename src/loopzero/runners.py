@@ -91,6 +91,10 @@ class RunnerBadOutput(RunnerError):
         self.tail = tail
 
 
+class RunnerMalformedOutput(RunnerBadOutput):
+    """The runner returned a payload that could not be parsed as a review."""
+
+
 class RunnerPromptTooLong(RunnerBadOutput):
     """The provider rejected the prompt for exceeding its context window."""
 
@@ -217,30 +221,30 @@ def _extract_json_object(text: str) -> object:
 def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str) -> ReviewResult:
     """Validate a decoded review object against the findings schema."""
     if not isinstance(payload, dict):
-        raise RunnerBadOutput(f"{family}: review is not a JSON object", _tail(raw))
+        raise RunnerMalformedOutput(f"{family}: review is not a JSON object", _tail(raw))
     if set(payload) != {"verdict", "findings"}:
-        raise RunnerBadOutput(f"{family}: review has unexpected or missing keys", _tail(raw))
+        raise RunnerMalformedOutput(f"{family}: review has unexpected or missing keys", _tail(raw))
     verdict, items = payload["verdict"], payload["findings"]
     if (
         not isinstance(verdict, str)
         or verdict not in ("approve", "request_changes")
         or not isinstance(items, list)
     ):
-        raise RunnerBadOutput(f"{family}: review lacks verdict/findings", _tail(raw))
+        raise RunnerMalformedOutput(f"{family}: review lacks verdict/findings", _tail(raw))
     findings: list[Finding] = []
     for item in items:
         required = {"severity", "path", "line", "title", "body"}
         if not isinstance(item, dict) or set(item) != required:
-            raise RunnerBadOutput(f"{family}: finding has unexpected or missing keys", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding has unexpected or missing keys", _tail(raw))
         if not isinstance(item["severity"], str) or item["severity"] not in SEVERITIES:
-            raise RunnerBadOutput(f"{family}: finding has bad severity", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding has bad severity", _tail(raw))
         path, line = item["path"], item["line"]
         if path is not None and not isinstance(path, str):
-            raise RunnerBadOutput(f"{family}: finding path is not a string", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding path is not a string", _tail(raw))
         if line is not None and (isinstance(line, bool) or not isinstance(line, int)):
-            raise RunnerBadOutput(f"{family}: finding line is not an integer", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding line is not an integer", _tail(raw))
         if not isinstance(item["title"], str) or not isinstance(item["body"], str):
-            raise RunnerBadOutput(f"{family}: finding title/body must be strings", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding title/body must be strings", _tail(raw))
         findings.append(Finding(**item))
     if any(f.severity in BLOCKING for f in findings):
         verdict = "request_changes"
@@ -475,7 +479,7 @@ def _codex_supports_ignore_user_config(
 def _claude_provenance(envelope: dict, raw: str) -> dict[str, object]:
     required = ("session_id", "usage", "total_cost_usd", "duration_api_ms")
     if any(name not in envelope for name in required):
-        raise RunnerBadOutput("claude: result envelope lacks provenance", _tail(raw))
+        raise RunnerMalformedOutput("claude: result envelope lacks provenance", _tail(raw))
     session_id = envelope["session_id"]
     usage = envelope["usage"]
     cost = envelope["total_cost_usd"]
@@ -489,7 +493,7 @@ def _claude_provenance(envelope: dict, raw: str) -> dict[str, object]:
         or isinstance(duration, bool)
         or not isinstance(duration, (int, float))
     ):
-        raise RunnerBadOutput("claude: result envelope has invalid provenance", _tail(raw))
+        raise RunnerMalformedOutput("claude: result envelope has invalid provenance", _tail(raw))
     return {
         "family": "claude",
         "session_id": session_id,
@@ -1144,9 +1148,9 @@ def _review_claude(
     try:
         envelope = _extract_json_object(raw)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerBadOutput("claude: stdout is not JSON", _tail(raw)) from exc
+        raise RunnerMalformedOutput("claude: stdout is not JSON", _tail(raw)) from exc
     if not isinstance(envelope, dict):
-        raise RunnerBadOutput("claude: result envelope is not an object", _tail(raw))
+        raise RunnerMalformedOutput("claude: result envelope is not an object", _tail(raw))
     if _claude_envelope_auth_failure(envelope):
         raise RunnerAuthFailed(f"claude: CLI is not authenticated\n{_tail(raw)}")
     if envelope.get("is_error") and _subscription_exhausted(raw, envelope):
@@ -1163,7 +1167,7 @@ def _review_claude(
         try:
             payload = _extract_json_object(str(envelope.get("result", "")))
         except (json.JSONDecodeError, ValueError) as exc:
-            raise RunnerBadOutput("claude: result text is not JSON", _tail(raw)) from exc
+            raise RunnerMalformedOutput("claude: result text is not JSON", _tail(raw)) from exc
     usage = envelope.get("modelUsage")
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
     reported_model = ", ".join(models) or None
@@ -1270,7 +1274,7 @@ def _review_codex(
     try:
         payload = _extract_json_object(message)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerBadOutput("codex: final message is not JSON", _tail(message)) from exc
+        raise RunnerMalformedOutput("codex: final message is not JSON", _tail(message)) from exc
     envelope = _evidence_json(raw)
     envelope["configured_settings"] = configured
     envelope["cli_version"] = cli_version
