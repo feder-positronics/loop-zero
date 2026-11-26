@@ -129,6 +129,11 @@ def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
     ("action", "creation or head-update event"), ("ref", "unexpected head ref"),
     ("missing status", "status is not an object"), ("missing ancestor", "not an ancestor"),
     ("same-head policy", "source policy blocked"),
+    ("candidate ready", "must be a draft"),
+    ("candidate retargeted", "must target the real main branch"),
+    ("candidate head fork", "head repository does not match"),
+    ("candidate base fork", "base repository does not match"),
+    ("source retargeted", "source PR #102 does not target this repository"),
 ])
 def test_rejects_invalid_attestation_evidence(case, diagnostic):
     incoming = event()
@@ -147,6 +152,14 @@ def test_rejects_invalid_attestation_evidence(case, diagnostic):
         incoming["action"] = "edited"
     elif case == "ref":
         incoming["pull_request"]["head"]["ref"] = "feature/forged"
+    elif case == "candidate ready":
+        values["/repos/owner/repo/pulls/900"]["draft"] = False
+    elif case == "candidate retargeted":
+        values["/repos/owner/repo/pulls/900"]["base"]["ref"] = "release"
+    elif case in {"candidate head fork", "candidate base fork"}:
+        values["/repos/owner/repo/pulls/900"][case.split()[1]]["repo"]["id"] = 8
+    elif case == "source retargeted":
+        values["/repos/owner/repo/pulls/102"]["base"]["ref"] = "release"
     elif case == "missing ancestor":
         values[f"/repos/owner/repo/compare/{'2' * 40}...{'c' * 40}"]["status"] = "diverged"
     elif case == "same-head policy":
