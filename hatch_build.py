@@ -13,7 +13,7 @@ class TrackedSdistFiles(BuildHookInterface):
         if not (root / ".git").exists():
             return
 
-        tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=root)
+        tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=root, timeout=60)
         self.build_config.set_exclude_all()
         build_data["force_include"].update(
             (name, name)
