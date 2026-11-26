@@ -13,10 +13,10 @@ issue or request. Size each task to one outcome someone can accept, or one
 failure family, in one PR by default. Every PR pays a fixed check, review and
 queue cost: keep tests, generated files, docs and related cleanup with their
 change, and batch queued, non-urgent chores of one risk class and area, never
-into a risky change or ahead of an urgent fix. Split or sequence only at a
-seam: separate rollout or rollback, a measurement that could change the design,
-a higher risk class (a destructive migration, a trust boundary), separate
-ownership, or a diff too wide to review reliably. Scale
+into a risky change or ahead of an urgent fix. Split an outcome only at a named
+seam. The seam must be separate rollout or rollback, a measurement that could
+change the design, a higher risk class (a destructive migration, a trust
+boundary), separate ownership or a diff too wide to review reliably. Scale
 planning depth to the cost of reversing a choice later: spend planning on
 persisted state, CLI or config interfaces, trust boundaries, public APIs and
 shared abstractions—asking "if this assumption changes after merge, what
