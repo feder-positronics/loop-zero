@@ -39,7 +39,7 @@ For builds, tests, CI, review, ready and merge, Codex exec/write_stdin yields
 >=120 s (>=30 s otherwise); Claude uses a background completion notification
 or `t3_background_wait`. Read the completed result once; never use
 `t3_thread_read` or `task_status` for liveness. Cap returned output at the
-producer: `gh api --jq` selected fields, shell `| head -c 2000`, thread reads
+producer: select GitHub REST fields with `--jq`, shell `| head -c 2000`, thread reads
 limit <=2, maxCharsPerItem <=600 and runLimit 1. Do not end the turn, settle or
 report done while a job you started has no `LOG.exit`, unless the unit is gone
 and you report the job as killed and the result as failed. If the turn must
