@@ -12,7 +12,7 @@ Respect settled decisions unless evidence invalidates their premise.
 Resolve choices answered by evidence; recommend and assume reversible delegated
 choices. Requester-reserved choices or changes to acceptance, scope, cost or
 external commitments need direction. When requester input is needed, ask one
-consequential question at a time, with a recommendation, strongest alternative
+consequential question at a time in a live chat, or all in one message when unattended, with a recommendation, strongest alternative
 and deciding premise. Do not make questions a ceremony for every reply.
 
 “Your call” retains the recommendation as assumed. If evidence collapses a
