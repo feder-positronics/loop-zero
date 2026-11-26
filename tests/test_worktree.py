@@ -262,8 +262,8 @@ def test_split_diff_summarizes_only_files_git_reports_deleted(git_repo: Path) ->
     joined = "".join(split_diff(worktree.diff_since(git_repo, base), 1_000))
 
     assert "+++ /dev/null" in joined and "+new = 'padded hunk'" in joined and "+new = 1 \r" in joined
-    assert "diff --git a/gone.py b/gone.py\ndeleted file, 1 lines" in joined
-    assert joined.count("deleted file, ") == 1
+    assert "gone.py: deleted, 1 lines" in joined
+    assert joined.count(": deleted, ") == 1
 
 
 def test_dirty_head_and_diff(repo: Path) -> None:

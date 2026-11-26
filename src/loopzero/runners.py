@@ -6,6 +6,7 @@ Host authentication is bound read-write into the sandbox HOME so OAuth refreshes
 from __future__ import annotations
 
 import base64
+import codecs
 import contextlib
 import hashlib
 import json
@@ -1395,12 +1396,15 @@ def split_diff(diff: str, budget: int) -> list[str]:
 
 def _summarize_deleted(block: str) -> str:
     # Judge deletion from git's header lines only; hunk lines are the PR's own text.
-    header, hunks = block.partition("\n@@")[::2]
-    if not re.search(r"(?m)^deleted file mode [0-7]{6}$", header):
+    if not re.search(r"(?m)^deleted file mode [0-7]{6}$", block.partition("\n@@")[0]):
         return block
-    first = header.split("\n", 1)[0]
-    deleted = sum(1 for line in hunks.split("\n") if line.startswith("-"))
-    return f"{first}\ndeleted file, {deleted} lines\n"
+    header = block.partition("\n")[0]
+    match = re.fullmatch(r'diff --git ("?)a/(.*)\1 \1b/\2\1', header)
+    path = match[2] if match else "(unknown file)"
+    if match and match[1]:
+        path = codecs.escape_decode(path.encode())[0].decode(errors="replace")
+    deleted = sum(line.startswith("-") and not line.startswith("---") for line in block.splitlines())
+    return f"{header}\n{path}: deleted, {deleted} lines\n"
 
 
 def _split_bytes(text: str, budget: int) -> list[str]:
