@@ -2465,7 +2465,8 @@ def test_late_check_preserves_receipt_when_head_moves(wt, gh, capsys, monkeypatc
         assert "receipt accepted:" in ready
 
 
-def test_overlapping_checks_run_stages_once(wt, capsys, monkeypatch):
+@pytest.mark.parametrize("first_exit", [0, 1])
+def test_overlapping_checks_share_only_a_pass(wt, capsys, monkeypatch, first_exit):
     started, waiting = Event(), Event()
     original_flock = cli.worktree.fcntl.flock
 
@@ -2477,7 +2478,7 @@ def test_overlapping_checks_run_stages_once(wt, capsys, monkeypatch):
     def stage(_config, _wt, _prefix, command, _timeout):
         started.set()
         assert waiting.wait(5)
-        return CheckResult(command, 0, 1.0, "")
+        return CheckResult(command, first_exit if run_stage.call_count == 1 else 0, 1.0, "")
 
     run_stage = Mock(side_effect=stage)
     monkeypatch.setattr(cli.worktree.fcntl, "flock", flock)
@@ -2487,10 +2488,10 @@ def test_overlapping_checks_run_stages_once(wt, capsys, monkeypatch):
         first = pool.submit(cli.main, ["check"])
         assert started.wait(5)
         second = pool.submit(cli.main, ["check"])
-        assert first.result(timeout=10) == second.result(timeout=10) == 0
+        assert (first.result(timeout=10), second.result(timeout=10)) == (first_exit, 0)
 
-    assert [call.args[3] for call in run_stage.call_args_list] == ["echo ok", "test -f README.md"]
-    assert "receipt reused:" in capsys.readouterr().out
+    assert [call.args[3] for call in run_stage.call_args_list] == ["echo ok"] * (1 + first_exit) + ["test -f README.md"]
+    assert ("receipt reused:" in capsys.readouterr().out) == (first_exit == 0)
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
