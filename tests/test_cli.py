@@ -2683,12 +2683,12 @@ def test_ready_wait_verdict(wt, gh, capsys, monkeypatch, head, wait, elapsed, co
         clock += seconds
 
     monkeypatch.setattr(cli, "_sleep", sleep)
-    code, out, err = run(capsys, "--config", "workflow.toml", "ready", f"--wait={wait}")
-
+    (wt / "retry config.toml").write_bytes((wt / "workflow.toml").read_bytes())
+    code, out, err = run(capsys, "--config", "retry config.toml", "ready", f"--wait={wait}")
     assert (code, err) == (expected, "")
     assert out.endswith({
         0: f"ready: {URL}\n", 1: "not ready: required check 'checks' is failure\n",
-        3: f"timed out waiting for required checks on {head[:12]}. Run `loopzero ready --wait` to resume on this head. Keep the same `--config` option.\n",
+        3: f"timed out waiting for required checks on {head[:12]}. Run `loopzero --config 'retry config.toml' ready --wait` to resume on this head.\n",
     }[expected])
 
 

@@ -1306,11 +1306,12 @@ def _wait_with_deadline(
 
 def _print_check_wait_timeout(pr: github.PR, args: argparse.Namespace | None) -> None:
     waiting_for = "GitHub to compute mergeability" if pr.mergeable == "UNKNOWN" else "required checks"
-    command = args.command if args else "ready"
-    keep_config = " Keep the same `--config` option." if args and args.config else ""
+    command = ["loopzero", args.command if args else "ready", "--wait"]
+    if args and args.config:
+        command[1:1] = ["--config", str(args.config)]
     print(
         f"timed out waiting for {waiting_for} on {pr.head_sha[:12]}. "
-        f"Run `loopzero {command} --wait` to resume on this head.{keep_config}"
+        f"Run `{shlex.join(command)}` to resume on this head."
     )
 
 def _verify_wait_snapshot(
