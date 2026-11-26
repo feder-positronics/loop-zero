@@ -3032,12 +3032,14 @@ def test_ready_matches_effective_inherited_check_environment(capsys, monkeypatch
         assert code == 1 and "not ready: check receipt has an incompatible settings fingerprint." in out
 
 
-@pytest.mark.parametrize("worker", ["legacy", "different-path", "matching"])
+@pytest.mark.parametrize("worker", ["legacy", "different-environment", "matching"])
 def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
     arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
     with monkeypatch.context() as worker_env:
-        if worker == "different-path":
+        if worker == "different-environment":
             worker_env.setenv("PATH", str(tmp_path / "worker-bin"), prepend=":")
+            for name, value in {"LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "TERM": "dumb"}.items():
+                worker_env.setenv(name, value)
         assert run(capsys, "check")[0] == 0
 
     receipt = wt / ".loopzero/checks.json"
@@ -3045,11 +3047,9 @@ def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_pa
     if worker == "legacy":
         # Older producers serialize these results without a settings fingerprint.
         del payload["settings_sha256"]
-    # Whole-job transport preserves the producer's fields.
-    receipt.write_text(json.dumps(payload))
-    assert run(capsys, "ready")[0] == (0 if worker == "matching" else 1)
-
-    if worker != "matching":
+        receipt.write_text(json.dumps(payload))
+    assert run(capsys, "ready")[0] == int(worker == "legacy")
+    if worker == "legacy":
         assert run(capsys, "check")[0] == 0
         assert run(capsys, "ready")[0] == 0
 
