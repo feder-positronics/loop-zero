@@ -2011,7 +2011,8 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
             assert "run `loopzero pr`, then `loopzero review` before merging main" in err
         else:
             assert f"{reviewed[:12]} must be on the first-parent history" in err
-            assert "including resolution edits" in err and "git reset --hard" not in err
+            assert "GitHub objects may be unavailable or exceed verification limits" in err
+            assert "Open a new PR from the current base" in err and "replay the fixes" not in err
         return
     assert code == 0, err
     header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)

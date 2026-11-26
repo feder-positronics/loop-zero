@@ -29,8 +29,5 @@ and [setup guidance](../../SETUP.md#api-keys-for-local-agents).
 
 Recurring code-health audits follow [CODE-HEALTH.md](../../docs/CODE-HEALTH.md).
 
-Deprecated aliases: `review-design-doc` → `review`; `refine-design-doc` →
-`write-design-doc`; `fix-failing-tests` → `diagnose`; `remove-dead-code` → `refine-code`.
-
 Optional vendor skills live under [integrations/](../../integrations/); to use one, link
 `$SRC/integrations/<name>` as the [setup loop](../../SETUP.md#connect-your-agent) links core skills.
