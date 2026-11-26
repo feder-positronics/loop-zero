@@ -21,7 +21,10 @@ Before publication, inspect the issue and links for its lifecycle blueprint and
 include required completion in the closing delivery. A child does not own its parent's blueprint.
 Recheck collisions, live acceptance, prior delivery and ownership before
 publication and merge. Reconcile changes before proceeding.
-On approval, run readiness at the approved head and defer optional changes.
+Defer optional changes after approval. With a current passing receipt, follow
+[contract Step 5](../../CONTRACT.md#the-six-steps) at the approved head before
+investigating missing or skipped draft checks. Use its scheduling guidance if
+checks remain missing after activation.
 Before queueing, check the candidate merged with the current base against
 every repository size cap, including the combined effect of any batch.
 Verify the replacement is installed and works before retiring a deployment workaround.
