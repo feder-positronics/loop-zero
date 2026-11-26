@@ -302,6 +302,42 @@ def run(capsys, *argv: str) -> tuple[int, str, str]:
     return code, captured.out, captured.err
 
 
+# Transcript size regressions
+@pytest.mark.parametrize("command", ["ready", "merge"])
+@pytest.mark.parametrize("stable", [False, True])
+def test_wait_reports_only_check_changes(wt, gh, head, capsys, monkeypatch, stable, command):
+    names = ["checks"] + [f"verify deployment / integration shard {n:02d}" for n in range(23)]
+    cfg = cli.dataclasses.replace(config.load(wt / "workflow.toml"), required_ci=tuple(names))
+    monkeypatch.setattr(cli, "_context", lambda *a, **k: (wt, cfg))
+    monkeypatch.setattr(cli, "_verify_wait_snapshot", lambda *a: None)
+    monkeypatch.setattr(cli, "WAIT_INTERVAL", 0.1)
+    monkeypatch.setattr(github, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    runs = [
+        [{"name": name, "status": "completed", "conclusion": "success"}
+         if i < cleared else {"name": name, "status": "in_progress"}
+         for i, name in enumerate(names)]
+        for cleared in ([0] if stable else [0, *range(25)])
+    ]
+    arm_check_runs(gh, head, *runs)
+    clock = [0.0]
+    monkeypatch.setattr(cli, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(cli, "_sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    if command == "merge":
+        monkeypatch.setattr(github, "merge", lambda *a: "c" * 40)
+        monkeypatch.setattr(cli, "_cleanup_remote_refs", lambda *a: None)
+        monkeypatch.setattr(cli, "_cleanup", lambda *a: None)
+    code, out, err = run(capsys, command, "--wait=1" if stable else "--wait=1800")
+    assert len((out + err).encode()) < 3200 and out.count("waiting:") == 1
+    assert not err and all(f"required check '{name}' is pending" in out for name in names)
+    if stable:
+        assert code == 3 and f"timed out waiting for required checks on {head[:12]}" in out
+        assert "cleared:" not in out
+    else:
+        assert code == 0 and out.endswith(f"ready: {URL}\n" if command == "ready" else "c" * 40 + "\n")
+        assert all(f"cleared: {name}\n" in out for name in names)
+
+
 # --- start / check --------------------------------------------------------------------
 
 
@@ -2367,6 +2403,7 @@ def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypat
     assert without_accepted_receipt(out).splitlines() == [
         "marked ready; required check 'checks' is skipped",
         "waiting: required check 'checks' is pending",
+        "cleared: checks",
         f"ready: {URL}",
     ]
 
