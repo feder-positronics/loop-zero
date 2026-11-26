@@ -478,7 +478,8 @@ stage is retried after success or uncertain launch. Only the coordinator writes
 the authoritative `checks.json` receipt. Writers lock the task state directory
 while rechecking HEAD and atomically replacing the receipt from a synced sibling
 temporary file. Successful keyed stages are checkpointed in the same receipt
-for reuse. The checkpoint cannot satisfy readiness before final worktree
+for reuse. Delegated runs keep the latest checkpoint in memory and publish it
+if interrupted. Runner outages leave the prior receipt intact. The checkpoint cannot satisfy readiness before final worktree
 validation. Runners cannot select stages or mint receipts. Stage admission
 belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the

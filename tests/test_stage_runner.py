@@ -158,7 +158,7 @@ def test_runner_process_failure_is_retryable(git_repo, command, diagnostic):
     config = make_config(check_runner=("/bin/sh", "-c", command))
 
     with pytest.raises(sandbox.SandboxUnavailable, match="Retry") as exc:
-        sandbox.run_checks(config, git_repo, timeout=0.1)
+        sandbox.run_checks(config, git_repo, timeout=0.1 if command == "exec sleep 10" else 30)
 
     assert diagnostic in str(exc.value)
     assert "elapsed" in str(exc.value)

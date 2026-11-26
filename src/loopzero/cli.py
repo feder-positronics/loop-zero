@@ -17,6 +17,7 @@ import re
 import sys
 import tempfile
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -575,18 +576,24 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+@sandbox._unwind_on_sigterm()
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
+    pending = deque(maxlen=1)
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),
             status=lambda message: print(message, flush=True),
-            checkpoint=lambda partial: _save_report(wt, partial))
+            checkpoint=pending.append if config.check_runner else lambda partial: _save_report(wt, partial))
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
+    except (KeyboardInterrupt, sandbox._Terminated):
+        if pending:
+            _save_report(wt, pending[0])
+        raise
     for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
