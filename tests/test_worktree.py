@@ -41,11 +41,12 @@ def test_git_fixture_ignores_inherited_directory(tmp_path, monkeypatch):
     assert (checkout / ".git").is_dir() and not ambient.exists()
 
 
-def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
-    name = worktree.branch_name(repo, "zażółć\u00a0")
+@pytest.mark.parametrize("slug", ["zażółć\u00a0", "ok-1.2_x"])
+def test_branch_round_trips_valid_names(repo: Path, slug: str) -> None:
+    name = worktree.branch_name(repo, slug)
     git(repo, "switch", "-c", name)
 
-    assert worktree.branch(repo) == "lz/zażółć\u00a0"
+    assert worktree.branch(repo) == f"lz/{slug}"
 
 
 def test_branch_refuses_detached_head(repo: Path) -> None:
@@ -137,21 +138,36 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     assert task.read_text().endswith("(filled by `loopzero review`)\n")
 
 
-@pytest.mark.parametrize("redirect", [None, "file", "directory"])
-def test_start_excludes_worktrees_and_task_dir(repo: Path, redirect: str | None) -> None:
+@pytest.mark.parametrize("case", ["regular", "file", "directory", "append", "replace"])
+def test_start_excludes_worktrees_and_task_dir(repo: Path, monkeypatch, case: str) -> None:
     exclude = repo / ".git" / "info" / "exclude"
     exclude.write_text("*.log")  # no trailing newline on purpose
-    if redirect:
-        link = exclude if redirect == "file" else exclude.parent
+    if case in ("file", "directory"):
+        link = exclude if case == "file" else exclude.parent
         link.symlink_to(link.rename(repo.parent / "outside"))
         with pytest.raises(worktree.WorktreeError, match="outside its Git directory"):
             worktree.start(repo, "t1", "main")
         assert exclude.read_text() == "*.log" and not (repo / ".worktrees").exists()
         return
     old_inode = exclude.stat().st_ino
+    write = worktree.os.write
+    replacement, concurrent = case == "replace", case in ("append", "replace")
+
+    def interleave(fd, rules):
+        if concurrent and rules.endswith(b".loopzero/\n"):
+            edit = exclude.with_suffix(".edited") if replacement else exclude
+            with edit.open("w" if replacement else "a") as stream:
+                stream.write("*.log\nlocal.env" if replacement else "\nlocal.env")
+            if replacement:
+                edit.replace(exclude)
+            monkeypatch.setattr(worktree.os, "write", write)
+        return write(fd, rules)
+
+    monkeypatch.setattr(worktree.os, "write", interleave)
     wt = worktree.start(repo, "t1", "main")
-    assert exclude.stat().st_ino != old_inode
-    assert exclude.read_text().splitlines() == ["*.log", ".worktrees/", ".loopzero/"]
+    assert (exclude.stat().st_ino != old_inode) == replacement
+    expected = ["*.log", "local.env"] if concurrent else ["*.log"]
+    assert exclude.read_text().splitlines() == [*expected, ".worktrees/", ".loopzero/"]
     assert not worktree.is_dirty(wt), "fresh worktree with task.md is clean"
     assert git(repo, "status", "--porcelain") == ""
     installed = exclude.stat()
@@ -160,30 +176,23 @@ def test_start_excludes_worktrees_and_task_dir(repo: Path, redirect: str | None)
     assert exclude.read_text().count(".worktrees/") == 1
 
 
-def test_start_refuses_existing_branch(repo: Path) -> None:
-    git(repo, "branch", "lz/dup")
-    with pytest.raises(worktree.WorktreeError, match="branch already exists"):
+@pytest.mark.parametrize("collision", ["branch", "directory"])
+def test_start_refuses_an_existing_task_destination(repo: Path, collision: str) -> None:
+    path = repo / ".worktrees" / "dup"
+    if collision == "branch":
+        git(repo, "branch", "lz/dup")
+    else:
+        path.mkdir(parents=True)
+    with pytest.raises(worktree.WorktreeError, match=f"{collision} already exists"):
         worktree.start(repo, "dup", "main")
-    assert not (repo / ".worktrees" / "dup").exists()
+    assert path.exists() == (collision == "directory")
 
 
-def test_start_refuses_existing_directory(repo: Path) -> None:
-    (repo / ".worktrees" / "dup").mkdir(parents=True)
-    with pytest.raises(worktree.WorktreeError, match="directory already exists"):
-        worktree.start(repo, "dup", "main")
-
-
-@pytest.mark.parametrize("slug", ["../escape", "a/b", "bad..name", "trail.lock", "sp ace", ""])
+@pytest.mark.parametrize("slug", ["../escape", "a/b", "bad..name", "trail.lock", "sp ace", "has~tilde", ""])
 def test_start_rejects_bad_slug(repo: Path, slug: str) -> None:
     with pytest.raises(worktree.WorktreeError, match="invalid slug"):
         worktree.start(repo, slug, "main")
     assert not (repo / ".worktrees").exists(), "rejected before fetch or worktree add"
-
-
-def test_branch_name_uses_git_check_ref_format(repo: Path) -> None:
-    assert worktree.branch_name(repo, "ok-1.2_x") == "lz/ok-1.2_x"
-    with pytest.raises(worktree.WorktreeError):
-        worktree.branch_name(repo, "has~tilde")
 
 
 @pytest.mark.parametrize("change", [("remove", "origin"), ("rename", "origin", "upstream")])

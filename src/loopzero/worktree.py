@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import errno
+import fcntl
+import os
 import re
-import stat
 import subprocess
 import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from select import select
-from uuid import uuid4
 
 from loopzero._proc import build_env, run, run_git_paths
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-EXCLUDES = (".worktrees/", ".loopzero/")
+EXCLUDES = (b".worktrees/", b".loopzero/")
 _BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
 _TASK_TEMPLATE = """# {title}
 
@@ -111,21 +111,20 @@ def _ensure_excludes(repo_root: Path) -> None:
     if not info.is_relative_to(common) or not exclude.is_relative_to(common):
         raise WorktreeError(f"Git exclude is outside its Git directory: {exclude}")
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude.read_text() if exclude.exists() else ""
-    missing = [entry for entry in EXCLUDES if entry not in existing.splitlines()]
-    if missing:
-        sep = "" if not existing or existing.endswith("\n") else "\n"
-        mode = stat.S_IMODE(exclude.stat().st_mode) if exclude.exists() else None
-        temp = exclude.with_name(f".exclude-{uuid4().hex}")
-        stream = temp.open("x")
-        try:
-            with stream:
-                stream.write(existing + sep + "\n".join(missing) + "\n")
-            if mode is not None:
-                temp.chmod(mode)
-            temp.replace(exclude)
-        finally:
-            temp.unlink(missing_ok=True)
+    while True:
+        fd = os.open(exclude, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o666)
+        with os.fdopen(fd, "rb") as stream:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            lines = set(stream.read().splitlines())
+            missing = [entry for entry in EXCLUDES if entry not in lines]
+            if missing:
+                # An editor can append an unterminated line before this write.
+                rules = b"\n" + b"\n".join(missing) + b"\n"
+                if os.write(fd, rules) != len(rules):
+                    raise WorktreeError(f"incomplete write to Git exclude: {exclude}")
+            with suppress(FileNotFoundError):
+                if os.path.samestat(os.fstat(fd), exclude.lstat()):
+                    return
 
 
 def start(repo_root: Path, slug: str, base_branch: str) -> Path:

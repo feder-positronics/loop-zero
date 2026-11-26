@@ -16,7 +16,7 @@ a decision or requesting production-change approval, follow
 Before continuing an existing branch or PR, follow
 [inherited-work guidance](reference.md#inherited-work).
 
-Retain an inherited task worktree or use `loopzero start` for a new delivery.
+Retain an inherited task worktree or use `loopzero start <task-slug>`.
 Record observable acceptance and the issue link. Deliver through
 [implement](../implement/SKILL.md). Follow the linked safeguards for
 [API shape changes](reference.md#api-shape-changes),

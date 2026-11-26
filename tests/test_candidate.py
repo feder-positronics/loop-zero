@@ -22,7 +22,6 @@ import pytest
 
 from loopzero import candidate, github
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
-from loopzero.types import LoopZeroError
 from tests.conftest import commit_file, git as isolated_git
 
 
@@ -476,7 +475,7 @@ def test_vanished_parent_rejects_conflicting_current_main(tree_candidate):
         attest(main_head=main)
 
 
-@pytest.mark.parametrize("timing", ["metadata", "policy", "initial"])
+@pytest.mark.parametrize("timing", ["metadata", "policy", "initial", TypeError, AttributeError, KeyError])
 def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monkeypatch, timing):
     _, git, _, _, parent, source, head = tree_candidate
     candidate_event = event()
@@ -512,9 +511,11 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     def policy(number, snapshot):
         seen.append(number)
+        if isinstance(timing, type) and number == 101:
+            raise timing("policy implementation error")
         if timing == "policy" and number == 101:
             assert snapshot["state"] == "open" and source_reads == 1 and status_reads == 1
-            raise LoopZeroError("source #101: PR #101 is MERGED, not open")
+            raise CandidateError("source #101: PR #101 is MERGED, not open")
 
     def verify_tree(repo, main_sha, candidate_sha, sources):
         verified.append((main_sha, candidate_sha, sources))
@@ -522,6 +523,11 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(candidate, "_verify_tree", verify_tree)
+    if isinstance(timing, type):
+        with pytest.raises(timing, match="policy implementation error"):
+            run_attestation(candidate_event, github_get=get, mergify_status=lineage, source_policy=policy)
+        assert seen == [101] and source_reads == 1 and not sleeps
+        return
     assert run_attestation(candidate_event, github_get=get, mergify_status=lineage,
                            source_policy=policy) == [{"number": 102, "head_sha": source}]
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
@@ -564,7 +570,7 @@ def test_metadata_retry_evaluates_fresh_policy(field, value):
 def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
     values, live = payloads(event()), status()
     sleeps, attempts, source_reads = [], [], []
-    expected = LoopZeroError("source #101: missing required review")
+    expected = CandidateError("source #101: missing required review")
     if failure == "closed":
         values["/repos/owner/repo/pulls/101"].update(state="closed", merged=False)
     if failure == "identity":
@@ -595,7 +601,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
             raise expected
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
-    with pytest.raises((CandidateError, LoopZeroError)) as caught:
+    with pytest.raises(CandidateError) as caught:
         run_attestation(github_get=get, status_reads=[live], source_policy=policy)
     assert not isinstance(caught.value, CandidateRaceError) and len(attempts) == 1 and sleeps == []
     if failure == "policy":

@@ -21,6 +21,10 @@ scratch = [".venv"]
 env = { UV_CACHE_DIR = "/home/me/.cache/uv", UV_PYTHON_DOWNLOADS = "never" }
 limits = { memory_mb = 1024, file_mb = 512 }
 
+[checks.inputs]
+"uv run pytest -q" = ["src/**"]
+"*" = ["lock"]
+
 [delivery]
 merge = "rebase"
 reviewers = ["codex"]
@@ -40,13 +44,16 @@ def write(tmp_path, text):
     return path
 
 
-def test_load_full_config(tmp_path):
-    assert config.load(write(tmp_path, FULL)) == Config(
+@pytest.mark.parametrize("strategy,queue", [("rebase", None), ("mergify", "main")])
+def test_load_full_config(tmp_path, strategy, queue):
+    workflow = FULL if queue is None else FULL.replace('merge = "rebase"', 'merge = "mergify"\nmergify_queue = "main"')
+    assert config.load(write(tmp_path, workflow)) == Config(
         repo="owner/name",
         base_branch="develop",
         checks=("uv run pytest -q", "uv run ruff check ."),
         required_ci=("checks",),
-        merge_strategy="rebase",
+        merge_strategy=strategy,
+        mergify_queue=queue,
         reviewers=("codex",),
         review={"codex": ReviewConfig("gpt-5.6-luna", "medium", ("low", "medium", "high"))},
         reviewer_ro_paths=("/opt/claude", "/opt/codex"),
@@ -58,6 +65,7 @@ def test_load_full_config(tmp_path):
         scratch=(".venv",),
         env=(("UV_CACHE_DIR", "/home/me/.cache/uv"), ("UV_PYTHON_DOWNLOADS", "never")),
         limits=ResourceLimits(memory_mb=1024, file_mb=512),
+        inputs={"uv run pytest -q": ("src/**",), "*": ("lock",)},
     )
 
     padded = FULL.replace('"uv run pytest -q"', '" uv run pytest -q "')
@@ -82,21 +90,6 @@ def test_load_applies_defaults(tmp_path):
     assert loaded.limits == ResourceLimits(memory_mb=4096, file_mb=2048)
 
 
-def test_mergify_delivery_requires_and_loads_queue(tmp_path):
-    loaded = config.load(write(tmp_path, """
-[repo]
-name = "o/n"
-[delivery]
-merge = "mergify"
-mergify_queue = "main"
-"""))
-    assert loaded.merge_strategy == "mergify"
-    assert loaded.mergify_queue == "main"
-
-    with pytest.raises(config.ConfigError, match="mergify_queue is required"):
-        config.load(write(tmp_path, '[repo]\nname = "o/n"\n[delivery]\nmerge = "mergify"\n'))
-
-
 def test_missing_file(tmp_path):
     with pytest.raises(config.ConfigError, match="config file not found"):
         config.load(tmp_path / "nope.toml")
@@ -115,6 +108,11 @@ def test_missing_file(tmp_path):
          r"workflow\.toml: checks\.commands.*nonblank command"),
         ('[repo]\nname = "o/n"\n[checks]\nnetwork = "yes"\n', "checks.network must be a bool"),
         ('[repo]\nname = "o/n"\n[delivery]\nmerge = "ff"\n', "delivery.merge must be one of"),
+        ('[repo]\nname = "o/n"\n[delivery]\nmerge = "mergify"\n', "mergify_queue is required"),
+        *((f'[repo]\nname = "o/n"\n[delivery]\n{strategy}mergify_queue = "main"\n',
+           rf"delivery\.mergify_queue.*delivery\.merge.*{selected}")
+          for strategy, selected in [("", "squash"), ('merge = "squash"\n', "squash"), ('merge = "queue"\n', "queue")]),
+        (FULL.replace('["src/**"]', '"src"'), r"checks\.inputs"),
         ('[repo]\nname = "o/n"\n[delivery]\nreviewers = ["gpt"]\n', "delivery.reviewers entries"),
         ('[repo]\nname = "o/n"\n[repo2]\nx = 1\n', "unknown key\\(s\\) in top level: repo2"),
         ('[repo]\nname = "o/n"\nnmae = "x"\n', "unknown key\\(s\\) in \\[repo\\]: nmae"),
@@ -174,18 +172,3 @@ def test_ro_path_boundary(tmp_path, path, allowed):
     else:
         with pytest.raises(config.ConfigError, match="must not expose"):
             config.load(cfg)
-
-
-def test_check_inputs(tmp_path):
-    cfg = config.load(write(tmp_path, FULL + '\n[checks.inputs]\n"uv run pytest -q" = ["src/**"]\n"*" = ["lock"]\n'))
-    assert cfg.inputs == {"uv run pytest -q": ("src/**",), "*": ("lock",)}
-    with pytest.raises(config.ConfigError):
-        config.load(write(tmp_path, FULL + '\n[checks.inputs]\n"uv run pytest -q" = "src"\n'))
-
-
-@pytest.mark.parametrize("strategy", ["", 'merge = "squash"\n', 'merge = "queue"\n'])
-def test_mergify_queue_rejects_other_strategies(tmp_path, strategy):
-    selected = "queue" if "queue" in strategy else "squash"
-    text = '[repo]\nname = "o/n"\n[delivery]\n' + strategy + 'mergify_queue = "main"\n'
-    with pytest.raises(config.ConfigError, match=rf"delivery\.mergify_queue.*delivery\.merge.*{selected}"):
-        config.load(write(tmp_path, text))
