@@ -10,9 +10,7 @@
   not use the snap: its confinement cannot reach the keyring. Without root,
   unpack the [release](https://github.com/cli/cli/releases) tarball and put
   `bin/gh` in `~/.local/bin` ahead of `/usr/bin`; that copy does not update.
-- Keep `gh` and `claude` current. Codex reviews run only on the versions
-  allowlisted in `src/loopzero/runners.py`; upgrade Codex with a loop-zero release
-  that accepts the new version. Tools that shape the build (`uv`,
+- Keep `gh`, `claude` and `codex` current. Tools that shape the build (`uv`,
   Python, a consumer's Node and package manager) change only with their pin in
   the repository, for example `uv` in `.github/workflows/checks.yml`.
 - Linux with `bwrap` on `PATH` for default `loopzero check` and fresh local
@@ -306,11 +304,9 @@ PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
   `loopzero` commands are never replayed by the shim. Existing processes keep their
   credentials until their harness safely replaces them; changing the active file
   does not change a running session. Never pin a token in `settings.json` `env`.
-  The loopzero shim prefers executable Codex in `~/.local/lib/codex-reviewer`;
-  allowlisting a newer release is a periodic task: copy both `codex` and its
-  matching `codex-code-mode-host` into `codex-reviewer-<v>`, preserving executable
-  permissions and keeping them side by side so sandboxed reviews can launch the
-  helper. Repoint the symlink after the allowlist PR lands.
+  The loopzero shim prefers executable Codex in `~/.local/lib/codex-reviewer`
+  when present; keep `codex` and its matching `codex-code-mode-host` side by side
+  there with executable permissions so sandboxed reviews can launch the helper.
 - Harness integrations can call `ai-accounts launch <provider> --model <model>` for
   a nonsecret JSON identity, then `ai-accounts exec <provider> --identity <identity>
   -- /absolute/real/executable ...` to pin that exact managed revision. Pass the
@@ -362,16 +358,16 @@ Use one pinned CLI revision and the same effective settings for `check`,
 writes the receipt. For remote stages, configure an operator-trusted
 `[checks].runner` using the [stage protocol](docs/ARCHITECTURE.md#check-stage-runners).
 
-Without a stage adapter, run the whole check locally. Use a local slot if the
-host requires one. On miki, if you used the isolated install, run these from
-the task worktree with the `install_dir` from that recipe.
+Without a stage adapter, run the whole check locally, through the host's slot
+wrapper where host policy requires one. If you used the isolated install, run
+these from the task worktree with the `install_dir` from that recipe.
 Make a scratch clone standalone before queueing, for example with
 `git clone --no-local`. If a Git object alternate is outside the check sandbox,
 `loopzero check` refuses it after the slot wait and before any stage runs.
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"
-HEAVY_SLOT_REMOTE_HOSTS="$HOME/.cache/intelflo-scratch/locks/no-remote-hosts.json" "$HOME/.cache/intelflo-scratch/locks/heavy-slot.sh" loopzero check
+loopzero check
 # After opening and reviewing the PR, keep this PATH for delivery.
 loopzero ready --wait
 loopzero merge --wait
