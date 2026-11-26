@@ -9,10 +9,10 @@ Produce the smallest artifact that lets the next actor proceed without
 re-deriving intent or architecture. Do not implement it. Unless explicitly
 requested, skip the document for a clear, small, safely bounded change.
 
-Read [shared design guidance](reference.md) for grounding, artifact choice,
-decision records, conventions, and validation. Align material ambiguity before
-drafting; preserve requester decisions and keep unresolved questions owned and
-visibly blocking the relevant action.
+Read only Grounding and Design Contract in [reference](reference.md) first.
+Before drafting, read Artifact Choice conventions. Read its table if type is open.
+Use Decisions for material choices, Artifact Lifecycle for links or time gates,
+and Validate and matching Type-Specific Checks before handoff. Keep blockers owned.
 
 Follow [Reporting](../../CONTRACT.md#reporting) for the owner-facing opening
 and visuals. Write user scenarios before UI proposals, then validate material
@@ -28,7 +28,3 @@ material questions retain owners and visibly block the relevant action.
 Validate the artifact. Revise material ambiguity or leave an explicit blocker.
 Finish with a commit-ready document and actionable acceptance and questions.
 Record its path and material decisions in task Notes, or otherwise in the handoff.
-
-Then continue the task you were given as far as it authorizes, or hand over
-what is left of its acceptance. If two repairs have failed, the route is
-probably wrong, so reconsider it before a third.

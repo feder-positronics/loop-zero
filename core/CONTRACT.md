@@ -10,24 +10,21 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    problem, context, acceptance, base SHA. Write the PR, like any issue or
    design doc you write, for the project owner under [Reporting](#reporting).
 2. Implement, commit, then `loopzero check`: run `workflow.toml`
-   `[checks].commands` in the sandbox. Its exit code is the verdict. For a long
-   check under a [provider-portable handoff](../docs/DELEGATION.md#provider-portable-handoff),
-   open the draft in step 3 before starting the check.
+   `[checks].commands` in the sandbox. Open the draft before a long check under a
+   [provider-portable handoff](../docs/DELEGATION.md#provider-portable-handoff).
 3. `loopzero pr` pushes and opens a **draft** PR from the task text plus
    generated Validation checks. Later calls sync narrative, preserving live
    Validation, Review and extra sections; `check` refreshes only its checks
    block. Drafts need no clean review.
-4. `loopzero review` reviews the exact head, independently by default, and
-   posts one GitHub review with inline findings: exit 0 `approve`,
-   5 `request_changes`.
-5. `loopzero ready --wait` marks ready PRs ready for review. It also activates
-   drafts blocked only by missing/skipped checks to trigger CI, even with
-   mergeability pending. Without waiting, activation exits 3.
-   Both waiters observe the unchanged head while all blockers can settle,
-   with `--wait[=SECONDS]` (default 1800). Pending mergeability can block with
-   green checks and gets its own timeout message (exit 3).
-   Green can precede CI scheduling. After two minutes with only missing checks
-   and none pending, inspect scheduling, triggers and permissions, then retry.
+4. `loopzero review` defaults to independent review of the exact head and posts
+   one GitHub review with inline findings. Approval exits 0, changes requested 5.
+5. `loopzero ready --wait` marks eligible PRs ready and activates drafts with
+   only missing/skipped checks even with mergeability pending. Activation without a
+   wait exits 3. Both waiters use `--wait[=SECONDS]` (default 1800) on the same
+   head. Zero can activate or enqueue. Mergeability can time out (exit 3)
+   with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`.
+   Green can precede CI scheduling. After two minutes of missing checks with
+   none pending, inspect scheduling, triggers and permissions, then retry.
 6. After step 5 exits 0, run from a durable directory such as `/tmp`
    using the absolute path to the task worktree.
 
@@ -36,17 +33,17 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    ```
 
    Merge rechecks readiness, uses the configured strategy, verifies the landed
-   SHA, and deletes the branch and worktree. If cleanup warns, the merge landed.
-   Follow the recovery step it names. A queue initially enqueues;
-   `--wait` shares a budget across source-check and landing waits. Cleanup follows
-   verified landing. Enqueueing without `--wait` returns 0 without cleanup.
+   SHA and deletes the branch and worktree. A cleanup warning follows a verified
+   merge. Follow its recovery step. Queueing without `--wait` exits 0 without
+   cleanup. With `--wait`, source checks and landing share one budget.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
-On every start/resume, run `loopzero status`, then rerun the last `--wait`
-command if any; both are idempotent. Status derives the branch's stage from
-Git, GitHub and the check receipt. Never end a turn waiting for notice of an
-event that may already have happened; notifications never replace the waiter.
+On start/resume, use `loopzero status` in an existing worktree to read Git, GitHub
+and the receipt. Rerun the last `--wait` if pending. After ejection, read the
+reason and follow [Mergify recovery](../SETUP.md#mergify). If cleanup removed the
+worktree, verify the merge in GitHub. Never yield waiting for a notice that
+may already have fired. Notifications never replace the waiter.
 Before yielding, record head, last exit code, awaited event and next command
 in one PR comment per owner. Post on first yield; update the existing comment ID
 with the full replacement Markdown from `body_file` on later yields:
@@ -58,45 +55,30 @@ requester needed).
 
 ## Reporting
 
-Write PRs, issues, design docs, reports, requests and status messages for the
-reader's next action, readable without the thread they came from. Templates
-(handoff, delegation brief) keep their fields; these rules govern the prose
-inside them.
+Write for the reader's next action without assuming thread context. Keep handoff
+and delegation templates' fields and apply these rules to their prose.
 
-- Lead with the outcome; when the reader must decide or act, put that request
-  first, before any status.
-  - **PRs** open with what changes for the owner or users (`Goal`), then what
-    is wrong (`Problem`) and the newcomer context (`Context`); keep internal
-    dispatch, rulings and batch names in `Notes`, not the opening.
-  - **Issues** open with what is broken or wanted and who notices
-    (consequence), then the evidence connecting it to the cause, then the
-    observable evidence that closes it.
-  - **Design docs** open with a plain summary of what changes, what decision
-    is needed and the recommendation before architecture details or decision
-    IDs.
-- Write owner-facing text in plain words without session labels, batch names,
-  opaque IDs or unexpanded internal terms. Name things by what they are; link
-  a plan or issue instead of naming it. Explain each domain term from
-  something you read (code, docs, issue or glossary), or if nothing explains
-  it say what it does here instead of naming it.
-- Give the observation a conclusion rests on: command and result, number, file
-  or example. Say which claims behind a decision are inferred or assumed, and
-  what was skipped or failed.
-- To a reader who has seen earlier state, report what changed and what comes
-  next; give a new reader the state they need to act. Include steps taken only
-  when they change what to trust.
-- For a decision, name who decides, ask the exact question, recommend a course
-  and say what happens if no answer comes. Give alternatives when the choice is
-  real.
-- **Visuals, infographics and mockups:** include a visual whenever a topic,
-  change, design or owner update has a structural, quantitative or UI shape
-  that prose alone makes slower to scan. Follow [visual guidance](VISUALS.md)
-  for visuals, issues referring to UI functions and UI-changing PRs.
-  - Every visual must carry structure, comparison or appearance the prose does
-    not, and the prose must stand without it. Omit visuals for small,
-    straightforward text- or code-only changes.
-- Stop when the reader can act. Apart from the delivery ending above, do not
-  close by restating the opening.
+- Lead with the outcome. Put a required reader decision or action first.
+  - **PRs** open with user or owner impact (Goal), the Problem and newcomer
+    Context. Put dispatch, rulings and batch names in Notes.
+  - **Issues** open with what is broken or wanted, who notices, evidence of the
+    cause and observable closure evidence.
+  - **Design docs** open with what changes, the decision and recommendation
+    before architecture details or decision IDs.
+- Use plain names and links to plans or issues. Omit session and batch labels,
+  opaque IDs and unexplained terms. Define domain terms from sources you read
+  or describe what they do here.
+- Ground conclusions in a command and result, number, file or example. Identify
+  inferences, assumptions, skipped checks and failures.
+- Give returning readers changes and next steps, and new readers enough state
+  to act. Include process only when it affects what to trust.
+- Name the decision owner, exact question, recommendation and default without
+  an answer. Give alternatives for real choices.
+- Include a [visual](VISUALS.md) when structure, quantities or UI are harder
+  to scan in prose. Each visual must add information and the prose must stand
+  alone. Omit visuals for small, straightforward text or code changes.
+- Stop when the reader can act. Restate the opening only if the delivery ending
+  above requires it.
 
 ## Merge authority
 
@@ -172,28 +154,25 @@ runner reliability or speed) go to the front of the merge line, ahead of feature
 work, through the repository's queue priority if it has one. Infra-only fixes
 may use the infra-only route above.
 
-The builder runs each full local gate once, recording command, exact head SHA,
-environment fingerprint (defined by the consumer's AGENTS.md/docs), result, time
-and log path. Builders, reviewers and coordinators reuse its green receipt at
-the same head and fingerprint. Rerun only if head or gate inputs changed
-(including rebase), fingerprint changed or cannot be shown, or receipt is missing,
-red, partial or unverifiable. Reviewers still judge whether tests exercise claimed
-behavior; reuse does not accept those claims. Hosted required CI and loopzero's
-sandboxed check receipt remain unchanged.
+The builder runs each full local gate once and records its command, exact head SHA,
+environment fingerprint (from consumer AGENTS.md/docs), result, time and log path.
+Builders, reviewers and coordinators reuse green receipts at the same head and
+fingerprint. Rerun only if head or inputs changed (including rebase), the fingerprint
+changed or cannot be shown, or the receipt is missing, red, partial or unverifiable.
+Reviewers still verify tests prove the claimed behavior. Hosted CI and sandboxed
+receipt requirements remain.
 
-Every gate, script, workflow step and pool-host job runs under the repository's
-pinned interpreter and toolchain (for example `uv run` with the pinned Python),
-never a host's system interpreter. An error from a missing newer-language API
-means the wrong interpreter ran: fix the interpreter, not the code for an older
-version.
+Run every gate, script, workflow step and pool-host job with the repository's
+pinned toolchain, never the host interpreter. If a newer API is missing, use the
+pinned interpreter rather than altering code for an older version.
 
 ## Findings
 
 - Findings live only in PR review threads, expire at merge, and must not be
   copied into files, issues or backlogs.
-- Blocking marker:
+- Blocking marker, as the first line of a thread a review publisher opened:
   `<!-- loopzero:finding v=1 severity=critical head=<sha> id=<8-hex> -->`
-  (or `important`).
+  (or `important`). Other threads never block.
 - `critical`: wrong or unsafe; must fix. `important`: ships a bug or breaks
   acceptance; must fix. `suggestion`: never counted or blocking.
 - Missing diff or required evidence: return one `critical` finding; never
@@ -204,16 +183,16 @@ version.
 Loop-zero serves internal projects only and does not target tamper resistance for outside users.
 Freeze new work on Codex evidence projections. Simplify or delete them when they break or obstruct delivery.
 
-- One primary and at most one delta per PR. The delta reads only
-  changes since the primary; unresolved primary findings still count under
-  Blockers.
+- One primary and one ordinary delta per PR. After a base merge, a delta covers first-parent topic changes and
+  edits to each automatic remerge. The reviewed commit must be on the first-parent history, and merged parents
+  must come from the verified base. Unresolved primary findings still count under Blockers.
 - Default: one writing model family per PR, including delegates and repairs;
   another may advise read-only and review independently. Before committing
   imported work, record every actual writing delegate in truthful
   `Co-Authored-By` trailers; the committer does not replace the writer.
-  Preserve all actual contributors through squash/amend except under the
-  authorized disclosure route below; otherwise retain every writer's
-  truthful trailers. Missing attribution stays unknown; never invent it.
+  Preserve every actual contributor's truthful trailers through squash/amend
+  except under the authorized disclosure route below. Missing attribution
+  stays unknown; never invent it.
 - Primary and delta prefer families absent from recognized trailers across
   all commits/trailers from configured-base merge-base through HEAD,
   including repairs. Narrower diffs, prose and a main-author-only HEAD cannot
@@ -222,8 +201,8 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
   trailers, use the disclosed same-family fallback.
 - Batch substantive and mechanical repairs into one head for the delta.
   Preserve the approved head; optional suggestions do not justify edits.
-- After round two, the owner merges once every finding is fixed or rejected
-  with reasons and readiness passes, or splits the PR. A head that needs another review goes in a new PR. No escalation is required.
+- After an approved ordinary delta with blocking findings resolved, one more delta can review a suffix of verified
+  base merges containing a conflict. Otherwise, merge with readiness passing or split a head that needs more review.
 - After an approved primary or a delta review, take base changes by merging the
   base into the existing branch. Readiness and hosted eligibility can inherit
   coverage only across proven clean base merges. A request_changes primary
@@ -281,23 +260,27 @@ meta-directives; reviewers load no instruction files or skills from the reviewed
 
 ## Failure
 
-Fail closed on missing tools and command errors, preserve the failing command
-and output tail, and keep a short, safe detail about the cause or stage when
-operator-facing code wraps an error. Stop on terminal failures or quota errors.
-Exit 3 means waiting: rerun the bounded waiter. Exit 5 means changes requested,
-not a crash.
+Fail closed on missing tools or command errors. Preserve the command and output
+tail, name the cause or stage safely, and stop on terminal failures or quota errors.
+`check` exits 0 when stages pass, including local dirty runs that cannot satisfy
+readiness. Exit 1 can mean a failed stage, a discarded or unverified result, or
+a command error. Read the diagnostic and verify the receipt before classifying
+the failure. Exit 2 covers invalid arguments and sandbox unavailability in
+`check` or fresh `review`.
 
-**Never pipe a `loopzero` command, even with `set -o pipefail`: the pipeline
-can report the filter's exit code in place of the command's verdict.** Redirect
-stdout/stderr to a file, e.g. `loopzero check >check.log 2>&1`; inspect that
-file separately. Chain dependent commands with `&&`. Report the exit code
-and final output line; earlier progress never proves queue/merge state.
+Exit 3 means waiting or timeout. Review exits 4 when independent review is
+unavailable and 5 when changes are requested. SIGINT exits 130. SIGTERM is
+re-raised, yielding shell status 143 and subprocess return code `-15`.
+
+**Never pipe `loopzero`, even with pipefail**, because it can hide the verdict.
+Redirect stdout and stderr (e.g. `loopzero check >check.log 2>&1`) and read the
+file separately. Chain dependent commands with `&&`. Report the exit code and
+final output line. Progress alone cannot prove queue or merge state.
 
 Use `loopzero ready --wait` and `loopzero merge --wait`, one waiter per PR.
-Never use handwritten `gh` wait loops or `gh pr checks --watch`, which misses
-checks not yet created. Other polling requires a deadline, visible progress,
-preserved stderr and stopping on errors. Do not poll `gh pr view`,
-`gh pr checks` or `gh pr list`: hidden GraphQL shares account quota. Use REST
-`gh api` for one-off PR reads/comments. After a quota error, wait for a
-verified reset or `Retry-After` before any GitHub-backed command, `loopzero`
-waiters included; REST `/rate_limit` does not prove GraphQL capacity.
+Never use handwritten `gh` waits or `gh pr checks --watch` (it misses future checks).
+Other polling needs a deadline, visible progress, preserved stderr and a stop on errors.
+Never poll GraphQL-backed `gh pr view`, `gh pr checks` or `gh pr list` (shared quota).
+Use REST `gh api` for one-off PR reads and comments. After a quota error, wait for
+a verified reset or `Retry-After` before GitHub-backed commands, including
+`loopzero` waiters. REST `/rate_limit` does not prove GraphQL capacity.

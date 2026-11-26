@@ -24,7 +24,7 @@ INTERFACES = {
 
 def git(root, *args, text=True):
     return subprocess.run(["git", *args], cwd=root, check=True,
-                          capture_output=True, text=text).stdout
+                          capture_output=True, text=text, timeout=60).stdout
 
 
 def interface(text, names):
@@ -115,7 +115,7 @@ def main():
         else:
             base = args.base or git(root, "merge-base", "HEAD", "origin/main").strip()
             errors = check(root, base)
-    except (OSError, ValueError, SyntaxError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, SyntaxError, subprocess.SubprocessError) as exc:
         print(f"architecture docs: FAIL ({exc})", file=sys.stderr)
         return 1
     if errors:
