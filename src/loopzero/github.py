@@ -171,24 +171,20 @@ def api_error_diagnostics():
 
 def _included_response(output: str) -> tuple[str | None, dict[str, str], str]:
     """Split one `gh api --include` response into status, headers and body."""
-    head, separator, body = output.partition("\r\n\r\n")
-    line_separator = "\r\n"
-    if not separator:
-        head, separator, body = output.partition("\n\n")
-        line_separator = "\n"
-    if not separator:
+    for line_separator in ("\r\n", "\n"):
+        head, separator, body = output.partition(line_separator * 2)
+        if separator:
+            break
+    else:
         return None, {}, output
     lines = head.split(line_separator)
     match = _HTTP_STATUS_RE.match(lines[0])
     if match is None:
         return None, {}, output
-    status = match.group(1)
-    headers: dict[str, str] = {}
-    for line in lines[1:]:
-        name, separator, value = line.partition(":")
-        if separator:
-            headers[name.strip().casefold()] = value.strip()
-    return status, headers, body
+    headers = {name.strip().casefold(): value.strip()
+               for name, separator, value in (line.partition(":") for line in lines[1:])
+               if separator}
+    return match.group(1), headers, body
 
 
 def _api_methods(args: tuple[str, ...]) -> list[str]:
@@ -806,9 +802,8 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         _, span = runners.leading_review_block(prefix)
         if len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
             raise runners.RunnerBadOutput("codex: oversized leading machine block; HOLD")
-    counts = {s: sum(1 for f in result.findings if f.severity == s) for s in
-              ("critical", "important", "suggestion")}
-    summary = ", ".join(f"{n} {s}" for s, n in counts.items())
+    severities = [f.severity for f in result.findings]
+    summary = ", ".join(f"{severities.count(s)} {s}" for s in ("critical", "important", "suggestion"))
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
     settings = ""
     if settings_layout == "summary":
@@ -858,11 +853,9 @@ def _review_transcript(result: ReviewResult, legacy_display: bool) -> str:
                "Exact raw SHA256: " + hashlib.sha256(result.raw.encode()).hexdigest())
     encoded = raw.encode("utf-8")
     if len(encoded) > 30_000:
-        raw = encoded[-30_000:].decode("utf-8", errors="ignore")
-        raw = (
-            "[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
-            "Full output remains in the saved local review artifact.]\n" + raw
-        )
+        tail = encoded[-30_000:].decode("utf-8", errors="ignore")
+        raw = ("[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
+               "Full output remains in the saved local review artifact.]\n" + tail)
     return f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
 
 

@@ -4103,16 +4103,17 @@ THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": Tru
 
 @pytest.mark.parametrize("outcome", ["refreshed", "remaining", "dispatch failed"])
 def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, outcome) -> None:
-    listing = threads_json(finding_pr)
-    remaining = listing if outcome == "remaining" else threads_json()
-    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED, remaining)
+    sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
+    finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
+    listing = threads_json({**finding_pr, "path": "src/Łódź.py"})
+    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
+               listing if outcome == "remaining" else threads_json())
     gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
-
-    expect_cli(capsys, 0, "resolve", stderr="", stdout="0b9b59e7  important  src/a.py:3  Off by one\n")
+    title = r"\u0141\xf3d\u017a" if outcome == "refreshed" else "Łódź"
+    expect_cli(capsys, 0, "resolve", stderr="", stdout=f"0b9b59e7  important  src/{title}.py:3  {title}\n")
     assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
-
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
-    assert out.splitlines()[0] == "resolved 0b9b59e7: Off by one"
+    assert out.splitlines()[0] == f"resolved 0b9b59e7: {title}"
     calls = [c["argv"] for c in gh.calls
              if c["argv"][:2] == ["api", "graphql"] and "viewer {" not in c["argv"][3]][2:]
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
@@ -4120,8 +4121,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: Fak
     endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
     dispatches = [c["argv"] for c in gh.calls if endpoint in c["argv"]]
     if outcome == "remaining":
-        assert (code, err, dispatches) == (0, "", [])
-        assert len(out.splitlines()) == 1
+        assert (code, err, dispatches, len(out.splitlines())) == (0, "", [], 1)
     else:
         assert dispatches == [["api", "-X", "POST", endpoint, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]]
         if outcome == "refreshed":
@@ -4423,6 +4423,9 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
     ("head_changed", 1.0),
     ("timeout", 0.9),
     ("timeout", 1.0),
+    ("incompatible_landed", 1.0),
+    ("incompatible_absent", 1.0),
+    ("incompatible_unverified", 1.0),
     ("api_error", 1.0),
     ("unsafe_config", 1.0),
     ("config_error", 1.0),
@@ -4439,9 +4442,12 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         gh, head, wt, "success", isDraft=False,
         state="MERGED" if outcome.startswith("already_") else "OPEN",
     )
+    if outcome.startswith("incompatible_"):
+        receipt = wt / ".loopzero/checks.json"
+        receipt.write_text(json.dumps({**json.loads(receipt.read_text()), "settings_sha256": "0" * 64}))
     gh.respond("api -X", "")
     landed = outcome in {
-        "merged", "worktree_removed", "merged_head_changed", "already_merged", "already_merged_changed",
+        "merged", "incompatible_landed", "worktree_removed", "merged_head_changed", "already_merged", "already_merged_changed",
     }
     snapshots = []
     if not outcome.startswith("already_"):
@@ -4472,6 +4478,10 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     reads = []
     def membership(*_):
         reads.append(True)
+        if outcome == "incompatible_absent":
+            return None
+        if outcome == "incompatible_unverified":
+            raise mergify.MergifyError("HTTP 503")
         if outcome in {"unsafe_pending", "requested_head_changed"} and len(reads) == 1:
             return None
         if len(reads) > 1:
@@ -4501,7 +4511,11 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
-    if outcome in {"merged", "already_merged", "worktree_removed"}:
+    if outcome.startswith("incompatible_"):
+        assert reads == [True] * (2 if landed else 1)
+        if not landed:
+            assert "incompatible settings fingerprint" in err
+    if outcome in {"merged", "incompatible_landed", "already_merged", "worktree_removed"}:
         assert code == 0 and "e" * 40 in out and not wt.exists(), err
         if outcome == "worktree_removed":
             assert "warning: merged but worktree cleanup failed" in err
@@ -4512,6 +4526,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
             assert err.index('"Left the queue" comment') < err.index("post `@mergifyio queue`")
         message = {"ejected": "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`", "head_changed": "head changed",
                    "timeout": "timed out", "api_error": "HTTP 503",
+                   "incompatible_absent": "incompatible settings fingerprint", "incompatible_unverified": "HTTP 503",
                    "unsafe_config": "unsafe or unavailable", "unsafe_pending": "unsafe or unavailable", "config_error": "HTTP 503",
                    "requested_head_changed": "head changed", "merged_head_changed": "head changed", "already_merged_changed": "head changed", "ejection_head_changed": "head changed"}[outcome]
         assert message in out + err
@@ -4744,6 +4759,25 @@ def test_wait_rechecks_closed_unmerged_pr(monkeypatch, final) -> None:
             _closed_unmerged_wait(monkeypatch, reads, steps=1)
     else:
         assert _closed_unmerged_wait(monkeypatch, reads, steps=1) == final
+
+
+def test_task_state_lock_times_out_with_a_live_holder(git_repo, monkeypatch):
+    now = 0.0
+
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(cli.worktree, "time", SimpleNamespace(monotonic=lambda: now, sleep=advance))
+    with cli.worktree.lock_local_state(git_repo):
+        with (
+            pytest.raises(TimeoutError, match=r"task state is busy.*retry"),
+            cli.worktree.lock_local_state(git_repo),
+        ):
+            pytest.fail("contender acquired a held directory lock")
+        assert now == 60
+    with cli.worktree.lock_local_state(git_repo):
+        assert now == 60
 
 
 @pytest.mark.parametrize("redirected", [False, True])

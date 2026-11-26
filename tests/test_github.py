@@ -434,6 +434,14 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> 
     assert all("subject_type" not in c for c in comments)
 
 
+def test_legacy_transcript_truncates_on_utf8_boundary():
+    tail = "x" * 29_999
+    result = ReviewResult("claude", HEAD, "primary", "approve", (), "🧪" + tail)
+    output = github._review_transcript(result, legacy_display=True)
+    assert "Transcript truncated" in output
+    assert output.endswith(f"\n{tail}\n```\n</details>")
+
+
 @pytest.mark.parametrize("metadata", ["new", "legacy", "malformed"])
 def test_publication_qualifies_each_call_from_native_evidence(gh, metadata):
     arm_review(gh)
