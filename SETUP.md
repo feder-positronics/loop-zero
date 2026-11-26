@@ -117,12 +117,11 @@ Point it at the GitHub repository you set in `[repo] name`. Use
 if you already configured it under a different name.
 
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
-repository root and set `[repo] name`. Check, review, ready, merge, and status
-read the workflow from the remote-tracking delivery branch. The workflow at
-`origin/HEAD` selects that branch through `[repo] base`. If the default branch
-pointer is missing, fetch and run `git remote set-head origin --auto`.
-Supply `--config <path>` for bootstrap or a deliberate override. Merged
-workflow edits take effect after fetching.
+repository root, set `[repo] name`, and commit your initial `[checks]` commands
+to the base branch before starting your first task. If the base has a
+`workflow.toml`, `loopzero check` uses its checks configuration even when
+`[checks]` is absent. To try task-side changes explicitly, run
+`loopzero --config workflow.toml check` from the task worktree. Then:
 
 - Run `[checks] commands` as described in the [delivery steps](core/CONTRACT.md#the-six-steps).
   For uv projects, `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
@@ -131,6 +130,11 @@ workflow edits take effect after fetching.
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
+- Check, review, ready, merge, and status load the workflow from the
+  remote-tracking delivery branch selected by `[repo] base` in the workflow
+  at `origin/HEAD`. Missing trusted policy blocks these commands. Fetch and
+  run `git remote set-head origin --auto` if the local default-branch pointer
+  is missing. Supply `--config <path>` during bootstrap or to override policy.
 - For offline checks, warm the configured writable uv cache on the host with
   `UV_CACHE_DIR=<configured-cache> uv sync --group dev` (use the groups your
   checks require). This also fetches build backends such as hatchling.
