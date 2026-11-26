@@ -10,8 +10,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import replace
-from datetime import UTC, datetime
-from email.utils import format_datetime
+from email.utils import formatdate
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -2737,18 +2736,7 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, w
     (False, 5, "invalid-date", True, 0, True),
 ])
 def test_ready_wait_review_failure_freshness(
-    wt: Path,
-    gh: FakeGh,
-    capsys,
-    monkeypatch,
-    name,
-    pending,
-    age,
-    new_failure,
-    wait,
-    expected,
-    waited,
-    head,
+    wt: Path, gh: FakeGh, capsys, monkeypatch, name, pending, age, new_failure, wait, expected, waited, head,
 ) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
     review_at = {
@@ -2764,8 +2752,7 @@ def test_ready_wait_review_failure_freshness(
     server_now = 1790164800 + age
     server_timeline = str(new_failure).startswith("server-")
     if server_timeline or new_failure == "invalid-date":
-        date = ("bad" if new_failure == "invalid-date" else
-                format_datetime(datetime.fromtimestamp(server_now, UTC), usegmt=True))
+        date = "bad" if new_failure == "invalid-date" else formatdate(server_now, usegmt=True)
         gh.respond(reviews_key(), f"HTTP/2 200 OK\nDate: {date}\n\n{json.dumps(reviews)}")
     offset = {"server-host-behind": -40, "server-host-ahead": 1000, "server-old-review": -40}
     start = server_now + offset.get(new_failure, 0)
@@ -2775,7 +2762,6 @@ def test_ready_wait_review_failure_freshness(
     failed_at = {
         "tie": "2026-09-23T12:00:00Z",
         "missing": None,
-        "fractional-review": "2026-09-23T12:00:00.000Z",
         "fractional-newer": "2026-09-23T12:00:00.250Z",
         "offset-tie": "2026-09-23T11:00:00-01:00",
         "offset-older": "2026-09-23T13:59:59+02:00",
@@ -2785,28 +2771,13 @@ def test_ready_wait_review_failure_freshness(
         new_failure,
         "2026-09-23T12:00:10Z" if new_failure is True else "2026-09-23T11:59:59Z",
     )
-    runs = (
-        [{"name": name, "status": "completed", "conclusion": "failure", "completed_at": failed_at}]
-        if name == "checks"
-        else [
-            {
-                "name": name,
-                "status": "in_progress",
-                "started_at": "2026-09-23T12:00:20Z",
-            }
-        ]
-        if pending
-        else []
-    )
-    statuses = (
-        [{"context": name, "state": "failure", "created_at": failed_at}]
-        if name != "checks"
-        else [
-        {"context": name, "state": "pending", "created_at": "2026-09-23T12:00:20Z"}
-        ]
-        if pending
-        else []
-    )
+    pending_at = "2026-09-23T12:00:20Z"
+    if name == "checks":
+        runs = [{"name": name, "conclusion": "failure", "status": "completed", "completed_at": failed_at}]
+        statuses = [{"context": name, "state": "pending", "created_at": pending_at}] if pending else []
+    else:
+        runs = [{"name": name, "status": "in_progress", "started_at": pending_at}] if pending else []
+        statuses = [{"context": name, "state": "failure", "created_at": failed_at}]
     arm_check_runs(gh, head, runs)
     gh.respond(f"api repos/{REPO}/commits/{head}/statuses", statuses)
     sleeps = []
@@ -2819,13 +2790,7 @@ def test_ready_wait_review_failure_freshness(
                        [{"context": name, "state": "success"}])
     monkeypatch.setattr(cli, "_sleep", advance)
     wait_flag = "--wait=10" if server_timeline else "--wait=60" if age < 0 else "--wait"
-    code, out, err = run(
-        capsys,
-        "--config",
-        "workflow.toml",
-        "ready",
-        *([wait_flag] if wait else []),
-    )
+    code, out, err = run(capsys, "--config", "workflow.toml", "ready", *([wait_flag] if wait else []))
     assert (code, err, bool(sleeps)) == (expected, "", waited)
     if server_timeline and waited:
         assert sleeps == [5.0]
