@@ -639,15 +639,21 @@ def _branch_head(repo: str, branch: str) -> str | None:
     return _branch_sha(endpoint, "commit", "invalid remote branch SHA", full_sha=True)
 
 
-def _commit_branch_prs(repo: str, branch: str) -> tuple[str, list[dict]]:
-    sha = _branch_head(repo, branch)
+def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> tuple[str, list[dict]]:
+    sha = head_sha if head_sha is not None else _branch_head(repo, branch)
     if sha is None:
         return "", []
 
     matches: list[dict] = []
     for page in range(1, 101):
         endpoint = f"repos/{repo}/commits/{sha}/pulls?per_page={PAGE}&page={page}"
-        rows = api_get(endpoint)
+        try:
+            rows = api_get(endpoint)
+        except GhError as exc:
+            # A local head can be unpushed. Let the branch fallback find its actual PR.
+            if head_sha is not None and page == 1 and re.search(r"\bHTTP 404\b", exc.tail):
+                return endpoint, []
+            raise
         if not isinstance(rows, list) or len(rows) > PAGE:
             raise GhError(("gh", "api", endpoint), "invalid commit PR page")
         for row in rows:
@@ -673,14 +679,13 @@ def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state
     return pr
 
 
-def pr_for_branch(repo: str, branch: str, *, open_only: bool = False, list_only: bool = False) -> PR | None:
+def pr_for_branch(repo: str, branch: str, *, open_only: bool = False, head_sha: str | None = None) -> PR | None:
     """Return the open PR, falling back to the most recent closed PR unless open_only."""
-    if not list_only:
-        endpoint, matches = _commit_branch_prs(repo, branch)
-        newest = max((row for row in matches if row["state"] == "open"),
-                     key=lambda row: (row["created_at"], row["number"]), default=None)
-        if newest is not None:
-            return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
+    endpoint, matches = _commit_branch_prs(repo, branch, head_sha)
+    newest = max((row for row in matches if row["state"] == "open"),
+                 key=lambda row: (row["created_at"], row["number"]), default=None)
+    if newest is not None:
+        return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
 
     # A closed association cannot rule out an open PR or newer closed history.
     owner = repo.split("/", 1)[0]

@@ -3143,7 +3143,9 @@ def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, co
     head = commit_mergify_configuration(wt) if command == "merge" else head
     monkeypatch.setattr(mergify, "configured", lambda *_: condition == "during-gates" or pytest.fail("remote gate read"))
     arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=command == "ready")
-    gh.respond(" ".join(BRANCH_READ), {"object": {"sha": head}})
+    commit_lookup = f"api repos/{REPO}/commits/{head}/pulls?per_page=100&page=1"
+    associated = dict(rest_pr_json(pr_json(headRefOid=head)), created_at="2026-10-06T00:00:00Z")
+    gh.respond(commit_lookup, [associated])
     path = wt / ".loopzero/checks.json"
     report = json.loads(path.read_text())
     if condition == "during-gates":
@@ -3158,7 +3160,7 @@ def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, co
         path.unlink()
         if condition == "transient":
             monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
-            gh.respond(pr_list_key(), {"stdout": "", "exit_code": 1, "stderr": "HTTP 503"}, [{"number": 7}])
+            gh.respond(commit_lookup, {"stdout": "", "exit_code": 1, "stderr": "HTTP 503"}, [associated])
     else:
         results = report["results"]
         report.update({
@@ -3173,7 +3175,7 @@ def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, co
     assert reason in out + err and "receipt accepted:" not in out
     assert all(github._read_only(tuple(c["argv"])) for c in gh.calls)
     if condition != "during-gates":
-        expected = [PR_LIST_READ, *LOOKUP_CALLS[1:]] if condition == "transient" else LOOKUP_CALLS[1:]
+        expected = [commit_lookup.split()] * (2 if condition == "transient" else 1) + [LOOKUP_CALLS[-1]]
         assert [c["argv"][:2] for c in gh.calls] == expected
 
 
