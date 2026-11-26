@@ -3176,6 +3176,7 @@ def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, co
         path.write_text(json.dumps(report))
     out, err = expect_cli(capsys, 1, command, *(["--wait"] if command == "merge" or condition == "during-gates" else []))
     assert reason in out + err and "receipt accepted:" not in out
+    assert ("owner queue route applies, post its one reason" in out) == (command == "ready")
     assert all(github._read_only(tuple(c["argv"])) for c in gh.calls)
     if condition != "during-gates":
         expected = [commit_lookup.split()] * (2 if condition == "transient" else 1) + [LOOKUP_CALLS[-1]]

@@ -1261,6 +1261,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
     for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
     if not readiness.ready:
+        if pr.is_draft and any(reason.startswith(("run loopzero check", "check receipt")) for reason in readiness.reasons):
+            print("If the delivery contract's owner queue route applies, post its one reason on the PR before taking it out of draft.")
         if args.wait is None and _pending_checks(config, pr, readiness):
             print(NEXT_WAIT)
         return 1
@@ -1559,9 +1561,7 @@ MERGIFY_REQUEUE = (
     "To requeue an unchanged head, post `@mergifyio queue` as the whole PR comment (same login); a new head is "
     "requested by `loopzero merge` or readmitted by a repository queue rule. Then rerun `loopzero merge --wait`."
 )
-MERGIFY_DEQUEUE_HINT = (
-    'Read Mergify\'s "Left the queue" comment on the PR for the reason. Address it before requeueing.'
-)
+MERGIFY_DEQUEUE_HINT = 'Read Mergify\'s "Left the queue" comment on the PR for the reason. Address it before requeueing.'
 
 
 def _mergify_departure(
