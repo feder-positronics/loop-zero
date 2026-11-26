@@ -809,7 +809,7 @@ def test_review_refuses_additional_host_state_exposure(
         monkeypatch.chdir(repo)
         assert _review("claude", repo).verdict == "approve"
         (fake_bin / "claude.stdin").unlink()
-    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+    with pytest.raises(RunnerBadOutput, match="protected reviewer state"):
         _review("claude", repo, reviewer_ro_paths=(str(exposed),) if exposed else ())
     assert not (fake_bin / "claude.stdin").exists()
 
@@ -858,7 +858,7 @@ def test_review_mounts_only_implicit_runtime_files(repo, fake_bin, tmp_path, fak
             expected = [native, helper] if family == "codex" else [native]
             assert _pairs(bwrap_argv(fake_bwrap), "--ro-bind-try") == [(str(p), str(p)) for p in expected]
     if mode not in {"implicit", "codex_helper", "real_codex"}:
-        with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+        with pytest.raises(RunnerBadOutput, match="protected reviewer state"):
             _review(family, repo, reviewer_ro_paths=(str(native.parent if real else native),)
                     if real or mode == "explicit" else ())
 

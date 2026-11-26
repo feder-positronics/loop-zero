@@ -445,7 +445,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
         guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}; No automatic retry."
     elif remaining is not None or retry_seconds or retry_date:
         delay = f"{retry_after} s" if retry_seconds else retry_after if retry_date else "~60 s"
-        guidance = f"\nRate limited: short-window limit: retry after {delay}; No automatic retry."
+        guidance = f"\nRate limited: short-window limit: retry after {delay}."
     return "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None) + guidance
 
 

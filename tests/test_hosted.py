@@ -268,7 +268,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
                            '{"message":"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ"}', "exit": 1}
         endpoint = pr if error == "before" else f"{reviews} --method GET"
         publisher.respond(endpoint, fault, [approval()] if error == "recover" else fault)
-        check_source(publisher, states, exit_code=int(error == "before"))
+        check_source(publisher, states, exit_code=int(error != "recover"))
         assert sleeps == [5]
         assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error != "recover")
         return
@@ -372,7 +372,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         monkeypatch.setattr(hosted.mergify, "api_get", lambda repo, suffix: candidate_status()
                             if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     with pytest.raises(error, match=message or None) if error else nullcontext():
-        assert hosted.main() == 0
+        assert hosted.main() == int(case in {"api", "mergify"})
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
               "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
