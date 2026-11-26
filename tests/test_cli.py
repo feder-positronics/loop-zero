@@ -4296,8 +4296,12 @@ def test_start_accepts_detached_harness_worktree(repo: Path, tmp_path: Path, mon
     git(repo, "worktree", "add", "-q", "--detach", str(harness))
     monkeypatch.chdir(harness)
     out, _ = expect_cli(capsys, 0, "start", "nested")
-    assert out.strip() == str(harness / ".worktrees" / "nested")
-    assert "lz/nested" in git(repo, "branch", "--list", "lz/nested")
+    task = repo / ".worktrees" / "nested"
+    assert out.strip() == str(task) and "lz/nested" in git(repo, "branch", "--list", "lz/nested")
+    (task / "uncommitted.txt").write_text("work\n")
+    monkeypatch.chdir(repo)
+    git(repo, "worktree", "remove", str(harness))
+    assert (task / "uncommitted.txt").read_text() == "work\n"
 
 
 def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys, head) -> None:

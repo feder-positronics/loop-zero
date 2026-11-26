@@ -579,7 +579,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     if current.stdout.strip().startswith("lz/") or root.parent.name == ".worktrees":
         raise CliError(f"already inside task worktree {root}; run start from the checkout that created it")
     config = _load_config(args, root)
-    print(worktree.start(root, args.slug, config.base_branch))
+    # Nest task worktrees in the primary checkout, so removing a harness worktree cannot delete them.
+    primary = _git(root, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0].removeprefix("worktree ")
+    print(worktree.start(Path(primary), args.slug, config.base_branch))
     return 0
 
 
