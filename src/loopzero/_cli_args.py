@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import sys
+from pathlib import Path
 
 WAIT_TIMEOUT = 1800.0
 
@@ -21,18 +22,12 @@ def _wait_seconds(value: str) -> float:
     raise argparse.ArgumentTypeError("expected a finite, nonnegative number of seconds")
 
 
-def _config_path(value: str):
-    from pathlib import Path
-
-    return Path(value)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loopzero", description="One task, one branch, one draft PR, one review, one merge."
     )
     parser.add_argument(
-        "--config", type=_config_path, default=None, help="path to workflow.toml (default: repo root)"
+        "--config", type=Path, help="path to workflow.toml (default: repo root)"
     )
     parser.add_argument("--version", action=_VersionAction, nargs=0, help="show program's version number and exit")
     sub = parser.add_subparsers(dest="command", required=True)
