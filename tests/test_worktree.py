@@ -281,10 +281,41 @@ def test_task_helpers_errors(repo: Path) -> None:
 
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
-    monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
-    worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
+    expected = worktree.head(wt)
+    advanced = git(wt, "commit-tree", f"{expected}^{{tree}}", "-p", expected, "-m", "concurrent").strip()
+
+    def checked_git(cwd, *args, **kwargs):
+        calls.append((cwd, args))
+        if args[1:3] == ("worktree", "remove"):
+            with pytest.raises(subprocess.CalledProcessError, match="non-zero") as locked:
+                git(wt, "update-ref", "--no-deref", "HEAD", advanced, expected)
+            assert "HEAD.lock" in locked.value.stderr
+        return real(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(worktree, "_git", checked_git)
+    worktree.cleanup(wt, expected)  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_cleanup_keeps_concurrent_detached_commit(repo: Path, monkeypatch, retry: bool) -> None:
+    wt = worktree.start(repo, "concurrent", "main")
+    expected = worktree.head(wt)
+    if retry:
+        git(wt, "switch", "--detach", expected)
+    real_lock = worktree._lock_verified_ref
+    advanced = git(wt, "commit-tree", f"{expected}^{{tree}}", "-p", expected, "-m", "concurrent").strip()
+
+    def lock(cwd, ref, sha):
+        if ref == "HEAD":
+            git(wt, "update-ref", "--no-deref", "HEAD", advanced, expected)
+        return real_lock(cwd, ref, sha)
+
+    monkeypatch.setattr(worktree, "_lock_verified_ref", lock)
+    with pytest.raises(worktree.WorktreeError):
+        worktree.cleanup(wt, expected, "lz/concurrent")
+    assert worktree.head(wt) == advanced and git(repo, "branch", "--list", "lz/concurrent").strip()
 
 
 @pytest.mark.parametrize("file", ["scratch.txt", "local.env", ".loopzero/user-notes.md"])

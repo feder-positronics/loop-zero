@@ -4757,7 +4757,9 @@ def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypat
     row = {**closed_history_row(pr_json(state="MERGED", headRefOid=head)), "created_at": "2026-10-07T05:04:00Z"}
     gh.append(f"api repos/{REPO}/pulls/7", merged, row, merged)
     gh.respond(f"api repos/{REPO}/commits/{head}/pulls?per_page=100&page=1", [] if event == "no-proof" else [row])
+    history = f"api repos/{REPO}/pulls?state=closed&head=acme%3Alz%2Ft1&per_page=100&page=1"
     if event == "no-proof":
+        gh.respond(history, [])
         git(wt, "switch", "--detach", head)
         code, _, err = run(capsys, "merge")
         assert code == 1 and "no merged PR proves cleanup" in err
@@ -4782,6 +4784,10 @@ def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypat
         assert code == 130 and "interrupted" in err and wt.exists()
         assert not git(wt, "branch", "--show-current").strip()
         assert bool(git(repo, "branch", "--list", "lz/t1").strip()) == (event == "update-ref")
+        if event == "worktree":
+            git(wt, "reset", "--hard", head)
+            gh.respond(f"api repos/{REPO}/commits/{head}/pulls?per_page=100&page=1", [])
+            gh.respond(history, [row])
         code, out, err = run(capsys, "merge")
     assert code == 0 and "was already merged" in out and wt.exists() == (event == "moved")
     assert ("but expected" in err) if event == "moved" else err == ""

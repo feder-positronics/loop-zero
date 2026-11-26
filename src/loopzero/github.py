@@ -657,13 +657,33 @@ def _commit_branch_prs(repo: str, branch: str, sha: str | None = None) -> tuple[
 def merged_pr_at_head(repo: str, branch: str, sha: str) -> PR | None:
     """Find a merged PR for the exact source branch and commit."""
     _, matches = _commit_branch_prs(repo, branch, sha)
-    for row in matches:
-        if row["state"] == "closed" and row["head"].get("sha") == sha:
-            pr, detail = _pr_detail(repo, row["number"])
-            if (pr.state == "MERGED" and pr.head_sha == sha
-                    and _matches_branch(detail["head"], repo, branch)):
-                return pr
+    return _matching_merged_pr(repo, branch, sha, matches) or _merged_pr_from_history(repo, branch, sha)
+
+
+def _matching_merged_pr(repo: str, branch: str, sha: str, rows: list) -> PR | None:
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("head"), dict):
+            raise GhError(("gh", "api"), "invalid closed PR history")
+        number = row.get("number")
+        if row.get("state") != "closed" or row["head"].get("sha") != sha or type(number) is not int:
+            continue
+        pr, detail = _pr_detail(repo, number)
+        if pr.state == "MERGED" and pr.head_sha == sha and _matches_branch(detail["head"], repo, branch):
+            return pr
     return None
+
+
+def _merged_pr_from_history(repo: str, branch: str, sha: str) -> PR | None:
+    head = quote(f"{repo.split('/', 1)[0]}:{branch}", safe="")
+    for page in range(1, 101):
+        endpoint = f"repos/{repo}/pulls?state=closed&head={head}&per_page={PAGE}&page={page}"
+        rows = api_get(endpoint)
+        if not isinstance(rows, list):
+            raise GhError(("gh", "api", endpoint), "invalid closed PR history")
+        match = _matching_merged_pr(repo, branch, sha, rows)
+        if match or len(rows) < PAGE:
+            return match
+    raise GhError(("gh", "api", endpoint), "closed PR history exceeds 100 pages")
 
 
 def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state: str) -> PR:

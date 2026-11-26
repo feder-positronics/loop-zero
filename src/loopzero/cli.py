@@ -1184,10 +1184,12 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
 
 
 def _pr_readiness(
-    wt: Path, config: Config, *, allow_merged: bool = False, workflow_wait: bool = False
+    wt: Path, config: Config, *, allow_merged: bool = False, workflow_wait: bool = False,
+    branch: str | None = None,
 ) -> tuple[github.PR, github.Readiness | None]:
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
-    branch, head = worktree.branch(wt), worktree.head(wt)
+    branch = branch if branch is not None else worktree.branch(wt)
+    head = worktree.head(wt)
     _require_task_branch(config, branch)
     pr = _require_pr(config, branch, allow_merged=allow_merged)
     _require_pushed(pr, head)
@@ -1637,7 +1639,7 @@ def _merge_pr_readiness(
             raise CliError(f"no merged PR proves cleanup of detached worktree for {previous!r}")
         return previous, pr, None
     branch = worktree.branch(wt)
-    pr, readiness = _pr_readiness(wt, config, allow_merged=True, workflow_wait=workflow_wait)
+    pr, readiness = _pr_readiness(wt, config, allow_merged=True, workflow_wait=workflow_wait, branch=branch)
     return branch, pr, readiness
 
 

@@ -10,7 +10,8 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, suppress
+from itertools import pairwise
 from pathlib import Path
 from select import select
 
@@ -313,9 +314,15 @@ def detached_from(wt: Path) -> str | None:
     """Return the branch named by the latest checkout to this detached HEAD."""
     if _git(wt, "branch", "--show-current", preserve_whitespace=True):
         return None
-    message = _git(wt, "reflog", "-1", "--format=%gs", "HEAD", preserve_whitespace=True)
-    match = re.fullmatch(rf"checkout: moving from (.+) to {head(wt)}", message)
-    return match[1] if match else None
+    entries = _git(wt, "reflog", "--format=%H %gs", "HEAD", preserve_whitespace=True).splitlines()
+    sha = head(wt)
+    for current, previous in pairwise(entries):
+        if " checkout: moving from " in current:
+            match = re.fullmatch(rf"{sha} checkout: moving from (.+) to {sha}", current)
+            # The prior entry records the actual old SHA, even if checkout
+            # read its source branch before a concurrent HEAD update.
+            return match[1] if match and previous.startswith(sha + " ") else None
+    return None
 
 
 def cleanup(wt: Path, expected_head: str, name: str | None = None) -> None:
@@ -325,26 +332,36 @@ def cleanup(wt: Path, expected_head: str, name: str | None = None) -> None:
         raise WorktreeError(f"no such worktree: {wt}")
     if head(wt) != expected_head:
         raise WorktreeError("local HEAD differs from merged PR head")
-    current = _git(wt, "branch", "--show-current", preserve_whitespace=True)
     name = name if name is not None else branch(wt)
     gd = Path(_git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True))
     if Path(_git(wt, "rev-parse", "--absolute-git-dir", preserve_whitespace=True)) == gd:
         raise WorktreeError("refusing cleanup from the primary checkout")
-    if current and current != name:
-        raise WorktreeError("local branch changed during merge cleanup")
-    ref = f"refs/heads/{name}"
-    lock = _lock_verified_ref(wt, ref, expected_head) if current else nullcontext()
-    with lock:
-        if _git(wt, "branch", "--show-current", preserve_whitespace=True) != current:
-            raise WorktreeError("local branch changed during merge cleanup")
-        if is_dirty(wt):
-            raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-        _require_no_ignored_user_files(wt)
+    current = _git(wt, "branch", "--show-current", preserve_whitespace=True)
     if current:
-        _git(wt, "-c", "core.logAllRefUpdates=true", "switch", "--quiet", "--detach", expected_head)
-    _delete_merged_branch(gd, name, expected_head)
+        _detach_clean_worktree(wt, expected_head, name)
+    with _lock_verified_ref(wt, "HEAD", expected_head):
+        if detached_from(wt) != name:
+            raise WorktreeError("local checkout changed during merge cleanup")
+        _require_clean_worktree(wt)
+        _delete_merged_branch(gd, name, expected_head)
+        _require_no_ignored_user_files(wt)
+        _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))
+
+
+def _require_clean_worktree(wt: Path) -> None:
+    if is_dirty(wt):
+        raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
     _require_no_ignored_user_files(wt)
-    _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
+
+
+def _detach_clean_worktree(wt: Path, expected_head: str, name: str) -> None:
+    with _lock_verified_ref(wt, f"refs/heads/{name}", expected_head):
+        if _git(wt, "branch", "--show-current", preserve_whitespace=True) != name:
+            raise WorktreeError("local branch changed during merge cleanup")
+        _require_clean_worktree(wt)
+    # Git needs its own HEAD lock for the switch. Cleanup verifies the checkout
+    # recorded by Git and takes the detached HEAD lock before deleting anything.
+    _git(wt, "-c", "core.logAllRefUpdates=true", "switch", "--quiet", "--detach", expected_head)
 
 
 def _delete_merged_branch(gd: Path, name: str, expected_head: str) -> None:
