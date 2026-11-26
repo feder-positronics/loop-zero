@@ -123,11 +123,13 @@ def _load_config(
     args: argparse.Namespace, root: Path, *, pin_checks: bool = False, previous: Config | None = None,
     refresh: bool = False,
 ) -> Config:
+    require_ci = pin_checks and args.command in {"ready", "merge"} and not getattr(args, "cancel", False)
     if not pin_checks or args.config:
         if pin_checks:
             print("checks are unpinned because --config was provided")
-        return config_mod.load(args.config or root / "workflow.toml")
-    config = config_mod.load_trusted(root, previous=previous, refresh=refresh, read_timeout=github.read_timeout)
+        return config_mod.load(args.config or root / "workflow.toml", require_ci=require_ci)
+    config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
+                                     require_ci=require_ci, read_timeout=github.read_timeout)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
@@ -415,7 +417,9 @@ def _save_report(
     payload = {"head": report.head, "dirty": report.dirty, "results": results}
     if report.settings_sha256 is not None:
         payload["settings_sha256"] = report.settings_sha256
-    def preserve_pass() -> bool:
+    def preserve_checkpoint() -> bool:
+        if report.results[-1] is not sandbox.INCOMPLETE_CHECK:
+            return not worktree.local_state_files(wt, CHECKS_FILE.name)[0]
         saved = _load_report(wt)
         return (saved is not None and saved.ok and not saved.dirty and saved.head == report.head
                 and saved.settings_sha256 == report.settings_sha256
@@ -423,7 +427,7 @@ def _save_report(
 
     return worktree.write_local_state(
         wt, CHECKS_FILE.name, json.dumps(payload, indent=2) + "\n", expected_head=report.head, locked_fd=locked_fd,
-        preserve=preserve_pass if checkpoint_checks is not None else None,
+        preserve=preserve_checkpoint if checkpoint_checks is not None else None,
     )
 
 
