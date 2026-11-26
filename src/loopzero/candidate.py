@@ -508,6 +508,9 @@ def _attest_candidate_once(
         try:
             source_policy(number, source)
         except Exception as exc:
+            # Standalone consumers supply their own policy error types.
+            if isinstance(exc, TypeError):
+                raise
             current = None
             with contextlib.suppress(Exception):
                 current = _lookup_source(github_get, full_name, number)

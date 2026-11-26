@@ -475,7 +475,7 @@ def test_vanished_parent_rejects_conflicting_current_main(tree_candidate):
         attest(main_head=main)
 
 
-@pytest.mark.parametrize("timing", ["metadata", "policy", "initial"])
+@pytest.mark.parametrize("timing", ["metadata", "policy", "initial", "unexpected"])
 def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monkeypatch, timing):
     _, git, _, _, parent, source, head = tree_candidate
     candidate_event = event()
@@ -511,6 +511,8 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     def policy(number, snapshot):
         seen.append(number)
+        if timing == "unexpected" and number == 101:
+            raise TypeError("policy implementation error")
         if timing == "policy" and number == 101:
             assert snapshot["state"] == "open" and source_reads == 1 and status_reads == 1
             raise LoopZeroError("source #101: PR #101 is MERGED, not open")
@@ -521,6 +523,11 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(candidate, "_verify_tree", verify_tree)
+    if timing == "unexpected":
+        with pytest.raises(TypeError, match="policy implementation error"):
+            run_attestation(candidate_event, github_get=get, mergify_status=lineage, source_policy=policy)
+        assert seen == [101] and source_reads == 1 and not sleeps
+        return
     assert run_attestation(candidate_event, github_get=get, mergify_status=lineage,
                            source_policy=policy) == [{"number": 102, "head_sha": source}]
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
