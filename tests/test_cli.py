@@ -2295,8 +2295,8 @@ def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, m
     refreshed = []
     monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *_: refreshed.append(head_of(wt)))
     assert run(capsys, "check")[0] == 0
-    original_receipt = receipt.read_bytes()
-
+    original_receipt = receipt.read_bytes().replace(b'"settings_sha256"', b'"obsolete_settings_sha256"')
+    receipt.write_bytes(original_receipt)
     save_report = cli._save_report
 
     def advance_before_save(path, report):
