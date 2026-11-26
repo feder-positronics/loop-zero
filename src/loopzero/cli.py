@@ -298,7 +298,7 @@ def _review_cap_reason(config: Config, pr: github.PR, head: str, reviews: list[d
     )
 
 
-MERGEABILITY_PENDING = "GitHub is computing mergeability"
+MERGEABILITY_PENDING = github.MERGEABILITY_PENDING
 
 
 def _readiness_precheck(wt: Path, config: Config, pr: github.PR, head: str, diagnostics: bool) -> str | None:
@@ -355,8 +355,6 @@ def _readiness(
             result = dataclasses.replace(result, reasons=tuple(
                 exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
             ))
-    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
-        result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
     report = _load_report(wt)
     receipt_problem = _check_report_problem(report, config, head)
     if receipt_problem:

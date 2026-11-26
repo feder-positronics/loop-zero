@@ -46,10 +46,7 @@ def test_eligibility_entry_points_report_malformed_config(tmp_path, module, args
     ({"workflow_run": {"pull_requests": [{"number": 7}, {"number": 8}]}}, None),
 ])
 def test_event_selection(event, number):
-    if number is None:
-        with pytest.raises(hosted.LoopZeroError):
-            hosted.event_number(event)
-    else:
+    with pytest.raises(hosted.LoopZeroError) if number is None else nullcontext():
         assert hosted.event_number(event) == number
 
 
@@ -91,8 +88,9 @@ def check_source(publisher, states, *, exit_code=0, error=None, match=None):
     ("stale", "", "pending"), ("malformed", "", "pending"),
     ("revoked", "", "pending"), ("absent", "important", "failure"),
     ("absent", "conflict", "failure"), ("COMMENTED", "important", "failure"),
+    ("APPROVED", "unknown", "pending"), ("APPROVED", "settles", "success"),
 ])
-def test_source_publication_is_bound_to_live_review(publisher, case, blocker, status):
+def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case, blocker, status):
     review = approval() | {"state": "COMMENTED"}
     reviews = {
         "absent": [], "APPROVED": [approval()], "revoked": [approval(), review | {"state": "DISMISSED"}],
@@ -100,15 +98,23 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
         "malformed": [review | {"body": "<!-- loopzero:review invalid -->\n**approve**"}],
     }.get(case, [review])
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", reviews)
-    if blocker == "conflict":
-        publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(mergeable="CONFLICTING")))
+    delays = []
+    monkeypatch.setattr(hosted.eligibility, "sleep", delays.append)
+    if blocker in {"conflict", "unknown", "settles"}:
+        initial = pr_json(mergeable="CONFLICTING" if blocker == "conflict" else "UNKNOWN")
+        snapshots = [initial, pr_json()] if blocker == "settles" else [initial]
+        publisher.respond(f"api repos/{REPO}/pulls/7", *(fixtures.rest_pr_json(pr) for pr in snapshots))
     if blocker == "important":
         publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding",
                                                                          author="trusted-publisher")))
     statuses = check_source(publisher, ["pending", status], exit_code=int(status == "failure"))
     assert all(s["context"] == "Loop-zero Eligibility" for s in statuses)
-    assert status != "success" or sum(c["argv"][1] != "graphql" for c in publisher.calls) <= 5
-    assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
+    assert delays == {"unknown": [2, 4, 8], "settles": [2]}.get(blocker, [])
+    if status == "success":
+        assert sum(c["argv"][1] != "graphql" for c in publisher.calls) <= 5 + int(blocker == "settles")
+    if status == "pending":
+        expected = github.MERGEABILITY_PENDING if blocker == "unknown" else "Awaiting trusted review of current source head"
+        assert statuses[-1]["description"] == expected
 
 
 @pytest.mark.parametrize("phase,expected", [("evaluate", "failure"), ("publish", "success")])
@@ -149,13 +155,11 @@ raise SystemExit(hosted.main())
 def test_hosted_review_coverage_after_source_head_changes(
     publisher, git_repo, monkeypatch, candidate, change,
 ):
-    git(git_repo, "switch", "-qc", "source")
-    git(git_repo, "commit", "-qm", "reviewed source", "--allow-empty")
-    reviewed = git(git_repo, "rev-parse", "HEAD").strip()
-    git(git_repo, "switch", "-q", "main")
     git(git_repo, "commit", "-qm", "base advance", "--allow-empty")
     base = git(git_repo, "rev-parse", "HEAD").strip()
-    git(git_repo, "switch", "-q", "source")
+    git(git_repo, "switch", "-qc", "source", "HEAD^")
+    git(git_repo, "commit", "-qm", "reviewed source", "--allow-empty")
+    reviewed = git(git_repo, "rev-parse", "HEAD").strip()
     if change == "ordinary":
         git(git_repo, "commit", "-qm", "unreviewed source", "--allow-empty")
     elif change == "clean merge":
@@ -388,7 +392,7 @@ def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
 
 
 @pytest.mark.parametrize("prior", [998, 999, 1000])
-def test_source_status_limit(publisher, monkeypatch, capsys, prior):
+def test_source_status_limit(publisher, capsys, prior):
     context = hosted.eligibility.CONTEXT
     endpoint = f"api repos/{REPO}/statuses/{HEAD}"
     refused = {
@@ -406,10 +410,7 @@ def test_source_status_limit(publisher, monkeypatch, capsys, prior):
         pages = [statuses[i:i + 100] for i in range(0, 1001, 100)]
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *pages, *pages)
 
-    monkeypatch.setattr(hosted.eligibility, "evaluate", lambda *args, **kwargs: SimpleNamespace(
-        ready=True, reasons=(),
-    ))
-
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [approval()])
     if prior == 998:
         check_source(publisher, ["pending", "success"])
         assert not any("/commits/" in " ".join(call["argv"]) for call in publisher.calls)
