@@ -798,7 +798,7 @@ def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
     return text
 
 
-ReviewSettingsLayout = Literal["current", "requested-reported", "summary"]
+ReviewSettingsLayout = Literal["current", "requested-reported"]
 
 
 def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = "", *,
@@ -823,21 +823,16 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     severities = [f.severity for f in result.findings]
     summary = ", ".join(f"{severities.count(s)} {s}" for s in ("critical", "important", "suggestion"))
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
-    settings = ""
-    if settings_layout == "summary":
-        effort = f" (effort {result.effort})" if result.effort else ""
-        settings = f"model {result.model or 'unknown'}{effort}, "
     lines = [prefix.rstrip("\n")] if prefix else []
     lines.append(
         f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
-        f"{settings}{duration}: **{result.verdict}** ({summary})"
+        f"{duration}: **{result.verdict}** ({summary})"
     )
     if result.fallback:
         lines.append(f"\nSame-family fallback: {result.fallback}. Cross-family review is preferred.")
     if result.chunk_count > 1:
         lines.append(f"\nReviewed in {result.chunk_count} chunks with the same model family.")
-    if settings_layout != "summary":
-        lines.extend(_review_settings_lines(result, include_configured=settings_layout == "current"))
+    lines.extend(_review_settings_lines(result, include_configured=settings_layout == "current"))
     if unplaced:
         lines.append("\nFindings without a file location:\n")
         lines += [_redact_published(f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —")) for f in unplaced]

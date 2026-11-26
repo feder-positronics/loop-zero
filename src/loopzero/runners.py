@@ -437,15 +437,12 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
     return tuple(binds)
 
 
-def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str:
-    diagnostic = "codex: version probe failed"
+def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str | None:
     try:
         done = _proc.run([str(binary), "--version"], cwd=cwd, env_allowlist=env_allowlist, timeout=30)
-    except (_proc.ToolMissing, _proc.ProcTimeout, OSError) as exc:
-        raise RunnerBadOutput(diagnostic) from exc
-    if done.exit_code:
-        raise RunnerBadOutput(diagnostic, _tail(done.stdout + done.stderr))
-    return done.stdout.rstrip("\n")
+    except (_proc.ToolMissing, _proc.ProcTimeout, OSError):
+        return None
+    return None if done.exit_code else done.stdout.rstrip("\n")
 
 
 def _codex_supports_ignore_user_config(

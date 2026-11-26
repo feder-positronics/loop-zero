@@ -115,6 +115,7 @@ FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc
     (MINIMAL + '[checks]\ncommands = ["echo ok"]\n'
      '[checks.inputs]\n"echo okay" = ["."]\n', r'checks\.inputs\."echo okay".*exact'),
     (MINIMAL + '[checks]\nrunner = ["runner"]\n', "unknown key\\(s\\) in \\[checks\\]: runner"),
+    (MINIMAL + '[delivery]\nreview_chunk_bytes = 200000\n', "unknown key\\(s\\) in \\[delivery\\]: review_chunk_bytes"),
 ])
 def test_invalid_content(tmp_path, text, message):
     with pytest.raises(config.ConfigError, match=message) as info:
