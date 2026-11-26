@@ -55,6 +55,7 @@ fi
 
 "${PY[@]}" - "$base" src/loopzero "$COMPLEXITY_CAP" <<'PY' || status=1
 import ast
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -122,14 +123,14 @@ base_scores: dict[tuple[str, str], int] = {}
 for raw in git_bytes("ls-tree", "-rz", "--name-only", base, "--", target).split(b"\0"):
     if not raw or not raw.endswith(b".py"):
         continue
-    rel = raw.decode("utf-8", errors="surrogateescape")
+    rel = os.fsdecode(raw)
     base_scores.update(file_complexities(rel, git_bytes("show", f"{base}:{rel}")))
 
 tree_scores: dict[tuple[str, str], int] = {}
 for raw in git_bytes("ls-files", "-zco", "--exclude-standard", "--", target).split(b"\0"):
     if not raw or not raw.endswith(b".py"):
         continue
-    rel = raw.decode("utf-8", errors="surrogateescape")
+    rel = os.fsdecode(raw)
     p = Path(rel)
     if p.is_file():
         tree_scores.update(file_complexities(rel, p.read_bytes()))
