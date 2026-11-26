@@ -19,6 +19,7 @@ from pathlib import Path
 from select import select
 from threading import Event, current_thread
 from unittest.mock import Mock
+from urllib.parse import quote
 
 import pytest
 
@@ -740,6 +741,13 @@ def test_check_tail_redacts_secret_forwarded_with_surrounding_whitespace(monkeyp
     monkeypatch.setenv("SERVICE_KEY", f" {SERVICE_KEY}\n")
     tail = _run_secret_stage(monkeypatch, tmp_path, f"HTTP 401 for Bearer {SERVICE_KEY} (request 7)")
     assert tail == "HTTP 401 for Bearer [REDACTED] (request 7)"
+
+
+def test_check_tail_redacts_json_escaped_and_url_quoted_secret(monkeypatch, tmp_path):
+    secret = 'p@ss/w0rd+1&"x\\9'
+    monkeypatch.setenv("SERVICE_KEY", secret)
+    output = f'{{"password": {json.dumps(secret)}}}\npostgresql://app:{quote(secret, safe="")}@db/app'
+    assert _run_secret_stage(monkeypatch, tmp_path, output) == '{"password": "[REDACTED]"}\npostgresql://app:[REDACTED]@db/app'
 
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',

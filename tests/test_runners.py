@@ -647,6 +647,19 @@ def test_claude_classifies_error_envelopes(fake_bin, tmp_path, exit_code, output
         assert "Token [REDACTED]." in str(raised.value)
 
 
+@pytest.mark.parametrize("result,error", [
+    ("API Error: 529 overloaded; sent x-api-key {key} (request 7)", RunnerBadOutput),
+    ("You've hit your session limit; key {key}", RunnerUsageLimit),
+])
+def test_every_failure_class_hides_forwarded_key(fake_bin, tmp_path, monkeypatch, result, error):
+    key = "gw_FAKE0123456789abcdef"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", f"{key}\n")  # Forwarded unchanged, printed stripped.
+    _fake_claude(fake_bin, {"is_error": True, "result": result.format(key=key)}, exit_code=1)
+    with pytest.raises(error) as raised:
+        _review("claude", tmp_path)
+    assert key not in f"{raised.value}{raised.value.tail}" and "[REDACTED]" in raised.value.tail
+
+
 @pytest.mark.parametrize("family,message", [
     ("claude", "OAuth access token has expired"),
     ("claude", "Failed to authenticate"),

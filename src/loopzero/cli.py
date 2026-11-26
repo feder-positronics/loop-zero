@@ -1136,7 +1136,8 @@ def _save_review_failure_output(wt: Path, head: str, kind: str, errors: dict[str
 
 def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
     lines = str(exc).splitlines()
-    detail = "\n".join(lines[:1 if isinstance(exc, runners.RunnerMalformedOutput) else 3])
+    # The cause of a failed reviewer is at the end of its output tail.
+    detail = "\n".join(lines[:1] + ([] if isinstance(exc, runners.RunnerMalformedOutput) else lines[1:][-2:]))
     if isinstance(exc, runners.RunnerAuthFailed):
         login = "claude auth login" if family == "claude" else "codex login"
         fix = f"run `{login}`"

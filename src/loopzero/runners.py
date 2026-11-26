@@ -171,14 +171,14 @@ def _tail(text: str) -> str:
     return text[-TAIL_CHARS:]
 
 
+def _redact_keys(family: str, text: str) -> str:
+    env = _proc.build_env(CLAUDE_AUTH_ENV if family == "claude" else CODEX_AUTH_ENV)
+    return _proc.redact(text, _proc.secret_forms(env.values()), r"\bsk-[A-Za-z0-9_-]{8,}",
+                        r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+
+
 def _auth_failure(family: str, diagnostic: str) -> RunnerAuthFailed:
-    names = CLAUDE_AUTH_ENV if family == "claude" else CODEX_AUTH_ENV
-    env = _proc.build_env(names)
-    values = {variant for value in env.values() if value for variant in (value, json.dumps(value)[1:-1])}
-    patterns = [*map(re.escape, sorted(values, key=len, reverse=True)), r"\bsk-[A-Za-z0-9_-]{8,}",
-                r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"]
-    diagnostic = re.sub("|".join(patterns), "[REDACTED]", diagnostic)
-    return RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(diagnostic)}")
+    return RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(_redact_keys(family, diagnostic))}")
 
 
 def _looks_like_auth_failure(text: str) -> bool:
@@ -268,12 +268,13 @@ def _run(
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
     except _proc.ProcTimeout as exc:
-        lines = _tail(exc.stderr.strip() or exc.stdout.strip()).splitlines()
+        lines = _tail(_redact_keys(family, exc.stderr.strip() or exc.stdout.strip())).splitlines()
         last_line = lines[-1] if lines else ""
         diagnostic = last_line.encode()
         tail = "…" + diagnostic[-320:].decode(errors="ignore") if len(diagnostic) > 320 else last_line
         raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", tail) from exc
-    if done.exit_code != 0:
+    if done.exit_code != 0:  # Hide forwarded keys from every failure class, not only auth.
+        done = replace(done, stdout=_redact_keys(family, done.stdout), stderr=_redact_keys(family, done.stderr))
         combined = f"{done.stdout}\n{done.stderr}"
         envelope = None
         if family == "claude":

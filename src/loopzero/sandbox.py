@@ -436,13 +436,13 @@ def _private_check_value(name: str, value: str) -> bool:
 
 def _check_secrets(config: Config) -> list[str]:
     """Forwarded host values to hide, longest first; committed [checks] env is public."""
-    return sorted({value.strip() for name, value in _proc.build_env(config.env_allowlist).items()
-                   if _private_check_value(name, value)}, key=len, reverse=True)
+    return _proc.secret_forms(value for name, value in _proc.build_env(config.env_allowlist).items()
+                              if _private_check_value(name, value))
 
 
 def _check_tail(text: str, config: Config | None = None, *, suffix: str = "") -> str:
     if secrets := (_check_secrets(config) if config is not None else []):
-        redacted = re.sub("|".join(map(re.escape, secrets)), "[REDACTED]", text)
+        redacted = _proc.redact(text, secrets)
         # Redact before cutting; the extra lead read in _run_one may hold a split secret.
         text = redacted[len(secrets[0]):] if len(text) > CHECK_TAIL_BYTES else redacted
     bounded = (text + suffix).rstrip("\n")[-CHECK_TAIL_BYTES:]
