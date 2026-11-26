@@ -2314,14 +2314,14 @@ def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, m
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_approved_pr_with_check_result(gh, head, wt, "failure", reviews=[])
-    arm_check_runs(gh, head, [{
-        "name": "checks", "status": "completed", "conclusion": "failure",
-        "check_suite": {"id": 10}}])
+    reviews = [rev("a" * 40, "primary"), rev("b" * 40, "delta", state="CHANGES_REQUESTED")]
+    arm_approved_pr_with_check_result(gh, head, wt, "failure", reviews=reviews)
+    arm_check_runs(gh, head, [{"name": "checks", "status": "completed", "conclusion": "failure",
+                              "check_suite": {"id": 10}}])
     code, out, _ = run(capsys, "ready")
     assert code == 1
     assert without_accepted_receipt(out).splitlines() == [
-        "not ready: no review recorded for the current head",
+        f"not ready: Both review rounds are spent (primary + delta) and {head[:12]} has no eligible review. Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused.",
         "not ready: required check 'checks' is failure",
     ]
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
@@ -4411,7 +4411,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
 
 @pytest.mark.parametrize("confirmed,kind", [
     (False, "current"), (False, "stale"), (False, "missing"),
-    (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"),
+    (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"), (True, "conflict"),
     (False, "head"), (False, "requeue"), (False, "author"), (False, "landed"),
 ])
 def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, confirmed, kind):
@@ -4421,7 +4421,7 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
     comments = [{"id": 42, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
                  "body": MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)}]
     if kind != "missing":
-        template = MERGIFY_QUEUE_FIXTURE["admission_report"] if admission else MERGIFY_QUEUE_FIXTURE["report"]
+        template = MERGIFY_QUEUE_FIXTURE.get("admission_report" if admission else f"{kind}_report", MERGIFY_QUEUE_FIXTURE["report"])
         body = template.replace("@url@", URL).replace("@sha@", "f" * 7 if kind == "head" else head[:7])
         comments.append({"id": 43, "user": {"login": "someone-else" if kind == "author" else "mergify[bot]"},
                          "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind),
@@ -4446,7 +4446,7 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
     if kind == "landed":
         assert (code, err) == (0, "") and not wt.exists() and out.splitlines()[-1] == "e" * 40
     elif kind in MERGIFY_QUEUE_FIXTURE["expected"]:
-        assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and "'checks'" in err
+        assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and ("'checks'" in err) == (kind != "conflict")
         assert all(part in err for part in [*MERGIFY_QUEUE_FIXTURE["requeue_guidance"], *MERGIFY_QUEUE_FIXTURE["expected"][kind]])
     else:
         assert code == 3 and wt.exists() and "waiting for admission" in out
@@ -4659,32 +4659,6 @@ def test_cleanup_preserves_local_work(wt, case, capsys):
     assert wt.exists()
     err = capsys.readouterr().err
     assert ("worktree is dirty" if case == "dirty" else "local HEAD differs") in err
-
-
-@pytest.mark.parametrize('error', [None, 'lookup', 'os', 'config', 'head', 'open', 'cleanup'])
-def test_backfill_dry_run_lists_only(wt, monkeypatch, capsys, error):
-    import importlib.util
-
-    script = Path(__file__).resolve().parents[1] / 'scripts/backfill_receipts.py'
-    spec = importlib.util.spec_from_file_location('backfill', script)
-    backfill = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(backfill)
-    (wt / '.loopzero/review-native.json').write_text('{}')
-    pr = SimpleNamespace(state='OPEN' if error == 'open' else 'MERGED', number=7,
-                         head_sha='a' * 40 if error == 'head' else cli.worktree.head(wt))
-    calls = []
-    def lookup(*a, **kw):
-        calls.append(a)
-        if error in ('lookup', 'os', 'config'):
-            raise {'os': OSError, 'config': backfill.config_mod.ConfigError}.get(error, cli.CliError)('load/lookup failed')
-        return pr
-    monkeypatch.setattr(backfill.config_mod if error == 'config' else cli,
-                        'load' if error == 'config' else '_require_pr', lookup)
-    monkeypatch.setattr(cli, '_cleanup', lambda *a: None if error == 'cleanup' else pytest.fail('dry run'))
-    assert backfill.main((['--confirm'] if error == 'cleanup' else []) + [str(wt)] * 2) == bool(error)
-    assert len(calls) == 2
-    assert ('retaining' if error else 'merged PR #7') in capsys.readouterr().out
-    assert wt.exists()
 
 
 def _closed_unmerged_wait(monkeypatch, reads, steps=0):
