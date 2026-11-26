@@ -80,7 +80,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
                checkpoint: Callable[[CheckReport], None] | None = None,
-               workflow: str | Path = "workflow.toml", _resolved: bool = False) -> CheckReport:
+               workflow: str | Path = "workflow.toml", expected_head: str | None = None,
+               _resolved: bool = False) -> CheckReport:
     """Run checks, stopping at the first failure; status emits only stage metadata.
 
     progress receives each command before launch, as before. Optional status receives
@@ -93,6 +94,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             "sudo apt install bubblewrap"
         )
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
+    if expected_head is not None and head != expected_head:
+        raise SandboxUnavailable(f"HEAD moved before checks started: {expected_head} to {head}")
     dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     if config.check_runner and dirty:
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,

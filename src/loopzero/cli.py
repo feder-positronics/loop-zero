@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import errno
 import fcntl
 import hashlib
 import importlib.metadata
@@ -14,6 +15,7 @@ import os
 import shlex
 import random
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -588,15 +590,40 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+@contextmanager
+def _lock_check(wt: Path, head: str) -> Iterator[None]:
+    # Abstract Unix addresses are released by the kernel and leave no lockfile.
+    digest = hashlib.sha256(os.fsencode(wt.resolve()) + b"\0" + head.encode()).hexdigest()
+    with socket.socket(socket.AF_UNIX) as lock:
+        try:
+            lock.bind("\0loopzero-check-" + digest)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            raise CliError(f"check already running in this worktree at {head[:12]}") from exc
+        yield
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
+    head = worktree.head(wt)
+    with _lock_check(wt, head):
+        if (_current_check_report(wt, config, head) is not None
+                and not worktree.is_dirty(wt) and worktree.head(wt) == head):
+            _refresh_pr_checks(wt, config)
+            print(f"PASS (reused {CHECKS_FILE} for {head[:12]} without running stages)")
+            return 0
+        return _run_check(args, wt, config, head)
+
+
+def _run_check(args: argparse.Namespace, wt: Path, config: Config, head: str) -> int:
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),
             status=lambda message: print(message, flush=True),
-            checkpoint=lambda partial: _save_report(wt, partial),
+            checkpoint=lambda partial: _save_report(wt, partial), expected_head=head,
             workflow=args.config or f"origin/{config.base_branch}:workflow.toml")
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
