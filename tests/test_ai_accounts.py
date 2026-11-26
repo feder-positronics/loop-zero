@@ -512,3 +512,41 @@ def test_account_lock_wait_is_bounded(helper, tmp_path, monkeypatch, name):
                 helper.sync_codex_home(tmp_path / "unreadable-home")
     assert elapsed == 60
     assert not (helper.STATE / "status.json").exists()
+
+
+def test_home_lock_timeout_does_not_publish_selections(helper, monkeypatch):
+    for name in ("main", "b"):
+        auth = {"tokens": {"account_id": name, "access_token": "synthetic"}}
+        helper.write_private(helper.codex_home(name) / "auth.json", json.dumps(auth))
+    helper.set_active("codex", "main")
+    for key in (*helper.EXPLICIT_ROUTES["codex"], "CODEX_HOME"):
+        monkeypatch.delenv(key, raising=False)
+    elapsed = 0.0
+
+    def advance(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+
+    monkeypatch.setattr(helper.time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(helper.time, "sleep", advance)
+    monkeypatch.setattr(helper, "model_availability", lambda *_: (True, True, 0.1))
+    monkeypatch.setattr(helper, "check_claude", lambda *_: pytest.fail("rotation started before home sync"))
+    with (helper.STATE / ".codex-sync.lock").open("a") as holder:
+        helper.fcntl.flock(holder, helper.fcntl.LOCK_EX)
+        operations = (
+            lambda: helper.check(quiet=True),
+            lambda: helper.cmd_add("codex", "new"),
+            lambda: helper.cmd_pinned_exec("codex", helper.identity("codex", "b"), ["unused"]),
+            lambda: helper.exhausted(
+                "codex", helper.identity("codex", "main"), "model",
+                prepare=lambda name: helper.account_env("codex", name),
+            ),
+        )
+        for operation in operations:
+            with pytest.raises(helper.AccountLockTimeout, match=r"\.codex-sync\.lock is busy"):
+                operation()
+    assert elapsed == 240
+    assert not helper.codex_home("new").exists()
+    assert helper.active("codex") == "main"
+    assert helper.active("claude") == "a"
+    assert not (helper.STATE / "status.json").exists()
