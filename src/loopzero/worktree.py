@@ -383,19 +383,27 @@ def _lock_verified_ref(wt: Path, ref: str, expected_head: str) -> Iterator[None]
                 transaction.terminate()
 
 
-def _require_no_ignored_user_files(wt: Path) -> None:
-    ignored = _git(
-        wt, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", preserve_newlines=True
-    )
-    for path in ignored.split("\0")[:-1]:
-        if not ((path in {".loopzero/task.md", ".loopzero/checks.json"}
-                 or re.fullmatch(r"\.loopzero/review(?:er-output)?-[0-9a-f]{12}-(primary|delta)\.json", path))
-                and not (wt / path).is_symlink()):
-            raise WorktreeError(f"worktree contains ignored file {path!r}, refusing to remove: {wt}")
+def _require_no_nested_worktree(wt: Path, git_dir: Path) -> None:
+    root = wt.resolve()
+    records = _git(git_dir, f"--git-dir={git_dir}", "worktree", "list", "--porcelain", "-z",
+                   preserve_whitespace=True)
+    for field in records.split("\0"):
+        if field.startswith("worktree "):
+            path = Path(field.removeprefix("worktree "))
+            if path != root and path.is_relative_to(root):
+                raise WorktreeError(f"nested worktree {path}, refusing to remove: {wt}")
+
+    def fail_scan(exc: OSError) -> None:
+        raise WorktreeError(f"could not inspect nested worktrees in {wt}: {exc}") from exc
+
+    # Other repositories' checkouts are absent from this Git registry.
+    for path, directories, files in root.walk(on_error=fail_scan):
+        if path != root and (".git" in files or ".git" in directories):
+            raise WorktreeError(f"nested Git worktree at {path}, refusing to remove: {wt}")
 
 
 def cleanup(wt: Path, expected_head: str) -> None:
-    """Remove a clean merged worktree and its branch if it has no local user files."""
+    """Remove a clean verified worktree and its branch, preserving nested worktrees."""
     wt = Path(wt).absolute()
     if not wt.exists():
         raise WorktreeError(f"no such worktree: {wt}")
@@ -409,7 +417,7 @@ def cleanup(wt: Path, expected_head: str) -> None:
             raise WorktreeError("local branch changed during merge cleanup")
         if is_dirty(wt):
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-        _require_no_ignored_user_files(wt)
+        _require_no_nested_worktree(wt, gd)
         _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
     worktrees = _git(gd, f"--git-dir={gd}", "worktree", "list", "--porcelain", "-z", preserve_whitespace=True)
     if f"branch {ref}" in worktrees.split("\0"):
