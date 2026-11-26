@@ -1249,7 +1249,7 @@ def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, tmp_path, err
     ("4676", "", "short-window limit: retry after ~60 s"),
     ("", "90", "short-window limit: retry after 90 s"),
     ("", "Wed, 25 Nov 2026 21:03:14 GMT", "short-window limit: retry after Wed, 25 Nov 2026 21:03:14 GMT"),
-    ("", "", "Rate limited: retry after GitHub's reset or Retry-After; No automatic retry."),
+    ("", "", "Rate limited: retry after GitHub's reset or Retry-After."),
 ])
 def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining, retry_after, hint):
     sleeps = []
@@ -1279,6 +1279,17 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining
     assert sleeps == ([90 if retry_after.isdigit() else 40] if retry_after and not remaining else [])
     assert [call["argv"] for call in gh.calls] == (
         [[*branch_head_key("lz/x").split(), "--include"]] + [[*pr_list_key("lz/x").split(), "--include"]] * (1 + len(sleeps)))
+
+
+def test_graphql_http_200_rate_limit_preserves_verified_waiter_reset(gh):
+    response = (
+        "HTTP/2.0 200 OK\r\nX-RateLimit-Resource: graphql\r\nX-RateLimit-Remaining: 0\r\n"
+        'X-RateLimit-Reset: 4070908800\r\n\r\n{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}'
+    )
+    gh.respond("api graphql", response, exit=1)
+    with pytest.raises(github.GhUnavailable) as info:
+        github._gh("api", "graphql", "-f", "query={viewer{login}}")
+    assert info.value.rate_reset == 4070908800
 
 
 @pytest.mark.parametrize("diagnostic", [

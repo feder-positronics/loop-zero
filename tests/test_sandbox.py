@@ -341,7 +341,8 @@ def test_alternate_probe_skips_default_inventory_and_honors_override(git_repo, m
     with pytest.raises(sandbox.SandboxUnavailable, match="Git alternate visibility probe timed out") as info:
         sandbox._preflight_alternates(cfg, git_repo, prefix, common)
     rendered = "".join(traceback.format_exception(info.value))
-    assert "private alternate probe diagnostic" not in rendered and "Create a standalone clone" in rendered
+    assert "private alternate probe diagnostic" not in rendered
+    assert "Transfer this task branch" in rendered
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):
@@ -395,7 +396,8 @@ class TestRealSandbox:
         message = str(failure.value)
         assert str(objects) in message
         assert "alternate" in message.lower() and "sandbox" in message.lower()
-        assert "standalone clone" in message.lower() and "loopzero start" in message
+        assert "transfer this task branch" in message.lower() and "standalone clone" in message.lower()
+        assert "rerun loopzero check at the same commit" in message.lower()
 
     @pytest.mark.parametrize("visibility", ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured"))
     def test_real_sandbox_allows_visible_git_alternates(self, git_repo, tmp_path, visibility):
