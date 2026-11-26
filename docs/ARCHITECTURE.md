@@ -435,8 +435,9 @@ index, README and AGENTS guidance without network access. The repository's
 CI enforce it against the event's base SHA. Push-to-main CI runs `--links-only`, because squash merging
 can drop authored trailers and landed history cannot re-establish the pre-merge
 acknowledgement; that mode still rejects broken local links and anchors.
-`loopzero check` pins checks to trusted base configuration, so run a new or
-changed gate directly until its configuration lands on the base.
+`loopzero check` pins checks to trusted base configuration and reuses a passing
+receipt when readiness validation, the clean checkout and declared inputs still
+match. Run a new or changed gate directly until its configuration lands on the base.
 
 The checker watches source-owned contracts, skill routing, the example and actual
 workflow, hosted workflow files, itself, and selected CLI/configuration interfaces;
