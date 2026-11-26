@@ -1234,18 +1234,23 @@ def _poll_until(
     started: float, timeout: float, *, bounded: bool = False, admitted: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
     delay = WAIT_INTERVAL
+    longest_read = 0.0
     while True:
         was_admitted = admitted is not None and admitted()
+        read_started = time.monotonic()
         yield  # Observe immediately, including --wait=0.
-        remaining = timeout - (time.monotonic() - started)
+        now = time.monotonic()
+        longest_read = max(longest_read, now - read_started)
+        remaining = timeout - (now - started)
         if remaining <= 0:
             return
         if admitted is not None and not was_admitted and admitted():
             delay = WAIT_INTERVAL
         pause = delay * random.uniform(0.9, 1.0)
         if bounded and remaining <= pause:
-            # Reserve up to five seconds for the last bounded read.
-            allowance = min(5.0, remaining / 2, max(0.5, remaining / 10))
+            # Reserve time for a complete readiness pass based on observed latency.
+            baseline = min(5.0, max(0.5, remaining / 10))
+            allowance = min(remaining / 2, max(baseline, 2 * longest_read))
             _sleep(remaining - allowance)
             yield
             remaining = timeout - (time.monotonic() - started)

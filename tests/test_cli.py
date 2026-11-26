@@ -3202,8 +3202,10 @@ def test_merge_wait_times_out_on_pending_checks_with_exit_three(
     assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
-@pytest.mark.parametrize("command,timeout,green_at", [("ready", 300, 280), ("ready", 10, 8), ("merge", 10, 8)])
-def test_source_wait_observes_late_green(wt, gh, capsys, monkeypatch, head, command, timeout, green_at):
+@pytest.mark.parametrize("command,timeout,green_at,read_time", [
+    ("ready", 300, 280, 0), ("ready", 300, 280, 7), ("ready", 10, 8, 0), ("merge", 10, 8, 0),
+])
+def test_source_wait_observes_late_green(wt, gh, capsys, monkeypatch, head, command, timeout, green_at, read_time):
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     clock = 0.0
     admitted = []
@@ -3214,6 +3216,13 @@ def test_source_wait_observes_late_green(wt, gh, capsys, monkeypatch, head, comm
         if clock >= green_at:
             arm_check_runs(gh, head, [{"name": "checks", "status": "completed", "conclusion": "success"}])
 
+    view = github.pr_view
+
+    def slow_view(*args, **kwargs):
+        if clock:
+            advance(read_time)
+        return view(*args, **kwargs)
+
     def merge(_repo, _number, _strategy, expected_head):
         admitted.append(expected_head)
         return "c" * 40
@@ -3222,6 +3231,7 @@ def test_source_wait_observes_late_green(wt, gh, capsys, monkeypatch, head, comm
     monkeypatch.setattr(cli.random, "uniform", lambda *_: 0.95)
     monkeypatch.setattr(cli, "_sleep", advance)
     monkeypatch.setattr(github, "merge", merge)
+    monkeypatch.setattr(github, "pr_view", slow_view)
     gh.respond("api -X", "")
 
     code, out, err = run(capsys, command, f"--wait={timeout}")
