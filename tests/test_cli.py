@@ -4715,19 +4715,28 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert json.loads(writes[0]["--input"])["body"] == prose + suffix
 
 
-def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
+@pytest.mark.parametrize("refresh", ["resync", "automatic"])
+def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys, refresh):
     head = head_of(wt)
-    live = "# PR\n\n## Validation\nManual validation evidence.\n"
+    config = cli._load_config(SimpleNamespace(command="check", config=None), wt, pin_checks=True)
+    live = ("# PR\n\n## Validation\nManual validation evidence.\n\n"
+            "<!-- loopzero:checks:start -->\n"
+            f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0\n"
+            "<!-- loopzero:checks:end -->\n")
     gh.respond_pr_list([pr_json(headRefOid=head, body=live)])
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
-    cli._save_report(wt, CheckReport(head, False, (CheckResult("echo ok", 0, 0.0, ""),)))
+    stages = tuple(CheckResult(command, 0, 0.0, "") for command in config.checks)
+    cli._save_report(wt, CheckReport(head, False, stages))
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
 
-    assert run(capsys, "pr")[0] == 0
+    if refresh == "resync":
+        assert run(capsys, "pr")[0] == 0
+    else:
+        cli._refresh_pr_checks(wt, config)
     draft = json.loads(gh.calls[-1]["--input"])["body"]
     assert "unverified" in draft and "run `loopzero check`" in draft
     assert "Manual validation evidence." in draft
 
-    git(wt, "push", "-q", "-u", "origin", "lz/t1")
     gh.respond_pr_list([pr_json(headRefOid=head, body=draft)])
     assert run(capsys, "check")[0] == 0
     draft = json.loads(gh.calls[-1]["--input"])["body"]
