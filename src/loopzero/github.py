@@ -23,7 +23,7 @@ from loopzero._proc import ProcTimeout, ToolMissing, run
 from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, ReviewResult
 
-GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
+GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"

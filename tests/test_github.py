@@ -738,6 +738,8 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     monkeypatch.setattr(github.time, "CLOCK_BOOTTIME", 7, raising=False)
     monkeypatch.setattr(github.time, "clock_gettime", lambda _: boot_time)
     monkeypatch.setattr(github.time, "monotonic", lambda: 100.0)  # stopped during host suspend
+    monkeypatch.setenv("GH_CONFIG_DIR", "/fixture/gh")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/fixture/xdg")
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.respond("api repos/acme/widgets", {})
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
@@ -751,10 +753,8 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     github._gh("api", "repos/acme/widgets/issues/7/comments", "--method", "POST")
     github._gh("api", "graphql", "-f", "query=mutation { resolveReviewThread(input: {}) { clientMutationId } }")
     assert github.auth_token() == "operator-token"
-    assert [c["token"] for c in gh.calls] == [
-        "synthetic-app-token", "synthetic-app-token", "synthetic-app-token",
-        "operator-token", "operator-token", "operator-token",
-    ]
+    assert [c["token"] for c in gh.calls] == ["synthetic-app-token"] * 3 + ["operator-token"] * 3
+    assert all(call["config"] == ["/fixture/gh", "/fixture/xdg"] for call in gh.calls)
     assert counter.read_text().splitlines() == ["called"]
     boot_time += 3_620
     wall_time += 2_620  # The wall clock stepped back by a thousand seconds.
