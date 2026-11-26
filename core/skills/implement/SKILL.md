@@ -32,14 +32,14 @@ Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../
 Follow [long-running jobs](../../../docs/DELEGATION.md#long-running-jobs) for commands
 expected to exceed about two minutes, and the [wait/output](../../../docs/DELEGATION.md#briefs-and-ownership)
 and [caps](../../../docs/DELEGATION.md#coordinator-rollover) rules. Set `runLimit 1` on thread reads.
-Hold the turn open until your job has `LOG.exit` or the unit is gone and you report it killed and failed.
+Do not end the turn, settle or report done before `LOG.exit` unless the unit is gone and you report it killed and failed.
 If you must yield, first schedule a one-shot T3 wakeup (`schedule:{type:once,runAt:<ISO time>}`)
 to read `LOG.exit` and resume its delivery step.
 
 Use worktrees of an existing clone. Keep receipts, evidence, review artifacts and handoffs on the PR,
 issue or named durable scratch. Reserve `/tmp` for running-command logs, builds and browser runs.
-Successful merge already runs contract cleanup. Hand leftovers to the named periodic retention job
-(such as `scratch-retention`) without waiting or scheduling wakeups.
+Merge already runs contract cleanup. At task finish, hand leftover worktrees and generated files to the periodic
+retention job named in host or repo instructions, without waiting or scheduling wakeups.
 Follow [Leftover cleanup](../../../docs/DELEGATION.md#leftover-cleanup) when verifying or operating it.
 With no named job or unproved conditions, preserve leftovers and report cleanup to the owner.
 For confirmed-abandoned tasks outside its scope, give the owner the
@@ -55,7 +55,8 @@ Leave base merges out of a branch awaiting its delta.
 After review, follow the [Review budget](../../CONTRACT.md#review-budget) for base or check-script
 changes. Keep the primary as the delta's base and reserve the delta for post-review fixes.
 
-Run checks with unchanged sandbox, check list and network settings. Report base failures as found.
+Never bypass the sandbox, change the check list or enable `[checks].network` to pass checks.
+Report base failures without working around them.
 For a deterministic out-of-scope defect requiring a workaround, use a follow-up PR for a small
 test-only fix or file an `urgent` issue naming the blocked PR. Commit yourself, outside checks, hooks
 and scripts. Update task and PR before adding paths required by acceptance. Obtain scope decisions
@@ -64,9 +65,9 @@ contract to report outstanding acceptance, checks and findings.
 
 Keep host and runner changes to ports, env, paths, services or labels compatible with current main,
 or wait for the consuming change to land. Prove the affected job on the changed host with one green
-run before enabling it for all runners. Check for mutual dependencies before parking a PR.
+run before enabling it for all runners. Before parking a PR, verify it does not wait on yours. Never park both on each other.
 Immediately hand failures outside the contract's owner queue route and their last-green comparison
-to [diagnose](../diagnose/SKILL.md).
+to [diagnose](../diagnose/SKILL.md). A log entry alone does not hand over the failure.
 
 To requeue without a merge-authority hold, post `@mergifyio queue` as the whole PR comment from the
 same login. Requeueing requires that comment even after `loopzero merge --wait`.

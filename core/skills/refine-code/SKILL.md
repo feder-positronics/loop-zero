@@ -7,14 +7,14 @@ description: Simplify a named or current-task diff, or delete evidenced dead cod
 
 Preserve observable behavior and public contracts in the user-named or current-task diff.
 Confirm task and branch in the outer worktree and follow [the contract](../../CONTRACT.md).
-Use clear names, control flow and local patterns. Keep cleanup and compatibility layers within scope.
+Use clear names, control flow and local patterns without unrelated cleanup or compatibility layers.
 
 Treat concurrency, exception timing, transactions, ordering, query predicates,
 persistence, isolation, serialization, public imports, API shape and assertions
 as semantic until equivalence is demonstrated. Route new behavior, abstraction
 boundaries or weakened tests to [implement](../implement/SKILL.md).
 
-Deletion outside the task diff needs explicit commissioning. Treat [code health](../../../docs/CODE-HEALTH.md)
+Deletion outside the task diff requires explicit commissioning by the requester. Treat [code health](../../../docs/CODE-HEALTH.md)
 findings as leads. Select a clean rollback commit and restore the whole batch before debugging any failed check.
 Verify in the base and current trees that supported consumers cannot reach removed code. Check dynamic entry
 points, registries, reflection, plugins, configuration, generated consumers and public exports.

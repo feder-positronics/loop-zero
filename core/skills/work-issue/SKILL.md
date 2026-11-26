@@ -10,7 +10,7 @@ Read live acceptance, comments, artifacts and linked work. Reconcile prior and p
 branches and competing PRs before pickup with the [dispatch authority](../../../docs/DELEGATION.md#team-roles).
 Verify remote identity before mutation and connected environment before production claims.
 Use [approval evidence](reference.md#evidence-for-approval) for decision counts, censuses or states
-and production-change approval. Use [inherited-work guidance](reference.md#inherited-work) before resuming.
+and production-change approval. Use [inherited-work guidance](reference.md#inherited-work) before continuing an existing branch or PR.
 Keep the inherited worktree or use `loopzero start <task-slug>`. Record observable acceptance and link
 the issue. Deliver through [implement](../implement/SKILL.md), applying the safeguards for
 [API shape](reference.md#api-shape-changes), [changed stack prerequisites or seeded browser state](reference.md#fresh-stack-proof)
@@ -40,4 +40,4 @@ Use [Reporting](../../CONTRACT.md#reporting) and open with one plain sentence co
 and any action needed. Send evidence, PR/head or landed SHA, outstanding acceptance and next-action
 owner with command or trigger to dispatch authority on the issue/PR or through the parent.
 Reconcile conflicts and scope-expanding or reserved choices with that owner. Continue only an
-already commissioned successor after recording this item's evidence and rechecking live state in a fresh worktree.
+already commissioned successor after recording this item's evidence and rechecking live state in a fresh task worktree.

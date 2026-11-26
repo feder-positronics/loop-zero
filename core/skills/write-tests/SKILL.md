@@ -18,7 +18,7 @@ snapshots, internal steps and copied calculations are insufficient alone.
 Cover material success, denial/isolation, validation, transitions and failures. Follow repo conventions
 with minimal deterministic, isolated fixtures. Prefer cheap real producers or match the public fields
 and behavior consumed, avoiding shared mutable state, timing tolerance and duplicate cases.
-For a bug fix, observe failure on pre-fix code. If impossible, explain the oracle and its limits.
+For a bug fix, observe the regression test fail on pre-fix code. If impossible, explain the oracle and its limits.
 Infrastructure failure cannot prove regression detection. New or changed tests block only through the
 consumer's admission rule. Established critical assertions remain blocking. Coverage-only tests may pass existing code.
 
