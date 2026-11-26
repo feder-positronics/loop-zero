@@ -9,8 +9,6 @@ import argparse
 import json
 import re
 import sys
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
 from loopzero import candidate, config, github, runners
@@ -89,46 +87,32 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     return latest if verdict else None
 
 
-class BaseMergeError(LoopZeroError):
-    """First-parent history or base provenance could not be established."""
-
-
-@contextmanager
-def base_merge_history(
-    repo: str, number: int, reviewed: str, head: str, base_branch: str,
-) -> Iterator[tuple[Callable[..., str], list[list[str]]]]:
-    """Verify the first-parent range and each merge's origin against the live PR base."""
+def verified_base_merges(
+    repo: str, number: int, reviewed: str, head: str, base_branch: str, *, clean: bool,
+) -> bool:
+    """Prove base provenance, requiring unmodified base merges alone for inheritance."""
     try:
         pr = github.api_get(f"repos/{repo}/pulls/{number}")
         base = pr["base"]["sha"]
         if (pr["head"]["sha"] != head or pr["base"]["ref"] != base_branch
                 or not re.fullmatch(r"[0-9a-f]{40}", base)):
-            raise BaseMergeError("could not verify the configured PR base at this head")
+            return False
         with candidate.fetched_git(repo, [reviewed, head, base]) as git:
-            history = [row.split() for row in
-                       git("rev-list", "--first-parent", "--parents", f"{reviewed}..{head}").splitlines()]
+            history = git("rev-list", "--first-parent", "--parents", f"{reviewed}..{head}")
             cursor = head
-            for commits in history:
+            for row in history.splitlines():
+                commits = row.split()
                 if len(commits) not in {2, 3} or commits[0] != cursor:
-                    raise BaseMergeError("unverifiable first-parent history or merge parents")
-                cursor = commits[1]
-                if len(commits) == 3:
-                    git("merge-base", "--is-ancestor", commits[2], base)
-            if cursor != reviewed:
-                raise BaseMergeError("reviewed head is absent from first-parent history")
-            yield git, history
-    except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError) as exc:
-        raise BaseMergeError(str(exc)) from exc
-
-
-def _clean_base_merges(repo: str, number: int, reviewed: str, head: str, base_branch: str) -> bool:
-    """Prove each intervening first-parent commit is an unmodified merge from the base."""
-    try:
-        with base_merge_history(repo, number, reviewed, head, base_branch) as (git, history):
-            for commits in history:
-                if len(commits) != 3:
                     return False
+                cursor = commits[1]
+                if len(commits) == 2:
+                    if clean:
+                        return False
+                    continue
                 merge, first, second = commits
+                git("merge-base", "--is-ancestor", second, base)
+                if not clean:
+                    continue
                 merge_bases = git("merge-base", "--all", first, second).splitlines()
                 # A shallow root outside the known merge bases could hide another base.
                 if git("rev-list", "--max-parents=0", first, second, "--not", *merge_bases):
@@ -136,8 +120,8 @@ def _clean_base_merges(repo: str, number: int, reviewed: str, head: str, base_br
                 tree = git("merge-tree", "--write-tree", first, second)
                 if tree != git("rev-parse", f"{merge}^{{tree}}"):
                     return False
-            return True
-    except BaseMergeError:
+            return cursor == reviewed
+    except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError):
         return False
 
 
@@ -172,7 +156,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
                 return None
         elif not (verdict.startswith("approve** (") and state in {"APPROVED", "COMMENTED"}):
             return None
-    if not _clean_base_merges(repo, number, reviewed, head, base_branch):
+    if not verified_base_merges(repo, number, reviewed, head, base_branch, clean=True):
         return None
     return latest
 

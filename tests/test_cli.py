@@ -1762,8 +1762,8 @@ def test_review_delta_replays_fixes_when_reviewed_head_is_second_parent(
     code, _, err = run(capsys, "review")
 
     assert code == 1
-    assert "absent from first-parent history" in err
-    assert f"replay the fixes on the reviewed head {reviewed[:12]}" in err
+    assert f"{reviewed[:12]} must be on the first-parent history" in err
+    assert f"on the reviewed head {reviewed[:12]}, including resolution edits" in err
     assert "git reset --hard" not in err
     assert not (fake_bin / "claude.stdin").exists()
     assert not (fake_bin / "codex.stdin").exists()
