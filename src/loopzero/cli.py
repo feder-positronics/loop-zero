@@ -18,7 +18,6 @@ import random
 import re
 import shlex
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, suppress
@@ -96,6 +95,10 @@ def _toplevel() -> Path:
     return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel", paths=True))
 
 
+class PrimaryCheckout(CliError):
+    """The command runs in the primary checkout, which has no task worktree to remove."""
+
+
 def _repo_root(wt: Path) -> None:
     """Verify the primary checkout or bare repository owns this linked worktree."""
     first = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0]
@@ -103,7 +106,9 @@ def _repo_root(wt: Path) -> None:
         raise CliError("Git did not identify the primary worktree; refusing cleanup")
     root = Path(first.removeprefix("worktree "))
     common = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)).resolve()
-    if root.resolve() == wt.resolve() or common not in (root.resolve(), (root / ".git").resolve()):
+    if root.resolve() == wt.resolve():
+        raise PrimaryCheckout("this is the primary checkout, nothing to clean up")
+    if common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
 
 
@@ -133,7 +138,7 @@ def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
     if done.exit_code not in (0, 1):
         detail = _proc.tail(done.stderr or done.stdout, 1)
         raise CliError(f"git merge-base --is-ancestor failed (exit {done.exit_code}): "
-                       f"{detail or 'retry the ancestry check'}")
+                       f"{detail or 'retry the ancestry check'}. If the commit is missing, run `git fetch origin {sha}` and retry.")
     return done.exit_code == 0
 
 
@@ -217,6 +222,10 @@ def _review_cap_spent(markers: list[Marker]) -> bool:
 
 def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     """Return (kind, reviewed_head) or raise when the PR's review budget is spent."""
+    current = next((m for m in reversed(markers) if m.head == head), None)
+    if current and current.state == "DISMISSED":
+        raise CliError("review for the current head was dismissed. Push fixes for a remaining delta "
+                       "or open a replacement PR if the review budget is spent.")
     if _review_cap_spent(markers):
         raise CliError(
             "review cap reached: fix or reject the findings "
@@ -432,19 +441,13 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
 
 _CHECKS_START = "<!-- loopzero:checks:start -->"
 _CHECKS_END = "<!-- loopzero:checks:end -->"
-_LEGACY_CHECKS = re.compile(
-    r"^Recorded for `[0-9a-f]+`(?: \(not current head\))?\n"
-    r"(?:- `[^\n]+`: exit -?\d+ \(\d+\.\d+s\)\n|"
-    r"- \(no check commands configured\)\n)*",
-    re.MULTILINE,
-)
 
 
 def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = (existing if existing is not None else worktree.task_text(wt)).replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(r"^## (?:Validation|Checks)\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = match.group(1)
@@ -452,11 +455,10 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -
     if start or _CHECKS_END in content:
         _, end, suffix = after.partition(_CHECKS_END)
         if not end or _CHECKS_END in before or _CHECKS_END in suffix or _CHECKS_START in after:
-            raise CliError("malformed loopzero checks block in PR Validation; repair its markers")
+            raise CliError("malformed loopzero checks block: fix the marker pair in Validation in the PR description on GitHub")
         content = before + block + suffix
     else:
-        # Migrate our old report/placeholder only, retaining behavioral evidence.
-        content = _LEGACY_CHECKS.sub("", content)
+        # Replace only our placeholder, retaining behavioral evidence.
         content = re.sub(
             r"^\((?:filled by `loopzero check`|no `loopzero check` run recorded)\)\n?",
             "", content, flags=re.MULTILINE,
@@ -481,7 +483,7 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
     task = worktree.task_text(wt).replace("\r\n", "\n")
     existing = existing.replace("\r\n", "\n")
     owned = {m.group(1): m.group() for m in pattern.finditer(task)
-             if m.group(1) not in {"Validation", "Checks", "Review"}}
+             if m.group(1) not in {"Validation", "Review"}}
     content = existing[first.start():] if (first := pattern.search(existing)) else ""
     prefix = task[:first.start()] if (first := pattern.search(task)) else task
 
@@ -564,12 +566,14 @@ def _pr_title(wt: Path, branch: str) -> str:
 def cmd_start(args: argparse.Namespace) -> int:
     root = _toplevel()
     current = config_mod.run_git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
-    if current.stdout.strip().startswith("lz/") or (
-        current.exit_code == 1 and worktree.is_linked_checkout(root)
-    ):
-        raise CliError(f"already inside task worktree {root}; run start from the main checkout")
+    # Nest task worktrees in the primary checkout, so removing a harness worktree cannot delete them.
+    listing = _git(root, "worktree", "list", "--porcelain", "-z", paths=True)
+    primary = Path(listing.split("\0", 1)[0].removeprefix("worktree "))
+    # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
+    if current.stdout.strip().startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
+        raise CliError(f"already inside task worktree {root}; run start from {primary}")
     config = _load_config(args, root)
-    print(worktree.start(root, args.slug, config.base_branch))
+    print(worktree.start(primary, args.slug, config.base_branch))
     return 0
 
 
@@ -820,7 +824,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             )
     try:
         if not _matches_publication(result, publication_context):
-            raise CliError("native publication context changed; HOLD")
+            raise CliError("native publication context changed. To recover, run loopzero review from the intended PR worktree with its configured publisher.")
     except runners.RunnerBadOutput:
         _save_review(wt, result)
         raise
@@ -943,14 +947,10 @@ def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettin
     codex = runners.codex_evidence(result)
     if codex is None:
         formats.append(("current", True))
-        if old_settings:
-            formats.append(("summary", True))
     if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
         formats.append(("requested-reported", True))
     if codex is not None and all("configured" not in call for call in codex["calls"]):
         formats.append(("requested-reported", False))
-    if result.family == "codex" and old_settings:
-        formats.append(("summary", False))
     return [(prefix, settings, display)
             for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
             for settings, display in formats]
@@ -1013,16 +1013,22 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
             f"run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR"
         )
     if not worktree.merges_since(wt, since):
-        return worktree.diff_since(wt, since)
-    patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
-             if number is not None else None)
-    if patch is None:
-        raise CliError(
-            f"could not verify merge history: {since[:12]} must be on the first-parent history and "
-            f"merged parents must come from {config.base_branch}. Check the first-parent log and merged parents. "
-            "If the history is correct, GitHub objects may be unavailable or exceed verification limits. "
-            "Open a new PR from the current base for a fresh review if verification still fails."
-        )
+        patch = worktree.diff_since(wt, since)  # Empty after an empty commit or a reverted change.
+    else:
+        patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
+                 if number is not None else None)
+        if patch is None:
+            raise CliError(
+                f"could not verify merge history: {since[:12]} must be on the first-parent history and "
+                f"merged parents must come from {config.base_branch}. Check the first-parent log and merged "
+                "parents. If the history is correct, GitHub objects may be unavailable or exceed verification "
+                "limits. Open a new PR from the current base for a fresh review if verification still fails."
+            )
+    if not patch and number is not None and github.open_blocking_findings(
+        config.repo, number, None, config.review_publishers or (github.login(),),
+    ):
+        raise CliError("empty delta leaves blocking findings open. Run `loopzero resolve` "
+                       "to list them, then address them before readiness.")
     return patch
 
 
@@ -1210,82 +1216,13 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         _repo_root(wt)
         name = worktree.branch(wt)
         worktree.cleanup(wt, pr.head_sha)
+    except PrimaryCheckout as exc:
+        print(f"note: merged; {exc}", file=sys.stderr)
     except (worktree.WorktreeError, CliError, OSError, _proc.ProcTimeout) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
             retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
-
-
-_SIZE_BUDGET = "scripts/size_budget.sh"
-
-
-def _prequeue_size_budget(
-    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness, *, project: bool = True,
-) -> None:
-    if not readiness.ready or config.merge_strategy != "mergify" or _SIZE_BUDGET not in config.checks:
-        return
-    origin = _git(wt, "remote", "get-url", "origin")
-    with tempfile.TemporaryDirectory(prefix="loopzero-size-") as directory:
-        root = Path(directory)
-        env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-               "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1",
-               "PYTHON": sys.executable, "PYTHONSAFEPATH": "1"}
-        git = partial(_git, root, extra_env=env)
-        git("clone", "--shared", "--no-checkout", "--template=", str(wt), ".")
-        # Fetch with the user's credential configuration for private origins.
-        fetched = _proc.run(
-            ["git", "fetch", "--no-tags", "--no-recurse-submodules", "--",
-             origin, f"refs/heads/{config.base_branch}"],
-            cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
-        )
-        if fetched.exit_code != 0:
-            reason = github.redact_credentials(_proc.tail(fetched.stderr or fetched.stdout, 1))
-            raise CliError(f"could not fetch {config.base_branch} from origin for the size budget check: "
-                           f"{reason or f'git exited {fetched.exit_code}'}")
-        base = git("rev-parse", "FETCH_HEAD^{commit}")
-        script = git("show", f"{base}:{_SIZE_BUDGET}")
-
-        def evaluate(target: str) -> _proc.Completed:
-            tree = git("merge-tree", "--write-tree", target, pr.head_sha)
-            # A candidate symlink must not read files outside the temporary checkout.
-            git("-c", "core.symlinks=false", "read-tree", "--reset", "-u", tree)
-            return _proc.run(["bash", "-s", "--", base], input=script + "\n", cwd=root,
-                             env_allowlist=("PATH",), extra_env=env, timeout=GIT_TIMEOUT,
-                             merge_output=True)
-
-        result = evaluate(base)
-        if result.exit_code:
-            raise CliError("current target size budget failed:\n" + result.stdout.rstrip())
-        if project:
-            _warn_queue_size(config, pr, root, origin, base, git, evaluate)
-
-
-def _warn_queue_size(
-    config: Config, pr: github.PR, root: Path, origin: str, base: str,
-    git: Callable[..., str], evaluate: Callable[[str], _proc.Completed],
-) -> None:
-    assert config.mergify_queue is not None
-    try:
-        numbers = mergify.queue_predecessors(config.repo, config.base_branch, config.mergify_queue, pr.number)
-        if not numbers:
-            return
-        refs = [f"refs/pull/{number}/head:refs/loopzero/{number}" for number in numbers]
-        _git(root, "fetch", "--no-tags", "--no-recurse-submodules", "--", origin, *refs)
-        integrated = base
-        for number in numbers:
-            source = git("rev-parse", f"refs/loopzero/{number}^{{commit}}")
-            if git("merge-base", integrated, source) == source:
-                return  # A queued PR may already have landed or be represented by another head.
-            tree = git("merge-tree", "--write-tree", integrated, source)
-            integrated = git("-c", "user.name=loopzero", "-c", "user.email=loopzero@localhost",
-                             "commit-tree", tree, "-p", integrated, "-p", source, "-m", "Queue size projection")
-        result = evaluate(integrated)
-    except (LoopZeroError, worktree.WorktreeError, OSError):
-        return
-    if result.exit_code and "size budget: FAIL" in result.stdout:
-        predecessors = ", ".join(f"#{number}" for number in numbers)
-        print(f"warning: projected size budget after {predecessors}:\n{result.stdout.rstrip()}")
 
 
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
@@ -1317,7 +1254,6 @@ def cmd_ready(args: argparse.Namespace) -> int:
                            initial=None if kicked else readiness)) is None:
             return 3
         pr, readiness, kicked = waited
-    _prequeue_size_budget(wt, config, pr, readiness)
     if readiness.ready and pr.is_draft and not kicked:
         _mark_ready(wt, config, pr.number, pr.head_sha)
         if args.wait is not None:
@@ -1549,12 +1485,14 @@ def _wait_for_checks(
                 + ", ".join(readiness.stale_verdicts)
             )
             stale_notice = True
-        # Missing check runs do not prove that no workflow was scheduled. Diagnose only
-        # when no visible pending check explains why the required jobs have not appeared.
+        # An active workflow may not have created its check runs yet.
         if (
             elapsed >= MISSING_RUN_GRACE
             and all(" missing on " in r for r in pending)
-            and not readiness.has_pending_checks
+            and not _read_wait_poll(
+                partial(github.has_check_activity, config.repo, pr.head_sha, readiness),
+                started + timeout,
+            )
         ):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "
@@ -1645,14 +1583,15 @@ def _mergify_departure(
     sha = _landed(config, pr, closed)
     if sha or closed:
         return sha
-    detail = MERGIFY_DEQUEUE_HINT
+    detail, requeue = MERGIFY_DEQUEUE_HINT, MERGIFY_REQUEUE
     if report is not None:
         detail = f"Mergify report: {report.url}."
         if report.attribution == "base_conflict":
             base = pr.base_ref
             detail = (f"The PR conflicts with {base}. Run `git fetch origin {base}` and resolve the base "
-                      f"integration according to the PR's review state. Requeue only after resolving the "
-                      f"conflict. {detail}")
+                      f"integration according to the PR's review state. {detail}")
+            requeue = ("After resolving the conflict, run `loopzero check`, `loopzero pr`, "
+                       "`loopzero review`, `loopzero ready --wait` and `loopzero merge --wait`.")
         else:
             if report.checks:
                 detail += " Failing checks: " + ", ".join(repr(check) for check in report.checks) + "."
@@ -1661,7 +1600,7 @@ def _mergify_departure(
                 "isolated": "Mergify tested this PR alone. Inspect or fix the failed check before requeueing unless it is a known flake.",
             }
             detail += " " + guidance.get(report.attribution, MERGIFY_DEQUEUE_HINT)
-    raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {MERGIFY_REQUEUE}")
+    raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {requeue}")
 
 
 def _mergify_wait_poll(
@@ -1768,7 +1707,6 @@ def _merge_with_mergify(
                 return sha
             raise closed[0]
         if not confirmed and not requested:
-            _prequeue_size_budget(wt, config, pr, readiness, project=admit_by is None)
             if admit_by is not None and time.monotonic() > admit_by:
                 raise _AdmissionDeadline
             _require_receipt(wt, config, pr.head_sha)

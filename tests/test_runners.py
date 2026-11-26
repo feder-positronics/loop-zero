@@ -352,7 +352,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
     for index, diff in enumerate(diffs, 1):
         results.append(review_with(
             "codex", cwd=tmp_path, head=head, kind=kind, diff=diff, task_text=task,
-            review_context=context, chunk=(index, len(diffs)) if split else None,
+            review_context=context, chunk=(index, len(diffs)),
         ))
         override = next(arg for arg in _argv(fake_bin, "codex")
                         if arg.startswith("developer_instructions="))
@@ -362,7 +362,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
         assert json.loads(header)["head"] == head and json.loads(header)["task_text"] == task
         assert raw_diff == diff.encode()
 
-    proof = codex_evidence(merge_reviews(results) if split else results[0])
+    proof = codex_evidence(merge_reviews(results))
     assert proof["complete"]
     assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
 
@@ -389,9 +389,10 @@ def test_codex_version_probe(fake_bin, tmp_path, monkeypatch, version, failure):
         return original(argv, **kwargs)
 
     monkeypatch.setattr(_proc, "run", probe)
-    with pytest.raises(RunnerBadOutput, match="version probe failed"):
-        _review("codex", tmp_path)
-    assert not (fake_bin / "codex.stdin").exists()
+    result = _review("codex", tmp_path)
+    assert result.verdict == "approve"
+    assert result.provenance["cli_version"] is None
+    assert (fake_bin / "codex.stdin").exists()
 
 
 @pytest.mark.parametrize("runtime", [False, True], ids=["default", "explicit"])
@@ -894,6 +895,7 @@ def test_claude_settings_and_merged_calls_preserve_native_evidence(fake_bin, tmp
         result = _review("claude", tmp_path, model=model, effort=effort)
         assert result.provenance["requested_settings"] == [{"model": model, "effort": effort}]
         assert json.loads(result.raw) == envelope
+        assert runners.validate_runner_result(merge_reviews([result]))
         results.append(result)
     results[0].provenance.pop("requested_settings")
     merged = merge_reviews(results)
@@ -1103,6 +1105,15 @@ def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str, budg
     assert all(len(chunk.encode()) <= budget for chunk in chunks)
     assert any(f"{name}: deleted, 600 lines" in chunk for chunk in chunks)
     assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
+
+
+@pytest.mark.parametrize("extra,count", [(0, 1), (1, 2)])
+def test_split_diff_default_budget_is_200000_bytes(extra: int, count: int) -> None:
+    first = "diff --git a/a b/a\n+" + "x" * 99_000 + "\n"
+    second = "diff --git a/b b/b\n+"
+    second += "y" * (200_000 - len(first) - len(second) - 1 + extra) + "\n"
+    assert len((first + second).encode()) == 200_000 + extra
+    assert len(split_diff(first + second)) == count
 
 
 def test_split_diff_encodes_long_utf8_line_in_linear_work() -> None:

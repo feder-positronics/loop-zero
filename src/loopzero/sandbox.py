@@ -1,4 +1,4 @@
-"""Run checks in bwrap, which gives no CPU/memory quotas; ulimit is best-effort."""
+"""Run checks in bwrap, with best-effort resource limits from prlimit."""
 
 from __future__ import annotations
 
@@ -360,8 +360,8 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], com
         if alternate.startswith('"'):
             alternate = os.fsdecode(ast.literal_eval("b" + alternate))
         remedy = (f"Git object alternate {alternate!r} is not readable in the check sandbox. "
-                  "Create a standalone clone without --shared/--reference, then run "
-                  "loopzero start there and rerun loopzero check.")
+                  "Transfer this task branch to a standalone clone without --shared/--reference, "
+                  "restore .loopzero/task.md, and rerun loopzero check at the same commit.")
         command = ("/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"', "loopzero-alternate", alternate)
         try:
             result = _run_bwrap(config, worktree, prefix, command, timeout=GIT_TIMEOUT)

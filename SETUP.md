@@ -24,8 +24,10 @@
 
 Pin to a full commit SHA from `main` and upgrade by re-running with a new SHA.
 The `v0.4.x` tags refer to the retired tool.
-`loopzero --version` prints the installed revision. Never edit the installed
-package: a hotfix is a branch, a PR, and a reinstall from the merged SHA.
+`loopzero --version` prints the revision of a Git-URL install; the verified
+install below prints `unknown revision`, so record its checked-out SHA. Never
+edit the installed package: a hotfix is a branch, a PR, and a reinstall from
+the merged SHA.
 User-wide:
 
 ```sh
@@ -343,10 +345,12 @@ that base and creates the task worktree from it.
 
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
-$EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
+$EDITOR .loopzero/task.md             # fill Goal, Problem, Context and Acceptance
 ```
 
-Make and commit a change in the task worktree, then run `loopzero check` there.
+Make and commit a change in the task worktree, then run `loopzero check` there;
+for a long check suite, run `loopzero pr` first so the draft exists
+([step 2](core/CONTRACT.md#the-six-steps)).
 Afterward, `loopzero status` shows the next step and requires authenticated
 access to the configured GitHub repository even before a PR exists. See the
 [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) and
@@ -364,12 +368,14 @@ requires one. If you used the isolated install, run these from the task
 worktree with the `install_dir` from that recipe.
 Make a scratch clone standalone before queueing, for example with
 `git clone --no-local`. If a Git object alternate is outside the check sandbox,
-`loopzero check` refuses it after the slot wait and before any stage runs.
+`loopzero check` refuses it before any stage runs. Move the task branch and
+`.loopzero/task.md` to the standalone clone, then recheck the same commit.
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"
+loopzero pr      # open the draft before a long check
 loopzero check
-# After opening and reviewing the PR, keep this PATH for delivery.
+# After reviewing the PR, keep this PATH for delivery.
 loopzero ready --wait
 loopzero merge --wait
 ```

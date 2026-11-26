@@ -129,6 +129,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    suffix consisting only of verified base merges with a conflict. Isolated Git
    reconstructs the automatic merges to confirm the conflict. Unresolved
    blocking findings or a third recorded review rule out this allowance.
+   An empty base-merge delta cannot bypass unresolved blocking findings.
+   Without review coverage, readiness also shows outdated unresolved findings.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
@@ -232,10 +234,8 @@ text hunks for every file (overriding `-diff`, `binary` and NUL detection) and
 runs no external diff command or text conversion, so changed lines stay visible.
 Chunked review summarizes only files whose Git header reports a deletion.
 The runner probes the selected Codex binary with `--version` and records its
-stdout in runner provenance and the saved review receipt. A failed probe uses
-RunnerBadOutput and existing family fallback before model input. Successful
-probe output is accepted across CLI releases. Unsupported Claude options follow
-existing native failure handling.
+stdout in runner provenance and the saved review receipt when available.
+Unsupported Claude options follow existing native failure handling.
 Native defaults and read-only tools remain enabled. Neither reviewer loads
 instructions from the reviewed head, which the PR controls: Claude runs with
 `--setting-sources ""`, and Codex runs with `project_doc_max_bytes=0` (no
@@ -313,11 +313,7 @@ verdict before publication. Standalone evaluation performs its own PR reads.
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Hosted attestation uses the trusted workflow's base branch for candidate and
 source targets, queue status and integration tree verification.
-When delivery uses the existing size checker, local readiness and new Mergify
-requests evaluate a temporary integration with the freshly fetched target. The
-target supplies the checker and baseline. Existing requests continue to the
-queue wait path. Readiness and new queue requests without an admission deadline can project an
-advisory budget after a single known chain of queued predecessors.
+The size budget runs only as a sandboxed check stage and in queue candidate CI.
 A candidate lineage read that finds zero or several live batch matches is
 reread within the current attempt, under a shared deadline. Separately,
 candidate attestation restarts as a complete fresh attempt, inside its own
