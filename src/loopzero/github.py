@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
+from collections.abc import Iterator
 from urllib.parse import quote
 
 from loopzero import runners
@@ -440,9 +441,7 @@ def _gh_json(*args: str, token: str | None = None) -> object:
                       token=token or "") from None
 
 
-def _paged(endpoint: str, key: str = "check_runs") -> list:
-    """Collect a list endpoint page by page until a short page."""
-    items: list = []
+def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
     page = 1
     while True:
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
@@ -451,10 +450,15 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
             chunk = chunk.get(key)
         if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
-        items += chunk
+        yield from chunk
         if len(chunk) < PAGE:
-            return items
+            return
         page += 1
+
+
+def _paged(endpoint: str, key: str = "check_runs") -> list:
+    """Collect a list endpoint page by page until a short page."""
+    return list(_iter_paged(endpoint, key))
 
 
 def _with_file(content: str) -> Path:
@@ -827,21 +831,12 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     return lines, first_added
 
 
-def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: list[dict],
-                                findings: tuple[Finding, ...]) -> None:
-    paths = {entry["filename"] for entry in entries}
-    missing = next(
-        (finding.path for finding in findings
-         if finding.severity in BLOCKING and finding.path and finding.path not in paths),
-        None,
-    )
-    if missing is None:
-        return
+def _require_complete_file_list(repo: str, number: int, head_sha: str, count: int, missing: str) -> None:
     pr, detail = _pr_detail(repo, number)
     request = ("gh", "api", f"repos/{repo}/pulls/{number}/files")
     if pr.head_sha != head_sha:
         raise GhError(request, f"PR #{number} head moved from {head_sha[:12]} to {pr.head_sha[:12]}; rerun review")
-    if detail.get("changed_files") != len(paths):
+    if detail.get("changed_files") != count:
         raise GhError(request,
                       f"cannot place finding on PR #{number} at {missing!r}: "
                       f"GitHub's {PR_FILE_LIMIT:,}-file limit prevents verifying the complete file list")
@@ -849,20 +844,33 @@ def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: 
 
 def _diff_map(repo: str, number: int, head_sha: str,
               findings: tuple[Finding, ...]) -> tuple[dict[str, set[int]], dict | None]:
-    """Commentable lines per path, plus the anchor (first file with a hunk, first added line)."""
-    entries = _paged(f"repos/{repo}/pulls/{number}/files")
-    if len(entries) >= PR_FILE_LIMIT:
-        _require_complete_file_list(repo, number, head_sha, entries, findings)
+    """Read through the located findings and the first hunk needed for fallback."""
+    blocking = tuple(f for f in findings if f.severity in BLOCKING)
+    remaining = {f.path for f in findings if f.path and (f.line or f.severity in BLOCKING)}
     commentable: dict[str, set[int]] = {}
     anchor: dict | None = None
-    for entry in entries:
+    if not remaining and not blocking:
+        return commentable, anchor
+    count = 0
+    paths: set[str] = set()
+    for entry in _iter_paged(f"repos/{repo}/pulls/{number}/files"):
+        count += 1
+        path = entry["filename"]
+        paths.add(path)
         lines, first_added = _right_lines(entry.get("patch") or "")
-        if not lines:
-            continue
-        commentable[entry["filename"]] = lines
-        if anchor is None:
-            line = first_added if first_added is not None else min(lines)
-            anchor = {"path": entry["filename"], "line": line, "side": "RIGHT"}
+        if lines:
+            if path in remaining:
+                commentable[path] = lines
+            if anchor is None:
+                line = first_added if first_added is not None else min(lines)
+                anchor = {"path": path, "line": line, "side": "RIGHT"}
+        remaining.discard(path)
+        if not remaining and (not blocking or anchor is not None):
+            break
+    if count >= PR_FILE_LIMIT:
+        missing = next((f.path for f in blocking if f.path in remaining), None)
+        if missing is not None:
+            _require_complete_file_list(repo, number, head_sha, len(paths), missing)
     return commentable, anchor
 
 
@@ -875,8 +883,7 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
 def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
                     formats: list[tuple[str, ReviewSettingsLayout, bool]]) -> list[dict]:
     """Place findings once for all exact body formats used in read-back."""
-    commentable, anchor = (_diff_map(repo, number, head_sha, result.findings)
-                           if result.findings else ({}, None))
+    commentable, anchor = _diff_map(repo, number, head_sha, result.findings)
     comments: list[dict] = []
     loose: list[Finding] = []
     for f in result.findings:
