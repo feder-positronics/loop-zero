@@ -813,7 +813,7 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     lines: set[int] = set()
     first_added: int | None = None
     current = None
-    for raw in patch.splitlines():
+    for raw in patch.removesuffix("\n").split("\n"):
         hunk = _HUNK_RE.match(raw)
         if hunk:
             current = int(hunk.group(1))
