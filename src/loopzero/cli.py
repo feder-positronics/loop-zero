@@ -822,12 +822,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
     token = _refresh_publisher_token(token, publisher)
     with github.pr_lock(config.repo, pr.number):
-        reviews = _pr_reviews(config.repo, pr.number)
-        allowed, _ = _decide_kind(
-            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
-        )
-        if allowed != kind:
-            raise CliError("review round changed during publication; run loopzero review again")
+        _require_open_review_round(config, pr, head, kind)
         try:
             github.post_review(
                 config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
@@ -859,6 +854,15 @@ def _finish_review(config: Config, pr: github.PR, result: ReviewResult) -> int:
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
+
+
+def _require_open_review_round(config: Config, pr: github.PR, head: str, kind: str) -> None:
+    markers = _pr_markers(_pr_reviews(config.repo, pr.number), head, config.review_publishers,
+                          repo=config.repo, number=pr.number)
+    if any(marker.kind == kind and marker.head == head for marker in markers):
+        raise CliError(f"the {kind} review round is already taken; run loopzero ready")
+    if _decide_kind(markers, head)[0] != kind:
+        raise CliError("review round changed during publication; run loopzero review again")
 
 
 def _refresh_publisher_token(token: str, publisher: str) -> str:

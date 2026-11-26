@@ -1361,7 +1361,7 @@ def test_overlapping_review_dispatches_and_publishes_once(
     monkeypatch.setattr(cli, "_run_review", overlap)
     code, _, err = run(capsys, "review")
     if separate_checkout:
-        assert code == 1 and "already has a primary review" in err, overlapping
+        assert code == 1 and "primary review round is already taken" in err, overlapping
         assert len(dispatched) == 2 and overlapping[0][0] == 0
     else:
         assert code == 0 and len(dispatched) == 1
@@ -4829,3 +4829,14 @@ def test_cross_checkout_check_refresh_keeps_review_summary(wt, repo, head, monke
         check.result(timeout=10)
     assert cli._CHECKS_START in body and "Keep this prose" in body
     assert f"- primary, claude, {head[:12]}, approve" in body
+
+
+@pytest.mark.parametrize("same_head", [False, True])
+def test_final_review_round_check_distinguishes_heads(wt, gh, head, same_head):
+    cfg = config.load(wt / "workflow.toml")
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": LOGIN}}})
+    gh.respond(reviews_key(), [rev(head if same_head else "a" * 40, "primary")])
+    expected = "round is already taken" if same_head else "round changed during publication"
+    with pytest.raises(cli.CliError, match=expected):
+        cli._require_open_review_round(cfg, pr, head, "primary")
