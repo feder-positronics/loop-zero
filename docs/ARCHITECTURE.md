@@ -64,7 +64,8 @@ a new persistent store.
 
 ## Delivery and feedback
 
-The [CLI](../src/loopzero/cli.py) implements the contract's
+The [console entry point](../src/loopzero/_cli_entry.py) parses arguments before
+loading the delivery [commands](../src/loopzero/cli.py), which implement the contract's
 [six steps](../core/CONTRACT.md#the-six-steps):
 
 1. `start` creates an isolated worktree and task branch from the configured base.
