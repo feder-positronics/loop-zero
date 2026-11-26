@@ -5,13 +5,14 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -141,20 +142,20 @@ _CREDENTIAL_TOKEN_RE = re.compile(
 
 
 @contextmanager
-def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False):
+def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False, check_on_exit: bool = True):
     """Share a monotonic budget across reads, including any retries."""
     previous = _read_scope.get()
     deadline = min(previous[0], deadline) if previous else deadline
     scope = _read_scope.set((deadline, token, retry))
     try:
         yield
-        read_timeout(0)
+        if check_on_exit:
+            read_timeout(0)
     finally:
         _read_scope.reset(scope)
 
 
-def read_timeout(limit: float, *, scoped: bool = True) -> float:
-    """Cap an I/O timeout or retry delay to the active read budget."""
+def read_timeout(limit: float = math.inf, *, scoped: bool = True) -> float:
     scope = _read_scope.get() if scoped else None
     if scope is None:
         return limit
@@ -1428,6 +1429,7 @@ def merged_sha(
     state = view.get("state")
     if merged and state == "closed":
         if isinstance(sha := view.get("merge_commit_sha"), str) and re.fullmatch(r"[0-9a-f]{40}", sha):
+            read_timeout(0)
             return sha
     elif not merged and state == "open":
         if check_hold and (hold := merge_hold(number, _pr_labels(view))):
@@ -1458,65 +1460,36 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
     return queued or bool(auto)
 
 
-def merge(
-    repo: str, number: int, strategy: str, head_sha: str, *, observation_deadline: float | None = None,
-) -> str | None:
-    """Merge PR `number` at exactly `head_sha` and return the verified merge SHA.
-
-    Returns None when the base branch uses a merge queue and GitHub accepted the PR
-    into it: the merge will land later, and the caller must verify on a later run.
-    """
+def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
+    """Merge at exactly this head, returning None if GitHub queued the PR."""
     if strategy not in ("squash", "merge", "rebase", "queue"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
     # A merge queue owns the method; gh rejects an explicit --squash/--merge/--rebase.
     method = () if strategy == "queue" else (f"--{strategy}",)
-    argv = (
-        "pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha,
-    )
-    def observation():
-        return (bounded_reads(observation_deadline, token=None, retry=True)
-                if observation_deadline is not None else nullcontext())
-
-    if strategy == "queue":
-        with observation():
-            if merge_pending(repo, number, head_sha):
-                return None
+    argv = ("pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha)
+    if strategy == "queue" and merge_pending(repo, number, head_sha):
+        return None
     write_error = None
     try:
         _gh(*argv, timeout=300)
     except (GhError, ProcTimeout, OSError) as exc:
         write_error = exc
-    # A synchronous merge already in flight still needs verification and cleanup.
-    if strategy != "queue" and (sha := merged_sha(repo, number, expected_head=head_sha)):
-        return sha
-    sha = None
+    # A direct merge already in flight still needs verification and cleanup.
+    scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
     try:
-        with observation():
-            sha = _verify_merge_request(repo, number, head_sha, argv, write_error, observe_landing=strategy == "queue")
-    except ReadDeadline:
-        if sha is None:
-            raise
-    return sha
-
-
-def _verify_merge_request(
-    repo: str, number: int, head_sha: str, argv: tuple[str, ...], write_error: Exception | None, *,
-    observe_landing: bool,
-) -> str | None:
-    if observe_landing:
         sha = merged_sha(repo, number, expected_head=head_sha)
-        read_timeout(0)
-        if sha:
-            return sha
+    finally:
+        _read_scope.reset(scope)
+    if sha:
+        return sha
     queue_error = None
     try:
         if merge_pending(repo, number, head_sha):
             return None
     except MergeFailed as exc:
         queue_error = exc
-    # The queue may have landed the PR between the two reads; look once more.
+    # The queue may have landed the PR between the two reads.
     sha = merged_sha(repo, number, expected_head=head_sha)
-    read_timeout(0)
     if sha:
         return sha
     if queue_error:

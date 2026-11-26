@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import http.client
 import json
-import math
 import os
 import re
 import signal
@@ -111,14 +110,6 @@ def _api_request(repo: str, suffix: str, method: str | None = None) -> urllib.re
     )
 
 
-def _wait_to_retry(delay: float, deadline: float | None) -> bool:
-    remaining = 5.0 if deadline is None else deadline - time.monotonic()
-    if delay >= remaining:
-        return False
-    _retry_sleep(delay)
-    return deadline is None or time.monotonic() < deadline
-
-
 def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | None:
     """GET one documented endpoint below this repository's fixed Mergify API path."""
     if not suffix.startswith("/") or "://" in suffix or ".." in suffix:
@@ -151,12 +142,14 @@ def _read_queue(request: urllib.request.Request, deadline: float | None) -> obje
         if not retry or not transient:
             raise MergifyError(detail)
         delay = max(2.0, wait or 0.0)
-        remaining = github.read_timeout(math.inf)
-        if wait is None and delay >= remaining:
-            _retry_sleep(remaining)
-            github.read_timeout(0)
-        if delay >= remaining or not _wait_to_retry(delay, deadline):
+        remaining = github.read_timeout() if deadline is not None else github.read_timeout(5.0)
+        if delay >= remaining:
+            if wait is None:
+                _retry_sleep(remaining)
+                github.read_timeout(0)
             raise MergifyError(f"{detail}; retry delay exceeds the wait budget")
+        _retry_sleep(delay)
+        github.read_timeout(0)
         retry = False
 
 

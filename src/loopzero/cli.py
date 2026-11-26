@@ -13,7 +13,6 @@ import dataclasses
 import fcntl
 import hashlib
 import json
-import math
 import os
 import random
 import re
@@ -1564,31 +1563,18 @@ def _wait_for_checks(
     return None
 
 
-def _queue_wait(
-    deadline: float, poll: Callable[[float], str | None], *,
-    bounded: bool, timeout_notice: str = "",
-) -> str | None:
+def _queue_wait(deadline: float, poll: Callable[[float], str | None], *, bounded: bool) -> str | None:
     if not bounded:  # Explicit --wait=0 still observes once.
         return poll(0)
-    sha = None
-    reported_timeout = False
-    try:
-        with github.bounded_reads(deadline, token=None, retry=True):
-            remaining = github.read_timeout(math.inf)
-            try:
-                sha = poll(remaining)
-                reported_timeout = sha is None
-            except (LoopZeroError, github.GhError, _proc.ProcTimeout):
-                github.read_timeout(0)
-                raise
-    except github.ReadDeadline:
-        if sha is None and timeout_notice and not reported_timeout:
-            print(timeout_notice)
-    return sha
+    with github.bounded_reads(deadline, token=None, retry=True, check_on_exit=False):
+        try:
+            return poll(github.read_timeout())
+        except (LoopZeroError, github.GhError, _proc.ProcTimeout):
+            github.read_timeout(0)
+            raise
 
 
 def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str | None:
-    """Merge SHA if landed; a closed-unmerged read is held as not final."""
     try:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
     except github.ClosedUnmerged as exc:
@@ -1606,16 +1592,14 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
     closed: list[github.GhError] = []
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
     with suppress(github.ReadDeadline):
-        for _ in _poll_until(started, timeout, bounded=bool(timeout)):
-            sha = _landed(config, pr, closed)
-            if sha:
+        for _ in _poll_until(started, timeout, bounded=True):
+            if sha := _landed(config, pr, closed):
                 return sha
-            if not github.merge_pending(config.repo, pr.number, pr.head_sha):
-                sha = _landed(config, pr, closed)
-                if sha:
-                    return sha
-                if closed:
-                    continue
+            if github.merge_pending(config.repo, pr.number, pr.head_sha):
+                continue
+            if sha := _landed(config, pr, closed):
+                return sha
+            if not closed:
                 raise CliError(f"PR #{pr.number} left the merge queue unmerged")
     _report_closed_observation(closed)
     return None
@@ -1623,34 +1607,32 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
 
 def _report_closed_observation(closed: list[github.GhError]) -> None:
     if closed:
-        try:
+        with suppress(github.ReadDeadline):
             github.read_timeout(0)
-        except github.ReadDeadline:
-            print(f"last queue observation: {closed[0]}")
-        else:
             raise closed[0]
+        print(f"last queue observation: {closed[0]}")
 
 
 def _merge_and_follow(
     config: Config, pr: github.PR, deadline: float | None, admit_by: float | None,
 ) -> str | None:
-    try:
-        sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha, observation_deadline=admit_by)
-    except github.ReadDeadline:
-        return None
-    if sha is None and deadline is not None:
-        return _queue_wait(deadline, partial(_wait_for_merge, config, pr), bounded=admit_by is not None)
-    return sha
+    merge = partial(github.merge, config.repo, pr.number, config.merge_strategy, pr.head_sha)
+    if deadline is None:
+        return merge()
+    with suppress(github.ReadDeadline):
+        return _queue_wait(deadline, lambda remaining: merge() or _wait_for_merge(config, pr, remaining),
+                           bounded=admit_by is not None)
+    return None
 
 
 def _mergify_timeout_detail(
-    config: Config, pr: github.PR, queue: str, state: mergify.Membership | None, *, query_report: bool,
+    config: Config, pr: github.PR, queue: str, state: mergify.Membership | None,
 ) -> str:
     if state is None:
         report = None
-        if query_report:
-            with suppress(github.GhError):
-                _, _, report = mergify.request_status(config.repo, pr.number, pr.head_sha, queue)
+        with suppress(github.GhError):
+            github.read_timeout(0)
+            _, _, report = mergify.request_status(config.repo, pr.number, pr.head_sha, queue)
         return f"waiting for admission to Mergify queue {queue}. " + (
             f"Mergify report: {report}" if report else "Check the PR for Mergify's admission report."
         )
@@ -1708,9 +1690,7 @@ def _mergify_departure(
     raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {MERGIFY_REQUEUE}")
 
 
-def _wait_for_mergify(
-    config: Config, pr: github.PR, timeout: float, confirmed: bool
-) -> str | None:
+def _wait_for_mergify(config: Config, pr: github.PR, timeout: float, confirmed: bool) -> str | None:
     """Follow one exact source head from request through confirmed membership to merge."""
     started = time.monotonic()
     closed: list[github.GhError] = []
@@ -1719,7 +1699,7 @@ def _wait_for_mergify(
     state = None
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     deadline = started + timeout if timeout else None
-    polls = _poll_until(started, timeout, bounded=bool(timeout), admitted=lambda: confirmed)
+    polls = _poll_until(started, timeout, bounded=True, admitted=lambda: confirmed)
     with suppress(github.ReadDeadline):
         for _ in polls:
             sha = _landed(config, pr, closed)
@@ -1740,7 +1720,7 @@ def _wait_for_mergify(
                     return sha
     _report_closed_observation(closed)
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
-    print(_mergify_timeout_detail(config, pr, queue, state, query_report=not timeout))
+    print(_mergify_timeout_detail(config, pr, queue, state))
     return None
 
 
@@ -1805,7 +1785,7 @@ def _merge_with_mergify(
     if deadline is not None:
         return _queue_wait(
             deadline, lambda remaining: _wait_for_mergify(config, pr, remaining, confirmed),
-            bounded=admit_by is not None, timeout_notice=f"timed out waiting for Mergify to land PR #{pr.number}",
+            bounded=admit_by is not None,
         )
     state_name = "confirmed in" if confirmed else "requested from"
     print(f"PR #{pr.number} {state_name} Mergify queue {queue}; {_FOLLOW_QUEUE}")
