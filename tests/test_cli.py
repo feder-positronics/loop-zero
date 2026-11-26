@@ -887,8 +887,7 @@ def test_check_selects_and_reports_workflow(wt, repo, tmp_path, capsys, policy):
         older_base = head_of(repo)
         advance_checks(repo, ["echo current-base"])
         git(wt, "tag", "origin/main", older_base)
-        expected = (f"checks pinned to origin/main@{head_of(repo)}", "running: echo current-base")
-        absent = "running: echo ok"
+        expected, absent = (f"checks pinned to origin/main@{head_of(repo)}", "running: echo current-base"), "running: echo ok"
     elif policy == "release":
         release_policy = WORKFLOW.replace('base = "main"', 'base = "release"')
         commit_file(repo, "workflow.toml", release_policy, "select release")
@@ -906,6 +905,7 @@ def test_check_selects_and_reports_workflow(wt, repo, tmp_path, capsys, policy):
     out, _ = expect_cli(capsys, 0, *options, "check", stderr="")
     assert_contains(out.splitlines(), *expected)
     assert absent is None or absent not in out
+    assert not options or out.startswith("checks are unpinned because --config was provided\n")
 
 
 @pytest.mark.parametrize("command", ["check", "review", "ready", "merge"])
@@ -927,9 +927,8 @@ def test_primary_review_requires_merge_base(wt, repo, gh, fake_bin, tmp_path, mo
     if shallow:
         git(wt, "push", "-q", "origin", "HEAD:refs/heads/lz/t1")
         checkout = tmp_path / "shallow"
-        origin = tmp_path / "origin.git"
         git(repo, "clone", "-q", "--depth=1", "--no-single-branch", "--branch", "lz/t1",
-            origin.as_uri(), str(checkout))
+            (tmp_path / "origin.git").as_uri(), str(checkout))
         git(checkout, "remote", "set-head", "origin", "main")
         (checkout / ".git/info/exclude").write_text(".loopzero/\n")
         shutil.copytree(wt / ".loopzero", checkout / ".loopzero")
@@ -1502,6 +1501,7 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
     else:
         monkeypatch.setattr(cli, "_run_review", change_body_during_review)
     _, err = expect_cli(capsys, 0, "review", stdout_contains=(f"primary review by claude on {head[:12]}: approve",))
+    posted_review(gh)
     post_index = next(i for i, call in enumerate(gh.calls) if call["argv"][:2] == post_key().split())
     assert gh.calls[post_index + 1]["argv"] == [*detail_key.split(), "--include"]
     patches = [call for call in gh.calls if "PATCH" in call["argv"]]
