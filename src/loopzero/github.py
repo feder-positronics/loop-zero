@@ -32,6 +32,7 @@ MARKER_RE = re.compile(
     r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
 )
 PAGE = 100
+PR_FILE_LIMIT = 3_000
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
 RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
 CHECK_SUITE_LIMIT = 1_000
@@ -48,7 +49,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id isResolved isOutdated path line
-          comments(first: 1) { nodes { body } }
+          comments(first: 1) { nodes { body } pageInfo { hasNextPage endCursor } }
         }
       }
     }
@@ -541,8 +542,70 @@ def _pr_detail(repo: str, number: int) -> tuple[PR, dict]:
     return pr, data
 
 
+def _matches_branch(source: dict, repo: str, branch: str) -> bool:
+    source_repo = source.get("repo")
+    name = source_repo.get("full_name") if isinstance(source_repo, dict) else None
+    return source.get("ref") == branch and isinstance(name, str) and name.casefold() == repo.casefold()
+
+
+def _branch_head(repo: str, branch: str) -> str | None:
+    endpoint = f"repos/{repo}/branches/{quote(branch, safe='')}"
+    try:
+        ref = api_get(endpoint)
+    except GhError as exc:
+        if re.search(r"\bHTTP 404\b", exc.tail):
+            return None
+        raise
+    commit = ref.get("commit") if isinstance(ref, dict) else None
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise GhError(("gh", "api", endpoint), "invalid remote branch SHA")
+
+    return sha
+
+
+def _commit_branch_prs(repo: str, branch: str) -> tuple[str, list[dict]]:
+    sha = _branch_head(repo, branch)
+    if sha is None:
+        return "", []
+
+    matches: list[dict] = []
+    for page in range(1, 101):
+        endpoint = f"repos/{repo}/commits/{sha}/pulls?per_page={PAGE}&page={page}"
+        rows = api_get(endpoint)
+        if not isinstance(rows, list) or len(rows) > PAGE:
+            raise GhError(("gh", "api", endpoint), "invalid commit PR page")
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("head"), dict):
+                raise GhError(("gh", "api", endpoint), "invalid commit PR head")
+            if _matches_branch(row["head"], repo, branch):
+                if (row.get("state") not in ("open", "closed")
+                        or type(row.get("number")) is not int or row["number"] < 1
+                        or not isinstance(row.get("created_at"), str)):
+                    raise GhError(("gh", "api", endpoint), "invalid commit PR")
+                matches.append(row)
+        if len(rows) < PAGE:
+            return endpoint, matches
+    raise GhError(("gh", "api", endpoint), "commit PRs exceed 100 pages")
+
+
+def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state: str) -> PR:
+    pr, detail = _pr_detail(repo, number)
+    state_matches = pr.state == state or (state == "CLOSED" and pr.state == "MERGED")
+    if not state_matches or not _matches_branch(detail["head"], repo, branch):
+        raise GhError(("gh", "api", endpoint), "PR changed during branch lookup")
+    return pr
+
+
 def pr_for_branch(repo: str, branch: str, *, open_only: bool = False) -> PR | None:
     """Return the open PR, falling back to the most recent closed PR unless open_only."""
+    endpoint, matches = _commit_branch_prs(repo, branch)
+    open_matches = [row for row in matches if row["state"] == "open"]
+    if open_matches:
+        newest = max(open_matches, key=lambda row: (row["created_at"], row["number"]))
+        return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
+
+    # A closed association cannot rule out an open PR or newer closed history.
     owner = repo.split("/", 1)[0]
     head = quote(f"{owner}:{branch}", safe="")
     for state in (("open",) if open_only else ("open", "closed")):
@@ -555,56 +618,55 @@ def pr_for_branch(repo: str, branch: str, *, open_only: bool = False) -> PR | No
             number = rows[0].get("number") if isinstance(rows[0], dict) else None
             if type(number) is not int or number < 1:
                 raise GhError(("gh", "api", endpoint), "invalid PR number in list")
-            pr, detail = _pr_detail(repo, number)
-            source = detail.get("head") or {}
-            source_repo = source.get("repo") or {}
-            source_name = source_repo.get("full_name") if isinstance(source_repo, dict) else None
-            if (source.get("ref") != branch or
-                    not isinstance(source_name, str) or source_name.casefold() != repo.casefold()
-                    or (pr.state == "OPEN") != (state == "open")):
-                raise GhError(("gh", "api", endpoint), "PR changed during branch lookup")
-            return pr
+            return _confirm_branch_pr(repo, branch, endpoint, number, state.upper())
     return None
+
+
+def _closed_history_number(repo: str, branch: str, endpoint: str, row: dict,
+                           seen: set[int]) -> int:
+    try:
+        number, merged_at = row["number"], row["merged_at"]
+        source = row["head"]
+        if (type(number) is not int or number < 1 or number in seen
+                or row["state"] != "closed" or not isinstance(source, dict)
+                or not _matches_branch(source, repo, branch)):
+            raise ValueError("invalid or repeated closed PR")
+        if merged_at is not None and (
+            not isinstance(merged_at, str) or datetime.fromisoformat(merged_at).tzinfo is None
+        ):
+            raise ValueError("invalid merged_at")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GhError(("gh", "api", endpoint), "invalid or repeated closed PR history") from exc
+    return number
 
 
 def merged_pr_for_branch(repo: str, branch: str) -> PR | None:
     """Prove completion, or read the complete closed history before publication."""
     head = quote(f"{repo.split('/', 1)[0]}:{branch}", safe="")
+    commit_endpoint, matches = _commit_branch_prs(repo, branch)
     seen: set[int] = set()
-    for page in range(1, 101):
-        endpoint = (f"repos/{repo}/pulls?state=closed&head={head}"
-                    f"&sort=created&direction=desc&per_page={PAGE}&page={page}")
-        rows = api_get(endpoint)
-        if not isinstance(rows, list) or len(rows) > PAGE:
+    for page in range(101):
+        if page == 0:
+            endpoint = commit_endpoint
+            rows = [row for row in matches if row["state"] == "closed"]
+        else:
+            endpoint = (f"repos/{repo}/pulls?state=closed&head={head}"
+                        f"&sort=created&direction=desc&per_page={PAGE}&page={page}")
+            rows = api_get(endpoint)
+        if not isinstance(rows, list) or (page and len(rows) > PAGE):
             raise GhError(("gh", "api", endpoint), "invalid closed PR history page")
         for row in rows:
-            try:
-                number, merged_at = row["number"], row["merged_at"]
-                source = row["head"]
-                source_name = source["repo"]["full_name"]
-                if (type(number) is not int or number < 1 or number in seen
-                        or row["state"] != "closed" or source["ref"] != branch
-                        or not isinstance(source_name, str)
-                        or source_name.casefold() != repo.casefold()):
-                    raise ValueError("invalid or repeated closed PR")
-                if merged_at is not None:
-                    if not isinstance(merged_at, str):
-                        raise ValueError("invalid merged_at")
-                    if datetime.fromisoformat(merged_at).tzinfo is None:
-                        raise ValueError("merged_at lacks timezone")
-            except (KeyError, TypeError, ValueError) as exc:
-                raise GhError(("gh", "api", endpoint), "invalid or repeated closed PR history") from exc
+            number = _closed_history_number(repo, branch, endpoint, row, seen)
             seen.add(number)
-            if merged_at is not None:
+            if row["merged_at"] is not None:
                 pr, detail = _pr_detail(repo, number)
-                source = detail["head"]
-                source_repo = source.get("repo")
-                if (pr.state != "MERGED" or source.get("ref") != branch
-                        or not isinstance(source_repo, dict)
-                        or str(source_repo.get("full_name", "")).casefold() != repo.casefold()):
+                if pr.state != "MERGED" or not _matches_branch(detail["head"], repo, branch):
                     raise GhError(("gh", "api", endpoint), "PR changed during completion lookup")
                 return pr
-        if len(rows) < PAGE:
+        if page == 0:
+            # A prior merge may belong to a different commit of this branch.
+            seen.clear()
+        elif len(rows) < PAGE:
             return None
     raise GhError(("gh", "api", endpoint), "closed PR history exceeds 100-page publication limit")
 
@@ -756,11 +818,35 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     return lines, first_added
 
 
-def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]:
+def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: list[dict],
+                                findings: tuple[Finding, ...]) -> None:
+    paths = {entry["filename"] for entry in entries}
+    missing = next(
+        (finding.path for finding in findings
+         if finding.severity in BLOCKING and finding.path and finding.path not in paths),
+        None,
+    )
+    if missing is None:
+        return
+    pr, detail = _pr_detail(repo, number)
+    request = ("gh", "api", f"repos/{repo}/pulls/{number}/files")
+    if pr.head_sha != head_sha:
+        raise GhError(request, f"PR #{number} head moved from {head_sha[:12]} to {pr.head_sha[:12]}; rerun review")
+    if detail.get("changed_files") != len(paths):
+        raise GhError(request,
+                      f"cannot place finding on PR #{number} at {missing!r}: "
+                      f"GitHub's {PR_FILE_LIMIT:,}-file limit prevents verifying the complete file list")
+
+
+def _diff_map(repo: str, number: int, head_sha: str,
+              findings: tuple[Finding, ...]) -> tuple[dict[str, set[int]], dict | None]:
     """Commentable lines per path, plus the anchor (first file with a hunk, first added line)."""
+    entries = _paged(f"repos/{repo}/pulls/{number}/files")
+    if len(entries) >= PR_FILE_LIMIT:
+        _require_complete_file_list(repo, number, head_sha, entries, findings)
     commentable: dict[str, set[int]] = {}
     anchor: dict | None = None
-    for entry in _paged(f"repos/{repo}/pulls/{number}/files"):
+    for entry in entries:
         lines, first_added = _right_lines(entry.get("patch") or "")
         if not lines:
             continue
@@ -780,7 +866,8 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
 def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
                     formats: list[tuple[str, ReviewSettingsLayout, bool]]) -> list[dict]:
     """Place findings once for all exact body formats used in read-back."""
-    commentable, anchor = _diff_map(repo, number) if result.findings else ({}, None)
+    commentable, anchor = (_diff_map(repo, number, head_sha, result.findings)
+                           if result.findings else ({}, None))
     comments: list[dict] = []
     loose: list[Finding] = []
     for f in result.findings:
@@ -888,10 +975,53 @@ def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
     ]
 
 
+_THREAD_REPLIES_QUERY = """
+query($thread: ID!, $after: String!) {
+  node(id: $thread) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $after) {
+        nodes { body viewerDidAuthor }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def _has_thread_reply(node: dict, reply: str) -> bool:
+    page = node["comments"].get("pageInfo", {})
+    while page.get("hasNextPage"):
+        data = _gh_json("api", "graphql", "-f", f"query={_THREAD_REPLIES_QUERY}",
+                        "-F", f"thread={node['id']}", "-f", f"after={page['endCursor']}")
+        try:
+            comments = data["data"]["node"]["comments"]
+            page = comments["pageInfo"]
+            if any(comment.get("viewerDidAuthor") is True and comment.get("body") == reply
+                   for comment in comments["nodes"]):
+                return True
+        except (KeyError, TypeError) as exc:
+            raise GhError(("resolve", node["id"]), "could not read thread replies") from exc
+    return False
+
+
 def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Finding:
-    """Reply in the thread of open finding `finding_id` and resolve it."""
-    for marker_id, thread_id, finding in open_findings(repo, number):
-        if marker_id == finding_id:
+    """Reply to a blocking finding, or resume an identical resolution."""
+    threads = _review_threads(repo, number, include_resolved=True)
+    for node in sorted(threads, key=lambda node: bool(node.get("isResolved"))):
+        finding = _parse_thread(node, None)
+        if finding is None:
+            continue
+        marker = MARKER_RE.search(node["comments"]["nodes"][0]["body"])
+        thread_id = node["id"]
+        if (marker.group("id") or thread_id) != finding_id:
+            continue
+        confirmed = _has_thread_reply(node, reply)
+        if node.get("isResolved"):
+            if confirmed:
+                return finding
+            continue
+        if not confirmed:
             # Two calls on purpose: fields of one mutation are not transactional, and a
             # thread must never be resolved unless its reply was confirmed.
             posted = _gh_json("api", "graphql", "-f", f"query={_REPLY_MUTATION}",
@@ -900,20 +1030,19 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Find
                 posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
             except (KeyError, TypeError) as exc:
                 raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
-            try:
-                response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
-                               "-F", f"thread={thread_id}", retry_idempotent=True)
-                thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
-                if thread["isResolved"] is not True:
-                    raise ValueError("GitHub did not return isResolved=true")
-            except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
-                raise GhError(
-                    ("resolve", finding_id),
-                    f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
-                    f"If its thread is still open on PR #{number}, resolve it there. "
-                    f"Do not rerun loopzero resolve (it could post the reply again).\n{exc}",
-                ) from exc
-            return finding
+        try:
+            response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
+                           "-F", f"thread={thread_id}", retry_idempotent=True)
+            thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
+            if thread["isResolved"] is not True:
+                raise ValueError("GitHub did not return isResolved=true")
+        except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
+            raise GhError(
+                ("resolve", finding_id),
+                f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
+                f"Retry loopzero resolve with the same reply on PR #{number}.\n{exc}",
+            ) from exc
+        return finding
     raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
 
 
@@ -945,6 +1074,10 @@ def open_blocking_findings(
 
 
 def _unresolved_threads(repo: str, number: int) -> list[dict]:
+    return _review_threads(repo, number)
+
+
+def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -> list[dict]:
     owner, name = repo.split("/", 1)
     after: str | None = None
     found: list[dict] = []
@@ -960,17 +1093,12 @@ def _unresolved_threads(repo: str, number: int) -> list[dict]:
             threads = data["data"]["repository"]["pullRequest"]["reviewThreads"]
             nodes = threads["nodes"]
             page = threads["pageInfo"]
-            found += [node for node in nodes if not node.get("isResolved")]
+            found += [node for node in nodes if include_resolved or not node.get("isResolved")]
             if not page["hasNextPage"]:
                 return found
             after = page["endCursor"]
         except (KeyError, TypeError) as exc:
             raise _not_found(number, exc) from exc
-
-
-def check_runs(repo: str, head_sha: str) -> dict[str, str]:
-    """Map signal name to state, using only the latest check run of each name."""
-    return _check_signals(repo, head_sha)[0]
 
 
 def _check_signals(

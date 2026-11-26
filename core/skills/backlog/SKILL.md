@@ -1,6 +1,6 @@
 ---
 name: backlog
-description: Recommend next work or report live GitHub backlog state through a read-only, evidence-backed issue and PR view.
+description: Inspect live GitHub issues and PRs read-only for next work, backlog state, delivery retrospectives or digests. Use retro for weekly workflow decisions.
 ---
 
 # Backlog

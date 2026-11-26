@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: Deliver one live GitHub issue through verified merge and closure or an explicit partial-delivery boundary; use only for work anchored to an issue.
+description: Own full delivery of a live GitHub issue through verified merge and closure or an explicit partial handoff.
 ---
 
 # Work Issue
@@ -30,7 +30,6 @@ blueprint. Include required completion in the closing delivery. A child issue
 does not own its parent's blueprint.
 Recheck collisions before publication and again before merge, rereading live
 acceptance, prior delivery and ownership. Reconcile changed state before proceeding.
-Follow the contract's owner queue route and merge authority.
 Review, CI and observable post-merge acceptance waits remain this task;
 neither bypass them nor start another issue.
 Before using [CI or observation-based acceptance](reference.md#acceptance-evidence)
