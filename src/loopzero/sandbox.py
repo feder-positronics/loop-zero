@@ -328,7 +328,7 @@ def _input_key(config: Config, worktree: Path, command: str, base: str, *,
     entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
     try:
         blobs = _input_blobs(config, worktree, tuple(path for paths in entries.values() for path in paths))
-    except (SandboxUnavailable, OSError):
+    except (SandboxUnavailable, _proc.ProcTimeout, OSError, ValueError):
         if not base:
             return None
         raise

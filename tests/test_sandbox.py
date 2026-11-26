@@ -792,10 +792,18 @@ def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case):
                for message in messages)
 
 
-def test_input_diagnostic_failure_does_not_block_dirty_check(git_repo, bwrap_log, fetched_base):
+@pytest.mark.parametrize("path", [":(bogus)README.md", "README\0.md", "README.md"])
+def test_input_diagnostic_failure_does_not_block_dirty_check(
+    git_repo, bwrap_log, fetched_base, monkeypatch, path,
+):
+    if path == "README.md":
+        def timed_out(*args):
+            raise sandbox._proc.ProcTimeout("input lookup timed out")
+
+        monkeypatch.setattr(sandbox, "_input_blobs", timed_out)
     (git_repo / "README.md").write_text("dirty\n")
     command = 'test "$(cat README.md)" = dirty'
-    config = make_config(checks=(command,), inputs={command: (":(bogus)README.md",)})
+    config = make_config(checks=(command,), inputs={command: (path,)})
     report = sandbox.run_checks(config, git_repo, status=lambda _: None)
     assert report.ok and report.dirty and report.results[0].command == command
 
