@@ -4466,10 +4466,10 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
     assert cli._wait_for_mergify(config, pr, 60 if confirmed else 360, confirmed=confirmed) == "e" * 40
     assert clock.sleeps == ([30, 30] if confirmed else [30, 60, 120, 30])
     assert set(configurations) == {(REPO, "main", "main", 60 if confirmed else 360)}
-    if confirmed:
-        assert len(reads_at_membership) > 1
-        assert all(current - previous == 1 for previous, current in
-                   itertools.pairwise(reads_at_membership))
+    assert len(configurations) == len(reads_at_membership) > 1
+    reads_per_poll = 1 if confirmed else 2
+    assert all(current - previous == reads_per_poll for previous, current in
+               itertools.pairwise(reads_at_membership))
 
 
 @pytest.mark.parametrize("outcome,jitter", [
