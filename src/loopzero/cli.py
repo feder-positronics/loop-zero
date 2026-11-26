@@ -258,9 +258,9 @@ def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
 ) -> github.Readiness:
+    config_mod.require_readiness(config)
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
-    config_mod.require_readiness(config)
     if reviews is None:
         reviews = _pr_reviews(config.repo, pr.number)
     publishers = config.review_publishers
@@ -1707,13 +1707,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     config_mod.require_readiness(config)
     reviews = _pr_reviews(config.repo, pr.number)
-    readiness = _readiness(wt, config, pr, head, reviews)
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         print("review:   none on this PR")
+    readiness = _readiness(wt, config, pr, head, reviews)
     print(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         print(f"  - {reason}")

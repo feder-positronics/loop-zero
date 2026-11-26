@@ -2417,6 +2417,18 @@ def test_ready_requires_explicit_ci_policy(wt, gh, capsys, head, required_ci):
             assert code == 1 and "required check 'checks' is failure" in out
 
 
+@pytest.mark.parametrize(("setting", "key"), [
+    (PUBLISHERS, "delivery.review_publishers"),
+    ('required_ci = ["checks"]', "checks.required_ci"),
+])
+def test_held_pr_reports_incomplete_readiness_policy(wt, gh, capsys, head, setting, key):
+    publish_workflow(wt, WORKFLOW.replace(setting, ""))
+    arm_pr(gh, head, labels=[{"name": "hold"}])
+    for command in ("ready", "merge"):
+        code, _, err = run(capsys, command)
+        assert code == 1 and f"origin/main:workflow.toml: {key}" in err
+
+
 def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
