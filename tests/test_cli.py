@@ -3280,15 +3280,30 @@ def test_open_finding_blocks_delivery(wt, gh, capsys, head, command, conclusion,
     assert all(c["argv"][:2] != ["pr", command] for c in gh.calls)
 
 
+def lose_native_merge_reply(monkeypatch):
+    original = github._gh
+
+    def transport(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if args[:2] == ("pr", "merge"):
+            raise github.ProcTimeout("lost native merge reply", "")
+        return result
+
+    monkeypatch.setattr(github, "_gh", transport)
+
+
+@pytest.mark.parametrize("lost_reply", [False, True])
 @pytest.mark.parametrize("branch,changed", [
     *((branch, False) for branch in TASK_BRANCHES), ("lz/t1", True),
 ])
 def test_merge_prints_sha_and_cleans_up(
-    wt: Path, repo: Path, gh: FakeGh, capsys, changed, head, branch
+    wt: Path, repo: Path, gh: FakeGh, capsys, changed, head, branch, monkeypatch, lost_reply
 ) -> None:
     git(wt, "branch", "-m", branch)
     arm_squash_merge(gh, head, wt, merge_json(state='MERGED', head='f' * 40 if changed else head_of(wt), sha='c' * 40), branch=branch)
     gh.respond("api -X", "")
+    if lost_reply:
+        lose_native_merge_reply(monkeypatch)
     code, out, err = run(capsys, "merge")
     out = without_accepted_receipt(out)
     if changed:
@@ -3856,13 +3871,16 @@ def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
         assert not err and f"PR #7 was already merged as {'e' * 12}" in out and out.endswith("e" * 40 + "\n")
 
 
-def native_queue(queued):
-    return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued}}}}
+def native_queue(queued, head):
+    return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued, "headRefOid": head}}}}
 
 
-def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_squash_merge(gh, head, wt, merge_json(state='OPEN', head=head_of(wt), sha=None))
-    gh.respond("api graphql", threads_json(), native_queue(True))
+@pytest.mark.parametrize("lost_reply", [False, True])
+def test_merge_queued_prints_and_keeps_worktree(wt, gh, capsys, head, monkeypatch, lost_reply):
+    arm_squash_merge(gh, head, wt, merge_json(state='OPEN', head=head, sha=None))
+    gh.respond("api graphql", threads_json(), native_queue(True, head))
+    if lost_reply:
+        lose_native_merge_reply(monkeypatch)
     expect_cli(capsys, 0, "merge", stderr="", stdout_contains=("queued for merge into main",),
                stdout_endswith="next: loopzero merge --wait follows the queue, verifies and cleans up\n")
     assert wt.exists()
@@ -3992,7 +4010,7 @@ def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
                      merge_json(state="MERGED", head=head, sha="e" * 40) if landed else open_pr]
     gh.append(f"api repos/{REPO}/pulls/7", *snapshots)
     ejected = outcome in {"ejected", "landed-on-ejection"}
-    gh.respond("api graphql", threads_json(), native_queue(True), native_queue(not ejected))
+    gh.respond("api graphql", threads_json(), native_queue(True, head), native_queue(not ejected, head))
     gh.respond("api -X", "")
     poll_clock(monkeypatch, jitter=1.0)
     wait = 0 if ejected else 60
