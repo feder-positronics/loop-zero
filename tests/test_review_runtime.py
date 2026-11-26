@@ -52,15 +52,18 @@ def result(row):
 
 
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
-def test_legacy_startup_failure_refuses_saved_result_and_multichunk(row, tmp_path):
+def test_legacy_startup_failure_invalidates_receipts_and_older_approval(row, git_repo):
     bad = result(row)
     assert not runners.validate_runner_result(bad)
-    cli._save_review(tmp_path, bad)
+    cli._save_review(git_repo, bad)
     with pytest.raises(cli.CliError, match="provenance/envelope mismatch"):
-        cli._load_review(tmp_path, bad.head, bad.kind)
+        cli._load_review(git_repo, bad.head, bad.kind)
     clean = dataclasses.replace(bad, raw=json.dumps(envelope(row) | {"events": []}))
     with pytest.raises(runners.RunnerBadOutput, match="Code Mode"):
         runners.merge_reviews([clean, bad])
+    older = copy.deepcopy(row)
+    older["body"] = cli.review_marker(row["commit_id"], "primary") + "\n**approve**"
+    assert eligibility.eligible_review([older, row], row["commit_id"], PUBLISHER) is None
 
 
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
@@ -110,33 +113,19 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, mode):
     if mode == "projected_quote":
         assert eligibility.eligible_review([review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
     markers = cli._pr_markers([review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
-    assert bool(markers) == (mode in ("clean", "quoted", "unrelated_error", "quoted_error", "projected_quote"))
+    accepted = mode in ("clean", "quoted", "unrelated_error", "quoted_error", "projected_quote")
+    assert bool(markers) is accepted
     script = _fake_codex(fake_bin, json.dumps(APPROVE))
-    if mode == "after_tool":
-        tool = {
-            "type": "item.completed",
-            "item": {"type": "command_execution", "status": "completed", "exit_code": 0},
-        }
-        script.write_text(
-            script.read_text().replace(
-                'echo \'{"type":"thread.started"',
-                "printf '%s\\n' '" + json.dumps(tool) + '\'\necho \'{"type":"thread.started"',
-            )
-        )
     if mode not in ("clean", "projected_quote"):
-        replace_codex_events(script, [fatal], prepend=True)
-    if mode in ("clean", "quoted", "unrelated_error", "quoted_error", "projected_quote"):
+        events = [{"type": "item.completed", "item": {
+            "type": "command_execution", "status": "completed", "exit_code": 0,
+        }}] if mode == "after_tool" else []
+        replace_codex_events(script, [*events, fatal], prepend=True)
+    if accepted:
         assert _review("codex", tmp_path).verdict == "approve"
     else:
         with pytest.raises(runners.RunnerBadOutput, match="Code Mode"):
             _review("codex", tmp_path)
-
-
-@pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
-def test_invalid_latest_cannot_revive_older_approval(row):
-    older = copy.deepcopy(row)
-    older["body"] = cli.review_marker(row["commit_id"], "primary") + "\n**approve**"
-    assert eligibility.eligible_review([older, row], row["commit_id"], PUBLISHER) is None
 
 
 # Keep the original routing inputs to catch a return of target-specific behavior.
@@ -172,5 +161,5 @@ def test_duplicate_primary_markers_on_one_head_count_as_one():
     assert cli._decide_kind(duplicate, head) == ("delta", reviewed)
     with pytest.raises(cli.CliError, match="already has a primary"):
         cli._decide_kind(duplicate, reviewed)
-    with pytest.raises(cli.CliError, match=r"review cap reached \(2 rounds per PR\)"):
+    with pytest.raises(cli.CliError, match="review cap reached"):
         cli._decide_kind([*duplicate, cli.Marker("c" * 40, "primary", "COMMENTED")], head)

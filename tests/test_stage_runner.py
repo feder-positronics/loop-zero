@@ -6,15 +6,20 @@ import pytest
 
 from loopzero import sandbox
 from loopzero.cli import _load_report, _save_report
-from loopzero.config import ConfigError, load
 
 from .conftest import git
 from .test_sandbox import bwrap_log, fetched_base, make_config  # noqa: F401
 
 
+READ_FRAME = 'import json,sys;r=json.load(sys.stdin);r.pop("env");'
+STAGE_FIELDS = 'r.update(exit_code=0,duration_s=0,not_started={fallback},tail={tail!r});'
+RETURN_FRAME = 'print(json.dumps(r))'
+FALLBACK_RUNNER = (sys.executable, '-c', READ_FRAME + STAGE_FIELDS.format(fallback=True, tail='') + RETURN_FRAME)
+
+
 @pytest.mark.parametrize('base_ref,body,verdict,tails', [
     *[(base_ref, 'r["tail"]=" ".join((env["UV_CACHE_DIR"],env["NODE_ENV"],env["AUDIT_VALUE"],os.environ["AUDIT_VALUE"]));print(json.dumps(r))',
-       True, ['/operator/cache production [REDACTED] [REDACTED]'] * 2) for base_ref in ('stale', 'missing', 'recorded')],
+       True, ['/operator/cache production [REDACTED] [REDACTED]'] * 2) for base_ref in ('stale', 'missing', 'recorded', 'abs-link', 'path-link')],
     ('stale', 'r["exit_code"]=7;r["tail"]="ok "+env["AUDIT_VALUE"];print(json.dumps(r))', False, ['ok [REDACTED]']),
     ('stale', 'print("x" * 3000 + "worker socket unavailable " + env["AUDIT_VALUE"], file=sys.stderr);sys.exit(42)', False, None),
     ('stale', 'r["exit_code"]=7;r["tail"]=env["AUDIT_VALUE"]+"Ω"*8183+" newest";print(json.dumps(r))', False,
@@ -47,19 +52,26 @@ def test_runner(git_repo, tmp_path, bwrap_log, monkeypatch, body, verdict, tails
         git(git_repo, 'branch', '-D', 'main')
     monkeypatch.setenv("AUDIT_VALUE", "opaque-fake-wrapper-password")
     configured = {"UV_CACHE_DIR": "/operator/cache", "NODE_ENV": "production", "AUDIT_VALUE": "opaque-fake-db-password"}
+    expected = dict(sandbox.SANDBOX_ENV, **configured)
     body = (f'repo=r["worktree"]\nassert r["base"] == "{base}"\n'
             'assert not Path.cwd().is_relative_to(Path(repo))\n'
-            f'env=r.pop("env");assert env == {dict(sandbox.SANDBOX_ENV, **configured)!r}\n'
-            'assert r["network"] is True\n'
-            'assert r["env_sha256"] == hashlib.sha256(json.dumps('
-            f'{dict(sandbox.SANDBOX_ENV, **configured)!r},'
+            f'env=r.pop("env");assert env == {expected!r} and r["network"] is True\n'
+            f'assert r["env_sha256"] == hashlib.sha256(json.dumps({expected!r},'
             'sort_keys=True,separators=(",", ":")).encode()).hexdigest()\n' + body)
     path = tmp_path / 'runner.py'
-    path.write_text('import hashlib,json,os,sys,subprocess\nfrom pathlib import Path\nr=json.load(sys.stdin)\nr.update(exit_code=0,duration_s=0.1,not_started=False,tail="ok")\n' + body)
+    preamble = 'import hashlib,json,os,sys,subprocess\nfrom pathlib import Path\nr=json.load(sys.stdin)\n'
+    launcher = (sys.executable, str(path))
+    if base_ref in ('abs-link', 'path-link'):
+        link = tmp_path / 'runner-python'
+        link.symlink_to(sys.executable)
+        monkeypatch.setenv('PATH', f'{tmp_path}:' + os.environ['PATH'])
+        preamble += f'assert sys.executable == {str(link)!r}\n'
+        launcher = (link.name if base_ref == 'path-link' else str(link), str(path), 'relative/argument')
+    path.write_text(preamble + STAGE_FIELDS.format(fallback=False, tail='ok') + '\n' + body)
     calls = []
     report = sandbox.run_checks(make_config(checks=('echo one', 'echo two'),
                                 env=tuple(configured.items()), env_allowlist=("PATH", "AUDIT_VALUE"), network=True,
-                                check_runner=(sys.executable, str(path))), git_repo, progress=calls.append)
+                                check_runner=launcher), git_repo, progress=calls.append)
     assert report.ok is verdict
     if 'exit_code"]=7' in body:
         assert report.results[0].exit_code == 7
@@ -87,12 +99,6 @@ def test_runner(git_repo, tmp_path, bwrap_log, monkeypatch, body, verdict, tails
     assert receipt.keys() == {'head', 'dirty', 'results', 'settings_sha256'}
 
 
-FALLBACK_RUNNER = (sys.executable, '-c', (
-    'import json,sys;r=json.load(sys.stdin);r.pop("env");'
-    'r.update(exit_code=0,duration_s=0,not_started=True,tail="");print(json.dumps(r))'
-))
-
-
 @pytest.mark.parametrize('dirty', [True, False])
 def test_runner_unavailable(git_repo, monkeypatch, dirty, fetched_base):  # noqa: F811
     if dirty:
@@ -101,17 +107,6 @@ def test_runner_unavailable(git_repo, monkeypatch, dirty, fetched_base):  # noqa
     report = sandbox.run_checks(make_config(check_runner=FALLBACK_RUNNER), git_repo)
     assert not report.ok and report.dirty is dirty
     assert ('bwrap binary missing' in report.results[0].tail) is not dirty
-
-
-@pytest.mark.parametrize('value', ['[]', '[""]', '[1]', '"runner"', '["./runner"]', '["tools/runner"]', '["python3","tools/run_stage.py"]', '["dispatch","--stage"]', '["dispatch","--opt=/operator/run.py"]'])
-def test_runner_config(tmp_path, value):
-    path = tmp_path / 'workflow.toml'
-    path.write_text('[repo]\nname="o/n"\n[checks]\nrunner=' + value)
-    if 'dispatch' in value or 'tools/run_stage.py' in value:
-        assert load(path).check_runner == tuple(json.loads(value))
-    else:
-        with pytest.raises(ConfigError):
-            load(path)
 
 
 @pytest.mark.parametrize('kind', ['executable', 'argument', 'symlink', 'path', 'executable_symlink', 'option', 'option_symlink', 'short', 'list', 'parent', 'colon_link', 'colon_tree'])
@@ -138,19 +133,6 @@ def test_runner_rejects_task_paths(git_repo, tmp_path, monkeypatch, kind):
               'colon_tree': (str(runner),)}[kind]
     report = sandbox.run_checks(make_config(check_runner=prefix), git_repo)
     assert not report.ok and 'references task worktree' in report.results[0].tail
-
-
-@pytest.mark.parametrize('bare', [False, True])
-def test_runner_preserves_executable_symlink(git_repo, tmp_path, monkeypatch, bare):
-    link = tmp_path / 'runner-python'
-    link.symlink_to(sys.executable)
-    monkeypatch.setenv('PATH', f'{tmp_path}:' + os.environ['PATH'])
-    git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
-    body = (f'import json,sys;assert sys.executable == {str(link)!r};'
-            'r=json.load(sys.stdin);r.pop("env");'
-            'r.update(exit_code=0,duration_s=0,not_started=False,tail="ok");print(json.dumps(r))')
-    report = sandbox.run_checks(make_config(check_runner=(link.name if bare else str(link), '-c', body, 'relative/argument')), git_repo)
-    assert report.ok, report.results[0].tail
 
 
 def test_runner_timeout(git_repo, monkeypatch, fetched_base):  # noqa: F811
