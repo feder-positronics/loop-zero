@@ -122,11 +122,13 @@ def _load_config(
     args: argparse.Namespace, root: Path, *, pin_checks: bool = False, previous: Config | None = None,
     refresh: bool = False,
 ) -> Config:
+    require_ci = pin_checks and args.command in {"ready", "merge"} and not getattr(args, "cancel", False)
     if not pin_checks or args.config:
         if pin_checks:
             print("checks are unpinned because --config was provided")
-        return config_mod.load(args.config or root / "workflow.toml")
-    config = config_mod.load_trusted(root, previous=previous, refresh=refresh, read_timeout=github._read_timeout)
+        return config_mod.load(args.config or root / "workflow.toml", require_ci=require_ci)
+    config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
+                                     require_ci=require_ci, read_timeout=github._read_timeout)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
