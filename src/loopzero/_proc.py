@@ -95,6 +95,12 @@ def tail(text: str, lines: int = TAIL_LINES) -> str:
     return "\n".join(text.rstrip("\n").splitlines()[-lines:])
 
 
+def preview(text: str, limit: int) -> str:
+    """Shorten terminal text at a UTF-8 boundary, including the omission marker."""
+    encoded = text.encode()
+    return text if len(encoded) <= limit else encoded[:limit - 3].decode(errors="ignore") + "…"
+
+
 def build_env(
     env_allowlist: Sequence[str], extra_env: Mapping[str, str] | None = None
 ) -> dict[str, str]:

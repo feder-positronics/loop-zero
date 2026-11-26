@@ -19,7 +19,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from loopzero import runners
-from loopzero._proc import ProcTimeout, ToolMissing, run
+from loopzero._proc import ProcTimeout, ToolMissing, preview, run
 from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, ReviewResult
 
@@ -1007,6 +1007,13 @@ def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
     ]
 
 
+def finding_preview(rows: list[str], url: str) -> list[str]:
+    shown = [preview(row, 240) for row in rows[:4]]
+    if len(rows) > len(shown):
+        shown.append(f"{len(rows) - len(shown)} more blocking findings. See {url}")
+    return shown
+
+
 _THREAD_REPLIES_QUERY = """
 query($thread: ID!, $after: String!) {
   node(id: $thread) {
@@ -1294,9 +1301,11 @@ def readiness(
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha):
-        where = f"{f.path}:{f.line}" if f.path else "(no location)"
-        reasons.append(f"open {f.severity} finding at {where}: {f.title}")
+    findings = open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha)
+    reasons.extend(finding_preview([
+        f"open {f.severity} finding at {f'{f.path}:{f.line}' if f.path else '(no location)'}: {f.title}"
+        for f in findings
+    ], pr.url))
     checks, stale, stale_verdicts, capped = (_check_signals(
         repo, pr.head_sha, review_at, review_grace, required_ci if workflow_wait else (),
         workflow_wait and stale_verdict_grace,

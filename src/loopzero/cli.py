@@ -1664,11 +1664,13 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     wt, config = _context(args)
     pr = _require_pr(config, worktree.branch(wt))
     if not args.finding:
-        for marker_id, _thread, f in github.open_findings(config.repo, pr.number):
-            print(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}")
+        rows = [f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}"
+                for marker_id, _, f in github.open_findings(config.repo, pr.number)]
+        for row in github.finding_preview(rows, pr.url):
+            print(row)
         return 0
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
-    print(f"resolved {args.finding}: {finding.title}")
+    print(f"resolved {args.finding}: {_proc.preview(finding.title, 240)}")
     try:
         with github.api_error_diagnostics():
             remaining = github.open_blocking_findings(config.repo, pr.number)

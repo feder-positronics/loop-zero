@@ -3050,22 +3050,20 @@ def test_ready_wait_tolerates_a_late_required_job_of_a_running_workflow(
 
 
 
-def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
-    wt: Path, gh: FakeGh, capsys, head
-) -> None:
-    finding = {
-        "isResolved": False, "path": "feature.py", "line": 1,
-        "comments": {"nodes": [{"body":
-            f"<!-- loopzero:finding severity=important head={head} -->\n"
-            "**important: Fix this**"}]},
-    }
-    arm_approved_pr_with_check_result(gh, head, wt, "skipped", readiness={"threads": (finding,)})
+@pytest.mark.parametrize("command", ["ready", "merge", "status", "resolve"])
+@pytest.mark.parametrize("count", [1, 40])
+def test_blocking_finding_output_stays_bounded(wt, gh, capsys, head, command, count):
+    findings = [_finding_thread(f"{i:08x}", head) for i in range(count)]
+    body = findings[0]["comments"]["nodes"][0]
+    body["body"] = body["body"].replace("Off by one", "界" * 3000)
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", readiness={"threads": findings})
+    code, out, err = run(capsys, command)
+    output = out + err
+    assert code == int(command in {"ready", "merge"})
+    assert len(output.encode()) < 2048 and "src/a.py:3" in output and "…" in output
+    assert ("36 more" in output and "/pull/7" in output) == (count == 40)
+    assert all(c["argv"][:2] not in (["pr", "ready"], ["pr", "merge"]) for c in gh.calls)
 
-    code, out, err = run(capsys, "ready")
-
-    assert code == 1 and err == ""
-    assert "not ready: open important finding at feature.py:1: Fix this" in out
-    assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
 @pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty", "wrong-commands", "legacy", "incompatible", "matching"])
