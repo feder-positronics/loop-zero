@@ -30,6 +30,12 @@ Never weaken assertions, delete coverage or broaden retries/timeouts without
 support that the old oracle was wrong. Never change product to mask infrastructure
 failure. Diagnosis-only commissions stop before implementation.
 
+For bulk GitHub REST reads, use the Loop Zero App on repositories it can access.
+Pass the token from `$HOME/.config/loopzero/app-token` in `GH_TOKEN`. Keep it out
+of arguments and logs. Check `/rate_limit` first and bound pages and per-run
+lookups. If App access or quota is unavailable, narrow the audit before using
+the shared user credential.
+
 Use synthetic/local data first; redact secrets, database URLs, personal data and
 user content from evidence. Instrumentation needs authority, safe output and
 recorded removal. Production edits, remote restarts and data mutations require
