@@ -36,15 +36,10 @@ _CODEX_REPORTED_MODEL_RE = re.compile(r"^[ \t]*model[ \t]*:[ \t]*([^\r\n]+)$",
 _CODEX_EFFORT_RE = re.compile(r"^[ \t]*reasoning effort[ \t]*:[ \t]*([^\r\n]+)$",
                               re.IGNORECASE | re.MULTILINE)
 
-_AUTH_PATTERNS = (
-    re.compile(r"not logged in", re.IGNORECASE),
-    re.compile(r"please run /login", re.IGNORECASE),
-    re.compile(r"please (?:run )?`?codex login`?", re.IGNORECASE),
-    re.compile(r"invalid api key", re.IGNORECASE),
-    re.compile(r"authentication[_ ]error", re.IGNORECASE),
-    re.compile(r"OAuth access token has expired|Failed to authenticate|token expired", re.IGNORECASE),
-    re.compile(r"\b401\b.*unauthori[sz]ed|unauthori[sz]ed.*\b401\b", re.IGNORECASE),
-    re.compile(r"login required|not authenticated|missing credentials", re.IGNORECASE),
+_AUTH_FAILURE = re.compile(
+    r"not logged in|please run /login|please (?:run )?`?codex login`?|invalid api key"
+    r"|authentication[_ ]error|OAuth access token has expired|Failed to authenticate|token expired|login required"
+    r"|\b401\b.*unauthori[sz]ed|unauthori[sz]ed.*\b401\b|not authenticated|missing credentials", re.IGNORECASE,
 )
 
 REVIEW_SCHEMA: dict[str, object] = {
@@ -104,14 +99,9 @@ _USAGE_LIMIT = re.compile(
     r'reached your [\w .-]*limit|hit your (?:(?:usage|weekly|session) )?limit'
     r'|usage_limit_(?:reached|exceeded)|usageLimitExceeded', re.IGNORECASE,
 )
-_TOO_LONG_PATTERNS = (
-    re.compile(r"prompt is too long", re.IGNORECASE),
-    re.compile(r"context_length_exceeded", re.IGNORECASE),
-    re.compile(r"maximum context length|input_too_large", re.IGNORECASE),  # codex: >1 Mi chars
+_TOO_LONG = re.compile(
+    r"prompt is too long|context_length_exceeded|maximum context length|input_too_large", re.IGNORECASE
 )
-
-
-# --------------------------------------------------------------------------- prompt
 
 
 def _review_policy(kind: str, *, split: bool) -> str:
@@ -177,29 +167,25 @@ def build_prompt(*, kind: str, head: str, task_text: str, diff: str,
     return header + "\n" + diff
 
 
-# --------------------------------------------------------------------------- parsing
-
-
 def _tail(text: str) -> str:
     return text[-TAIL_CHARS:]
 
 
 def _looks_like_auth_failure(text: str) -> bool:
-    return any(p.search(text) for p in _AUTH_PATTERNS)
+    return _AUTH_FAILURE.search(text) is not None
 
 
 def _claude_envelope_auth_failure(envelope: object) -> bool:
-    if not isinstance(envelope, dict):
-        return False
-    return envelope.get("api_error_status") in (401, 403) or (
-        envelope.get("terminal_reason") == "api_error"
-        and re.search(r"authenticate|OAuth|expired|401", str(envelope.get("result", "")),
-                      re.IGNORECASE) is not None
+    return isinstance(envelope, dict) and (
+        envelope.get("api_error_status") in (401, 403)
+        or (envelope.get("terminal_reason") == "api_error"
+            and re.search(r"authenticate|OAuth|expired|401", str(envelope.get("result", "")),
+                          re.IGNORECASE) is not None)
     )
 
 
 def _looks_too_long(text: str) -> bool:
-    return any(p.search(text) for p in _TOO_LONG_PATTERNS)
+    return _TOO_LONG.search(text) is not None
 
 
 def _subscription_exhausted(text: str, envelope: object = None) -> bool:
@@ -284,8 +270,10 @@ def _run(
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
     except _proc.ProcTimeout as exc:
-        stderr_line = _tail(exc.stderr.rstrip()).rpartition("\n")[2]
-        tail = f"{stderr_line}\n{_tail(exc.stdout)}".strip()
+        lines = _tail(exc.stderr.strip() or exc.stdout.strip()).splitlines()
+        last_line = lines[-1] if lines else ""
+        diagnostic = last_line.encode()
+        tail = "…" + diagnostic[-320:].decode(errors="ignore") if len(diagnostic) > 320 else last_line
         raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", tail) from exc
     if done.exit_code != 0:
         combined = f"{done.stdout}\n{done.stderr}"
@@ -325,18 +313,20 @@ def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Conf
 
 
 def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
-    done = _proc.run(["git", "rev-parse", flag], cwd=cwd, env_allowlist=env_allowlist, timeout=30)
+    raw = _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag)
+    return (cwd / raw.strip()).resolve()
+
+
+def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str) -> str:
+    done = _proc.run(["git", *args], cwd=cwd, env_allowlist=allowlist, timeout=30)
     if done.exit_code != 0:
-        raise RunnerBadOutput(f"git rev-parse {flag} exited {done.exit_code}", _tail(done.stderr))
-    raw = Path(done.stdout.strip())
-    return (raw if raw.is_absolute() else cwd / raw).resolve()
+        raise RunnerBadOutput(f"git {label} exited {done.exit_code}", _tail(done.stderr))
+    return done.stdout
 
 
 def _git_dirs(cwd: Path, env_allowlist: tuple[str, ...]) -> tuple[Path, Path]:
-    done = _proc.run(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir"],
-        cwd=cwd, env_allowlist=env_allowlist, timeout=30,
-    )
+    argv = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir"]
+    done = _proc.run(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=30)
     paths = done.stdout.removesuffix("\n").split("\n")
     if done.exit_code == 0 and len(paths) == 2:
         common_dir, git_dir = map(Path, paths)
@@ -433,36 +423,37 @@ def _sandbox_prefix(
 
 def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
     """Prepare mount points and return existing host auth paths to bind read-write."""
-    binds: list[tuple[Path, Path]] = []
+    sandbox_home = Path(sandbox.SANDBOX_HOME)
     if family == "claude":
         # Native environment auth needs no disk credentials or host refresh state.
         if any(os.environ.get(name) for name in CLAUDE_AUTH_ENV):
             return ()
-        source_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").resolve()
-        if source_dir.is_dir():
-            (home / ".claude").mkdir()
-            binds.append((source_dir, Path(sandbox.SANDBOX_HOME) / ".claude"))
-        state_file = (Path.home() / ".claude.json").resolve()
-        if state_file.is_file():
-            (home / ".claude.json").touch()
-            binds.append((state_file, Path(sandbox.SANDBOX_HOME) / ".claude.json"))
+        state = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+        mounts = ((state, ".claude", True), (Path.home() / ".claude.json", ".claude.json", False))
     else:
         # Only auth.json: codex rewrites it in place on refresh, and the reviewer's
         # shell runs unsandboxed inside bwrap, so the rest of CODEX_HOME stays private.
-        auth_file = (Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "auth.json").resolve()
-        if auth_file.is_file():
-            (home / ".codex").mkdir()
-            (home / ".codex" / "auth.json").touch()
-            binds.append((auth_file, Path(sandbox.SANDBOX_HOME) / ".codex" / "auth.json"))
+        state = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        mounts = ((state / "auth.json", ".codex/auth.json", False),)
+    binds = []
+    for path, destination, directory in mounts:
+        source, target = path.resolve(), home / destination
+        if directory and source.is_dir():
+            target.mkdir()
+        elif not directory and source.is_file():
+            if target.parent != home:
+                target.parent.mkdir()
+            target.touch()
+        else:
+            continue
+        binds.append((source, sandbox_home / destination))
     return tuple(binds)
 
 
 def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str:
     diagnostic = "codex: version probe failed"
     try:
-        done = _proc.run(
-            [str(binary), "--version"], cwd=cwd, env_allowlist=env_allowlist, timeout=30,
-        )
+        done = _proc.run([str(binary), "--version"], cwd=cwd, env_allowlist=env_allowlist, timeout=30)
     except (_proc.ToolMissing, _proc.ProcTimeout, OSError) as exc:
         raise RunnerBadOutput(diagnostic) from exc
     if done.exit_code:
@@ -475,15 +466,62 @@ def _codex_supports_ignore_user_config(
 ) -> bool:
     """Return whether this Codex version can avoid loading bound ``config.toml``."""
     try:
-        done = _proc.run(
-            [str(binary), "exec", "--help"],
-            cwd=cwd,
-            env_allowlist=env_allowlist,
-            timeout=30,
-        )
+        done = _proc.run([str(binary), "exec", "--help"], cwd=cwd,
+                         env_allowlist=env_allowlist, timeout=30)
     except (_proc.ToolMissing, _proc.ProcTimeout, FileNotFoundError):
         return False
     return done.exit_code == 0 and "--ignore-user-config" in f"{done.stdout}\n{done.stderr}"
+
+
+# Linux rejects one argv element over 128 KiB (MAX_ARG_STRLEN) before the reviewer starts.
+CODEX_SKILL_OVERRIDE_LIMIT = 100_000
+
+
+def _codex_repository_skill_overrides(cwd: Path) -> list[str]:
+    """`-c` options disabling every skill Codex discovers in the reviewed tree.
+
+    Codex lists skills under the checkout's `.agents/skills` and `.codex/skills`, and a
+    `$name` mention in the prompt injects one; the PR controls both. Codex matches the
+    canonical SKILL.md path; its config offers no wildcard. A skill directory linking
+    outside the checkout, an unreadable one, or too many skills fails the attempt.
+    """
+    try:
+        paths = _repository_skill_paths(cwd)
+        entries = ",".join(
+            # TOML basic strings forbid a literal DEL, which JSON leaves unescaped.
+            f"{{path={json.dumps(path, ensure_ascii=False).replace(chr(127), '\\u007f')},enabled=false}}"
+            for path in sorted(paths)
+        )
+        size = len(f"skills.config=[{entries}]".encode())
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        raise RunnerBadOutput(f"codex: cannot list repository skills to disable: {exc}") from exc
+    if size > CODEX_SKILL_OVERRIDE_LIMIT:
+        raise RunnerBadOutput(f"codex: {len(paths)} repository skills are too many to disable")
+    return ["-c", f"skills.config=[{entries}]"] if paths else []
+
+
+def _repository_skill_paths(cwd: Path) -> set[str]:
+    tree, paths, seen = cwd.resolve(), set(), set()
+    pending = [cwd / ".agents" / "skills", cwd / ".codex" / "skills"]
+    while pending:
+        path = pending.pop()
+        if not os.path.lexists(path):
+            continue
+        # Strict: a looping or dangling link fails closed; Codex might resolve it elsewhere.
+        real = path.resolve(strict=True)
+        if not real.is_relative_to(tree):
+            raise RunnerBadOutput(f"codex: skill directory {path} links outside the checkout")
+        if not real.is_dir():
+            if path.name == "SKILL.md":
+                paths.add(str(real))
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        with os.scandir(real) as entries:
+            pending.extend(path / entry.name for entry in entries
+                           if entry.is_symlink() or entry.is_dir() or entry.name == "SKILL.md")
+    return paths
 
 
 def _claude_provenance(envelope: dict, raw: str) -> dict[str, object]:
@@ -530,6 +568,11 @@ def _setting(value: object) -> str | None:
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_./:-]{1,128}", value) else None
 
 
+def _settings(value: object) -> dict[str, str | None]:
+    fields = value if isinstance(value, dict) else {}
+    return {key: _setting(fields.get(key)) for key in ("model", "effort")}
+
+
 def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None]]]:
     """Keep native claims, launch configuration and optional requests distinct."""
     try:
@@ -547,22 +590,16 @@ def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None
     for index, envelope in enumerate(envelopes):
         envelope = envelope if isinstance(envelope, dict) else {}
         request = requested[index] if index < len(requested) else {}
-        request = request if isinstance(request, dict) else {}
         if result.family == "claude":
             usage = envelope.get("modelUsage")
             models = [key for key in usage if _setting(key)] if isinstance(usage, dict) else []
             reported = {"model": ", ".join(models[:8]) or None, "effort": None}
         else:
-            evidence = envelope.get("reported_settings")
-            evidence = evidence if isinstance(evidence, dict) else {}
-            reported = {key: _setting(evidence.get(key)) for key in ("model", "effort")}
-        pinned = (
-            (configured[index] if index < len(configured) else {})
-            if result.family == "claude" else envelope.get("configured_settings", {})
-        )
-        pinned = pinned if isinstance(pinned, dict) else {}
-        settings.append({"configured": {key: _setting(pinned.get(key)) for key in ("model", "effort")},
-                         "requested": {key: _setting(request.get(key)) for key in ("model", "effort")},
+            reported = _settings(envelope.get("reported_settings"))
+        pinned = envelope.get("configured_settings")
+        if result.family == "claude":
+            pinned = configured[index] if index < len(configured) else None
+        settings.append({"configured": _settings(pinned), "requested": _settings(request),
                          "reported": reported})
     return settings
 
@@ -626,9 +663,7 @@ def _bounded_int(value, minimum=1):
 
 
 def _identifier(value, limit=128):
-    return (
-        isinstance(value, str) and len(value) <= limit and re.fullmatch(r"[A-Za-z0-9_.:-]+", value)
-    )
+    return isinstance(value, str) and len(value) <= limit and re.fullmatch(r"[A-Za-z0-9_.:-]+", value)
 
 
 def _hex(value, length):
@@ -638,19 +673,8 @@ def _hex(value, length):
 def _valid_codex_evidence(value):
     """Strict closed schema, including exact context/order/offset bounds; no coercion."""
     fields = {
-        "version",
-        "family",
-        "repo",
-        "pr",
-        "head",
-        "kind",
-        "publisher",
-        "receipt",
-        "raw_sha256",
-        "raw_bytes",
-        "complete",
-        "chunk_count",
-        "calls",
+        "version", "family", "repo", "pr", "head", "kind", "publisher", "receipt",
+        "raw_sha256", "raw_bytes", "complete", "chunk_count", "calls",
     }
     if not isinstance(value, dict) or set(value) != fields:
         return False
@@ -678,22 +702,11 @@ def _valid_codex_evidence(value):
         return False
     sessions, ranges = set(), set()
     for index, call in enumerate(value["calls"], 1):
-        keys = {
-            "index",
-            "session",
-            "requested",
-            "reported",
-            "fatal",
-            "inspection",
-            "base",
-            "diff_sha256",
-        }
         if not isinstance(call, dict):
             return False
-        if "configured" in call:
-            keys.add("configured")
-        if call.get("inspection") == "verified":
-            keys |= {"head_event", "diff_event"}
+        settings_keys = ("requested", "reported", "configured") if "configured" in call else ("requested", "reported")
+        event_keys = ("head_event", "diff_event") if call.get("inspection") == "verified" else ()
+        keys = {"index", "session", "fatal", "inspection", "base", "diff_sha256", *settings_keys, *event_keys}
         if (
             set(call) != keys
             or not _bounded_int(call["index"])
@@ -708,26 +721,23 @@ def _valid_codex_evidence(value):
             return False
         sessions.add(call["session"])
         ranges.add((call["base"], call["diff_sha256"]))
-        for label in ("requested", "reported", *(("configured",) if "configured" in call else ())):
+        for label in settings_keys:
             settings = call[label]
             if not isinstance(settings, dict) or set(settings) != {"model", "effort"}:
                 return False
             for key, limit in (("model", 128), ("effort", 32)):
                 if settings[key] is not None and not _identifier(settings[key], limit):
                     return False
-        if call["inspection"] == "verified":
-            for label in ("head_event", "diff_event"):
-                event = call[label]
-                if (
-                    not isinstance(event, dict)
-                    or set(event) != {"id", "start", "end"}
-                    or not _identifier(event["id"])
-                    or not _bounded_int(event["start"], 0)
-                    or not _bounded_int(event["end"])
-                    or not event["start"] < event["end"] <= value["raw_bytes"]
-                    or (label == "head_event" and event["end"] - event["start"] != 40)
-                ):
-                    return False
+        for label in event_keys:
+            event = call[label]
+            if (
+                not isinstance(event, dict) or set(event) != {"id", "start", "end"}
+                or not _identifier(event["id"])
+                or not (_bounded_int(event["start"], 0) and _bounded_int(event["end"]))
+                or not event["start"] < event["end"] <= value["raw_bytes"]
+                or (label == "head_event" and event["end"] - event["start"] != 40)
+            ):
+                return False
     return len(ranges) == 1
 
 
@@ -741,6 +751,10 @@ def valid_codex_evidence(value):
 def encode_codex_evidence(value):
     if not valid_codex_evidence(value):
         raise RunnerBadOutput("codex: invalid native evidence projection")
+    return _codex_header(value)
+
+
+def _codex_header(value):
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     header = CODEX_HEADER + base64.urlsafe_b64encode(encoded).decode().rstrip("=") + " -->"
     if len(header.encode()) > CODEX_HEADER_LIMIT:
@@ -758,7 +772,7 @@ def decode_codex_evidence(header):
     token = match[1]
     data = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
     value = _evidence_json(data)
-    if not valid_codex_evidence(value) or encode_codex_evidence(value) != header:
+    if not valid_codex_evidence(value) or _codex_header(value) != header:
         raise ValueError("noncanonical or invalid evidence")
     return value
 
@@ -815,25 +829,22 @@ def _native_inspection(envelope, context):
     started, completed, found = {}, set(), {}
     for event in envelope["events"]:
         item = event.get("item")
-        if (
-            not isinstance(item, dict)
-            or item.get("type") != "command_execution"
-            or not _identifier(item.get("id"))
-        ):
+        if not isinstance(item, dict) or item.get("type") != "command_execution" or not _identifier(item.get("id")):
             continue
-        if event.get("type") == "item.started":
+        event_type = event.get("type")
+        if event_type == "item.started":
             if item["id"] in started:
                 return {}
             started[item["id"]] = item.get("command")
             continue
-        if event.get("type") == "item.completed":
-            if item["id"] in completed:
-                return {}
-            completed.add(item["id"])
+        if event_type != "item.completed":
+            continue
+        if item["id"] in completed:
+            return {}
+        completed.add(item["id"])
         output, command = item.get("aggregated_output"), item.get("command")
         if (
-            event.get("type") != "item.completed"
-            or item.get("status") != "completed"
+            item.get("status") != "completed"
             or type(item.get("exit_code")) is not int
             or item["exit_code"] != 0
             or not isinstance(output, str)
@@ -847,20 +858,14 @@ def _native_inspection(envelope, context):
             if operation == ("head",):
                 match = re.search(rb"(?m)^" + context["head"].encode() + rb"(?=\r?$)", data)
                 if match:
-                    found["head_event"] = {
-                        "id": item["id"],
-                        "start": match.start(),
-                        "end": match.end(),
-                    }
+                    found["head_event"] = {"id": item["id"], "start": match.start(), "end": match.end()}
             elif operation == ("diff", context["base"], context["head"]):
                 match = re.search(rb"(?m)^diff --git ", data)
-                if match:
-                    start, end = match.start(), match.start() + context["diff_bytes"]
-                    if (
-                        end <= len(data)
-                        and hashlib.sha256(data[start:end]).hexdigest() == context["diff_sha256"]
-                    ):
-                        found["diff_event"] = {"id": item["id"], "start": start, "end": end}
+                if not match:
+                    continue
+                start, end = match.start(), match.start() + context["diff_bytes"]
+                if end <= len(data) and hashlib.sha256(data[start:end]).hexdigest() == context["diff_sha256"]:
+                    found["diff_event"] = {"id": item["id"], "start": start, "end": end}
     return found if set(found) == {"head_event", "diff_event"} else {}
 
 
@@ -882,20 +887,8 @@ def _codex_evidence(result):
         context = envelope.get("review_context")
         if not isinstance(context, dict):
             raise RunnerBadOutput("codex: missing recorded review context")
-        binding = {
-            key: context.get(key)
-            for key in (
-                "repo",
-                "pr",
-                "publisher",
-                "head",
-                "kind",
-                "base",
-                "diff_sha256",
-                "diff_bytes",
-                "cwd",
-            )
-        }
+        shared_fields = ("repo", "pr", "publisher", "head", "kind", "base", "diff_sha256", "diff_bytes", "cwd")
+        binding = {key: context.get(key) for key in shared_fields}
         if common is None:
             common = binding
         if (
@@ -912,12 +905,8 @@ def _codex_evidence(result):
             or any(
                 not _hex(context.get(key), 64)
                 for key in (
-                    "fragment_sha256",
-                    "prompt_sha256",
-                    "policy_sha256",
-                    "source_sha256",
-                    "binary_sha256",
-                    "argv_sha256",
+                    "fragment_sha256", "prompt_sha256", "policy_sha256",
+                    "source_sha256", "binary_sha256", "argv_sha256",
                 )
             )
         ):
@@ -990,6 +979,7 @@ def _codex_evidence(result):
                 "diff_sha256": context["diff_sha256"],
             }
         )
+    raw_bytes = result.raw.encode("utf-8")
     value = {
         "version": 1,
         "family": "codex",
@@ -999,8 +989,8 @@ def _codex_evidence(result):
         "kind": result.kind,
         "publisher": common["publisher"],
         "receipt": f".loopzero/review-{result.head[:12]}-{result.kind}.json",
-        "raw_sha256": hashlib.sha256(result.raw.encode("utf-8")).hexdigest(),
-        "raw_bytes": len(result.raw.encode("utf-8")),
+        "raw_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "raw_bytes": len(raw_bytes),
         "complete": True,
         "chunk_count": len(calls),
         "calls": calls,
@@ -1109,9 +1099,6 @@ def _codex_provenance(
     return provenance, json.dumps(envelope, separators=(",", ":"))
 
 
-# --------------------------------------------------------------------------- adapters
-
-
 def _review_claude(
     prompt: str, *, policy: str, cwd: Path, head: str, kind: str, timeout: int,
     ro_paths: tuple[str, ...], model: str | None, effort: str | None,
@@ -1144,9 +1131,8 @@ def _review_claude(
         argv[0] = str(binary)
         configured = {"model": model or None, "effort": effort or None}  # explicit --model/--effort above
         done = _run(
-            [*prefix, *argv], cwd=cwd, prompt=prompt,
-            env_allowlist=(*config.env_allowlist, *CLAUDE_AUTH_ENV), timeout=timeout,
-            family="claude",
+            [*prefix, *argv], cwd=cwd, prompt=prompt, timeout=timeout, family="claude",
+            env_allowlist=(*config.env_allowlist, *CLAUDE_AUTH_ENV),
         )
     raw = done.stdout
     try:
@@ -1226,6 +1212,7 @@ def _review_codex(
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
         auth_binds = _auth_binds("codex", home)
         prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
+        skill_overrides = _codex_repository_skill_overrides(cwd)  # before Codex runs at all
         cli_version = _observe_codex_version(binary, cwd, config.env_allowlist)
         ignore_user_config = _codex_supports_ignore_user_config(binary, cwd, config.env_allowlist)
         argv = [
@@ -1247,6 +1234,10 @@ def _review_codex(
             "--skip-git-repo-check",
             "-c",
             "mcp_servers={}",
+            # The reviewed head controls AGENTS.md and its skills; keep both out of context.
+            "-c",
+            "project_doc_max_bytes=0",
+            *skill_overrides,
             "--output-schema",
             f"{sandbox.SANDBOX_HOME}/schema.json",
             "--output-last-message",
@@ -1351,18 +1342,15 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
         "configured_settings": [call["configured"] for result in results for call in review_settings(result)],
     }
     if first.family == "claude":
-        provenance.update(
-            usage=[result.provenance["usage"] for result in results],
-            total_cost_usd=sum(float(result.provenance["total_cost_usd"]) for result in results),
-            duration_api_ms=sum(float(result.provenance["duration_api_ms"]) for result in results),
-        )
+        provenance["usage"] = [result.provenance["usage"] for result in results]
+        for key in ("total_cost_usd", "duration_api_ms"):
+            provenance[key] = sum(float(result.provenance[key]) for result in results)
     else:
         provenance["token_usage"] = [result.provenance["token_usage"] for result in results]
         provenance["cli_versions"] = [result.provenance.get("cli_version") for result in results]
-    return ReviewResult(
-        family=first.family,
-        head=first.head,
-        kind=first.kind,
+    return replace(
+        first,
+        fallback="",
         verdict=verdict,
         findings=findings,
         raw=json.dumps(envelopes, separators=(",", ":")),
@@ -1377,10 +1365,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
 def split_diff(diff: str, budget: int) -> list[str]:
     """Group unified-diff file blocks below ``budget`` bytes."""
     starts = [match.start() for match in re.finditer(r"(?m)^diff --git ", diff)]
-    blocks = [
-        diff[starts[i] : starts[i + 1] if i + 1 < len(starts) else len(diff)]
-        for i in range(len(starts))
-    ] if starts else [diff]
+    blocks = [diff[start:end] for start, end in zip(starts, [*starts[1:], len(diff)], strict=False)] or [diff]
     if len(diff.encode()) > budget:
         blocks = [_summarize_deleted(block) for block in blocks]
     pieces = [piece for block in blocks for piece in _split_bytes(block, budget)]
@@ -1436,6 +1421,39 @@ def _split_bytes(text: str, budget: int) -> list[str]:
     return pieces
 
 
+def _validated_payloads(family, envelopes, provenance, sessions):
+    if family not in ("claude", "codex") or [item.get("session_id") for item in envelopes] != sessions:
+        return None
+    usage_key = "usage" if family == "claude" else "token_usage"
+    usages = [item.get(usage_key) for item in envelopes]
+    if not all(isinstance(item, dict) for item in usages):
+        return None
+    if provenance.get(usage_key) != (usages[0] if len(usages) == 1 else usages):
+        return None
+    try:
+        if family == "claude" and _valid_claude_envelopes(envelopes, provenance):
+            return [_claude_payload(item) for item in envelopes]
+        if family == "codex" and all(item.get("type") == "codex_exec_result"
+                                     and not codex_fatal_startup(item) for item in envelopes):
+            return [_extract_json_object(str(item["final_message"])) for item in envelopes]
+    except (KeyError, ValueError):
+        return None
+    return None
+
+
+def _valid_claude_envelopes(envelopes, provenance):
+    if not all(item.get("type") == "result" and item.get("subtype", "success") == "success"
+               and not item.get("is_error") for item in envelopes):
+        return False
+    for key in ("total_cost_usd", "duration_api_ms"):
+        amounts = [item.get(key) for item in envelopes]
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in amounts):
+            return False
+        if provenance.get(key) != sum(amounts):
+            return False
+    return True
+
+
 def validate_runner_result(result: ReviewResult) -> bool:
     """Return whether saved provenance agrees with the provider envelope(s)."""
     provenance = result.provenance
@@ -1463,46 +1481,8 @@ def validate_runner_result(result: ReviewResult) -> bool:
     envelopes = decoded if isinstance(decoded, list) else [decoded]
     if len(envelopes) != result.chunk_count or not all(isinstance(item, dict) for item in envelopes):
         return False
-    if result.family == "claude":
-        envelope_sessions = [item.get("session_id") for item in envelopes]
-        usages = [item.get("usage") for item in envelopes]
-        costs = [item.get("total_cost_usd") for item in envelopes]
-        durations = [item.get("duration_api_ms") for item in envelopes]
-        expected_usage: object = usages[0] if len(usages) == 1 else usages
-        provenance_ok = (
-            envelope_sessions == sessions
-            and all(item.get("type") == "result" for item in envelopes)
-            and all(item.get("subtype", "success") == "success" for item in envelopes)
-            and all(not item.get("is_error") for item in envelopes)
-            and all(isinstance(item, dict) for item in usages)
-            and all(isinstance(item, (int, float)) and not isinstance(item, bool)
-                    for item in costs + durations)
-            and provenance.get("usage") == expected_usage
-            and provenance.get("total_cost_usd") == sum(costs)
-            and provenance.get("duration_api_ms") == sum(durations)
-        )
-        try:
-            payloads = [_claude_payload(item) for item in envelopes]
-        except (json.JSONDecodeError, ValueError):
-            return False
-    elif result.family == "codex":
-        envelope_sessions = [item.get("session_id") for item in envelopes]
-        usages = [item.get("token_usage") for item in envelopes]
-        expected_usage = usages[0] if len(usages) == 1 else usages
-        provenance_ok = (
-            envelope_sessions == sessions
-            and all(item.get("type") == "codex_exec_result" for item in envelopes)
-            and not any(codex_fatal_startup(item) for item in envelopes)
-            and all(isinstance(item, dict) for item in usages)
-            and provenance.get("token_usage") == expected_usage
-        )
-        try:
-            payloads = [_extract_json_object(str(item["final_message"])) for item in envelopes]
-        except (KeyError, json.JSONDecodeError, ValueError):
-            return False
-    else:
-        return False
-    if not provenance_ok:
+    payloads = _validated_payloads(result.family, envelopes, provenance, sessions)
+    if payloads is None:
         return False
     try:
         parsed = [
@@ -1519,15 +1499,12 @@ def validate_runner_result(result: ReviewResult) -> bool:
     ) else "approve"
     if result.findings != findings or result.verdict != verdict:
         return False
-    if result.family == "codex":
-        try:
+    try:
+        if result.family == "codex":
             _codex_evidence(result)
-        except (RunnerBadOutput, ValueError, KeyError, TypeError, AttributeError):
-            return False
+    except (RunnerBadOutput, ValueError, KeyError, TypeError, AttributeError):
+        return False
     return True
-
-
-# --------------------------------------------------------------------------- family
 
 
 def family_from_trailer(value: str) -> str | None:
@@ -1547,12 +1524,6 @@ def author_families(cwd: Path, head: str, base: str) -> set[str]:
     use the PR merge-base, including for delta reviews of a narrower diff.
     """
     revision = f"{base}..{head}"
-    done = _proc.run(
-        ["git", "log", "--format=%(trailers:key=Co-Authored-By,valueonly)", revision],
-        cwd=cwd,
-        env_allowlist=_ALLOWLIST,
-        timeout=30,
-    )
-    if done.exit_code != 0:
-        raise RunnerBadOutput(f"git log {revision} exited {done.exit_code}", _tail(done.stderr))
-    return {family for line in done.stdout.splitlines() if (family := family_from_trailer(line))}
+    trailers = _review_git(cwd, _ALLOWLIST, f"log {revision}",
+                           "log", "--format=%(trailers:key=Co-Authored-By,valueonly)", revision)
+    return {family for line in trailers.splitlines() if (family := family_from_trailer(line))}
