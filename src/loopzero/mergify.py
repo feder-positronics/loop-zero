@@ -7,11 +7,13 @@ import http.client
 import json
 import os
 import re
+import signal
 import stat
 import ssl
 import time
 import urllib.error
 import urllib.request
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -73,25 +75,45 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _retry_sleep = time.sleep
 
 
-def _open(request: urllib.request.Request):
+class _RequestDeadline(Exception):
+    """Bypass transport handlers that retry OSError."""
+
+
+@contextmanager
+def _open(request: urllib.request.Request, timeout: float = 30):
+    def expire(_signum, _frame):
+        raise _RequestDeadline()
+
+    if signal.getitimer(signal.ITIMER_REAL) != (0, 0):
+        raise TimeoutError("Mergify HTTP request cannot start with an active alarm")
     try:
-        return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
-    except ValueError:
-        # The HTTP client can include the Authorization value in a header error.
-        raise MergifyError("Mergify API request has an invalid URL or header") from None
+        with ExitStack() as cleanup:
+            cleanup.callback(signal.signal, signal.SIGALRM, signal.signal(signal.SIGALRM, expire))
+            cleanup.callback(signal.setitimer, signal.ITIMER_REAL, 0)
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+            try:
+                response = urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout)
+            except ValueError:
+                raise MergifyError("Mergify API request has an invalid URL or header") from None
+            yield cleanup.enter_context(response)
+    except _RequestDeadline:
+        raise TimeoutError("Mergify HTTP request timed out") from None
+
+
+def _api_request(repo: str, suffix: str, method: str | None = None) -> urllib.request.Request:
+    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
+    return urllib.request.Request(
+        f"{API}/repos/{owner}/{name}{suffix}", method=method,
+        headers={"Accept": "application/json", "User-Agent": "loopzero",
+                 "Authorization": f"Bearer {_credential()}"},
+    )
 
 
 def api_get(repo: str, suffix: str) -> object | None:
     """GET one documented endpoint below this repository's fixed Mergify API path."""
     if not suffix.startswith("/") or "://" in suffix or ".." in suffix:
         raise ValueError("Mergify API suffix must be a repository-relative absolute path")
-    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
-    endpoint = f"{API}/repos/{owner}/{name}{suffix}"
-    request = urllib.request.Request(
-        endpoint,
-        headers={"Accept": "application/json", "User-Agent": "loopzero",
-                 "Authorization": f"Bearer {_credential()}"},
-    )
+    request = _api_request(repo, suffix)
     for delay in (2.0, 5.0, None):  # reads retry server errors, throttling and dropped reads
         try:
             with _open(request) as response:
@@ -249,13 +271,7 @@ def configured(repo: str, branch: str, queue: str) -> bool:
 
 
 def dequeue(repo: str, number: int) -> None:
-    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
-    endpoint = f"{API}/repos/{owner}/{name}/merge-queue/pull/{number}/dequeue"
-    request = urllib.request.Request(
-        endpoint, method="POST",
-        headers={"Accept": "application/json", "User-Agent": "loopzero",
-                 "Authorization": f"Bearer {_credential()}"},
-    )
+    request = _api_request(repo, f"/merge-queue/pull/{number}/dequeue", "POST")
     try:
         with _open(request):
             return
