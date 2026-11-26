@@ -1151,10 +1151,10 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
 
 
 def _pr_readiness(
-    wt: Path, config: Config, *, allow_merged: bool = False, workflow_wait: bool = False
+    wt: Path, config: Config, branch: str, *, allow_merged: bool = False, workflow_wait: bool = False
 ) -> tuple[github.PR, github.Readiness | None]:
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
-    branch, head = worktree.branch(wt), worktree.head(wt)
+    head = worktree.head(wt)
     _require_task_branch(config, branch)
     pr = _require_pr(config, branch, allow_merged=allow_merged)
     _require_pushed(pr, head)
@@ -1184,7 +1184,7 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
 
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
-    pr, readiness = _pr_readiness(wt, config, workflow_wait=args.wait is not None)
+    pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None)
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
     kicked = bool(waiting)
@@ -1600,8 +1600,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if args.cancel and args.wait is not None:
         raise CliError("merge --cancel cannot be combined with --wait")
     wt, config = _context(args, pin_checks=True)
+    branch = worktree.branch(wt)
     if args.cancel:
-        branch = worktree.branch(wt)
         if config.merge_strategy != "mergify":
             raise CliError("merge --cancel is only available with delivery.merge = 'mergify'")
         pr = _require_pr(config, branch)
@@ -1609,7 +1609,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
     pr, readiness = _pr_readiness(
-        wt, config, allow_merged=True, workflow_wait=args.wait is not None
+        wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None
     )
     started = time.monotonic()
     deadline = None if args.wait is None else started + args.wait
