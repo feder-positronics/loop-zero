@@ -30,6 +30,9 @@ is described in [MERGIFY.md](MERGIFY.md).
 
 ## 2. How many reviews a change gets
 
+The PR owner is the session delivering the PR, or the coordinator once it
+adopts it ([The six steps](../core/CONTRACT.md#the-six-steps)).
+
 ```mermaid
 flowchart TD
     A["Primary review"] -->|approved| Z["Done: continue to ready"]
@@ -44,8 +47,7 @@ flowchart TD
     J -->|none can run| I["Report the blocker to whoever commissioned the PR"]
 ```
 
-See the contract's [review budget](../core/CONTRACT.md#review-budget). The PR
-owner is defined in [The six steps](../core/CONTRACT.md#the-six-steps).
+See the contract's [review budget](../core/CONTRACT.md#review-budget).
 
 ## 3. Who does what
 
