@@ -4735,6 +4735,26 @@ def test_wait_rechecks_closed_unmerged_pr(monkeypatch, final) -> None:
         assert _closed_unmerged_wait(monkeypatch, reads, steps=1) == final
 
 
+def test_task_state_lock_times_out_with_a_live_holder(tmp_path, monkeypatch):
+    now = 0.0
+
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now)
+    monkeypatch.setattr(cli, "_sleep", advance)
+    with cli._lock_task_state(tmp_path):
+        with (
+            pytest.raises(TimeoutError, match=r"task state is busy.*retry"),
+            cli._lock_task_state(tmp_path),
+        ):
+            pytest.fail("contender acquired a held directory lock")
+        assert now == cli.GIT_TIMEOUT
+    with cli._lock_task_state(tmp_path):
+        assert now == cli.GIT_TIMEOUT
+
+
 def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
     path = tmp_path / cli.CHECKS_FILE
     monkeypatch.setattr(cli.worktree, "head", lambda _: next(heads))

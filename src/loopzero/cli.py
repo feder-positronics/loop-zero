@@ -374,7 +374,15 @@ def _lock_task_state(wt: Path) -> Iterator[None]:
     directory.mkdir(parents=True, exist_ok=True)
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        deadline = time.monotonic() + GIT_TIMEOUT
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                _sleep(min(0.1, remaining))
+        else:
+            raise TimeoutError(f"task state is busy in {wt}; retry when the other command finishes")
         yield
     finally:
         os.close(fd)
