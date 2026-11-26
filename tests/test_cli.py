@@ -2501,7 +2501,7 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, sett
     if settled == "CONFLICTING":
         assert code == 1 and "has merge conflicts" in out + err
     elif settled == "UNKNOWN":
-        assert code == 3 and "timed out waiting for GitHub to compute mergeability" in out
+        assert code == 3 and out.endswith(f"timed out waiting for GitHub to compute mergeability on {head[:12]}. Run `loopzero {command} --wait` to resume on this head.\n")
     else:
         assert code == (0 if command == "ready" else 3)
     assert requests == ([(REPO, 7, head, "main")]
@@ -2582,10 +2582,11 @@ def test_ready_wait_verdict(wt, gh, capsys, monkeypatch, head, wait, elapsed, co
 
     monkeypatch.setattr(github, "pr_view", observe)
 
-    out, _err = expect_cli(capsys, expected, "ready", f"--wait={wait}", stderr="")
+    (wt / "-retry config.toml").write_bytes((wt / "workflow.toml").read_bytes())
+    out, _ = expect_cli(capsys, expected, "--config", "./-retry config.toml", "ready", f"--wait={wait}", stderr="")
     assert out.endswith({
         0: f"ready: {URL}\n", 1: f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n",
-        3: f"timed out waiting for required checks on {head[:12]}\n",
+        3: f"timed out waiting for required checks on {head[:12]}. Run `loopzero '--config=-retry config.toml' ready --wait` to resume on this head.\n",
     }[expected])
 
 
@@ -2660,7 +2661,7 @@ def test_ready_wait_revalidates_its_ready_transition(
                       [30.0, 5.0] if initial_pending else [30.0])
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n" if expected == 1 else
-                        f"timed out waiting for required checks on {head[:12]}\n")
+                        f"timed out waiting for required checks on {head[:12]}. Run `loopzero ready --wait` to resume on this head.\n")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
 
@@ -2732,7 +2733,7 @@ def test_ready_transition_missing_run_gets_observation_grace(
     assert marked_at == [210.0]
     assert clock.sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [30.0, 30.0])
     assert out.endswith(f"ready: {URL}\n" if run_appears else
-                        f"timed out waiting for required checks on {head[:12]}\n")
+                        f"timed out waiting for required checks on {head[:12]}. Run `loopzero ready --wait` to resume on this head.\n")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
 
@@ -3191,8 +3192,8 @@ def test_merge_wait_times_out_on_pending_checks_with_exit_three(
 ) -> None:
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
 
-    out, _err = expect_cli(capsys, 3, "merge", "--wait=0", stderr="")
-    assert f"timed out waiting for required checks on {head[:12]}" in out
+    out, _ = expect_cli(capsys, 3, "merge", "--wait=0", stderr="")
+    assert f"timed out waiting for required checks on {head[:12]}. Run `loopzero merge --wait` to resume on this head." in out
     assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
@@ -3217,7 +3218,7 @@ def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, h
     monkeypatch.setattr(github, "run", slow_check)
     out, _err = expect_cli(capsys, 3, "merge", "--wait=16", stderr="")
     assert budgets == pytest.approx([8.0])
-    assert f"timed out waiting for required checks on {head[:12]}" in out
+    assert f"timed out waiting for required checks on {head[:12]}. Run `loopzero merge --wait` to resume on this head." in out
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
