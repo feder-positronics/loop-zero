@@ -1765,17 +1765,20 @@ class _AdmissionDeadline(Exception):
 
 
 def _follow_blocked_mergify(
-    config: Config, pr: github.PR, readiness: github.Readiness, queue: str, deadline: float | None,
+    config: Config, pr: github.PR, readiness: github.Readiness, queue: str, deadline: float | None, *, bounded: bool,
 ) -> str | None:
     hint = _merge_check_hint(config, pr, readiness)
     try:
         confirmed = (deadline is not None and pr.base_ref == config.base_branch
-                     and mergify.membership(config.repo, pr.number, queue) is not None)
+                     and mergify.membership(config.repo, pr.number, queue, deadline if bounded else None) is not None)
+    except github.ReadDeadline:
+        print(f"timed out waiting for Mergify to land PR #{pr.number}")
+        return None
     except mergify.MergifyError as exc:
         confirmed = False
         hint += f"; Mergify membership unverified: {exc}"
     if confirmed:
-        return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), True)
+        return _queue_wait(deadline, partial(_wait_for_mergify, config, pr, confirmed=True), bounded=bounded)
     raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
 
 
@@ -1787,7 +1790,7 @@ def _merge_with_mergify(
     queue = config.mergify_queue
     assert queue is not None
     if not readiness.ready:
-        return _follow_blocked_mergify(config, pr, readiness, queue, deadline)
+        return _follow_blocked_mergify(config, pr, readiness, queue, deadline, bounded=admit_by is not None)
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )

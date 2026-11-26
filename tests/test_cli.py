@@ -4806,6 +4806,25 @@ def test_queue_wait_keeps_landing_verified_before_scope_exit(monkeypatch):
     assert cli._queue_wait(1, poll, bounded=True) == "e" * 40
 
 
+def test_mergify_resume_bounds_first_membership_read(monkeypatch, capsys):
+    clock = poll_clock(monkeypatch)
+    budgets = []
+
+    def open_request(request, *, timeout):
+        budgets.append(timeout)
+        clock.now += 2
+        raise TimeoutError("membership response exceeded the budget")
+
+    monkeypatch.setattr(mergify, "_credential", lambda: "test-key")
+    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request))
+    monkeypatch.setattr(cli, "_merge_check_hint", lambda *_: "")
+    monkeypatch.setattr(cli, "_wait_for_mergify", Mock(side_effect=AssertionError("polled after deadline")))
+    cfg = SimpleNamespace(repo=REPO, base_branch="main")
+    pr = SimpleNamespace(number=7, base_ref="main")
+    assert cli._follow_blocked_mergify(cfg, pr, None, "main", 1, bounded=True) is None
+    assert budgets == [1] and "timed out" in capsys.readouterr().out
+
+
 def test_mergify_queue_retries_stop_at_merge_deadline(wt, gh, capsys, monkeypatch, replay_gh):
     commit_mergify_configuration(wt)
     head = head_of(wt)
