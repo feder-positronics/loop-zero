@@ -3178,14 +3178,14 @@ def test_merge_wait_times_out_on_pending_checks_with_exit_three(
     assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
-def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, head, replay_gh):
+@pytest.mark.parametrize("command", ["ready", "merge"])
+def test_source_wait_bounds_slow_check_read(wt, gh, capsys, monkeypatch, head, replay_gh, command):
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     budgets = []
     initial_check_seen = False
     run_gh = github.run
     clock = poll_clock(monkeypatch, start=1000.0)
     monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
-
     def slow_check(argv, *, timeout, **kwargs):
         nonlocal initial_check_seen
         if len(argv) > 2 and argv[2].endswith("/check-runs"):
@@ -3198,9 +3198,9 @@ def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, h
         return run_gh(argv, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(github, "run", slow_check)
-    out, _err = expect_cli(capsys, 3, "merge", "--wait=16", stderr="")
+    out, _err = expect_cli(capsys, 3, command, "--wait=16", stderr="")
     assert budgets == pytest.approx([4.0])
-    assert f"timed out waiting for required checks on {head[:12]}. Run `loopzero merge --wait` to resume on this head." in out
+    assert f"timed out waiting for required checks on {head[:12]}. Run `loopzero {command} --wait` to resume on this head." in out
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 

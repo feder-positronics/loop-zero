@@ -1215,6 +1215,7 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
 
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
+    read_started = time.monotonic()
     pr, readiness = _pr_readiness(wt, config, workflow_wait=args.wait is not None)
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
@@ -1232,7 +1233,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
     ):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
                                      shown=readiness.reasons if kicked else (), args=args,
-                                     allow_skipped=True, initial=None if kicked else readiness)
+                                     allow_skipped=True, initial=None if kicked else readiness,
+                                     initial_read_time=started - read_started)
         if waited is None:
             return 3
         pr, readiness, kicked = waited
@@ -1241,7 +1243,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
             waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=True, started=started,
-                                         args=args, allow_skipped=True)
+                                         args=args, allow_skipped=True,
+                                         initial_read_time=started - read_started)
             if waited is None:
                 return 3
             pr, readiness, kicked = waited
