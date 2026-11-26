@@ -901,12 +901,15 @@ def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
 def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettingsLayout, bool]]:
     old_settings = "requested_settings" not in result.provenance
     formats: list[tuple[github.ReviewSettingsLayout, bool]] = [("current", False)]
-    if runners.codex_evidence(result) is None:
+    codex = runners.codex_evidence(result)
+    if codex is None:
         formats.append(("current", True))
         if old_settings:
             formats.append(("summary", True))
     if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
         formats.append(("requested-reported", True))
+    if codex is not None and all("configured" not in call for call in codex["calls"]):
+        formats.append(("requested-reported", False))
     if result.family == "codex" and old_settings:
         formats.append(("summary", False))
     return [(prefix, settings, display)
