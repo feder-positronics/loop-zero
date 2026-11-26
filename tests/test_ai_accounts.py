@@ -95,6 +95,12 @@ def test_codex_requires_requested_model_evidence(helper, monkeypatch):
     assert helper.active('codex') == 'main'
 
 
+def test_run_returns_after_leader_exits_with_inherited_stderr(helper):
+    argv = [helper.sys.executable, helper.__file__, 'run', 'claude', '--', helper.sys.executable,
+            '-c', 'import subprocess, sys; subprocess.Popen(["sleep", "6"]); sys.exit(7)']
+    assert helper.subprocess.run(argv, timeout=5).returncode == 7
+
+
 @pytest.mark.parametrize('providers,explicit,retry_safe,runs,active', [
     ('claude,codex', False, False, 1, 'a'), ('claude', False, False, 1, 'b'),
     ('claude', False, True, 2, 'b'), ('claude', True, True, 1, 'a')])
