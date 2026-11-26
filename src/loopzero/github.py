@@ -1173,7 +1173,17 @@ def _check_signals(
             workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
         if _has_active_replacement(cr, workflows, head_sha):
             superseded.append(name)
-    return states, (*stale, *superseded), stale_verdicts, _check_suites_at_limit(runs)
+    capped = _check_suites_at_limit(runs)
+    _discard_unverified_successes(states, latest_status.keys() - latest_runs.keys(), capped)
+    return states, (*stale, *superseded), stale_verdicts, capped
+
+
+def _discard_unverified_successes(states: dict[str, str], status_only: set[str], capped: bool) -> None:
+    # A status-only success may hide a failed run outside the returned suites.
+    if capped:
+        for name in status_only:
+            if states[name] == "success":
+                del states[name]
 
 
 def _check_suites_at_limit(runs: list[dict]) -> bool:
