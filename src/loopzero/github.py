@@ -9,13 +9,13 @@ import re
 import shlex
 import tempfile
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
-from collections.abc import Iterator
 from urllib.parse import quote
 
 from loopzero import runners
@@ -441,6 +441,7 @@ def _gh_json(*args: str, token: str | None = None) -> object:
 
 
 def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
+    """Yield validated rows until the last page."""
     page = 1
     while True:
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
@@ -456,7 +457,6 @@ def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
 
 
 def _paged(endpoint: str, key: str = "check_runs") -> list:
-    """Collect a list endpoint page by page until a short page."""
     return list(_iter_paged(endpoint, key))
 
 
@@ -835,33 +835,26 @@ def _require_complete_file_list(repo: str, number: int, head_sha: str, count: in
 
 def _diff_map(repo: str, number: int, head_sha: str,
               findings: tuple[Finding, ...]) -> tuple[dict[str, set[int]], dict | None]:
-    """Read through the located findings and the first hunk needed for fallback."""
     blocking = tuple(f for f in findings if f.severity in BLOCKING)
     remaining = {f.path for f in findings if f.path and (f.line or f.severity in BLOCKING)}
     commentable: dict[str, set[int]] = {}
     anchor: dict | None = None
-    if not remaining and not blocking:
-        return commentable, anchor
+    rows = _iter_paged(f"repos/{repo}/pulls/{number}/files") if remaining or blocking else ()
     count = 0
-    paths: set[str] = set()
-    for entry in _iter_paged(f"repos/{repo}/pulls/{number}/files"):
+    for entry in rows:
         count += 1
         path = entry["filename"]
-        paths.add(path)
         lines, first_added = _right_lines(entry.get("patch") or "")
-        if lines:
-            if path in remaining:
-                commentable[path] = lines
-            if anchor is None:
-                line = first_added if first_added is not None else min(lines)
-                anchor = {"path": path, "line": line, "side": "RIGHT"}
+        commentable[path] = lines
+        if lines and anchor is None:
+            line = first_added if first_added is not None else min(lines)
+            anchor = {"path": path, "line": line, "side": "RIGHT"}
         remaining.discard(path)
         if not remaining and (not blocking or anchor is not None):
-            break
-    if count >= PR_FILE_LIMIT:
-        missing = next((f.path for f in blocking if f.path in remaining), None)
-        if missing is not None:
-            _require_complete_file_list(repo, number, head_sha, len(paths), missing)
+            return commentable, anchor
+    missing = next((f.path for f in blocking if f.path in remaining), None)
+    if missing is not None and count >= PR_FILE_LIMIT:
+        _require_complete_file_list(repo, number, head_sha, len(commentable), missing)
     return commentable, anchor
 
 
