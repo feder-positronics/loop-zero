@@ -572,15 +572,20 @@ def _append_review(body: str, result: ReviewResult) -> str:
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
     """Best-effort refresh only when local HEAD is the existing PR head."""
     try:
-        with worktree.lock_local_state(wt):
-            upstream = config_mod.run_git(wt, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-            if upstream.exit_code == 0:
-                branch, head = worktree.branch(wt), worktree.head(wt)
-                pr = github.pr_for_branch(config.repo, branch, open_only=True)
-                if pr is not None and pr.head_sha == head:
-                    body = _pr_body(wt, head, config, pr.body)
-                    if body != (pr.body or "").replace("\r\n", "\n"):
-                        github.update_body(config.repo, pr.number, body)
+        upstream = config_mod.run_git(wt, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+        if upstream.exit_code != 0:
+            return
+        branch, head = worktree.branch(wt), worktree.head(wt)
+        pr = github.pr_for_branch(config.repo, branch, open_only=True)
+        if pr is None or pr.head_sha != head:
+            return
+        with github.pr_lock(config.repo, pr.number):
+            live = github.pr_view(config.repo, pr.number)
+            if live.state != "OPEN" or live.head_sha != head:
+                return
+            body = _pr_body(wt, head, config, live.body)
+            if body != live.body.replace("\r\n", "\n"):
+                github.update_body(config.repo, pr.number, body)
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError, worktree.WorktreeError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
@@ -726,7 +731,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None:
-        with worktree.lock_local_state(wt):
+        with github.pr_lock(config.repo, pr.number):
             live = github.pr_view(config.repo, pr.number)
             if live.state != "OPEN":
                 raise CliError(f"PR #{pr.number} closed during publication")
@@ -887,12 +892,11 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
                 f"{exc} | publication unconfirmed; review saved at {path}; "
                 "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
             ) from exc
-    try:
-        with worktree.lock_local_state(wt):
+        try:
             live = github.pr_view(config.repo, pr.number)
             github.update_body(config.repo, pr.number, _append_review(live.body, result))
-    except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
-        print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
+        except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
+            print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
 
 
