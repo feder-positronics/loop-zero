@@ -231,7 +231,7 @@ def test_hosted_import_does_not_load_yaml():
 
 @pytest.mark.parametrize("failure,status,budget,wait", [
     ("http", 503, None, 2), ("reset", None, None, 2), ("truncated", None, None, 2),
-    ("http", 429, None, 40), ("http", 403, 20, None), ("http", 429, 20, None)])
+    ("http", 429, 100, 40), ("http", 429, None, None), ("http", 403, 20, None), ("http", 429, 20, None)])
 def test_api_get_retries_transient_reads(monkeypatch, failure, status, budget, wait):
     calls, sleeps = [], []
     def fake_open(request):
@@ -245,7 +245,7 @@ def test_api_get_retries_transient_reads(monkeypatch, failure, status, budget, w
     monkeypatch.setattr(mergify, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(mergify, "_credential", lambda: "k")
     if status in {403, 429}:
-        with pytest.raises(mergify.MergifyError, match="Retry-After: 40s" + ("; retry delay exceeds" if budget else "")):
+        with pytest.raises(mergify.MergifyError, match="Retry-After: 40s" + ("; retry delay exceeds" if wait is None else "")):
             mergify.api_get("acme/widgets", "/merge-queue/status", None if budget is None else mergify.time.monotonic() + budget)
     else:
         assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}

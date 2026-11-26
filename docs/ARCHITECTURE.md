@@ -353,7 +353,8 @@ GitHub reads and the idempotent thread resolution mutation retry transient
 failures once after five seconds. They stop on exhausted quota and honor a
 secondary limit’s Retry-After when the delay fits the read budget. Mergify
 queue reads retry once after two seconds, subject to Retry-After and the
-remaining queue wait budget. See the
+remaining queue wait budget. Calls without a deadline allow less than five
+seconds of backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).
 The optional host ai-accounts helper owns managed credential selection and exact-model
 eligibility under its existing lock. Its Claude exec reserve guard (including pinned

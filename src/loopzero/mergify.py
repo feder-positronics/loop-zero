@@ -81,7 +81,8 @@ def _open(request: urllib.request.Request):
 
 
 def _wait_to_retry(delay: float, deadline: float | None) -> bool:
-    if deadline is not None and time.monotonic() + delay >= deadline:
+    remaining = 5.0 if deadline is None else deadline - time.monotonic()
+    if delay >= remaining:
         return False
     _retry_sleep(delay)
     return deadline is None or time.monotonic() < deadline

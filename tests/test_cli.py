@@ -4382,8 +4382,8 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=head),
                    merge_json(state='MERGED', head='f' * 40, sha='e' * 40))
     configurations = []
-    def configured(*_):
-        configurations.append(True)
+    def configured(*args):
+        configurations.append(args[-1])
         if len(configurations) > 1:
             if outcome == "config_error":
                 raise mergify.MergifyError("configuration HTTP 503")
@@ -4430,7 +4430,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
-    assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
+    assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else []) and all(deadline == (250 if outcome == "timeout" else 0) for deadline in configurations)
     if outcome in {"merged", "already_merged", "worktree_removed"}:
         assert code == 0 and "e" * 40 in out and not wt.exists(), err
         if outcome == "worktree_removed":
