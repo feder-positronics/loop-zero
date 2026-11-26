@@ -169,6 +169,8 @@ def evaluate(repo: str, number: int, head: str, base: str,
     pr = github.pr_view(repo, number)
     if pr.head_sha != head:
         return github.Readiness(False, ("source head changed; refresh eligibility",))
+    if hold := github.merge_hold(pr.number, pr.labels):
+        return github.Readiness(False, (hold,))
     reviews, page = [], 1
     while True:
         batch = github.api_get(f"repos/{repo}/pulls/{number}/reviews?per_page=100&page={page}")
