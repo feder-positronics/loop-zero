@@ -148,6 +148,11 @@ to the base branch before starting your first task. If the base has a
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
+- Check, review, ready, merge, and status load the workflow from the
+  remote-tracking delivery branch selected by `[repo] base` in the workflow
+  at `origin/HEAD`. Missing trusted policy blocks these commands. Fetch and
+  run `git remote set-head origin --auto` if the local default-branch pointer
+  is missing. Supply `--config <path>` during bootstrap or to override policy.
 - For offline checks, warm the configured writable uv cache on the host with
   `UV_CACHE_DIR=<configured-cache> uv sync --group dev` (use the groups your
   checks require). This also fetches build backends such as hatchling.
