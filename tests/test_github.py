@@ -262,12 +262,13 @@ def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
     assert "required token scope: repo" in info.value.tail
 
 
-def test_generic_failure_carries_command_and_tail(gh: FakeGh) -> None:
-    gh.fail("pr ready", "HTTP 422: boom\n")
+@pytest.mark.parametrize("stdout", ["", '{"message": "detail on stdout"}'])
+def test_generic_failure_carries_command_and_tail(gh: FakeGh, stdout: str) -> None:
+    gh.respond("pr ready", {"stdout": stdout, "stderr": "gh: HTTP 422\n", "exit": 1})
     with pytest.raises(github.GhError) as info:
         github.mark_ready(REPO, 7)
     assert info.value.command == ("gh", "pr", "ready", "7", "--repo", REPO)
-    assert "HTTP 422" in info.value.tail
+    assert info.value.tail == "gh: HTTP 422" + ("\n\n" + stdout if stdout else "\n")
 
 
 # --- PR lookup / creation -----------------------------------------------------------
@@ -571,14 +572,6 @@ def test_post_review_falls_back_to_comment_for_own_pr(gh: FakeGh, verdict: str, 
     assert first["comments"] == second["comments"] and first["body"] == second["body"]
 
 
-def test_gh_error_tail_joins_stderr_and_stdout(gh: FakeGh) -> None:
-    gh.respond("pr ready", {"stdout": '{"message": "detail on stdout"}', "stderr": "gh: HTTP 422\n",
-                            "exit": 1})
-    with pytest.raises(github.GhError) as info:
-        github.mark_ready(REPO, 7)
-    assert info.value.tail == 'gh: HTTP 422\n\n{"message": "detail on stdout"}'
-
-
 @pytest.mark.parametrize(("failure", "remedy"), [
     ("not logged in", github.GH_AUTH_REMEDY),
     ("HTTP 429 rate limit", "retry after GitHub's reset or Retry-After"),
@@ -639,23 +632,16 @@ def test_gh_timeout_redacts_diagnostics(monkeypatch) -> None:
     assert info.value.__suppress_context__
 
 
-@pytest.mark.parametrize("verdict", ["approve", "request_changes"])
-def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str) -> None:
-    arm_review(gh, author="bot-user")
-    github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]))
+@pytest.mark.parametrize("verdict,supplied", [("approve", False), ("request_changes", False), ("approve", True)])
+def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str, supplied: bool) -> None:
+    details = f"api repos/{REPO}/pulls/7"
+    arm_review(gh, author="someone-else" if supplied else "bot-user")
+    pr = github._pr_from_rest(rest_pr_json(pr_json(author={"login": "bot-user"}))) if supplied else None
+    github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]), pr=pr)
     (payload,) = review_payloads(gh)
     assert payload["event"] == "COMMENT"
-    assert [c["argv"][:2] for c in gh.calls[:2]] == [["api", f"repos/{REPO}/pulls/7"],
-                                               ["api", "graphql"]]
-    assert gh.argv(0) == ["api", f"repos/{REPO}/pulls/7", "--include"]
-
-
-def test_post_review_uses_given_pr_without_lookup(gh: FakeGh) -> None:
-    arm_review(gh)
-    pr = github._pr_from_rest(rest_pr_json(pr_json(author={"login": "bot-user"})))
-    github.post_review(REPO, 7, HEAD, review(verdict="approve"), pr=pr)
-    assert calls_for(gh, "pr view") == []
-    assert review_payloads(gh)[0]["event"] == "COMMENT"
+    assert [c["argv"] for c in calls_for(gh, details)] == ([] if supplied else [[*details.split(), "--include"]])
+    assert gh.argv(int(not supplied))[:2] == ["api", "graphql"]
 
 
 def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
@@ -676,9 +662,9 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     app = thread(f"{marker('important')}\n**important: From the App**", path="src/c.py")
     app["comments"]["nodes"][0]["author"] = {"__typename": "Bot", "login": "loopzero-app"}
     gh.respond("api graphql", threads_json(
-        thread(f"{versioned}\n**critical: Null deref**\n\nx may be None"),
+        thread(f"{versioned}\n**critical: Null deref**\n\nx may be None", edited="2026-09-18T01:00:00Z"),
         thread(f"{marker('important')}\nplain title", resolved=True),
-        thread(f"{marker('suggestion')}\n**suggestion: Rename**"),
+        thread(f"{marker('suggestion')}\n**suggestion: Rename**", edited="2026-09-18T01:00:00Z"),
         thread(f"{marker('important')}\n**important: Missing check**\n\nvalidate",
                path="src/b.py", line=2),
         app,
@@ -690,7 +676,8 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
                 "**important: Missing check**\n\nvalidate"),
         Finding("important", "src/c.py", 3, "From the App", "**important: From the App**"),
     ]
-    argv = gh.argv(0)
+    (call,) = gh.calls
+    argv = call["argv"]
     assert argv[:2] == ["api", "graphql"]
     assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
     assert any(a.startswith("query=") and "author { __typename login }" in a for a in argv)
@@ -711,6 +698,9 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     (marker("critical").replace(" head=", "\nhead=") + "\n**critical: Split**", "bot-user"),
     (marker("critical") + " trailing prose\n**critical: Trailed**", "bot-user"),
     (marker("critical", head=HEAD[:7]) + "\n**critical: Short head**", "bot-user"),
+    ("stripped loopzero marker\n**critical: X**", "bot-user"),
+    ("mentions loopzero but a human wrote it", "human"),
+    ("bot-user wrote this but it is unrelated", "bot-user"),
 ])
 def test_open_findings_ignore_untrusted_or_quoted_markers(gh: FakeGh, body: str, author: str) -> None:
     gh.respond("api graphql", threads_json({**thread(body, author=author), "id": "T_1"}))
@@ -836,29 +826,6 @@ def test_finding_id_is_deterministic_and_uses_location_and_title() -> None:
     assert github.finding_id(HEAD, "src/a.py", 10, "Null deref") == expected
     assert github.finding_id(HEAD, "src/a.py", 10, "Null deref") == expected
     assert github.finding_id(HEAD, "src/a.py", 11, "Null deref") != expected
-
-
-def test_open_blocking_findings_counts_only_explicit_blocking_markers(gh: FakeGh) -> None:
-    gh.respond("api graphql", threads_json(
-        thread(f"{marker('suggestion')}\n**suggestion: nit**", edited="2026-09-18T01:00:00Z"),
-        thread(f"{marker('critical')}\nX", edited="2026-09-18T01:00:00Z", path="e.py", line=4),
-    ))
-    found = github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
-    assert [(f.severity, f.path, f.line, f.title) for f in found] == [
-        ("critical", "e.py", 4, "X"),
-    ]
-    assert all(c["argv"][:2] == ["api", "graphql"] for c in gh.calls), "no login lookup needed"
-
-
-def test_open_blocking_findings_does_not_guess_from_body_or_author(gh: FakeGh) -> None:
-    gh.respond("api graphql", threads_json(
-        thread("stripped loopzero marker\n**critical: X**", author="bot-user"),
-        thread("mentions loopzero but a human wrote it", author="human"),
-        thread("bot-user wrote this but it is unrelated", author="bot-user"),
-    ))
-    found = github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
-    assert found == []
-    assert all(c["argv"] != ["api", "user"] for c in gh.calls)
 
 
 def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
@@ -1016,22 +983,16 @@ def arm_workflow_runs(gh, *runs):
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", *pages)
 
 
-def test_readiness_ready(gh: FakeGh) -> None:
-    arm_readiness(gh)
-    assert readiness() == github.Readiness(True, ())
+@pytest.mark.parametrize("reviewed,reasons", [
+    (HEAD, ()),
+    ("b" * 40, (f"head {HEAD[:12]} differs from reviewed {'b' * 12}",)),
+    (None, ("no review recorded for the current head",)),
+])
+def test_readiness_requires_current_review(gh: FakeGh, reviewed, reasons) -> None:
+    arm_readiness(gh, threads=(thread(f"{marker('critical')}\nX", resolved=True),
+                               thread(f"{marker('suggestion')}\nY")))
+    assert readiness(reviewed=reviewed) == github.Readiness(not reasons, reasons)
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
-
-
-def test_readiness_head_moved(gh: FakeGh) -> None:
-    arm_readiness(gh)
-    r = readiness(reviewed="b" * 40)
-    assert not r.ready and any("differs from reviewed" in x for x in r.reasons)
-
-
-def test_readiness_no_review(gh: FakeGh) -> None:
-    arm_readiness(gh)
-    r = readiness(reviewed=None)
-    assert r.reasons == ("no review recorded for the current head",)
 
 
 @pytest.mark.parametrize("finding,reason", [
@@ -1049,12 +1010,6 @@ def test_readiness_blocking_finding(gh: FakeGh, finding: dict, reason: str) -> N
     arm_readiness(gh, threads=(finding,))
     result = readiness()
     assert not result.ready and result.reasons == (reason,)
-
-
-def test_readiness_resolved_or_suggestion_threads_do_not_block(gh: FakeGh) -> None:
-    arm_readiness(gh, threads=(thread(f"{marker('critical')}\nX", resolved=True),
-                               thread(f"{marker('suggestion')}\nY")))
-    assert readiness().ready
 
 
 def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
@@ -1121,13 +1076,7 @@ def test_readiness_defers_only_replaceable_failure(gh: FakeGh, created_at, statu
 
 
 def test_readiness_looks_up_only_required_failed_checks(gh: FakeGh) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [
-        {"name": "checks", "status": "completed", "conclusion": "success"},
-        {"name": "optional", "status": "completed", "conclusion": "failure",
-         "check_suite": {"id": 10}},
-    ]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    arm_workflow_check(gh, check_run("success"), failed_check(name="optional"))
     result = readiness(workflow_wait=True)
     assert result.ready
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)

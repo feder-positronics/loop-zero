@@ -1111,12 +1111,14 @@ def test_progress_output_precedes_the_stderr_verdict_in_one_file(tmp_path: Path)
 
 
 @pytest.mark.parametrize("corrupt_report", [False, True], ids=["no-report", "corrupt-report"])
-def test_pr_updates_existing_open_pr(wt, gh, capsys, corrupt_report):
+def test_pr_updates_existing_open_pr(wt, gh, capsys, corrupt_report, git_calls):
     if corrupt_report:
         (wt / ".loopzero" / "checks.json").write_text('{"results": "nope"}')
     arm_pr_body_patch(gh, head_of(wt))
 
+    git_calls.clear()
     code, out, err = run(capsys, "pr")
+    assert not any(call[:2] == ["merge-base", "--is-ancestor"] for call in git_calls)
 
     assert code == 0 and out == URL + "\n"
     assert ("warning: ignoring unreadable" in err) == corrupt_report
@@ -1136,6 +1138,7 @@ def test_pr_aborts_when_ancestry_cannot_be_verified(wt, gh, fake_tool, tmp_path,
         pushes = trace_pushes(fake_tool, tmp_path)
     else:
         arm_pr_body_patch(gh, head_of(wt))
+        git(wt, "commit", "--allow-empty", "-m", "Advance local head")
         pushes = tmp_path / "pushes"
         fake_tool("git", f'''\
 if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ]; then {probe}; fi
@@ -3332,8 +3335,7 @@ def test_mergify_uses_one_deadline_for_checks_admission_and_landing(
         return pr, github.Readiness(ready=True, reasons=()), False
 
     if admission_expires:
-        monkeypatch.setattr(mergify, "membership",
-                            lambda *_: spend_admission_time() if clock[0] >= 1009 else None)
+        monkeypatch.setattr(mergify, "membership", spend_admission_time)
         monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("queued after the deadline"))
     else:
         monkeypatch.setattr(mergify, "request", spend_admission_time)
@@ -3709,7 +3711,7 @@ def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys, he
 @pytest.mark.parametrize("attested", [True, False])
 @pytest.mark.parametrize("merge_state", ["BEHIND", "CLEAN"])
 def test_mergify_merge_requests_once_for_behind_head(
-    wt: Path, gh: FakeGh, capsys, monkeypatch, attested, merge_state
+    wt: Path, gh: FakeGh, capsys, monkeypatch, attested, merge_state, git_calls
 ) -> None:
     head = commit_mergify_configuration(wt)
     arm_approved_ready_pr(gh, head, wt, isDraft=False, mergeStateStatus=merge_state)
@@ -3718,7 +3720,9 @@ def test_mergify_merge_requests_once_for_behind_head(
     stub_mergify_admission(monkeypatch, configured=None)
     monkeypatch.setattr(mergify, "request", lambda *args: requested.append(args))
 
+    git_calls.clear()
     code, out, err = run(capsys, "merge")
+    assert git_calls.count(["branch", "--show-current"]) == 1
 
     if attested:
         assert (code, err) == (0, "")
