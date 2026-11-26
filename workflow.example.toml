@@ -63,7 +63,7 @@ reviewers = ["claude", "codex"]
 # When omitted, loop-zero mounts the selected binary's resolved directory;
 # inside native state roots, only the executable file is mounted instead.
 # Explicit paths must not overlap native auth/state or private reviewer state.
-# Claude installations may need their npm or bun prefix listed here.
+# Codex installations may need their npm or bun prefix listed here.
 # reviewer_ro_paths = ["/home/<you>/.local/share/npm", "/home/<you>/.bun"]
 
 # Optional per-family defaults. `--model` and `--effort` override these for one run;

@@ -279,12 +279,17 @@ def _run(
         if family == "claude":
             with contextlib.suppress(json.JSONDecodeError, ValueError):
                 envelope = _extract_json_object(done.stdout)
-        if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(combined):
-            raise _auth_failure(family, combined)
-        if _subscription_exhausted(combined, envelope):
-            raise RunnerUsageLimit(f"{family}: usage limit reached", _tail(combined))
-        if _looks_too_long(combined):
-            raise RunnerPromptTooLong(f"{family}: prompt is too long", _tail(combined))
+        diagnostic = combined if family == "claude" else "\n".join(
+            [done.stderr, *(json.dumps(event, ensure_ascii=False) for event in _json_lines(done.stdout)
+                            if event.get("type") in ("error", "turn.failed")
+                            or (event.get("type") == "item.completed" and isinstance(event.get("item"), dict)
+                                and event["item"].get("type") == "error"))])
+        if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(diagnostic):
+            raise _auth_failure(family, diagnostic)
+        if _subscription_exhausted(diagnostic, envelope):
+            raise RunnerUsageLimit(f"{family}: usage limit reached", _tail(diagnostic))
+        if _looks_too_long(diagnostic):
+            raise RunnerPromptTooLong(f"{family}: prompt is too long", _tail(diagnostic))
         raise RunnerBadOutput(f"{family}: exited {done.exit_code}", _tail(combined))
     return done
 
