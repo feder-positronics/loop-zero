@@ -346,14 +346,18 @@ def _readiness(
 # --------------------------------------------------------------------------- checks report
 
 
+def _check_report_matches(report: CheckReport, wt: Path, config: Config, head: str) -> bool:
+    return (report.head == head and not report.dirty
+            and tuple(result.command for result in report.results) == config.checks
+            and report.settings_sha256 is not None
+            and report.settings_sha256 == sandbox.settings_fingerprint(config, wt))
+
+
 def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
     report = _load_report(wt)
-    if (report is None or report.head != head or report.dirty or not report.ok
-            or tuple(result.command for result in report.results) != config.checks
-            or report.settings_sha256 is None
-            or report.settings_sha256 != sandbox.settings_fingerprint(config, wt)):
-        return None
-    return report
+    if report is not None and report.ok and _check_report_matches(report, wt, config, head):
+        return report
+    return None
 
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
@@ -434,12 +438,14 @@ def _load_report(wt: Path) -> CheckReport | None:
         return None
 
 
-def _validation_section(wt: Path, head: str) -> str:
+def _validation_section(wt: Path, head: str, config: Config) -> str:
     loaded = _load_report(wt)
     if loaded is None:
         return "(no `loopzero check` run recorded)"
     recorded, results = loaded.head, loaded.results
     lines = [f"Recorded for `{recorded[:12]}`" + ("" if recorded == head else " (not current head)")]
+    if not _check_report_matches(loaded, wt, config, head):
+        lines[0] += " (unverified, run `loopzero check`)"
     lines += [
         f"- `{r.command}`: exit {r.exit_code}" for r in results
     ] or ["- (no check commands configured)"]
@@ -456,10 +462,10 @@ _LEGACY_CHECKS = re.compile(
 )
 
 
-def _pr_body(wt: Path, head: str, existing: str | None = None) -> str:
+def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = (existing if existing is not None else worktree.task_text(wt)).replace("\r\n", "\n")
-    block = f"{_CHECKS_START}\n{_validation_section(wt, head)}\n{_CHECKS_END}"
+    block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
     pattern = re.compile(r"^## (?:Validation|Checks)\n(.*?)(?=^## |\Z)",
                          re.DOTALL | re.MULTILINE)
     match = pattern.search(body)
@@ -520,7 +526,7 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
 
 
 def _update_pr_checks(wt: Path, head: str, config: Config, pr: github.PR) -> None:
-    body = _pr_body(wt, head, pr.body)
+    body = _pr_body(wt, head, config, pr.body)
     if body != (pr.body or "").replace("\r\n", "\n"):
         github.update_body(config.repo, pr.number, body)
 
@@ -646,7 +652,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_pr(args: argparse.Namespace) -> int:
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
@@ -660,7 +666,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
             "run `loopzero start <new-task-slug>` for a new task"
         )
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
-    body = _pr_body(wt, head, existing)
+    body = _pr_body(wt, head, config, existing)
     force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
     push = ["push", "-u", "origin"]
     if force_lease:
