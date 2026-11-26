@@ -116,7 +116,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    on every poll.
    Local readiness and hosted eligibility share the mergeability verdict.
    Hosted source refresh retries an unknown result on the same head before
-   leaving it pending. Candidate source evidence includes mergeability.
+   leaving it pending.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree
