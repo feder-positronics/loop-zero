@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import errno
 from email.utils import parsedate_to_datetime
 import fcntl
 import hashlib
@@ -58,6 +59,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -192,6 +194,35 @@ def sync_codex_home(home: Path, *, create: bool = False) -> None:
         _sync_codex_home(home)
 
 
+def _copy_across_devices(entry: Path, target: Path) -> None:
+    import ctypes
+
+    # The private staging directory is also excluded from future mirroring
+    # by shared() if the process is interrupted before cleanup.
+    with tempfile.TemporaryDirectory(dir=target.parent, prefix=".codex-sync-", suffix=".lock") as directory:
+        staged = Path(directory) / entry.name
+        is_directory = entry.is_dir()
+        if is_directory:
+            shutil.copytree(entry, staged, symlinks=True)
+        else:
+            shutil.copy2(entry, staged, follow_symlinks=False)
+
+        # Linux/WSL renameat2 with RENAME_NOREPLACE publishes the complete
+        # entry in one operation without replacing a competing destination.
+        rename = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+        if rename is None:
+            raise OSError(errno.ENOSYS, "Atomic cross-device publication is unavailable", target)
+        if rename(-100, os.fsencode(staged), -100, os.fsencode(target), 1):
+            error = ctypes.get_errno()
+            if error == errno.EEXIST:
+                return
+            raise OSError(error, os.strerror(error), target)
+        if is_directory:
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+
 def _sync_codex_home(home: Path) -> None:
     """Mirror shared Codex files while holding the home lock."""
     for entry in home.iterdir():
@@ -202,6 +233,10 @@ def _sync_codex_home(home: Path) -> None:
                 os.rename(entry, target)
             except FileNotFoundError:
                 pass
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                _copy_across_devices(entry, target)
     for src in CODEX_MAIN.iterdir():
         dst = home / src.name
         if shared(src) and not dst.exists() and not dst.is_symlink():
