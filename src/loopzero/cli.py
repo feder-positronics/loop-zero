@@ -1213,7 +1213,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
                 return 3
             pr, readiness, kicked = waited
     assert readiness is not None
-    for reason in readiness.reasons:
+    for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
     if not readiness.ready:
         if args.wait is None and _pending_checks(config, pr, readiness):
@@ -1252,6 +1252,17 @@ def _pending_checks(
     waitable.add(MERGEABILITY_PENDING)
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
+
+
+def _readiness_messages(pr: github.PR, readiness: github.Readiness) -> Iterator[str]:
+    for reason in readiness.reasons:
+        check, separator, conclusion = reason.rpartition("' is ")
+        if (separator and check.startswith("required check '") and conclusion not in {"pending", "skipped"}
+                and reason not in readiness.waitable_failures):
+            yield (f"{reason}. Inspect {pr.url}/checks. Fix reproducible failures before retrying. "
+                   "Rerun the failed job only for a transient failure. Once green, run `loopzero ready --wait`.")
+        else:
+            yield reason
 
 
 def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness) -> str:
@@ -1541,7 +1552,7 @@ def _merge_with_mergify(
     """Request Mergify after readiness verifies the source gates and queue configuration."""
     if not readiness.ready:
         hint = _merge_check_hint(config, pr, readiness)
-        raise CliError("not ready to request Mergify: " + "; ".join(readiness.reasons) + hint)
+        raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
     queue = config.mergify_queue
     assert queue is not None
     requested, confirmed_marker = mergify.markers(
@@ -1622,7 +1633,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     else:
         if not readiness.ready:
             hint = _merge_check_hint(config, pr, readiness)
-            raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
+            raise CliError("not ready to merge: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
         if admit_by is not None and time.monotonic() > admit_by:
             print(f"timed out before merging PR #{pr.number}")
             return 3
