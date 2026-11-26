@@ -12,7 +12,7 @@ import signal
 import subprocess
 import sys
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from select import select
 from types import SimpleNamespace
@@ -3022,7 +3022,7 @@ def test_ready_requires_clean_successful_local_report_at_head(
         if condition == "wrong-head":
             report["head"] = "0" * 40
         elif condition == "wrong-commands":
-            report["results"][0]["command"] = "true"
+            report["results"].pop()
         elif condition == "legacy":
             del report["settings_sha256"]
         else:
@@ -3036,8 +3036,10 @@ def test_ready_requires_clean_successful_local_report_at_head(
         assert f"not ready: {reason}." in out
         assert ("Run loopzero check in this worktree at this head with the same current CLI and effective "
                 "settings as ready, using a local coordinator for delegated stages." in out)
+    elif condition == "wrong-commands":
+        assert "not ready: check receipt's plan differs from the trusted workflow." in out
     elif condition != "matching":
-        assert out.endswith("not ready: run loopzero check at this head\n")
+        assert ("not ready: run loopzero check at this head" if condition == "missing" else "not ready: check receipt") in out
 
 
 @pytest.mark.parametrize("wait_for", [None, "ready", "merge"])
@@ -3764,7 +3766,7 @@ def test_status_silently_ignores_legacy_report_without_dirty(
 
     assert code == 0 and err == ""
     assert "ready:    no" in out
-    assert "  - run loopzero check at this head" in out
+    assert "  - check receipt was recorded in a dirty worktree." in out
 
 
 def test_gh_errors_are_one_line_on_stderr(wt: Path, gh: FakeGh, capsys) -> None:
@@ -4594,22 +4596,25 @@ def test_receipt_print_failure_preserves_verdict(wt, gh, capsys, head, monkeypat
     assert run(capsys, command)[0] == 0
 
 
-@pytest.mark.parametrize("invalid", ["stale", "red", "dirty", "commands"])
-def test_invalid_receipt_is_not_announced(wt, gh, capsys, head, invalid):
+@pytest.mark.parametrize("field,value,reason", [
+    ("head", "a" * 40, "check receipt is for aaaaaaaaaaaa."),
+    ("exit_code", 1, "check receipt records a failed stage."),
+    ("dirty", True, "check receipt was recorded in a dirty worktree."),
+    ("command", "changed", "check receipt's plan differs from the trusted workflow."),
+    ("results", [], "check receipt is incomplete."),
+    ("results", "checkpoint", "check receipt is incomplete."),
+])
+def test_invalid_receipt_is_not_announced(wt, gh, capsys, head, field, value, reason):
     arm_approved_ready_pr(gh, head, wt)
     path = wt / ".loopzero/checks.json"
     data = json.loads(path.read_text())
-    if invalid == "stale":
-        data["head"] = "a" * 40
-    elif invalid == "dirty":
-        data["dirty"] = True
-    elif invalid == "red":
-        data["results"][0]["exit_code"] = 1
-    else:
-        data["results"][0]["command"] = "changed"
+    target = data["results"][0] if field in {"exit_code", "command"} else data
+    if value == "checkpoint":
+        value = [data["results"][0], asdict(CheckResult("<checks incomplete>", 1, 0.0, ""))]
+    target[field] = value
     path.write_text(json.dumps(data))
     code, out, _ = run(capsys, "ready")
-    assert code == 1 and "run loopzero check at this head" in out
+    assert code == 1 and f"not ready: {reason}" in out
     assert "receipt accepted:" not in out
 
 
