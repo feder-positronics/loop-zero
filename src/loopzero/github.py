@@ -14,6 +14,7 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -120,7 +121,7 @@ class Readiness:
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
                           r"connection reset|no server is currently|error connecting to api\.github\.com|"
                           r"unexpected end of JSON input|Something went wrong while executing your query", re.IGNORECASE)
-RETRY_DELAYS = (5.0, 20.0, 60.0)
+RETRY_DELAY = 5.0
 _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str | None, bool] | None] = ContextVar("github_reads", default=None)
 _api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
@@ -143,8 +144,8 @@ def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = Fals
         _read_scope.reset(scope)
 
 
-def _read_timeout(limit: float) -> float:
-    scope = _read_scope.get()
+def _read_timeout(limit: float, *, scoped: bool = True) -> float:
+    scope = _read_scope.get() if scoped else None
     if scope is None:
         return limit
     remaining = scope[0] - time.monotonic()
@@ -326,6 +327,24 @@ def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> boo
             or bool(re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)))
 
 
+def _retry_pause(delay: float | None, limit: float, *, scoped: bool = True) -> bool:
+    if delay is None or delay >= _read_timeout(limit, scoped=scoped):
+        return False
+    _retry_sleep(delay)
+    return True
+
+
+def _rate_limit_delay(headers: dict[str, str], delay: float | None) -> float | None:
+    if delay is None or headers.get("x-ratelimit-remaining") == "0":
+        return None
+    value = headers.get("retry-after", "")
+    try:
+        wait = int(value) if re.fullmatch(r"[0-9]{1,18}", value) else parsedate_to_datetime(value).timestamp() - time.time()
+    except (OverflowError, OSError, ValueError):
+        return None
+    return max(delay, wait)
+
+
 def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
     if (using_app and len(args) > 1 and args[0] == "api"
             and re.fullmatch(r"repos/[^/]+/[^/]+/pulls\?.+", args[1])
@@ -340,48 +359,48 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     rest_api = args[:1] == ("api",) and args[:2] != ("api", "graphql")
     patch_error = args[:1] == ("api",) and _api_method(args) == "PATCH"
     request_args = args
-    if (rest_api or diagnostic_api) and not {"--include", "-i"} & set(args):
+    api = args[:1] == ("api",)
+    if api and not {"--include", "-i"} & set(args):
         request_args = (*args, "--include")
     argv = ("gh", *request_args)
     cwd = cwd or Path("/")
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    delays = (None,) if scope and not scope[2] else (*RETRY_DELAYS, None)
+    delays = (RETRY_DELAY, None) if retryable and (not scope or scope[2]) else (None,)
     for delay in delays:
         selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout) if scope else timeout)
+                       timeout=_read_timeout(timeout, scoped=read_only))
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
-            if scope and scope[2]:
-                _read_timeout(timeout)
-            if delay is None or not retryable:
+            _read_timeout(timeout, scoped=bool(scope and scope[2]))
+            if not _retry_pause(delay, timeout, scoped=read_only):
                 raise ProcTimeout(
                     _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
                     stderr=_redact_tokens(exc.stderr, selected), duration_s=exc.duration_s,
                 ) from None
-            _retry_sleep(_read_timeout(delay) if scope else delay)
             continue
-        status, headers, body = (_included_response(done.stdout) if rest_api or diagnostic_api
+        status, headers, body = (_included_response(done.stdout) if api
                                  else (None, {}, done.stdout))
-        tail = "\n".join(part for part in (done.stderr, body if rest_api else done.stdout) if part)
+        tail = "\n".join(part for part in (done.stderr, body) if part)
         if done.exit_code and _rate_limited(status, headers, tail):
-            guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api
+            if _retry_pause(_rate_limit_delay(headers, delay), timeout, scoped=read_only):
+                continue
+            guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api or headers
                         else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
             if diagnostic_api or patch_error:
                 detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                            message_tail=None if diagnostic_api else tail)
                 raise GhUnavailable(("GitHub API request",), detail, token=selected, guidance=guidance)
-            raise GhUnavailable(argv, tail, token=selected, guidance=guidance)
+            raise GhUnavailable(("gh", *args), tail, token=selected, guidance=guidance)
         transient = _transient_error(tail, retry_idempotent, status)
-        if done.exit_code == 0 or delay is None or not retryable or not transient:
+        if done.exit_code == 0 or not transient or not _retry_pause(delay, timeout, scoped=read_only):
             break
-        _retry_sleep(_read_timeout(delay) if scope else delay)
     if done.exit_code != 0:
         error_command = ("GitHub API request",) if diagnostic_api or patch_error else argv
         error_tail = (_api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
