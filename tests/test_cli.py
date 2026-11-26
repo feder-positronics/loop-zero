@@ -2894,7 +2894,7 @@ def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, co
         elif condition == "empty":
             report["results"] = []
         elif condition == "checkpoint":
-            report["results"].append(asdict(CheckResult("<checks incomplete>", 1, 0.0, "")))
+            report["results"][1:] = [asdict(CheckResult("<checks incomplete>", 1, 0.0, ""))]
         elif condition == "red":
             report["results"][0]["exit_code"] = 1
         elif condition == "legacy":

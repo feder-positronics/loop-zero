@@ -584,8 +584,8 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
       for overflow in (0, 1, 2)),
     pytest.param("\n", 1, True, id="adjudication-counts-toward-tightened-budget"),
 ])
-def test_raw_leading_utf8_span_at_limit_and_overflow(native, separator, overflow, tightened, monkeypatch):
-    result = native[0]() if tightened else BYTE_LIMIT_REVIEW
+def test_raw_leading_utf8_span_at_limit_and_overflow(request, separator, overflow, tightened, monkeypatch):
+    result = request.getfixturevalue("native")[0]() if tightened else BYTE_LIMIT_REVIEW
     marker = cli.review_marker(result.head, result.kind)
     header = runners.encode_codex_evidence(runners.codex_evidence(result))
     adjudication = "<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
