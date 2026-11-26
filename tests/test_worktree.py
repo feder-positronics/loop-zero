@@ -208,9 +208,9 @@ def test_dirty_head_and_diff(repo: Path) -> None:
     assert not worktree.is_dirty(wt)
     assert worktree.head(wt) != base
     diff = worktree.diff_since(wt, base)
-    assert "+print(1)" in diff and "new.py" in diff
+    assert b"+print(1)" in diff and b"new.py" in diff
     (wt / "new.py").write_text("print(2)\n")
-    assert "print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
+    assert b"print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
     assert worktree.is_dirty(wt)
 
 
