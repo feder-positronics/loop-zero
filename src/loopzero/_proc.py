@@ -167,6 +167,7 @@ def run(
     encoding: str | None = None,
     preserve_newlines: bool = False,
     tail_chars: int | None = None,
+    graceful_interrupt: bool = False,
     pass_fds: tuple[int, ...] = (),
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
@@ -198,13 +199,19 @@ def run(
                 stdout, stderr = (proc.communicate(stdin, timeout=timeout) if tail_chars is None
                                   else (_read_output_tail(proc, tail_chars, timeout), ""))
             except BaseException:
-                if os.name == "posix":
-                    with suppress(ProcessLookupError):
-                        os.killpg(proc.pid, signal.SIGKILL)
-                else:
-                    proc.kill()
-                # Popen's context exit can skip reaping after KeyboardInterrupt.
-                proc.wait()
+                try:
+                    if graceful_interrupt and os.name == "posix":
+                        with suppress(ProcessLookupError, subprocess.TimeoutExpired):
+                            os.killpg(proc.pid, signal.SIGTERM)
+                            proc.wait(timeout=5)
+                finally:
+                    if os.name == "posix":
+                        with suppress(ProcessLookupError):
+                            os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                    # Popen's context exit can skip reaping after KeyboardInterrupt.
+                    proc.wait()
                 raise
     except FileNotFoundError as exc:
         if exc.filename == str(cwd):
