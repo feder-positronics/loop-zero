@@ -3648,6 +3648,12 @@ def test_merge_warns_when_cleanup_fails(wt, gh, capsys, monkeypatch, head, remov
     assert err.rstrip().endswith(hint)
 
 
+def test_cleanup_in_primary_checkout_skips_unfollowable_retry(repo: Path, capsys) -> None:
+    cli._cleanup(repo, SimpleNamespace(head_sha="a" * 40))
+    assert capsys.readouterr().err == "note: merged; this is the primary checkout, nothing to clean up\n"
+    assert repo.exists()
+
+
 def test_cleanup_hints_name_branch_and_configured_repo_without_commands(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:

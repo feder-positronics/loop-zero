@@ -102,6 +102,10 @@ def _toplevel() -> Path:
     return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel", paths=True))
 
 
+class PrimaryCheckout(CliError):
+    """The command runs in the primary checkout, which has no task worktree to remove."""
+
+
 def _repo_root(wt: Path) -> None:
     """Verify the primary checkout or bare repository owns this linked worktree."""
     first = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0]
@@ -109,7 +113,9 @@ def _repo_root(wt: Path) -> None:
         raise CliError("Git did not identify the primary worktree; refusing cleanup")
     root = Path(first.removeprefix("worktree "))
     common = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)).resolve()
-    if root.resolve() == wt.resolve() or common not in (root.resolve(), (root / ".git").resolve()):
+    if root.resolve() == wt.resolve():
+        raise PrimaryCheckout("this is the primary checkout, nothing to clean up")
+    if common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
 
 
@@ -1238,6 +1244,8 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         _repo_root(wt)
         name = worktree.branch(wt)
         worktree.cleanup(wt, pr.head_sha)
+    except PrimaryCheckout as exc:
+        print(f"note: merged; {exc}", file=sys.stderr)
     except (worktree.WorktreeError, CliError, OSError, _proc.ProcTimeout) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
