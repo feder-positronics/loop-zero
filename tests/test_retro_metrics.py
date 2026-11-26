@@ -94,13 +94,28 @@ def sources(tmp_path, monkeypatch, request):
     ]
 
 
-def test_record_replay_and_weekly_window(sources, capsys):
+@pytest.fixture
+def record_and_replay(sources, capsys):
     calls, args = sources
-    assert retro_metrics.main([*args, "--record", "--host-command", "host-adapter"]) == 0
-    live = capsys.readouterr()
+
+    def run(*options, host=False):
+        command = [*args, *options]
+        adapter = ["--host-command", "host-adapter"] if host else []
+        assert retro_metrics.main([*command, "--record", *adapter]) == 0
+        live = capsys.readouterr()
+        count = len(calls)
+        assert retro_metrics.main(command) == 0
+        assert capsys.readouterr() == live
+        assert len(calls) == count
+        return live
+
+    return run
+
+
+def test_record_replay_and_weekly_window(sources, record_and_replay):
+    calls, _ = sources
+    live = record_and_replay(host=True)
     assert sum(call == ["host-adapter"] for call in calls) == 1
-    assert retro_metrics.main(args) == 0
-    assert capsys.readouterr() == live
     assert len(calls) == 6
 
     report = json.loads(live.out)
@@ -150,26 +165,16 @@ def test_weekly_sample_reserves_controls_and_deduplicates_stalled_order():
     assert [item["number"] for item in sample["items"][2:]] == [8, 7, 1, 2, 3, 4]
 
 
-def test_weekly_report_uses_stall_threshold_without_running_other_alerts(sources, capsys):
-    calls, args = sources
-    args = [*args, "--stall-hours", "12", "--dead-owner", "coordinator"]
-    assert retro_metrics.main([*args, "--record"]) == 0
-    live = capsys.readouterr()
+def test_weekly_report_uses_stall_threshold_without_running_other_alerts(record_and_replay):
+    live = record_and_replay("--stall-hours", "12", "--dead-owner", "coordinator")
     report = json.loads(live.out)
     assert {"kind": "stalled_p0", "number": 4} in report["weekly_sample"]["items"]
     assert all(alert["kind"] == "unknown" for alert in report["alerts"])
-    count = len(calls)
-    assert retro_metrics.main(args) == 0
-    assert capsys.readouterr() == live
-    assert len(calls) == count
 
 
-def test_alerts_find_stalled_order_and_dead_owner(sources, capsys):
-    calls, args = sources
-    options = ["--alerts", "--stall-hours", "12", "--owner", "coordinator",
-               "--band", "merges", "2", "3"]
-    assert retro_metrics.main([*args, *options, "--record", "--host-command", "host-adapter"]) == 0
-    live = capsys.readouterr()
+def test_alerts_find_stalled_order_and_dead_owner(record_and_replay):
+    live = record_and_replay("--alerts", "--stall-hours", "12", "--owner", "coordinator",
+                             "--band", "merges", "2", "3", host=True)
     findings = json.loads(live.out)["alerts"]
     assert live.err == ""
     assert [finding for finding in findings if finding["kind"] != "unknown"] == [
@@ -177,10 +182,6 @@ def test_alerts_find_stalled_order_and_dead_owner(sources, capsys):
         {"kind": "stalled_p0", "issue": 4, "last_activity": "2026-05-28T06:00:00Z", "hours": 18},
         {"kind": "dead_owner", "owner": "coordinator"},
     ]
-    count = len(calls)
-    assert retro_metrics.main([*args, *options]) == 0
-    assert capsys.readouterr() == live
-    assert len(calls) == count
 
 
 def test_missing_and_failed_sources_do_not_report_zero(sources, capsys):
@@ -209,17 +210,10 @@ def test_invalid_band_is_usage_error(capsys):
     ((250, 251), 1, False),
     ((250, None), 1, False),
 ], indirect=["sources"])
-def test_stalled_issue_checks_linked_pr_commit_count_at_limit(sources, detail_reads, stalled, capsys):
-    calls, args = sources
-    options = ["--alerts", "--stall-hours", "1"]
-    assert retro_metrics.main([*args, *options, "--record"]) == 0
-    live = capsys.readouterr()
+def test_stalled_issue_checks_linked_pr_commit_count_at_limit(sources, detail_reads, stalled, record_and_replay):
+    calls, _ = sources
+    live = record_and_replay("--alerts", "--stall-hours", "1")
     alerts = json.loads(live.out)["alerts"]
     assert any(a["kind"] == "stalled_p0" and a["issue"] == 5 for a in alerts) == stalled
     assert any(a.get("source") == "p0/#5/activity" for a in alerts) == (not stalled)
     assert sum(call[-1] == f"repos/{REPO}/pulls/3" for call in calls) == detail_reads
-
-    count = len(calls)
-    assert retro_metrics.main([*args, *options]) == 0
-    assert capsys.readouterr() == live
-    assert len(calls) == count

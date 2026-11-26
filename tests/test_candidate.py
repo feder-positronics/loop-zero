@@ -102,21 +102,24 @@ def payloads(candidate_event: dict) -> dict[str, object]:
 
 
 def run_attestation(
-    *,
     candidate_event: dict | None = None,
+    *,
     status_reads: list[dict] | None = None,
     github_payloads: dict[str, object] | None = None,
+    github_get=None,
+    mergify_status=None,
     source_policy=lambda _number, _source: None,
+    run=attest_candidate,
 ):
     candidate_event = candidate_event or event()
     reads, values = (
         cycle(status_reads or [status(), status()]),
         github_payloads or payloads(candidate_event),
     )
-    return attest_candidate(
+    return run(
         candidate_event,
-        github_get=lambda path: deepcopy(values[path]),
-        mergify_status=lambda *_: deepcopy(next(reads)),
+        github_get=github_get or (lambda path: deepcopy(values[path])),
+        mergify_status=mergify_status or (lambda *_: deepcopy(next(reads))),
         source_policy=source_policy,
     )
 
@@ -184,10 +187,8 @@ def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str)
 
     reads = iter([status(), status()])
     with pytest.raises(CandidateError, match=diagnostic):
-        attest_candidate(
-            candidate_event, github_get=github_get,
-            mergify_status=lambda *_: deepcopy(next(reads)), source_policy=lambda *_: None,
-        )
+        run_attestation(candidate_event, github_get=github_get,
+                        mergify_status=lambda *_: deepcopy(next(reads)))
 
 
 def test_same_head_still_obeys_source_policy() -> None:
@@ -286,8 +287,8 @@ def tree_candidate(tmp_path, monkeypatch):
                 return {"object": {"sha": sha}} if sha else {}
             return deepcopy(values[path])
 
-        return run(candidate_event, github_get=get, mergify_status=lambda *_: deepcopy(queue),
-                   source_policy=policy)
+        return run_attestation(candidate_event, github_get=get, status_reads=[queue],
+                               source_policy=policy, run=run)
 
     return attest, git, commit, base, parent, source, candidate_sha
 
@@ -520,7 +521,8 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(candidate, "_verify_tree", verify_tree)
-    assert attest_candidate(candidate_event, github_get=get, mergify_status=lineage, source_policy=policy) == [{"number": 102, "head_sha": source}]
+    assert run_attestation(candidate_event, github_get=get, mergify_status=lineage,
+                           source_policy=policy) == [{"number": 102, "head_sha": source}]
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
     assert candidate_reads == (4 if timing == "metadata" else 3)
     assert verified == [(main, head, [source])] and sleeps == [2]
@@ -545,12 +547,7 @@ def test_metadata_retry_evaluates_fresh_policy(field, value):
                 raise CandidateError("fresh policy rejects drift")
 
     with pytest.raises(CandidateError, match="fresh policy rejects drift"):
-        attest_candidate(
-            event(),
-            github_get=get,
-            mergify_status=lambda *_: status(),
-            source_policy=policy,
-        )
+        run_attestation(github_get=get, source_policy=policy)
     assert snapshots == [
         ("source 101", False),
         (value if field == "body" else "source 101", field == "draft"),
@@ -598,12 +595,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     with pytest.raises((CandidateError, LoopZeroError)) as caught:
-        attest_candidate(
-            event(),
-            github_get=get,
-            mergify_status=lambda *_: deepcopy(live),
-            source_policy=policy,
-        )
+        run_attestation(github_get=get, status_reads=[live], source_policy=policy)
     assert not isinstance(caught.value, CandidateRaceError) and len(attempts) == 1 and sleeps == []
     if failure == "policy":
         assert caught.value is expected and len(source_reads) == 2
@@ -632,12 +624,7 @@ def test_persistent_race_preserves_last_error_and_bounds_retry(
     monkeypatch.setattr(candidate, "_retry_clock", lambda: clock[0])
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     with pytest.raises(CandidateRaceError, match="membership changed") as caught:
-        attest_candidate(
-            event(),
-            github_get=lambda _: None,
-            mergify_status=lambda *_: None,
-            source_policy=lambda *_: None,
-        )
+        run_attestation(github_get=lambda _: None, status_reads=[None])
     assert len(attempts) == attempt_count and caught.value is attempts[-1]
     assert sum(sleeps) <= 4
 
@@ -673,7 +660,8 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
     monkeypatch.setattr(candidate, "_retry_clock", lambda: clock[0])
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     def run():
-        return attest_candidate(event(), github_get=lambda p: deepcopy(values[p]), mergify_status=read_status, source_policy=lambda n, _: seen.append(n))
+        return run_attestation(github_payloads=values, mergify_status=read_status,
+                               source_policy=lambda n, _: seen.append(n))
     if stop in {"settled", "changed"}:
         assert run() == [{"number": 101, "head_sha": "1" * 40}, {"number": 102, "head_sha": "2" * 40}]
         assert seen == [101, 102] * (2 if stop == "changed" and second else 1)
