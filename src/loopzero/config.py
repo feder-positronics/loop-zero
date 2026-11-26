@@ -24,26 +24,14 @@ FORBIDDEN_RO_TREES = ("/run", "/var/run", "/proc", "/dev", "/sys", "/root")
 _SECTIONS: dict[str, dict[str, type]] = {
     "repo": {"name": str, "base": str},
     "checks": {
-        "commands": list,
-        "runner": list,
-        "inputs": dict,
-        "required_ci": list,
-        "network": bool,
-        "env_allowlist": list,
-        "ro_paths": list,
-        "writable": list,
-        "scratch": list,
-        "env": dict,
-        "limits": dict,
+        "commands": list, "runner": list, "inputs": dict, "required_ci": list, "network": bool,
+        "env_allowlist": list, "ro_paths": list, "writable": list, "scratch": list,
+        "env": dict, "limits": dict,
     },
     "delivery": {
-        "merge": str,
-        "mergify_queue": str,
-        "reviewers": list,
-        "review_publishers": list,
-        "reviewer_ro_paths": list,
-        "review_chunk_bytes": int,
-        "review": dict,
+        "merge": str, "mergify_queue": str,
+        "reviewers": list, "review_publishers": list, "reviewer_ro_paths": list,
+        "review_chunk_bytes": int, "review": dict,
     },
 }
 
@@ -75,12 +63,13 @@ def load(path: Path | str) -> Config:
         raise ConfigError(f"{path}: {exc}") from None
 
 
+def run_git(worktree: Path, *args: str, timeout: float = 60) -> _proc.Completed:
+    return _proc.run(["git", *args], cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=timeout)
+
+
 def base_revision(worktree: Path, base_branch: str) -> str:
     """Resolve the remote base, or the task's recorded base when the ref is absent."""
-    done = _proc.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base_branch}"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
-    )
+    done = run_git(worktree, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base_branch}")
     if done.exit_code == 0:
         return done.stdout.strip()
     if done.exit_code == 1:
@@ -92,17 +81,11 @@ def base_revision(worktree: Path, base_branch: str) -> str:
 def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
-    resolved = _proc.run(
-        ["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
-    )
+    resolved = run_git(worktree, "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}")
     if resolved.exit_code != 0:
         raise ConfigError(f"{source} has no remote-tracking base commit. {hint}")
     revision = resolved.stdout.strip()
-    shown = _proc.run(
-        ["git", "show", f"{revision}:workflow.toml"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
-    )
+    shown = run_git(worktree, "show", f"{revision}:workflow.toml")
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
     try:
@@ -118,10 +101,7 @@ def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
 def load_trusted(worktree: Path) -> Config:
     """Select delivery policy using Git's origin default and its trusted workflow."""
     prefix = "refs/remotes/origin/"
-    default = _proc.run(
-        ["git", "symbolic-ref", "--quiet", f"{prefix}HEAD"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
-    )
+    default = run_git(worktree, "symbolic-ref", "--quiet", f"{prefix}HEAD")
     ref = default.stdout.strip()
     if default.exit_code != 0 or not ref.startswith(prefix):
         raise ConfigError(
@@ -130,12 +110,12 @@ def load_trusted(worktree: Path) -> Config:
         )
     branch = ref.removeprefix(prefix)
     policy, revision = _remote_workflow(worktree, branch)
-    if policy.base_branch == branch:
-        return replace(policy, trusted_base_revision=revision)
-    base, revision = _remote_workflow(worktree, policy.base_branch)
-    if base.base_branch != policy.base_branch:
-        raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
-    return replace(base, trusted_base_revision=revision)
+    if policy.base_branch != branch:
+        branch = policy.base_branch
+        policy, revision = _remote_workflow(worktree, branch)
+        if policy.base_branch != branch:
+            raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
+    return replace(policy, trusted_base_revision=revision)
 
 
 def _build(data: dict[str, Any]) -> Config:
@@ -180,20 +160,20 @@ def _build(data: dict[str, Any]) -> Config:
             raise ConfigError(f"unknown review family delivery.review.{family}")
         if not isinstance(table, dict):
             raise ConfigError(f"[delivery.review.{family}] must be a table")
-        _reject_unknown(
-            f"[delivery.review.{family}]", table, ("model", "effort", "allowed_efforts")
-        )
+        label = f"delivery.review.{family}"
+        _reject_unknown(f"[{label}]", table, ("model", "effort", "allowed_efforts"))
         for key in ("model", "effort"):
             if key in table and (not isinstance(table[key], str) or not table[key]):
-                raise ConfigError(f"delivery.review.{family}.{key} must be a non-empty str")
-        if "allowed_efforts" in table and not isinstance(table["allowed_efforts"], list):
-            raise ConfigError(f"delivery.review.{family}.allowed_efforts must be a list")
-        allowed = _strings(
-            f"delivery.review.{family}.allowed_efforts", table.get("allowed_efforts", [])
-        )
-        review[family] = ReviewConfig(table.get("model"), table.get("effort"), allowed)
+                raise ConfigError(f"{label}.{key} must be a non-empty str")
+        allowed = table.get("allowed_efforts", [])
+        if not isinstance(allowed, list):
+            raise ConfigError(f"{label}.allowed_efforts must be a list")
+        review[family] = ReviewConfig(table.get("model"), table.get("effort"),
+                                      _strings(f"{label}.allowed_efforts", allowed))
 
-    commands = _commands(checks.get("commands", []))
+    commands = _strings("checks.commands", checks.get("commands", []))
+    if any(not command.strip() for command in commands):
+        raise ConfigError("checks.commands entries must each be a nonblank command")
     kwargs: dict[str, Any] = {}
     if "runner" in checks:
         runner = _strings("checks.runner", checks["runner"])
@@ -210,12 +190,11 @@ def _build(data: dict[str, Any]) -> Config:
                 raise ConfigError(f"{label} must exactly match a checks.commands entry")
             inputs[key] = _strings(label, value)
         kwargs["inputs"] = inputs
-    if "env_allowlist" in checks:
-        kwargs["env_allowlist"] = _strings("checks.env_allowlist", checks["env_allowlist"])
-    if "ro_paths" in checks:
-        kwargs["sandbox_ro"] = _host_paths("checks.ro_paths", checks["ro_paths"])
-    if "writable" in checks:
-        kwargs["writable"] = _host_paths("checks.writable", checks["writable"])
+    for key, field, read in (("env_allowlist", "env_allowlist", _strings),
+                             ("ro_paths", "sandbox_ro", _host_paths),
+                             ("writable", "writable", _host_paths)):
+        if key in checks:
+            kwargs[field] = read(f"checks.{key}", checks[key])
     if "env" in checks:
         kwargs["env"] = _env_table(checks["env"])
     if "scratch" in checks:
@@ -270,13 +249,6 @@ def _reject_unknown(where: str, table: dict[str, Any], allowed: Any) -> None:
     unknown = sorted(set(table) - set(allowed))
     if unknown:
         raise ConfigError(f"unknown key(s) in {where}: {', '.join(unknown)}")
-
-
-def _commands(value: list[Any]) -> tuple[str, ...]:
-    commands = _strings("checks.commands", value)
-    if any(not command.strip() for command in commands):
-        raise ConfigError("checks.commands entries must each be a nonblank command")
-    return commands
 
 
 def _strings(label: str, value: list[Any]) -> tuple[str, ...]:

@@ -76,17 +76,20 @@ def _open(request: urllib.request.Request):
     return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
 
 
+def _request(repo: str, suffix: str, method: str | None = None) -> urllib.request.Request:
+    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
+    return urllib.request.Request(
+        f"{API}/repos/{owner}/{name}{suffix}", method=method,
+        headers={"Accept": "application/json", "User-Agent": "loopzero",
+                 "Authorization": f"Bearer {_credential()}"},
+    )
+
+
 def api_get(repo: str, suffix: str) -> object | None:
     """GET one documented endpoint below this repository's fixed Mergify API path."""
     if not suffix.startswith("/") or "://" in suffix or ".." in suffix:
         raise ValueError("Mergify API suffix must be a repository-relative absolute path")
-    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
-    endpoint = f"{API}/repos/{owner}/{name}{suffix}"
-    request = urllib.request.Request(
-        endpoint,
-        headers={"Accept": "application/json", "User-Agent": "loopzero",
-                 "Authorization": f"Bearer {_credential()}"},
-    )
+    request = _request(repo, suffix)
     for delay in (2.0, 5.0, None):  # reads retry server errors, throttling and dropped reads
         try:
             with _open(request) as response:
@@ -203,13 +206,7 @@ def configured(repo: str, branch: str, queue: str) -> bool:
 
 
 def dequeue(repo: str, number: int) -> None:
-    owner, name = (quote(part, safe="") for part in repo.split("/", 1))
-    endpoint = f"{API}/repos/{owner}/{name}/merge-queue/pull/{number}/dequeue"
-    request = urllib.request.Request(
-        endpoint, method="POST",
-        headers={"Accept": "application/json", "User-Agent": "loopzero",
-                 "Authorization": f"Bearer {_credential()}"},
-    )
+    request = _request(repo, f"/merge-queue/pull/{number}/dequeue", "POST")
     try:
         with _open(request):
             return
@@ -223,18 +220,26 @@ def _marker(kind: str, head: str, queue: str) -> str:
     return f"<!-- {kind} head={head} queue={queue} -->"
 
 
+def _comment_login(comment: dict) -> object:
+    user = comment.get("user")
+    return user.get("login") if isinstance(user, dict) else None
+
+
+def _comment_url(repo: str, number: int, comment_id: int) -> str:
+    return f"https://github.com/{repo}/pull/{number}#issuecomment-{comment_id}"
+
+
+def _comments(repo: str, number: int) -> list[dict]:
+    return github._paged(f"repos/{repo}/issues/{number}/comments")
+
+
 def _admission_report(comments: list[dict], requested_at: str) -> int | None:
-    vendor_comments = [
-        comment for comment in comments
-        if isinstance(user := comment.get("user"), dict) and user.get("login") == "mergify[bot]"
-        and str(comment.get("updated_at") or "") >= requested_at
-    ]
-    latest = max(vendor_comments, key=lambda comment: str(comment.get("updated_at") or ""), default={})
-    if "### ⏳ Waiting for queue conditions" in str(latest.get("body") or "").splitlines():
-        report_id = latest.get("id")
-        if type(report_id) is int and report_id > 0:
-            return report_id
-    return None
+    candidates = (comment for comment in comments if _comment_login(comment) == "mergify[bot]"
+                  and str(comment.get("updated_at") or "") >= requested_at)
+    latest = max(candidates, key=lambda comment: str(comment.get("updated_at") or ""), default={})
+    report_id = latest.get("id")
+    waiting = "### ⏳ Waiting for queue conditions" in str(latest.get("body") or "").splitlines()
+    return report_id if waiting and type(report_id) is int and report_id > 0 else None
 
 
 def _queue_command(body: str, queue: str) -> bool:
@@ -265,7 +270,7 @@ def _departure_payload(body: str, queue: str) -> dict:
 def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
     """Use a bot report only when it identifies the latest command and current head."""
     try:
-        comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+        comments = _comments(repo, number)
     except github.GhError:
         return None
     comments = [item for item in comments if type(item.get("id")) is int and item["id"] > 0]
@@ -274,8 +279,7 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
         key=lambda item: item["id"], default={},
     )
     latest = max(
-        (item for item in comments if isinstance(user := item.get("user"), dict)
-         and user.get("login") == "mergify[bot]"),
+        (item for item in comments if _comment_login(item) == "mergify[bot]"),
         key=lambda item: (str(item.get("updated_at") or ""), item["id"]), default={},
     )
     body = str(latest.get("body") or "")
@@ -283,10 +287,10 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
     if not command or not payload:
         return None
 
-    url = f"https://github.com/{repo}/pull/{number}#issuecomment-"
+    command_url = _comment_url(repo, number, command["id"])
     entered = next((line for line in body.splitlines() if line.startswith("- ✅ **Entered the queue** ")), "")
     source = re.search(r"^- 🚫 \*\*Left the queue\*\* [^\n]+ · `([0-9a-f]{7,40})`$", body, re.M)
-    if f"]({url}{command['id']})" not in entered or not source or not head.startswith(source[1]):
+    if f"]({command_url})" not in entered or not source or not head.startswith(source[1]):
         return None
     markers = [line for line in str(command.get("body") or "").splitlines()
                if line.startswith(f"<!-- {REQUEST} ")]
@@ -300,23 +304,22 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
         ("**The failure is in this pull request.** It failed tested alone on top of ", "isolated"),
         ("**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.", "stacked"),
     ) if any(line.startswith(prefix) for line in body.splitlines())), "")
-    return Departure(f"{url}{latest['id']}", names, attribution)
+    return Departure(_comment_url(repo, number, latest["id"]), names, attribution)
 
 
 def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
     login, requested, confirmed = github.login(token=""), False, False
     requested_at = ""
-    comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+    comments = _comments(repo, number)
     for item in comments:
-        user = item.get("user")
-        if isinstance(user, dict) and user.get("login") == login:
-            lines = str(item.get("body") or "").splitlines()
-            requeue = _queue_command(str(item.get("body") or ""), queue)
+        if _comment_login(item) == login:
+            body = str(item.get("body") or "")
+            lines, requeue = body.splitlines(), _queue_command(body, queue)
             if _marker(REQUEST, head, queue) in lines or (requeue and confirmed):
                 requested, requested_at = True, str(item.get("created_at") or "")
             confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)
     report_id = _admission_report(comments, requested_at)
-    report = f"https://github.com/{repo}/pull/{number}#issuecomment-{report_id}" if report_id else None
+    report = _comment_url(repo, number, report_id) if report_id else None
     return requested, confirmed, report
 
 
