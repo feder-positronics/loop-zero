@@ -42,12 +42,15 @@ and branch protection remains essential.
 
 Local `.loopzero/task.md` is working handoff context, rendered into the PR.
 The CLI also writes a head-bound checks receipt and saved review output in
-`.loopzero/` for local readiness and reposting. They do not form a second authoritative delivery history; new Codex native audit
-receipts have the restricted retention requirement described below. Local readiness requires
+`.loopzero/` for local readiness and reposting. The CLI rejects tracked state
+and symlinks and uses the worktree's state directory descriptor for receipt I/O.
+GitHub retains authoritative delivery history. The retention rule for Codex
+native audit receipts is described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
 review evidence using trusted base configuration. Local readiness and merge fetch
-the configured origin base once at startup before loading its publisher policy.
-A receipt bound to the base may require a new check after that base advances.
+the configured origin base before loading its publisher policy. Source-check waiters refresh
+the trusted policy on each poll. A base advance requires a new receipt only
+when it changes the effective check settings.
 Losing local artifacts may require rerunning checks or review, and never creates
 a hosted approval.
 Saved runner artifacts also retain the repository, PR and actual request publisher
@@ -103,7 +106,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    local history.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
-   the PR-wide cap of one primary and one delta across head rewrites, and the
+   the PR-wide review budget across head rewrites, and the
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
    The delta requires the reviewed commit on the current head's first-parent
@@ -111,6 +114,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    runner receives topic patches in first-parent order and the difference
    between each automatic remerge and its recorded tree. Isolated Git verifies
    the history and builds the patch, excluding unrelated base changes.
+   After an approved ordinary delta, one extra delta can cover a first-parent
+   suffix consisting only of verified base merges with a conflict. Isolated Git
+   reconstructs the automatic merges to confirm the conflict. Unresolved
+   blocking findings or a third recorded review rule out this allowance.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
@@ -121,8 +128,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    environment values. For local sandbox receipts it omits inherited `PATH`,
    `LANG`, `LC_ALL`, `TERM`, and `HEAVY_SLOT_GRANTED_CORES` so readiness can
    run in a different host environment. Explicit settings, delegated runner
-   environments, and stage reuse keys still bind these values. Waiters check
-   for policy changes on every poll.
+   environments, and stage reuse keys still bind these values. A receipt for
+   delegated or input-keyed checks binds the configured base branch. Only the
+   stage reuse key binds the exact base revision. Source-check waiters check for policy
+   changes on every poll.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree
@@ -168,7 +177,9 @@ person / agent session / T3 workspace
 ```
 
 The [sandbox](../src/loopzero/sandbox.py) bounds check writes, credentials,
-network access and resources. [Reviewer runners](../src/loopzero/runners.py)
+network access and resources. Checks and their Bubblewrap probes pass
+sandbox environment settings over a private file descriptor, keeping
+forwarded values out of process arguments. [Reviewer runners](../src/loopzero/runners.py)
 bound source access while allowing the network required by model CLIs; that
 network means the sandbox cannot prevent exfiltration of readable data.
 For a Codex executable installed inside protected native state, the implicit
@@ -533,8 +544,8 @@ Declared `[checks.inputs]` pathspecs opt commands into local passing-result reus
 Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
 command, version, sandbox configuration and the resolved base SHA. A stage runs
 fresh when a matched path cannot be identified as a readable regular file.
-The receipt fingerprint also binds the base SHA when reuse
-is configured, so advancing the base invalidates a pass at the same task head.
+A base advance prevents reuse in a fresh check. Readiness can still accept
+the existing passing receipt at the same task head if its settings match.
 With explicit `--config`, reuse can fall back to the recorded task base if the
 remote ref is absent. Without either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only

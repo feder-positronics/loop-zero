@@ -255,22 +255,13 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
 
 
 def _run(
-    argv: list[str],
-    *,
-    cwd: Path,
-    prompt: str,  # delivered on stdin
-    env_allowlist: tuple[str, ...],
-    timeout: int,
-    family: str,
+    argv: list[str], *, cwd: Path, prompt: str,  # delivered on stdin
+    env_allowlist: tuple[str, ...], timeout: int, family: str,
 ) -> _proc.Completed:
     try:
         done = _proc.run(
-            argv,
-            cwd=cwd,
-            env_allowlist=env_allowlist,
-            timeout=timeout,
-            input=prompt,
-            encoding="utf-8",
+            argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout,
+            input=prompt, encoding="utf-8",
         )
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
@@ -302,28 +293,19 @@ _ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
 def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Config:
     """Build a networked, read-only sandbox config independent of check settings."""
     return Config(
-        repo="review/sandbox",
-        base_branch="main",
-        checks=(),
-        required_ci=(),
-        merge_strategy="squash",
-        reviewers=(family,),
-        network=True,
-        env_allowlist=BASE_ENV,
-        sandbox_ro=ro_paths or (str(binary.resolve().parent),),
-        writable=(),
-        scratch=(),
-        env=(),
+        repo="review/sandbox", base_branch="main", checks=(), required_ci=(),
+        merge_strategy="squash", reviewers=(family,), network=True, env_allowlist=BASE_ENV,
+        sandbox_ro=ro_paths or (str(binary.resolve().parent),), writable=(), scratch=(), env=(),
     )
 
 
 def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
-    raw = _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag)
-    return (cwd / raw.strip()).resolve()
+    return (cwd / _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag, paths=True)).resolve()
 
 
-def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str) -> str:
-    done = _proc.run(["git", *args], cwd=cwd, env_allowlist=allowlist, timeout=30)
+def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str, paths: bool = False) -> str:
+    run = _proc.run_git_paths if paths else _proc.run
+    done = run(["git", *args], cwd=cwd, env_allowlist=allowlist, timeout=30)
     if done.exit_code != 0:
         raise RunnerBadOutput(f"git {label} exited {done.exit_code}", _tail(done.stderr))
     return done.stdout
@@ -331,12 +313,10 @@ def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str) -
 
 def _git_dirs(cwd: Path, env_allowlist: tuple[str, ...]) -> tuple[Path, Path]:
     argv = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir"]
-    done = _proc.run(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=30)
-    paths = done.stdout.removesuffix("\n").split("\n")
-    if done.exit_code == 0 and len(paths) == 2:
-        common_dir, git_dir = map(Path, paths)
-        if common_dir.is_absolute() and git_dir.is_absolute():
-            return common_dir.resolve(), git_dir.resolve()
+    done = _proc.run_git_paths(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=30)
+    paths = [Path(path) for path in done.stdout.split("\n")]
+    if done.exit_code == 0 and len(paths) == 2 and all(path.is_absolute() for path in paths):
+        return paths[0].resolve(), paths[1].resolve()
     # A path may contain a newline, which makes the combined output ambiguous.
     return _git_dir(cwd, "--git-common-dir", env_allowlist), _git_dir(cwd, "--git-dir", env_allowlist)
 
@@ -387,13 +367,7 @@ def _sandbox_prefix(
     _require_review_sandbox()
     common_dir, git_dir = _git_dirs(cwd, config.env_allowlist)
     prefix = sandbox.bwrap_argv(
-        config,
-        cwd,
-        home,
-        common_dir,
-        git_dir,
-        clearenv=False,
-        writable_binds=auth_binds,
+        config, cwd, home, common_dir, git_dir, clearenv=False, writable_binds=auth_binds,
     )
     private = (home.resolve(), Path(sandbox.SANDBOX_HOME))
     args = iter(prefix)
@@ -1116,26 +1090,13 @@ def _review_claude(
     ro_paths: tuple[str, ...], model: str | None, effort: str | None,
 ) -> ReviewResult:
     argv = [
-        "claude",
-        "-p",
-        "--append-system-prompt",
-        policy,
+        "claude", "-p", "--append-system-prompt", policy,
         *(["--model", model] if model else []),
         *(["--effort", effort] if effort else []),
-        "--output-format",
-        "json",
-        "--json-schema",
-        json.dumps(REVIEW_SCHEMA, separators=(",", ":")),
-        "--permission-mode",
-        "plan",
-        "--tools",
-        "Read,Grep,Glob",
-        "--no-session-persistence",
-        "--setting-sources",
-        "",
-        "--strict-mcp-config",
-        "--disallowedTools",
-        "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
+        "--output-format", "json", "--json-schema", json.dumps(REVIEW_SCHEMA, separators=(",", ":")),
+        "--permission-mode", "plan", "--tools", "Read,Grep,Glob",
+        "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
+        "--disallowedTools", "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
     with sandbox.private_directory("loopzero-review-home-") as home:
         auth_binds = _auth_binds("claude", home)
@@ -1228,33 +1189,19 @@ def _review_codex(
         cli_version = _observe_codex_version(binary, cwd, config.env_allowlist)
         ignore_user_config = _codex_supports_ignore_user_config(binary, cwd, config.env_allowlist)
         argv = [
-            str(binary),
-            "exec",
-            "-c",
-            "developer_instructions=" + json.dumps(policy, ensure_ascii=False),
+            str(binary), "exec", "-c", "developer_instructions=" + json.dumps(policy, ensure_ascii=False),
             *(["-m", model] if model else []),
             *(["-c", f"model_reasoning_effort={effort}"] if effort else []),
             *(["--ignore-user-config"] if ignore_user_config else []),
             "--json",
-            # Codex's own sandbox is nested bwrap, which hosts restricting unprivileged
-            # user namespaces deny, so every shell read failed. The loop-zero bwrap
-            # above already keeps the tree read-only and HOME private.
-            "--sandbox",
-            "danger-full-access",
-            "--cd",
-            str(cwd),
-            "--skip-git-repo-check",
-            "-c",
-            "mcp_servers={}",
+            # Nested bwrap can fail on restricted hosts. The outer bwrap keeps the tree
+            # read-only and HOME private.
+            "--sandbox", "danger-full-access", "--cd", str(cwd), "--skip-git-repo-check",
+            "-c", "mcp_servers={}",
             # The reviewed head controls AGENTS.md and its skills; keep both out of context.
-            "-c",
-            "project_doc_max_bytes=0",
-            *skill_overrides,
-            "--output-schema",
-            f"{sandbox.SANDBOX_HOME}/schema.json",
-            "--output-last-message",
-            f"{sandbox.SANDBOX_HOME}/last.json",
-            "-",
+            "-c", "project_doc_max_bytes=0", *skill_overrides,
+            "--output-schema", f"{sandbox.SANDBOX_HOME}/schema.json",
+            "--output-last-message", f"{sandbox.SANDBOX_HOME}/last.json", "-",
         ]
         configured = {"model": model or None, "effort": effort or None}  # explicit -m/-c above
         if review_context is not None:
@@ -1348,12 +1295,13 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     if any(codex_fatal_startup(envelope) for envelope in envelopes):
         raise RunnerBadOutput("codex: fatal Code Mode startup failure")
     sessions = [str(result.provenance["session_id"]) for result in results]
+    settings = [call for result in results for call in review_settings(result)]
     provenance: dict[str, object] = {
         "family": first.family,
         "session_id": sessions[0],
         "session_ids": sessions,
-        "requested_settings": [call["requested"] for result in results for call in review_settings(result)],
-        "configured_settings": [call["configured"] for result in results for call in review_settings(result)],
+        "requested_settings": [call["requested"] for call in settings],
+        "configured_settings": [call["configured"] for call in settings],
     }
     if first.family == "claude":
         provenance["usage"] = [result.provenance["usage"] for result in results]

@@ -106,8 +106,26 @@ def _verified_merge(git: Callable[..., str], merge: str, first: str, second: str
     return not clean or git("merge-tree", "--write-tree", first, second) == git("rev-parse", f"{merge}^{{tree}}")
 
 
+def _verified_base_chain(git: Callable[..., str], reviewed: str, head: str, base: str, *,
+                         clean: bool, conflict_only: bool) -> bool:
+    cursor, conflict = head, False
+    row_lengths = {3} if clean or conflict_only else {2, 3}
+    for row in git("rev-list", "--first-parent", "--parents", f"{reviewed}..{head}").splitlines():
+        commits = row.split()
+        if len(commits) not in row_lengths or commits[0] != cursor:
+            return False
+        cursor = commits[1]
+        if len(commits) == 2:
+            continue
+        if not _verified_merge(git, *commits, base, clean=clean):
+            return False
+        if conflict_only and not conflict:
+            conflict = git("merge-tree", "--write-tree", *commits[1:], merge_conflict_status=True) == "1"
+    return cursor == reviewed and (conflict or not conflict_only)
+
+
 def base_merge_material(
-    repo: str, number: int, reviewed: str, head: str, base_branch: str, *, clean: bool,
+    repo: str, number: int, reviewed: str, head: str, base_branch: str, *, clean: bool, conflict_only: bool = False,
 ) -> bytes | None:
     """Return a verified delta patch, or empty bytes for proven clean inheritance."""
     try:
@@ -117,19 +135,7 @@ def base_merge_material(
                 or not re.fullmatch(r"[0-9a-f]{40}", base)):
             return None
         with candidate.fetched_git(repo, [reviewed, head, base]) as git:
-            history = git("rev-list", "--first-parent", "--parents", f"{reviewed}..{head}")
-            cursor = head
-            row_lengths = {3} if clean else {2, 3}
-            for row in history.splitlines():
-                commits = row.split()
-                if len(commits) not in row_lengths or commits[0] != cursor:
-                    return None
-                cursor = commits[1]
-                if len(commits) == 2:
-                    continue
-                if not _verified_merge(git, *commits, base, clean=clean):
-                    return None
-            if cursor != reviewed:
+            if not _verified_base_chain(git, reviewed, head, base, clean=clean, conflict_only=conflict_only):
                 return None
             if clean:
                 return b""
@@ -142,6 +148,21 @@ def base_merge_material(
         raise
     except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError):
         return None
+
+
+def _summary_verdict(body: str, kind: str) -> str:
+    # Read the publisher's summary before model prose can quote either verdict.
+    _, machine_block = runners.leading_review_block(body)
+    summary, _, rest = body[len(machine_block):].lstrip().partition("\n")
+    if summary.startswith(("Reposted from runner session: ", "Reposted from runner sessions: ")):
+        summary = rest.partition("\n")[0]
+    return summary.partition(": **")[2] if summary.startswith(f"loopzero {kind} review by ") else ""
+
+
+def approved_delta(reviews: list[dict], head: str, publishers: tuple[str, ...], *, repo: str, number: int) -> bool:
+    review = eligible_review(reviews, head, publishers, repo=repo, number=number)
+    return bool(review and review["state"] in {"APPROVED", "COMMENTED"}
+                and _summary_verdict(review["body"], "delta").startswith("approve** ("))
 
 
 def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
@@ -160,15 +181,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
         return None
     if marker[2] == "primary":
-        _, machine_block = runners.leading_review_block(latest["body"])
-        # App reviews use COMMENTED for either verdict. Read the publisher's
-        # summary before model prose, which can quote either verdict.
-        summary, _, rest = latest["body"][len(machine_block):].lstrip().partition("\n")
-        if summary.startswith(("Reposted from runner session: ", "Reposted from runner sessions: ")):
-            summary = rest.partition("\n")[0]
-        if not summary.startswith("loopzero primary review by "):
-            return None
-        verdict = summary.partition(": **")[2]
+        verdict = _summary_verdict(latest["body"], "primary")
         state = latest.get("state")
         if verdict.startswith("request_changes** (") and state in {"CHANGES_REQUESTED", "COMMENTED"}:
             if github.open_blocking_findings(repo, number, reviewed, publishers):
