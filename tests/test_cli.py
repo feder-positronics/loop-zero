@@ -4814,3 +4814,26 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys, refresh):
     draft = json.loads(gh.calls[-1]["--input"])["body"]
     assert "unverified" not in draft
     assert_contains(draft, f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0", "Manual validation evidence.")
+
+
+def test_late_checkpoint_preserves_completed_pass(wt, gh, capsys, head, monkeypatch):
+    def run_checks(cfg, path, *, progress, status, checkpoint, workflow):
+        results = tuple(CheckResult(c, 0, 0, "", input_key="key") for c in cfg.checks)
+        passed = CheckReport(head, False, results, cli.sandbox.settings_fingerprint(cfg))
+        incomplete = CheckResult(cli.sandbox.INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
+        partial = replace(passed, results=(results[0], incomplete))
+        checkpoint(partial)
+        assert cli._load_report(wt) == partial
+        cli._save_report(wt, passed)
+        checkpoint(partial)
+        assert cli._current_check_report(wt, cfg, head) == passed
+        cli._save_report(wt, replace(passed, results=results[:1]))
+        checkpoint(partial)
+        assert cli._load_report(wt) == partial
+        cli._save_report(wt, passed)
+        return replace(passed, results=(replace(results[0], exit_code=1),))
+
+    monkeypatch.setattr(cli.sandbox, "run_checks", run_checks)
+    code, _, err = run(capsys, "check")
+    assert code == 1 and "(exit 1)" in err, err
+    assert cli._load_report(wt).results[0].exit_code == 1

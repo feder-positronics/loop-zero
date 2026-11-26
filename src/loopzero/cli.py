@@ -418,7 +418,7 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
         return
 
 
-def _save_report(wt: Path, report: CheckReport) -> str | None:
+def _save_report(wt: Path, report: CheckReport, *, checkpoint_checks: tuple[str, ...] | None = None) -> str | None:
     """Publish the receipt or return the current HEAD if the result is stale."""
     results = [
         {k: v for k, v in dataclasses.asdict(result).items()
@@ -428,8 +428,15 @@ def _save_report(wt: Path, report: CheckReport) -> str | None:
     payload = {"head": report.head, "dirty": report.dirty, "results": results}
     if report.settings_sha256 is not None:
         payload["settings_sha256"] = report.settings_sha256
+    def preserve_pass() -> bool:
+        saved = _load_report(wt)
+        return (saved is not None and saved.ok and not saved.dirty and saved.head == report.head
+                and saved.settings_sha256 == report.settings_sha256
+                and tuple(result.command for result in saved.results) == checkpoint_checks)
+
     return worktree.write_local_state(
         wt, CHECKS_FILE.name, json.dumps(payload, indent=2) + "\n", expected_head=report.head,
+        preserve=preserve_pass if checkpoint_checks is not None else None,
     )
 
 
@@ -630,7 +637,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     report = sandbox.run_checks(
         config, wt, progress=lambda command: print(f"running: {github.redact_credentials(command)}", flush=True),
-        status=lambda message: print(message, flush=True), checkpoint=lambda partial: _save_report(wt, partial),
+        status=lambda message: print(message, flush=True),
+        checkpoint=lambda partial: _save_report(wt, partial, checkpoint_checks=config.checks),
         workflow=args.config or f"origin/{config.base_branch}:workflow.toml",
     )
     shortened = False

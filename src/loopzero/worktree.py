@@ -9,6 +9,7 @@ import re
 import stat
 import subprocess
 from collections.abc import Iterator
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from select import select
@@ -147,12 +148,15 @@ def read_local_state(wt: Path, name: str) -> str:
 
 def write_local_state(
     wt: Path, name: str, text: str, *, private: bool = False, exclusive: bool = False,
-    expected_head: str | None = None,
+    expected_head: str | None = None, preserve: Callable[[], bool] | None = None,
 ) -> str | None:
-    with _local_state_directory(wt, create=True, lock=private or expected_head is not None) as fd:
+    lock = private or expected_head is not None or preserve is not None
+    with _local_state_directory(wt, create=True, lock=lock) as fd:
         if expected_head is not None and (current_head := head(wt)) != expected_head:
             return current_head
         _regular_state(wt, fd, name)
+        if preserve is not None and preserve():
+            return None
         if private:
             os.fchmod(fd, 0o700)
         temp = f".{name}-{uuid4().hex}"
