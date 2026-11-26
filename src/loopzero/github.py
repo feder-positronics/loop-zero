@@ -325,10 +325,6 @@ def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> boo
             or bool(re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)))
 
 
-def _retry_delays(scope: tuple[float, str | None, bool] | None, diagnostic: bool) -> tuple:
-    return (None,) if scope and not scope[2] else (*(RETRY_DELAYS[:1] if diagnostic else RETRY_DELAYS), None)
-
-
 def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
     if (using_app and len(args) > 1 and args[0] == "api"
             and re.fullmatch(r"repos/[^/]+/[^/]+/pulls\?.+", args[1])
@@ -350,7 +346,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    delays = _retry_delays(scope, diagnostic_api)
+    delays = ((RETRY_DELAYS[0], None) if scope[2] else (None,)) if scope else (*RETRY_DELAYS, None)
     for delay in delays:
         selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         try:

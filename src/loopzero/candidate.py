@@ -289,6 +289,15 @@ def _attest_source(
     return source_sha
 
 
+def _require_git_exit(operation: str, returncode: int) -> None:
+    if operation == "fetch" and returncode:
+        from loopzero import github
+
+        raise github.GhUnavailable(("git", "fetch"), "GitHub objects unavailable")
+    _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
+             "resource bound hit, or integration conflict")
+
+
 @contextlib.contextmanager
 def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
     """Run bounded Git commands on fetched objects in an isolated bare repository."""
@@ -298,6 +307,8 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
     if not token:
         try:
             token = github.auth_token()
+        except github.GhUnavailable:
+            raise
         except github.GhError:
             raise CandidateError("GitHub fetch authentication unavailable") from None
     _require(bool(token), "GitHub fetch authentication unavailable")
@@ -341,9 +352,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                         _require(time.monotonic() < deadline, "Git time bound exceeded")
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             process.wait(timeout=0.02)
-                    _require(process.returncode == 0,
-                             f"git {args[0]} exited {process.returncode}: objects unavailable, "
-                             "resource bound hit, or integration conflict")
+                    _require_git_exit(args[0], process.returncode)
                     _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
                     output.seek(0)
                     result = output.read(_TREE_OUTPUT + 1)
