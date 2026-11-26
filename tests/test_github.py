@@ -1273,28 +1273,28 @@ def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
     (("api", "repos/acme/widgets/pulls/1"), 2, ""),
     (("api", "repos/acme/widgets/commits/x/check-runs", "--method", "GET", "-F", "per_page=100"), 2, "dial tcp 140.82.121.5:443: i/o timeout"),
     (("api", "graphql", "-f", "query=query { viewer { login } }"), 2, "net/http: TLS handshake timeout"),
-    (("api", "repos/acme/widgets/pulls/7"), 2, "error connecting to api.github.com"),
+    (("api", "repos/acme/widgets/pulls/7"), 2, "connection reset by peer"),
     (("api", "repos/acme/widgets/pulls/7/reviews"), 2, "unexpected end of JSON input"),
     (("api", "graphql", "-f", "query=query { viewer { login } }"), 2, "gh: Something went wrong while executing your query"),
     (("api", "repos/acme/widgets/issues/1/comments", "-f", "body=x"), 1, "HTTP 503"),
     (("api", "graphql", "-f", "query=mutation { resolve }"), 1, "HTTP 503"),
 ])
 def test_gh_retries_only_transient_reads(monkeypatch, args, attempts, error):
-    seen: list[list[str]] = []
+    seen, sleeps = [], []
     def run(argv, **_):
         seen.append(argv)
-        failed = len(seen) == 1
+        failed = len(seen) == 1 or "connection reset" in error
         if failed and "pulls/1" in argv[2]:
             raise github.ProcTimeout("gh api timed out")
         return type("Done", (), {"exit_code": int(failed), "stdout": "ok", "stderr": error * failed})
     monkeypatch.setattr(github, "run", run)
-    monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
-    if attempts == 2:
+    monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
+    if attempts == 2 and "connection reset" not in error:
         assert github._gh(*args) == "ok"
     else:
         with pytest.raises(github.GhError):
             github._gh(*args)
-    assert len(seen) == attempts
+    assert len(seen) == attempts and sleeps == ([5] if attempts == 2 else [])
 
 
 @pytest.mark.parametrize("error", ["API rate limit exceeded", "API rate limit already exceeded",
@@ -1314,28 +1314,28 @@ def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, tmp_path, err
 
 
 @pytest.mark.parametrize(("remaining", "retry_after", "hint"), [
-    ("0", "", "hourly quota exhausted: retry after 2026-11-25T21:03:14+00:00"),
+    ("0", "90", "hourly quota exhausted: retry after 2026-11-25T21:03:14+00:00"),
     ("4676", "90", "short-window limit: retry after 90 s"),
     ("4676", "", "short-window limit: retry after ~60 s"),
     ("", "90", "short-window limit: retry after 90 s"),
     ("", "Wed, 25 Nov 2026 21:03:14 GMT", "short-window limit: retry after Wed, 25 Nov 2026 21:03:14 GMT"),
     ("", "", "Rate limited: retry after GitHub's reset or Retry-After; No automatic retry."),
 ])
-def test_rest_rate_limit_uses_failed_response_headers(gh, remaining, retry_after, hint):
+def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining, retry_after, hint):
+    sleeps = []
+    monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
+    monkeypatch.setattr(github.time, "time", lambda: 1795640554)
     headers = "HTTP/2.0 403 Forbidden\r\nX-Unrelated: never print this\r\n"
     if remaining:
-        headers += (
-            f"X-RateLimit-Resource: core\r\nX-RateLimit-Remaining: {remaining}\r\n"
-            "X-RateLimit-Reset: 1795640594\r\n"
-        )
+        headers += f"X-RateLimit-Resource: core\r\nX-RateLimit-Remaining: {remaining}\r\nX-RateLimit-Reset: 1795640594\r\n"
     if retry_after:
         headers += f"Retry-After: {retry_after}\r\n"
     gh.respond(pr_list_key("lz/x"), headers + '\r\n{"message":"API rate limit exceeded"}',
                exit=1, stderr="gh: API rate limit exceeded for installation ID 123 (HTTP 403)")
 
-    with pytest.raises(github.GhError) as info:
+    budget = 50 if remaining == "4676" else 100
+    with github.bounded_reads(github.time.monotonic() + budget, retry=True), pytest.raises(github.GhError) as info:
         github.pr_for_branch(REPO, "lz/x")
-
     error = str(info.value)
     assert hint in error
     if remaining:
@@ -1345,10 +1345,9 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, remaining, retry_after
     if retry_after:
         assert f"Retry-After: {retry_after}" in error
     assert "never print this" not in error
-    assert [call["argv"] for call in gh.calls] == [
-        [*branch_head_key("lz/x").split(), "--include"],
-        [*pr_list_key("lz/x").split(), "--include"],
-    ]
+    assert sleeps == ([90 if retry_after.isdigit() else 40] if retry_after and not remaining else [])
+    assert [call["argv"] for call in gh.calls] == (
+        [[*branch_head_key("lz/x").split(), "--include"]] + [[*pr_list_key("lz/x").split(), "--include"]] * (1 + len(sleeps)))
 
 
 @pytest.mark.parametrize(("diagnostic", "verified"), [

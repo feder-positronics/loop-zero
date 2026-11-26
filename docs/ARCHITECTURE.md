@@ -331,7 +331,8 @@ The current CLI writes PR bodies only when content changes, excluding volatile
 check timing from the generated validation block. Keep refreshes idempotent:
 one state transition should not become repeated writes that trigger policy CI.
 GitHub reads and the idempotent thread resolution mutation retry transient
-failures up to three times (5/20/60 seconds) and stop on rate limits. Mergify
+failures once after five seconds. They stop on exhausted quota and honor a
+secondary limit’s Retry-After when the delay fits the read budget. Mergify
 reads retry server errors, throttling and failed
 reads up to twice (2/5 seconds). Waits use bounded backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).
