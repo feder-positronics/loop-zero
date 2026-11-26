@@ -1244,6 +1244,28 @@ def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str, budg
     assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
 
 
+def test_split_diff_encodes_long_utf8_line_in_linear_work() -> None:
+    diff = "diff --git a/new.txt b/new.txt\n+" + "aé€😀" * 1500 + "\n"
+    budget = 511
+    encoded_chars = 0
+
+    def count_encodes(frame, event, arg):
+        nonlocal encoded_chars
+        if event == "c_call" and arg.__name__ == "encode" and isinstance(arg.__self__, str):
+            encoded_chars += len(arg.__self__)
+
+    previous = sys.getprofile()
+    sys.setprofile(count_encodes)
+    try:
+        chunks = split_diff(diff, budget)
+    finally:
+        sys.setprofile(previous)
+
+    assert "".join(chunks) == diff
+    assert all(len(chunk.encode()) <= budget for chunk in chunks)
+    assert encoded_chars <= 5 * len(diff)
+
+
 # ----------------------------------------------------------------- family detection
 
 
