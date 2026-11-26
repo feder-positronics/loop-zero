@@ -1,5 +1,6 @@
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -196,3 +197,53 @@ def test_invalid_band_is_usage_error(capsys):
         retro_metrics.main(["--repo", REPO, "--until", END, "--band", "merges", "3", "2"])
     assert exc.value.code == 2
     assert "ordered limits" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("rows", "total", "stalled"), [
+    (101, None, True),
+    (250, 250, True),
+    (250, 251, False),
+    (250, None, False),
+])
+def test_stalled_issue_checks_linked_pr_commit_count_at_limit(
+    tmp_path, monkeypatch, rows, total, stalled,
+):
+    old = "2026-05-26T00:00:00Z"
+    pull = f"repos/{REPO}/pulls/3"
+    calls = []
+
+    def collect(argv):
+        endpoint = argv[-1]
+        calls.append(endpoint)
+        if endpoint == pull:
+            return {} if total is None else {"commits": total}
+        if endpoint.startswith(f"{pull}/commits?"):
+            page = int(endpoint.rsplit("=", 1)[1])
+            size = min(100, rows - (page - 1) * 100)
+            return [{"commit": {"committer": {"date": old}}}] * size
+        if endpoint == f"repos/{REPO}/issues/3/comments?per_page=100&page=1":
+            return []
+        assert endpoint == f"repos/{REPO}/issues/4/timeline?per_page=100&page=1"
+        return [{
+            "event": "cross-referenced", "created_at": old,
+            "source": {"issue": {"created_at": old, "pull_request": {
+                "url": f"https://api.github.com/{pull}",
+            }}},
+        }]
+
+    monkeypatch.setattr(retro_metrics, "run_json", collect)
+    args = SimpleNamespace(repo=REPO, stall_hours=12)
+    priority_issues = [issue(4, old)]
+    end = retro_metrics.timestamp(END)
+    live = retro_metrics.Inputs(tmp_path, record=True)
+    alerts = retro_metrics.stalled_p0s(live, args, priority_issues, end)
+    assert [alert["kind"] for alert in alerts] == (["stalled_p0"] if stalled else [])
+    assert any(a["source"] == "p0/#4/activity" for a in live.alerts) == (not stalled)
+    assert calls.count(pull) == (1 if rows == 250 else 0)
+
+    live.save()
+    before = calls.copy()
+    replay = retro_metrics.Inputs(tmp_path, record=False)
+    assert retro_metrics.stalled_p0s(replay, args, priority_issues, end) == alerts
+    assert replay.alerts == live.alerts
+    assert calls == before
