@@ -16,7 +16,6 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
 @pytest.mark.parametrize('body,verdict,tails', [
     ('print(json.dumps(r))', True, ['ok', 'ok']),
     ('r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
-    ('print("x" * 3000 + "worker socket unavailable", file=sys.stderr);sys.exit(42)', False, None),
     ('r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
      ['Ω' * 8188 + ' newest']),
     ('subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
@@ -27,7 +26,7 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
         'r["duration_s"]=float("nan");print(json.dumps(r))',
         'r["exit_code"]=True;print(json.dumps(r))',
         'r["network"]=1;print(json.dumps(r))', 'r["network"]=False;print(json.dumps(r))',
-        'print(json.dumps(r));sys.exit(1)', 'r["not_started"]=True;print(json.dumps(r))',
+        'r["not_started"]=True;print(json.dumps(r))',
         *[f'r["{field}"]="wrong";print(json.dumps(r))' for field in ('head', 'base', 'command', 'env_sha256', 'network', 'worktree')],
     ]],
 ])
@@ -59,10 +58,6 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
     assert report.ok is verdict
     if 'exit_code"]=7' in body:
         assert report.results[0].exit_code == 7
-    if 'sys.exit(42)' in body:
-        result = report.results[0]
-        assert result.exit_code == 42 and result.duration_s > 0
-        assert result.tail == 'Stage runner failed: process exit 42\n' + ('x' * 3000 + 'worker socket unavailable')[-2000:]
     if tails is not None:
         assert [r.tail for r in report.results] == tails
     if not verdict:
@@ -92,9 +87,13 @@ def test_runner_unavailable(git_repo, monkeypatch, dirty):
     git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
     monkeypatch.setattr(sandbox.shutil, 'which', lambda name: None)
     prefix = (sys.executable, '-c', 'import json,sys;r=json.load(sys.stdin);r.pop("env");r.update(exit_code=0,duration_s=0,not_started=True,tail="");print(json.dumps(r))')
-    report = sandbox.run_checks(make_config(check_runner=prefix), git_repo)
-    assert not report.ok and report.dirty is dirty
-    assert ('bwrap binary missing' in report.results[0].tail) is not dirty
+    config = make_config(check_runner=prefix)
+    if not dirty:
+        with pytest.raises(sandbox.SandboxUnavailable, match="bwrap binary missing"):
+            sandbox.run_checks(config, git_repo)
+        return
+    report = sandbox.run_checks(config, git_repo)
+    assert not report.ok and report.dirty
 
 
 @pytest.mark.parametrize('value', ['[]', '[""]', '[1]', '"runner"', '["./runner"]', '["tools/runner"]', '["python3","tools/run_stage.py"]', '["dispatch","--stage"]', '["dispatch","--opt=/operator/run.py"]'])
@@ -147,19 +146,22 @@ def test_runner_preserves_executable_symlink(git_repo, tmp_path, monkeypatch, ba
     assert report.ok, report.results[0].tail
 
 
-def test_runner_timeout(git_repo, monkeypatch):
-    git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
-    original = sandbox._proc.run
-    def run(argv, **kwargs):
-        if argv[0] == sys.executable:
-            raise sandbox._proc.ProcTimeout('deadline', 'partial', duration_s=0.25)
-        return original(argv, **kwargs)
-    monkeypatch.setattr(sandbox._proc, 'run', run)
-    report = sandbox.run_checks(make_config(check_runner=(sys.executable,)), git_repo, timeout=0.1)
-    assert not report.ok
-    result = report.results[0]
-    assert result.exit_code == 124 and result.duration_s == 0.25
-    assert 'partial' in result.tail and 'timed out after 0.1s' in result.tail
+@pytest.mark.parametrize(("command", "diagnostic"), [
+    ("exit 75", "process exit 75"),
+    ("exit 124", "process exit 124"),
+    ("kill -TERM $$", "process exit -15"),
+    ("exit 143", "process exit 143"),
+    ("exec sleep 10", "timed out after 0.1s"),
+])
+def test_runner_process_failure_is_retryable(git_repo, command, diagnostic):
+    git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    config = make_config(check_runner=("/bin/sh", "-c", command))
+
+    with pytest.raises(sandbox.SandboxUnavailable, match="Retry") as exc:
+        sandbox.run_checks(config, git_repo, timeout=0.1)
+
+    assert diagnostic in str(exc.value)
+    assert "elapsed" in str(exc.value)
 
 
 @pytest.mark.parametrize('change', ['fallback', 'base'])

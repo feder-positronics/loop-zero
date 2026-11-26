@@ -49,7 +49,7 @@ SANDBOX_ENV = {
 
 
 class SandboxUnavailable(LoopZeroError):
-    """bubblewrap is missing or cannot create a sandbox on this host."""
+    """Check execution infrastructure is unavailable."""
 
 
 class _Terminated(BaseException):
@@ -607,6 +607,15 @@ def _stage_frame(stdout: str, binding: dict) -> dict:
     return frame
 
 
+def _runner_stdout(done: _proc.Completed) -> str:
+    if done.exit_code == 0:
+        return done.stdout
+    stderr = _proc.tail(done.stderr)[-2000:]
+    detail = (f"Stage runner failed: process exit {done.exit_code} "
+              f"({done.duration_s:.2f}s elapsed). Retry the check.")
+    raise SandboxUnavailable(f"{detail}\n{stderr}".rstrip())
+
+
 def _dispatch_one(
     config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
 ) -> CheckResult:
@@ -634,12 +643,7 @@ def _dispatch_one(
                 raise ValueError("Stage runner references task worktree")
             done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
                              input=json.dumps({**binding, "env": env}), encoding="utf-8")
-        if done.exit_code:
-            stderr = _proc.tail(done.stderr)[-2000:]
-            detail = f"Stage runner failed: process exit {done.exit_code}"
-            return CheckResult(command, done.exit_code, done.duration_s,
-                               f"{detail}\n{stderr}".rstrip())
-        frame = _stage_frame(done.stdout, binding)
+        frame = _stage_frame(_runner_stdout(done), binding)
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed after stage")
         if frame["not_started"]:
@@ -655,8 +659,11 @@ def _dispatch_one(
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
                            _check_tail(frame["tail"]))
     except _proc.ProcTimeout as exc:
-        return CheckResult(command, TIMEOUT_EXIT,
-                           exc.duration_s if exc.duration_s is not None else timeout,
-                           _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
+        elapsed = exc.duration_s if exc.duration_s is not None else timeout
+        detail = (f"Stage runner timed out after {timeout:g}s "
+                  f"({elapsed:.2f}s elapsed). Retry the check.")
+        raise SandboxUnavailable(f"{detail}\n{_check_tail(exc.stderr or exc.stdout)}".rstrip()) from exc
+    except SandboxUnavailable:
+        raise
     except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
         return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {exc}"))
