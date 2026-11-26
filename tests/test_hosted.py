@@ -53,8 +53,7 @@ def test_event_selection(event, number):
 def publisher(tmp_path, fake_bin, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
-    event = tmp_path / "event.json"
-    event.write_text(json.dumps({"pull_request": {"number": 7}}))
+    (event := tmp_path / "event.json").write_text(json.dumps({"pull_request": {"number": 7}}))
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
     Path("workflow.toml").write_text(f'[repo]\nname="{REPO}"\nbase="main"\n[delivery]\nreview_publishers=["trusted-publisher"]\n')
     gh = FakeGh(fake_bin, tmp_path)
@@ -64,6 +63,7 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     gh.respond_pr_view(pr_json())
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
+    gh.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [])
     return gh
 
 
@@ -144,28 +144,29 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
     assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == ["pending", state]
 
 
-@pytest.mark.parametrize("error", ["api", "head", "publication", "config"])
-def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, error):
-    monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [])
-    if error == "api":
-        publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1",
-                          {"stdout": "HTTP/2.0 503 Service Unavailable\r\nX-GitHub-Request-Id: GHREQ-8774\r\n\r\n{\"message\":\"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ\"}", "stderr": "gh: Service unavailable (HTTP 503)", "exit": 1})
+@pytest.mark.parametrize("error", ["api", "recover", "head", "publication", "config", "before"])
+def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, capsys, error):
+    sleeps = []
+    monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
+    endpoint = f"api repos/{REPO}/pulls/7" + ("" if error == "before" else "/reviews?per_page=100&page=1")
+    if error in {"api", "recover", "before"}:
+        fault = {"stdout": "HTTP/2.0 503 Service Unavailable\r\nX-GitHub-Request-Id: GHREQ-8774\r\n\r\n{\"message\":\"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ\"}", "exit": 1}
+        publisher.respond(endpoint, fault, [{"state": "APPROVED", "commit_id": HEAD, "user": {"login": "trusted-publisher"}, "body": f"<!-- loopzero:review head={HEAD} kind=primary -->\nreview: **approve**"}] if error == "recover" else fault)
     elif error == "head":
         publisher.respond_pr_view(pr_json(), pr_json(headRefOid="b" * 40))
     elif error == "publication":
-        publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {},
-                          {"stdout": "", "exit": 1, "stderr": "invalid description (HTTP 422)"})
+        publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {}, {"stdout": "", "exit": 1, "stderr": "invalid description (HTTP 422)"})
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [{"context": "other"}])
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
-    with pytest.raises((github.GhError, hosted.LoopZeroError), match=(r"method=GET endpoint=/repos/acme/widgets/pulls/7/reviews status=503 request_id=GHREQ-8774 message=Service unavailable \[REDACTED\]" if error == "api" else None)) as raised:
-        hosted.main()
-    if error == "publication":
-        assert "invalid description (HTTP 422)" in str(raised.value)
-    statuses = [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c]
-    assert statuses == ([] if error == "config" else ["pending", "pending"]
-                        if error == "publication" else ["pending", "failure"])
+    if error in {"api", "recover", "before"}:
+        assert hosted.main() == (1 if error == "before" else 0) and sleeps == ([5] if error == "recover" else list(github.RETRY_DELAYS))
+        assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error != "recover")
+    else:
+        with pytest.raises(hosted.LoopZeroError, match="invalid description" if error == "publication" else None):
+            hosted.main()
+    states = {"before": [], "config": [], "head": ["pending", "failure"], "api": ["pending"], "recover": ["pending", "success"]}
+    assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == states.get(error, ["pending", "pending"])
 
 
 @pytest.mark.parametrize("case,error,message", [
@@ -175,15 +176,15 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
-    ("interrupt", KeyboardInterrupt, ""),
+    ("interrupt", KeyboardInterrupt, ""), ("api", None, ""),
     ("manual", hosted.LoopZeroError, "pull_request_target creation"), ("metadata", None, ""),
     ("stale", hosted.LoopZeroError, "head is no longer current"),
     ("untrusted", CandidateError, "head event was not sent"),
 ])
 def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatch, case, error, message):
     event = candidate_event()
-    event["action"] = "edited" if case == "metadata" else event["action"]
-    event["sender"]["id"] = 1 if case == "untrusted" else event["sender"]["id"]
+    event["action"], event["sender"]["id"] = (
+        "edited" if case == "metadata" else event["action"], 1 if case == "untrusted" else event["sender"]["id"])
     values = candidate_payloads(event)
     if case in {"valid", "hold"}:
         gh = FakeGh(fake_bin, tmp_path)
@@ -202,11 +203,11 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
     if case == "malformed":
         values["/repos/owner/repo/pulls/101"] = []
-    (event_path := tmp_path / "event.json").write_text(json.dumps(event))
+    (tmp_path / "event.json").write_text(json.dumps(event))
     (tmp_path / "workflow.toml").write_text('[repo]\nname="owner/repo"\nbase="main"\n[delivery]\nreview_publishers=["trusted-publisher"]\n')
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
-    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "event.json"))
     attempts, sleeps = [], []
 
     def api_get(path):
@@ -228,15 +229,14 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         if args[3] == "failure" and case == "publisher":
             raise RuntimeError("publication details must not replace attestation error")
     monkeypatch.setattr(github, "commit_status", publish)
-    evaluated = []
-    real_evaluate = hosted.eligibility.evaluate
+    evaluated, real_evaluate = [], hosted.eligibility.evaluate
 
     def evaluate(repo, number, head, base, publishers):
         evaluated.append((repo, number, head, base, publishers))
         if case in {"valid", "hold"}:
             return real_evaluate(repo, number, head, base, publishers)
-        if case == "interrupt":
-            raise KeyboardInterrupt()
+        if fault := {"interrupt": KeyboardInterrupt(), "api": github.GhUnavailable(("gh",), "HTTP 503")}.get(case):
+            raise fault
         reasons = (github.MISSING_REVIEW_REASON,) if case == "policy" else ()
         return github.Readiness(not reasons, reasons)
     if case not in {"valid", "hold"}:
@@ -249,7 +249,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
             hosted.main()
     else:
         assert hosted.main() == 0
-    terminal = [] if case in {"manual", "metadata", "stale", "interrupt"} else ["failure"]
+    terminal = [] if case in {"manual", "metadata", "stale", "interrupt", "api"} else ["failure"]
     expected = [] if case in {"manual", "metadata", "stale"} else ["pending", *terminal]
     assert case != "race" or (len(attempts) == 3 and sleeps == [2, 2] and len(evaluated) == 6)
     if case == "valid":
