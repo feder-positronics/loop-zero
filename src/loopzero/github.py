@@ -32,6 +32,7 @@ APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 PR_LOCK_DIR = Path.home() / ".cache/loopzero/pr-locks"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
+MERGEABILITY_PENDING = "GitHub is computing mergeability"
 MARKER_RE = re.compile(
     r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
     r"head=(?P<head>[0-9a-f]{40}) id=(?P<id>[0-9a-f]{8}) -->"
@@ -1323,6 +1324,14 @@ def behind_reason(pr: PR, reviewed_head: str | None) -> str:
     )
 
 
+def mergeability_blocker(pr: PR) -> str | None:
+    if pr.mergeable == "CONFLICTING":
+        return f"PR #{pr.number} has merge conflicts with {pr.base_ref}"
+    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
+        return MERGEABILITY_PENDING
+    return None
+
+
 def readiness(
     repo: str,
     pr: PR,
@@ -1342,8 +1351,8 @@ def readiness(
         reasons.append(f"PR #{pr.number} is {pr.state}, not open")
     if pr.base_ref != base_branch:
         reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}")
-    if pr.mergeable == "CONFLICTING":
-        reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
+    if blocker := mergeability_blocker(pr):
+        reasons.append(blocker)
     if pr.merge_state == "BEHIND" and not allow_behind:
         reasons.append(behind_reason(pr, reviewed_head))
     if not reviewed_head:

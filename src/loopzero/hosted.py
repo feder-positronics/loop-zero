@@ -64,6 +64,19 @@ def _candidate_event(event: dict, head: str) -> bool:
     return True
 
 
+def _source_status(result: github.Readiness, current: github.PR) -> tuple[str, str]:
+    reasons = result.reasons
+    if result.ready:
+        if not (blocker := github.mergeability_blocker(current)):
+            return "success", "Reviewed source head"
+        reasons = (blocker,)
+    if reasons and set(reasons) <= {github.MISSING_REVIEW_REASON, github.MERGEABILITY_PENDING}:
+        if github.MISSING_REVIEW_REASON in reasons:
+            return "pending", "Awaiting trusted review of current source head"
+        return "pending", github.MERGEABILITY_PENDING
+    return "failure", "; ".join(reasons)
+
+
 def _run(cfg: Config) -> int:
     if cfg.repo != os.environ.get("GITHUB_REPOSITORY") or not cfg.review_publishers:
         raise LoopZeroError("trusted repository configuration or review publishers missing")
@@ -94,18 +107,15 @@ def _run(cfg: Config) -> int:
                     f"{owner}/{repo}", f"/merge-queue/status?branch={quote(branch, safe='')}"),
                 source_policy=policy,
             )
-            ready, message = True, "All attested candidate sources are reviewed"
         else:
-            snapshot = github.pr_from_rest(pr)
+            snapshot = eligibility.source_snapshot(cfg.repo, number, head, github.pr_from_rest(pr))
             result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers,
                                           snapshot=snapshot)
-            ready, message = result.ready, "; ".join(result.reasons) or "Reviewed source head"
-        if _landed_before_publication(cfg.repo, number, head, snapshot):
+        current = _publication_snapshot(cfg.repo, number, head, snapshot)
+        if current is None:
             return 0
-        state = "success" if ready else "failure"
-        if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
-            message = "Awaiting trusted review of current source head"
-            state = "pending"
+        state, message = (("success", "All attested candidate sources are reviewed") if candidate
+                          else _source_status(result, current))
     except (github.GhUnavailable, github.ProcTimeout) as exc:
         print(f"Eligibility pending: evidence unavailable ({exc})", file=sys.stderr)
         return 0
@@ -114,18 +124,21 @@ def _run(cfg: Config) -> int:
         raise
     _publish_verdict(cfg.repo, head, state, message[:140])
     print(message)
-    return 0 if ready or state == "pending" else 1
+    return int(state == "failure")
 
 
-def _landed_before_publication(repo: str, number: int, head: str, snapshot: github.PR | None) -> bool:
+def _publication_snapshot(
+    repo: str, number: int, head: str, snapshot: github.PR | None,
+) -> github.PR | None:
     current = github.pr_view(repo, number)
     if current.head_sha != head:
         raise LoopZeroError("head changed before publication; refresh eligibility")
-    if snapshot is None or current.state == "MERGED":
-        return snapshot is not None
-    if eligibility.source_fingerprint(current) != eligibility.source_fingerprint(snapshot):
-        raise LoopZeroError("source metadata changed before publication; refresh eligibility")
-    return False
+    if snapshot is not None:
+        if current.state == "MERGED":
+            return None
+        if eligibility.source_fingerprint(current) != eligibility.source_fingerprint(snapshot):
+            raise LoopZeroError("source metadata changed before publication; refresh eligibility")
+    return current
 
 
 def _publish_verdict(repo: str, head: str, state: str, description: str) -> None:
