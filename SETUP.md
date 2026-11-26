@@ -74,6 +74,14 @@ symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
+Before resuming automated PR check refreshes or explicit PR resyncs after an
+upgrade, advance every PR-body writer to the selected CLI revision. For
+unverified receipt warnings, use a revision containing
+[3ff80bd9 (#1160)](https://github.com/feder-positronics/loop-zero/commit/3ff80bd91c92f12d557cead31776df40d4328097).
+Once the writers are updated, run `loopzero check` for the current head to
+replace old receipts. If you roll back across that fix, pause those writes before
+switching the CLI and resume them once the writers support the warning again.
+
 If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
 after GitHub may have accepted a Claude review, run `loopzero review --repost`
 with the publishing CLI revision or a newer compatible revision. The rollback
@@ -264,6 +272,13 @@ path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Copy
 `~/.config/systemd/user/`, then run
 `systemctl --user enable --now ai-accounts.timer`.
 
+To review with a pinned CLI and managed credentials, set `PINNED_BIN` to the
+directory containing the pinned `loopzero` executable:
+
+```sh
+PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
+```
+
 - Claude accounts are long-lived tokens: run `claude setup-token` per account and
   pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
   `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
@@ -338,6 +353,34 @@ Afterward, `loopzero status` shows the next step and requires authenticated
 access to the configured GitHub repository even before a PR exists. See the
 [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) and
 [Blockers](core/CONTRACT.md#blockers) for the rest of the workflow.
+
+### Check receipts with remote execution
+
+Use one pinned CLI revision and the same effective settings for `check`,
+`ready`, and `merge`. If a shared install can change mid-task, use the
+[isolated install](#install). The coordinator runs in the task worktree and
+writes the receipt. For remote stages, configure an operator-trusted
+`[checks].runner` using the [stage protocol](docs/ARCHITECTURE.md#check-stage-runners).
+
+Without a stage adapter, run the whole check locally. Use a local slot if the
+host requires one. On miki, if you used the isolated install, run these from
+the task worktree with the `install_dir` from that recipe.
+
+```sh
+export PATH="$install_dir/venv/bin:$PATH"
+HEAVY_SLOT_REMOTE_HOSTS="$HOME/.cache/intelflo-scratch/locks/no-remote-hosts.json" "$HOME/.cache/intelflo-scratch/locks/heavy-slot.sh" loopzero check
+# After opening and reviewing the PR, keep this PATH for delivery.
+loopzero ready --wait
+loopzero merge --wait
+```
+
+A whole-job remote worker writes its own receipt. Ready can use it only if it
+passes the existing checks for a clean, passing receipt at the exact head,
+with the current ordered commands and matching settings fingerprint. An older
+worker can omit the fingerprint. A current worker can produce a different
+fingerprint, for example when its inherited `PATH` differs. GitHub required
+CI supplies separate evidence. The [owner queue route](core/CONTRACT.md#blockers)
+applies only under its documented conditions.
 
 ## Removing an abandoned task worktree
 
@@ -465,6 +508,12 @@ the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
 (the loop-zero checkout ref or installed package revision). Dispatch the
 eligibility workflow for the existing PR, or run the command below with its
 unchanged source SHA. The refreshed reader can use the approval already on GitHub.
+
+For inherited review coverage, advance both source and candidate workflow pins to
+a revision containing [23219dd3 (#1081)](https://github.com/feder-positronics/loop-zero/commit/23219dd39e641549164c346e137f4e09718115f6).
+The updated reader accepts an ancestor approval only across verified clean merges
+from the configured base. After deploying both pins, refresh eligibility for open
+sources judged by the older reader so their statuses reflect the updated policy.
 
 From a trusted base checkout, run:
 
