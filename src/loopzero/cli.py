@@ -659,6 +659,28 @@ def _check_failure_preview(tail: str, limit: int = 1536) -> str:
     return preview.decode(errors="ignore")
 
 
+def _print_check_failures(config: Config, results: tuple[CheckResult, ...]) -> bool:
+    shortened = False
+    for result in results:
+        if result.exit_code != 0:
+            print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
+            tail = _proc.tail(result.tail)
+            preview = _check_failure_preview(tail)
+            shortened |= preview != tail
+            print(preview, file=sys.stderr)
+            if not config.network and (result.command.startswith("uv sync --offline --locked")
+                                       or OFFLINE_FAILURE_RE.search(tail)):
+                env = sandbox.SANDBOX_ENV | _proc.build_env(config.env_allowlist) | dict(config.env)
+                print(
+                    "\nThe sandbox has no network because `[checks] network = false`; "
+                    f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
+                    "Run UV_CACHE_DIR=<effective-cache> uv sync --group dev on the host "
+                    "(use the required groups) so the cache under `[checks] writable` is warm, "
+                    "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
+                )
+    return shortened
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
@@ -676,24 +698,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
-    shortened = False
-    for result in report.results:
-        if result.exit_code != 0:
-            print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
-            tail = _proc.tail(result.tail)
-            preview = _check_failure_preview(tail)
-            shortened |= preview != tail
-            print(preview, file=sys.stderr)
-            if not config.network and (result.command.startswith("uv sync --offline --locked")
-                                       or OFFLINE_FAILURE_RE.search(tail)):
-                env = sandbox.SANDBOX_ENV | _proc.build_env(config.env_allowlist) | dict(config.env)
-                print(
-                    "\nThe sandbox has no network because `[checks] network = false`; "
-                    f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
-                    "Run UV_CACHE_DIR=<effective-cache> uv sync --group dev on the host "
-                    "(use the required groups) so the cache under `[checks] writable` is warm, "
-                    "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
-                )
+    shortened = _print_check_failures(config, report.results)
     if (current_head := _save_report(wt, report)) is not None:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
               file=sys.stderr)
