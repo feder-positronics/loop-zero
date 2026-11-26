@@ -1478,16 +1478,30 @@ def merge(
         _gh(*argv, timeout=300)
     except GhError as exc:
         raise MergeFailed(exc.command, exc.tail) from exc
+    if strategy != "queue":
+        # A synchronous merge already in flight still needs verification and cleanup.
+        if sha := merged_sha(repo, number, expected_head=head_sha):
+            return sha
     budget = (bounded_reads(observation_deadline, token=None, retry=True)
               if observation_deadline is not None else nullcontext())
-    with budget:
-        return _verify_merge_request(repo, number, head_sha, argv)
+    sha = None
+    try:
+        with budget:
+            sha = _verify_merge_request(repo, number, head_sha, argv, observe_landing=strategy == "queue")
+    except ReadDeadline:
+        if sha is None:
+            raise
+    return sha
 
 
-def _verify_merge_request(repo: str, number: int, head_sha: str, argv: tuple[str, ...]) -> str | None:
-    sha = merged_sha(repo, number, expected_head=head_sha)
-    if sha:
-        return sha
+def _verify_merge_request(
+    repo: str, number: int, head_sha: str, argv: tuple[str, ...], *, observe_landing: bool,
+) -> str | None:
+    if observe_landing:
+        sha = merged_sha(repo, number, expected_head=head_sha)
+        read_timeout(0)
+        if sha:
+            return sha
     queue_error = None
     try:
         if merge_pending(repo, number):
@@ -1496,6 +1510,7 @@ def _verify_merge_request(repo: str, number: int, head_sha: str, argv: tuple[str
         queue_error = exc
     # The queue may have landed the PR between the two reads; look once more.
     sha = merged_sha(repo, number, expected_head=head_sha)
+    read_timeout(0)
     if sha:
         return sha
     if queue_error:

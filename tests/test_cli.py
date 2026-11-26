@@ -4631,6 +4631,7 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
 def test_merge_queue_landing_within_budget(
     wt, gh, capsys, monkeypatch, head, replay_gh, wait, latency, state, expected,
 ):
+    publish_workflow(wt, WORKFLOW.replace('merge = "squash"', 'merge = "queue"'))
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     clock = [1000.0]
     budgets = []
@@ -4669,6 +4670,39 @@ def test_merge_queue_landing_within_budget(
     assert budgets == ([1.0, 1.0, 0.5] if state == "CLOSED" else [1.0 if wait else 120.0] * 2)
     assert ("closed without a verified merge" in out) is (state == "CLOSED")
     assert ("timed out waiting for the merge queue" in out) is (expected == 3)
+
+
+def test_direct_merge_verifies_after_queue_wait_deadline(wt, gh, capsys, monkeypatch, head, replay_gh):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    clock = poll_clock(monkeypatch)
+    run_gh = github.run
+    cleaned = []
+
+    def merge_then_verify(argv, *, timeout, **kwargs):
+        if argv[1:3] == ["pr", "merge"]:
+            clock.now += 2
+            gh.respond(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="e" * 40))
+            return Completed(0, "", "", 2)
+        return run_gh(argv, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(github, "run", merge_then_verify)
+    monkeypatch.setattr(cli, "_cleanup_remote_refs", lambda *_: None)
+    monkeypatch.setattr(cli, "_cleanup", lambda *_: cleaned.append(True))
+
+    code, out, err = run(capsys, "merge", "--wait=1")
+    assert (code, err, cleaned) == (0, "", [True])
+    assert out.splitlines()[-1] == "e" * 40
+
+
+def test_queue_wait_keeps_landing_verified_before_scope_exit(monkeypatch):
+    clock = poll_clock(monkeypatch)
+
+    def poll(_remaining):
+        github.read_timeout(0)
+        clock.now = 1
+        return "e" * 40
+
+    assert cli._queue_wait(1, poll, bounded=True) == "e" * 40
 
 
 def test_mergify_queue_retries_stop_at_merge_deadline(wt, gh, capsys, monkeypatch, replay_gh):

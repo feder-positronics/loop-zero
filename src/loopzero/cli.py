@@ -1373,6 +1373,7 @@ def _wait_with_deadline(
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr, args)
         return None
+    sha = None
     reported_timeout = False
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
@@ -1484,6 +1485,7 @@ def _queue_wait(
 ) -> str | None:
     if not bounded:  # Explicit --wait=0 still observes once.
         return poll(0)
+    sha = None
     reported_timeout = False
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
@@ -1495,9 +1497,8 @@ def _queue_wait(
                 github.read_timeout(0)
                 raise
     except github.ReadDeadline:
-        if timeout_notice and not reported_timeout:
+        if sha is None and timeout_notice and not reported_timeout:
             print(timeout_notice)
-        return None
     return sha
 
 
