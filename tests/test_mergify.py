@@ -59,29 +59,23 @@ def request_log(monkeypatch):
     return install
 
 
-def test_membership_uses_bearer_and_validates_queue(request_log):
-    seen = request_log({"number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 2})
-    assert mergify.membership("acme/widgets", 7, "main") == mergify.Membership()
+@pytest.mark.parametrize("status", [None, 404, 403])
+def test_membership_uses_bearer_and_maps_only_404_to_absent(request_log, status):
+    seen = request_log({"number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 2}, status=status)
+    if status == 403:
+        with pytest.raises(mergify.MergifyError, match="HTTP 403"):
+            mergify.membership("acme/widgets", 7, "main")
+        return
+    assert mergify.membership("acme/widgets", 7, "main") == (None if status == 404 else mergify.Membership())
     assert seen[0].full_url == "https://api.mergify.com/v1/repos/acme/widgets/merge-queue/pull/7"
     assert seen[0].headers["Authorization"] == "Bearer secret"
     assert seen[0].headers["User-agent"] == "loopzero"
 
 
-@pytest.mark.parametrize("status", [404, 403])
-def test_membership_maps_404_only_to_absent(request_log, status):
-    request_log(status=status)
-    if status == 404:
-        assert mergify.membership("acme/widgets", 7, "main") is None
-    else:
-        with pytest.raises(mergify.MergifyError, match="HTTP 403"):
-            mergify.membership("acme/widgets", 7, "main")
-
-
-def test_api_get_rejects_paths_outside_repository():
+@pytest.mark.parametrize("path", ["https://example.invalid/x", "/../other"])
+def test_api_get_rejects_paths_outside_repository(path):
     with pytest.raises(ValueError, match="repository-relative"):
-        mergify.api_get("acme/widgets", "https://evil.example/x")
-    with pytest.raises(ValueError, match="repository-relative"):
-        mergify.api_get("acme/widgets", "/../other")
+        mergify.api_get("acme/widgets", path)
 
 
 def test_dequeue_posts_to_documented_endpoint(request_log):
@@ -192,10 +186,8 @@ def test_credential_file_must_be_private(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("field,value", [("number", "7"), ("position", None), ("queued_at", None)])
-def test_malformed_membership_never_confirms(monkeypatch, field, value):
-    payload = {"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "main"}
-    payload[field] = value
-    monkeypatch.setattr(mergify, "api_get", lambda *_: payload)
+def test_malformed_membership_never_confirms(request_log, field, value):
+    request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "main", field: value})
     with pytest.raises(mergify.MergifyError):
         mergify.membership("acme/widgets", 7, "main")
 
