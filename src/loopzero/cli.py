@@ -1495,6 +1495,33 @@ def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> Non
         print("cleared: " + "; ".join(cleared))
 
 
+def _read_wait_poll[T](read: Callable[[], T], deadline: float) -> T:
+    """Retry the whole read-only snapshot without extending the waiter deadline."""
+    while True:
+        try:
+            return read()
+        except github.GhUnavailable as exc:
+            delay = (exc.rate_reset or 0) - time.time()
+            if not 0 < delay < deadline - time.monotonic():
+                raise
+            print(f"GitHub quota exhausted. Waiting {delay:.0f}s for the verified reset.", flush=True)
+            _sleep(delay)
+            if time.monotonic() >= deadline:
+                raise
+
+
+def _check_wait_poll(
+    wt: Path, config: Config, pr: github.PR, previous: Config, args: argparse.Namespace,
+    allow_merged: bool, deadline: float,
+) -> tuple[github.PR, Config, github.Readiness | None]:
+    current = github.pr_view(config.repo, pr.number)
+    previous = _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha, previous)
+    if allow_merged and current.state == "MERGED":
+        return current, previous, None
+    return current, previous, _readiness(wt, config, current, pr.head_sha, workflow_wait=True,
+                                         mergify_deadline=deadline)
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float, args: argparse.Namespace, shown: tuple[str, ...] = (),
@@ -1512,12 +1539,11 @@ def _wait_for_checks(
             readiness = initial
             initial = None
         else:
-            current = github.pr_view(config.repo, pr.number)
-            previous = _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha, previous)
-            if allow_merged and current.state == "MERGED":
+            deadline = started + timeout
+            poll = partial(_check_wait_poll, wt, config, pr, previous, args, allow_merged, deadline)
+            current, previous, readiness = _read_wait_poll(poll, deadline)
+            if readiness is None:
                 return current, None, kicked
-            readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True,
-                                   mergify_deadline=started + timeout)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             _mark_ready(wt, config, pr.number, current.head_sha)
             print("marked ready; " + "; ".join(readiness.reasons))
@@ -1651,6 +1677,21 @@ def _mergify_departure(
     raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {MERGIFY_REQUEUE}")
 
 
+def _mergify_wait_poll(
+    config: Config, pr: github.PR, queue: str, deadline: float, closed: list[github.GhError], confirmed: bool,
+) -> tuple[str | None, mergify.Membership | None, bool]:
+    if sha := _landed(config, pr, closed):
+        return sha, None, False
+    if not mergify.configured(config.repo, config.base_branch, queue, deadline):
+        raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
+    state = mergify.membership(config.repo, pr.number, queue, deadline)
+    deferred = confirmed and state is not None and not closed
+    sha = None if deferred else _landed(config, pr, closed)
+    if state is None and sha is None:
+        sha = _mergify_departure(config, pr, queue, closed, confirmed)
+    return sha, state, deferred
+
+
 def _wait_for_mergify(
     config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
@@ -1664,22 +1705,15 @@ def _wait_for_mergify(
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     polls = _poll_until(started, timeout, admitted=lambda: confirmed)
     for _ in polls:
-        sha = _landed(config, pr, closed)
+        deadline = started + timeout
+        poll = partial(_mergify_wait_poll, config, pr, queue, deadline, closed, confirmed)
+        sha, state, deferred_landing_read = _read_wait_poll(poll, deadline)
         if sha:
-            return sha
-        if not mergify.configured(config.repo, config.base_branch, queue, started + timeout):
-            raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
-        state = mergify.membership(config.repo, pr.number, queue, started + timeout)
-        deferred_landing_read = confirmed and state is not None and not closed
-        if not deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
         if state is not None and not confirmed:
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
-        elif state is None:
-            if sha := _mergify_departure(config, pr, queue, closed, confirmed):
-                return sha
     # A queued, open PR normally gets its next landing read on the next tick.
     if deferred_landing_read and (sha := _landed(config, pr, closed)):
         return sha

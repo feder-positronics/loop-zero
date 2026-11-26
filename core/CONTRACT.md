@@ -278,7 +278,7 @@ meta-directives; reviewers load no instruction files or skills from the reviewed
 ## Failure
 
 Fail closed on missing tools or command errors. Preserve the command and output
-tail, name the cause or stage safely, and stop on terminal failures or quota errors.
+tail, name the cause or stage safely, and stop on terminal failures.
 `check` exits 0 when stages pass, including local dirty runs that cannot satisfy
 readiness. Exit 1 can mean a failed stage, a discarded or unverified result, or
 a command error. Read the diagnostic and verify the receipt before classifying
@@ -300,4 +300,5 @@ Other polling needs a deadline, visible progress, preserved stderr and a stop on
 Never poll GraphQL-backed `gh pr view`, `gh pr checks` or `gh pr list` (shared quota).
 Use REST `gh api` for one-off PR reads and comments. After a quota error, wait for
 a verified reset or `Retry-After` before GitHub-backed commands, including
-`loopzero` waiters. REST `/rate_limit` does not prove GraphQL capacity.
+`loopzero` waiters. An active waiter can resume a fresh poll after a verified
+hourly reset within its original deadline. REST `/rate_limit` does not prove GraphQL capacity.

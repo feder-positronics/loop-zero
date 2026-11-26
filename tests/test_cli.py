@@ -13,6 +13,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from functools import partial
 from dataclasses import asdict, replace
 from email.utils import formatdate
 from pathlib import Path
@@ -4414,6 +4415,50 @@ def test_ready_pins_review_publishers_to_base(wt, repo, gh, capsys, monkeypatch,
     gh.respond(f"api repos/{REPO}/statuses/{head}", {})
     assert hosted.main() == 0
     assert json.loads(gh.calls[-1]["--input"])["state"] == ("success" if publisher == LOGIN else "pending")
+
+
+@pytest.mark.parametrize("kind", ["checks", "mergify"])
+@pytest.mark.parametrize("reset", [None, -1, 20, 100])
+def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
+    head = commit_mergify_configuration(wt)
+    config = cli.config_mod.load_trusted(wt)
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    clock = poll_clock(monkeypatch, jitter=1.0)
+    monkeypatch.setattr(cli.time, "time", lambda: clock.now)
+    polls = []
+    error = github.GhUnavailable(("gh",), "quota exhausted", rate_reset=reset)
+
+    def next_poll(*_args):
+        polls.append(clock.now)
+        return pr if kind == "checks" else ("e" * 40 if len(polls) == 2 else None)
+
+    def gated(*_args, **_kwargs):
+        if len(polls) == 1:
+            raise error
+        return github.Readiness(True, ())
+
+    if kind == "checks":
+        monkeypatch.setattr(github, "pr_view", next_poll)
+        monkeypatch.setattr(cli, "_verify_wait_snapshot", lambda *_: config)
+        monkeypatch.setattr(cli, "_readiness", gated)
+        wait = partial(cli._wait_for_checks, wt, config, pr, 90, kicked=True, started=0,
+                       args=SimpleNamespace(command="ready", config=None))
+        expected = (pr, github.Readiness(True, ()), True)
+    else:
+        monkeypatch.setattr(cli, "_landed", next_poll)
+        monkeypatch.setattr(mergify, "configured", gated)
+        wait = partial(cli._wait_for_mergify, config, pr, 90, confirmed=True)
+        expected = "e" * 40
+
+    if reset == 20:
+        assert wait() == expected
+        assert polls == [0, 20]
+        assert clock.sleeps == [20]
+    else:
+        with pytest.raises(github.GhUnavailable, match="quota exhausted"):
+            wait()
+        assert polls == [0]
+        assert not clock.sleeps
 
 
 @pytest.mark.parametrize("confirmed", [True, False])

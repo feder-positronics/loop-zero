@@ -936,5 +936,3 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     assert report.results[0].exit_code == 7
     assert 'stage-ran' in report.results[0].tail
     assert not report.results[0].reused_from
-
-

@@ -68,10 +68,12 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 
 class GhError(Exception):
     def __init__(self, command: tuple[str, ...], tail: str, *,
-                 token: str = "", guidance: str = "", confirmed_rate_limit: bool = False) -> None:
+                 token: str = "", guidance: str = "", confirmed_rate_limit: bool = False,
+                 rate_reset: int | None = None) -> None:
         self.command = tuple(_redact_tokens(arg, token) for arg in command)
         self.tail = _redact_tokens(tail, token) + guidance
         self.confirmed_rate_limit = confirmed_rate_limit
+        self.rate_reset = rate_reset
         command_text = _redact_tokens(" ".join(command), token)
         super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
 
@@ -412,8 +414,12 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
     error = GhUnavailable if transient else GhError
+    confirmed_limit = rate_limited and status in {"403", "429"}
+    reset = headers.get("x-ratelimit-reset", "")
+    rate_reset = int(reset) if (confirmed_limit and headers.get("x-ratelimit-remaining") == "0"
+                                and re.fullmatch(r"[0-9]{1,18}", reset)) else None
     raise error(error_command, detail, token=selected, guidance=guidance,
-                confirmed_rate_limit=rate_limited and status in {"403", "429"})
+                confirmed_rate_limit=confirmed_limit, rate_reset=rate_reset)
 
 
 def _rest_rate_limit(headers: dict[str, str]) -> str:
