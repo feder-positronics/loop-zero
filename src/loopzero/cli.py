@@ -104,14 +104,16 @@ def _repo_root(wt: Path) -> Path:
     return root
 
 
-def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = False) -> Config:
+def _load_config(
+    args: argparse.Namespace, root: Path, *, pin_checks: bool = False, refresh: bool = False,
+) -> Config:
     path = args.config or root / "workflow.toml"
     if not pin_checks:
         return config_mod.load(path)
     if args.config:
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
-    config = config_mod.load_trusted(root, refresh=args.command in {"ready", "merge"})
+    config = config_mod.load_trusted(root, refresh=refresh)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
@@ -124,7 +126,9 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
 
 def _context(args: argparse.Namespace, *, pin_checks: bool = False) -> tuple[Path, Config]:
     wt = _toplevel()
-    return wt, _load_config(args, wt, pin_checks=pin_checks)
+    return wt, _load_config(
+        args, wt, pin_checks=pin_checks, refresh=args.command in {"ready", "merge"},
+    )
 
 
 def _is_ancestor(wt: Path, sha: str, head: str) -> bool:

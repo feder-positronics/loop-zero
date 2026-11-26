@@ -2464,7 +2464,7 @@ def test_source_wait_reads_once_before_first_interval(
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
 @pytest.mark.parametrize("settled", ["CONFLICTING", "MERGEABLE", "UNKNOWN"])
-def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, settled):
+def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, settled, git_calls):
     commit_mergify_configuration(wt)
     head = head_of(wt)
     arm_approved_ready_pr(gh, head, wt, mergeable="UNKNOWN", isDraft=False)
@@ -2480,8 +2480,10 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, sett
     clock = []
     monkeypatch.setattr(cli.time, "monotonic", lambda: sum(clock))
     monkeypatch.setattr(cli, "_sleep", clock.append)
+    git_calls.clear()
     code, out, err = run(capsys, command, "--wait=1")
 
+    assert sum(call[0] == "fetch" for call in git_calls) == 1
     if settled == "CONFLICTING":
         assert code == 1 and "has merge conflicts" in out + err
     elif settled == "UNKNOWN":

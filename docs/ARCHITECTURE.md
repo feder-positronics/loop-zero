@@ -44,8 +44,10 @@ The CLI also writes a head-bound checks receipt and saved review output in
 receipts have the restricted retention requirement described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
 review evidence using trusted base configuration. Local readiness and merge fetch
-the configured origin base before loading its publisher policy. Losing local
-artifacts may require rerunning checks or review, and never creates a hosted approval.
+the configured origin base once at startup before loading its publisher policy.
+A receipt bound to the base may require a new check after that base advances.
+Losing local artifacts may require rerunning checks or review, and never creates
+a hosted approval.
 Saved runner artifacts also retain the repository, PR and actual request publisher
 before publication. A lost POST reply triggers a read-only reconciliation bounded
 by one 30-second transport deadline, with no read retries. Recovery regenerates
