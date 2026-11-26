@@ -663,7 +663,10 @@ def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> t
             rows = api_get(endpoint)
         except GhError as exc:
             # A local head can be unpushed. Let the branch fallback find its actual PR.
-            if head_sha is not None and page == 1 and re.search(r"\bHTTP 404\b", exc.tail):
+            missing_commit = re.search(r"\bHTTP 404\b", exc.tail) or (
+                f"No commit found for SHA: {sha}" in exc.tail and re.search(r"\bHTTP 422\b", exc.tail)
+            )
+            if head_sha is not None and page == 1 and missing_commit:
                 return endpoint, []
             raise
         if not isinstance(rows, list) or len(rows) > PAGE:
