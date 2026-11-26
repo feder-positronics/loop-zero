@@ -34,13 +34,14 @@ _SECTIONS: dict[str, dict[str, type]] = {
         "review_chunk_bytes": int, "review": dict,
     },
 }
+_REVIEW_SETTINGS = {"model": str, "effort": str, "allowed_efforts": list}
 
 
 class ConfigError(LoopZeroError):
     """The configuration file is missing, unreadable, or has invalid content."""
 
 
-def load(path: Path | str) -> Config:
+def load(path: Path | str, *, require_ci: bool = False) -> Config:
     """Load and validate a workflow file."""
     path = Path(path)
     try:
@@ -52,12 +53,17 @@ def load(path: Path | str) -> Config:
             "(https://github.com/feder-positronics/loop-zero/blob/main/SETUP.md#configure), "
             "or follow this repository's review process if it has one."
         ) from exc
-    return _parse_workflow(raw, path)
+    return _parse_workflow(raw, path, require_ci=require_ci)
 
 
-def _parse_workflow(raw: bytes, source: Path | str, hint: str = "") -> Config:
+def _parse_workflow(raw: bytes, source: Path | str, hint: str = "", *,
+                    require_ci: bool = False, branch: str | None = None) -> Config:
     try:
-        return _build(tomllib.loads(raw.decode("utf-8")))
+        data = tomllib.loads(raw.decode("utf-8"))
+        policy = _build(data)
+        if require_ci and (branch is None or policy.base_branch == branch):
+            _require_ci(data.get("checks", {}))
+        return policy
     except UnicodeDecodeError as exc:
         raise ConfigError(f"{source}: {exc}") from exc
     except (tomllib.TOMLDecodeError, ConfigError) as exc:
@@ -100,7 +106,7 @@ def _has_replacement_refs(common_dir: Path) -> bool:
 
 
 def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
-                     refresh: bool, read_timeout: Callable[[float], float]) -> tuple[Config, str]:
+                     refresh: bool, require_ci: bool, read_timeout: Callable[[float], float]) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
     ref = f"refs/remotes/origin/{branch}"
@@ -126,12 +132,13 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
     )
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
-    return _parse_workflow(shown.stdout.encode("utf-8", "surrogateescape"), source, f". {hint}"), revision
+    return _parse_workflow(shown.stdout.encode("utf-8", "surrogateescape"), source, f". {hint}",
+                           require_ci=require_ci, branch=branch), revision
 
 
-def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: bool = False,
+def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: bool = False, require_ci: bool = False,
                  read_timeout: Callable[[float], float] = float) -> Config:
-    """Select delivery policy using Git's origin default and its trusted workflow."""
+    """Select trusted delivery policy, reusing earlier loads from the same validation mode."""
     prefix = "refs/remotes/origin/"
     default = run_git(worktree, "symbolic-ref", "--quiet", f"{prefix}HEAD", timeout=read_timeout(60))
     ref = default.stdout.strip()
@@ -142,73 +149,61 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
         )
     branch = ref.removeprefix(prefix)
     for _ in range(2):
-        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh, read_timeout=read_timeout)
+        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh,
+                                            require_ci=require_ci, read_timeout=read_timeout)
         if policy.base_branch == branch:
             return replace(policy, trusted_base_revision=revision)
         branch = policy.base_branch
     raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
 
 
+def _require_ci(checks: dict[str, Any]) -> None:
+    if "required_ci" not in checks:
+        raise ConfigError(
+            "checks.required_ci must list the required contexts or explicitly set required_ci = [] if none are required"
+        )
+
+
 def _build(data: dict[str, Any]) -> Config:
     _reject_unknown("top level", data, _SECTIONS)
-    for section, keys in _SECTIONS.items():
-        table = data.get(section, {})
-        if not isinstance(table, dict):
-            raise ConfigError(f"[{section}] must be a table")
-        _reject_unknown(f"[{section}]", table, keys)
-        for key, kind in keys.items():
-            if key in table and not isinstance(table[key], kind):
-                raise ConfigError(f"{section}.{key} must be a {kind.__name__}")
+    sections = {
+        section: _check_table(section, data.get(section, {}), schema)
+        for section, schema in _SECTIONS.items()
+    }
+    repo, checks, delivery = sections["repo"], sections["checks"], sections["delivery"]
 
-    repo = data.get("repo", {})
-    checks = data.get("checks", {})
-    delivery = data.get("delivery", {})
-
-    if "name" not in repo:
+    if (name := repo.get("name")) is None:
         raise ConfigError("missing required key repo.name (\"owner/name\")")
-    name = repo["name"]
     if name.count("/") != 1 or not all(name.split("/")):
         raise ConfigError(f'repo.name must look like "owner/name", got {name!r}')
 
-    base = repo.get("base", "main")
-    if not base:
+    if not (base := repo.get("base", "main")):
         raise ConfigError("repo.base must not be empty")
     merge, mergify_queue = _merge_settings(delivery)
     reviewers = _strings("delivery.reviewers", delivery.get("reviewers", list(REVIEWER_FAMILIES)))
     if not reviewers:
         raise ConfigError("delivery.reviewers must list at least one reviewer")
-    for reviewer in reviewers:
-        if reviewer not in REVIEWER_FAMILIES:
-            raise ConfigError(
-                f"delivery.reviewers entries must be in {REVIEWER_FAMILIES}, got {reviewer!r}"
-            )
-    review_chunk_bytes = delivery.get("review_chunk_bytes", 200_000)
+    if unknown := next((family for family in reviewers if family not in REVIEWER_FAMILIES), None):
+        raise ConfigError(f"delivery.reviewers entries must be in {REVIEWER_FAMILIES}, got {unknown!r}")
+    review_chunk_bytes = delivery.get("review_chunk_bytes", Config.review_chunk_bytes)
     if isinstance(review_chunk_bytes, bool) or review_chunk_bytes < 4096:
         raise ConfigError("delivery.review_chunk_bytes must be an int >= 4096")
     review: dict[str, ReviewConfig] = {}
     for family, table in delivery.get("review", {}).items():
         if family not in REVIEWER_FAMILIES:
             raise ConfigError(f"unknown review family delivery.review.{family}")
-        if not isinstance(table, dict):
-            raise ConfigError(f"[delivery.review.{family}] must be a table")
         label = f"delivery.review.{family}"
-        _reject_unknown(f"[{label}]", table, ("model", "effort", "allowed_efforts"))
-        for key in ("model", "effort"):
-            if key in table and (not isinstance(table[key], str) or not table[key]):
-                raise ConfigError(f"{label}.{key} must be a non-empty str")
-        allowed = table.get("allowed_efforts", [])
-        if not isinstance(allowed, list):
-            raise ConfigError(f"{label}.allowed_efforts must be a list")
-        review[family] = ReviewConfig(table.get("model"), table.get("effort"),
-                                      _strings(f"{label}.allowed_efforts", allowed))
+        table = _check_table(label, table, _REVIEW_SETTINGS, nonempty_strings=True)
+        review[family] = ReviewConfig(
+            table.get("model"), table.get("effort"), _strings(f"{label}.allowed_efforts", table.get("allowed_efforts", [])),
+        )
 
     commands = _strings("checks.commands", checks.get("commands", []))
     if any(not command.strip() for command in commands):
         raise ConfigError("checks.commands entries must each be a nonblank command")
     kwargs: dict[str, Any] = {}
     if "runner" in checks:
-        runner = _strings("checks.runner", checks["runner"])
-        if not runner or any(not arg or "\0" in arg for arg in runner):
+        if not (runner := _strings("checks.runner", checks["runner"])) or any("\0" in arg for arg in runner):
             raise ConfigError("checks.runner must be a nonempty argv prefix")
         if "/" in runner[0] and not Path(runner[0]).is_absolute():
             raise ConfigError("checks.runner executable paths must be absolute")
@@ -236,10 +231,8 @@ def _build(data: dict[str, Any]) -> Config:
         if "runner" in checks and checks["limits"]:
             keys = ", ".join(f"checks.limits.{key}" for key in sorted(checks["limits"]))
             raise ConfigError(f"{keys} apply only to local checks and cannot be set with checks.runner")
-    reviewer_ro_paths = _host_paths(
-        "delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])
-    )
     return Config(
+        reviewer_ro_paths=_host_paths("delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])),
         repo=name,
         base_branch=base,
         checks=commands,
@@ -250,7 +243,6 @@ def _build(data: dict[str, Any]) -> Config:
         review_publishers=_strings("delivery.review_publishers",
                                    delivery.get("review_publishers", [])),
         review=review,
-        reviewer_ro_paths=reviewer_ro_paths,
         review_chunk_bytes=review_chunk_bytes,
         network=checks.get("network", False),
         inputs=inputs, env=env, **kwargs,
@@ -258,8 +250,7 @@ def _build(data: dict[str, Any]) -> Config:
 
 
 def _merge_settings(delivery: dict[str, Any]) -> tuple[str, str | None]:
-    merge = delivery.get("merge", "squash")
-    if merge not in MERGE_STRATEGIES:
+    if (merge := delivery.get("merge", "squash")) not in MERGE_STRATEGIES:
         raise ConfigError(f"delivery.merge must be one of {MERGE_STRATEGIES}, got {merge!r}")
     mergify_queue = delivery.get("mergify_queue")
     if merge == "mergify":
@@ -272,9 +263,22 @@ def _merge_settings(delivery: dict[str, Any]) -> tuple[str, str | None]:
     return merge, mergify_queue
 
 
+def _check_table(label: str, table: Any, schema: dict[str, type], *,
+                 nonempty_strings: bool = False) -> dict[str, Any]:
+    if not isinstance(table, dict):
+        raise ConfigError(f"[{label}] must be a table")
+    _reject_unknown(f"[{label}]", table, schema)
+    for key, kind in schema.items():
+        if key in table:
+            nonempty = nonempty_strings and kind is str
+            if not isinstance(table[key], kind) or (nonempty and not table[key]):
+                expected = "non-empty str" if nonempty else kind.__name__
+                raise ConfigError(f"{label}.{key} must be a {expected}")
+    return table
+
+
 def _reject_unknown(where: str, table: dict[str, Any], allowed: Any) -> None:
-    unknown = sorted(set(table) - set(allowed))
-    if unknown:
+    if unknown := sorted(set(table) - set(allowed)):
         raise ConfigError(f"unknown key(s) in {where}: {', '.join(unknown)}")
 
 
