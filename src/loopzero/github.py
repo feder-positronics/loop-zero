@@ -29,9 +29,8 @@ APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
 MARKER_RE = re.compile(
-    r"<!--\s*loopzero:finding\s+(?:v=(?P<version>1)\s+)?"
-    r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"
-    r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
+    r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
+    r"head=(?P<head>[0-9a-f]{40}) id=(?P<id>[0-9a-f]{8}) -->"
 )
 PAGE = 100
 PR_FILE_LIMIT = 3_000
@@ -51,7 +50,9 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id isResolved isOutdated path line
-          comments(first: 1) { nodes { body } pageInfo { hasNextPage endCursor } }
+          comments(first: 1) {
+            nodes { body author { __typename login } } pageInfo { hasNextPage endCursor }
+          }
         }
       }
     }
@@ -985,22 +986,29 @@ def _title_of(text: str) -> str:
     return re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
 
 
-def _parse_thread(node: dict, current_head: str | None) -> Finding | None:
+def _thread_marker(node: dict, publishers: tuple[str, ...]) -> re.Match[str] | None:
+    """The v=1 marker opening a thread's first comment, if a review publisher wrote it."""
     comments = node.get("comments", {}).get("nodes") or []
     if not comments:
         return None
-    first = comments[0]
-    body = first.get("body") or ""
-    match = MARKER_RE.search(body)
+    author = comments[0].get("author") or {}
+    login = str(author.get("login") or "")
+    # GraphQL names an App's bot account without REST's "[bot]" suffix.
+    if author.get("__typename") == "Bot":
+        login += "[bot]"
+    if not login or login.casefold() not in {p.casefold() for p in publishers}:
+        return None
+    # The publisher writes the marker as the whole first line, exactly as finding_marker does.
+    return MARKER_RE.fullmatch((comments[0].get("body") or "").partition("\n")[0])
+
+
+def _parse_thread(node: dict, current_head: str | None,
+                  publishers: tuple[str, ...]) -> Finding | None:
+    match = _thread_marker(node, publishers)
     if not match or match.group("severity") not in BLOCKING:
         return None
-    version = match.group("version")
+    body = node["comments"]["nodes"][0]["body"]
     marker_head = match.group("head")
-    marker_id = match.group("id")
-    if version and (not marker_head or not marker_id):
-        return None
-    if not version and marker_id:
-        return None
     if current_head is not None and marker_head != current_head and node.get("isOutdated"):
         return None
     severity = match.group("severity")
@@ -1018,12 +1026,13 @@ _RESOLVE_MUTATION = (
 )
 
 
-def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
+def open_findings(repo: str, number: int,
+                  publishers: tuple[str, ...]) -> list[tuple[str, str, Finding]]:
     """(marker id, thread id, finding) for every unresolved blocking thread, any head."""
     return [
-        (MARKER_RE.search(node["comments"]["nodes"][0]["body"]).group("id") or node["id"], node["id"], f)
+        (_thread_marker(node, publishers).group("id"), node["id"], f)
         for node in _unresolved_threads(repo, number)
-        if (f := _parse_thread(node, None))
+        if (f := _parse_thread(node, None, publishers))
     ]
 
 
@@ -1057,16 +1066,16 @@ def _has_thread_reply(node: dict, reply: str) -> bool:
     return False
 
 
-def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Finding:
+def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
+                    publishers: tuple[str, ...]) -> Finding:
     """Reply to a blocking finding, or resume an identical resolution."""
     threads = _review_threads(repo, number, include_resolved=True)
     for node in sorted(threads, key=lambda node: bool(node.get("isResolved"))):
-        finding = _parse_thread(node, None)
+        finding = _parse_thread(node, None, publishers)
         if finding is None:
             continue
-        marker = MARKER_RE.search(node["comments"]["nodes"][0]["body"])
         thread_id = node["id"]
-        if (marker.group("id") or thread_id) != finding_id:
+        if _thread_marker(node, publishers).group("id") != finding_id:
             continue
         confirmed = _has_thread_reply(node, reply)
         if node.get("isResolved"):
@@ -1113,15 +1122,17 @@ def refresh_eligibility(repo: str, number: int, base: str) -> None:
 
 
 def open_blocking_findings(
-    repo: str, number: int, current_head: str | None = None
+    repo: str, number: int, current_head: str | None, publishers: tuple[str, ...],
 ) -> list[Finding]:
-    """Findings from unresolved review threads whose first comment carries a blocking marker.
+    """Findings from unresolved review threads whose first comment opens with a blocking marker.
 
-    Only explicit critical and important markers block. When `current_head` is supplied, an
-    outdated thread is ignored unless its marker names that head.
+    Only critical and important v=1 markers on the first line of a comment written by a
+    review publisher block. When `current_head` is supplied, an outdated thread is ignored
+    unless its marker names that head.
     """
     return [
-        f for node in _unresolved_threads(repo, number) if (f := _parse_thread(node, current_head))
+        f for node in _unresolved_threads(repo, number)
+        if (f := _parse_thread(node, current_head, publishers))
     ]
 
 
@@ -1319,6 +1330,7 @@ def readiness(
     review_grace: bool = False,
     workflow_wait: bool = False,
     stale_verdict_grace: bool = False,
+    publishers: tuple[str, ...],
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
     reasons: list[str] = []
@@ -1334,7 +1346,8 @@ def readiness(
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha):
+    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha,
+                                    publishers):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
     checks, stale, stale_verdicts, capped = (_check_signals(

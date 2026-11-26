@@ -101,7 +101,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
-   head or an eligible review covering an ancestor, blocking findings,
+   head or an eligible review covering an ancestor, blocking findings
+   (unresolved threads a review publisher opened with a head-bound marker line),
    target branch and required CI. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
@@ -116,6 +117,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    that requested changes also requires resolved findings at the reviewed head.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
+   Each poll resolves the trusted workflow ref, reusing parsed policy when the
+   branch and immutable revision match the preceding observation.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge
    admission checks readiness again. Missing-run diagnosis keeps its two-minute
@@ -187,7 +190,10 @@ commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
 that header, a newline and the Git patch, including carriage returns and the
 final newline. UTF-8 patches are supplied verbatim. For other patches, the
 prompt escapes invalid bytes and literal backslashes so the changes stay
-visible. The native inspection digest always binds the original Git bytes.
+visible. The native inspection digest always binds the original Git bytes. Git forces
+text hunks for every file (overriding `-diff`, `binary` and NUL detection) and
+runs no external diff command or text conversion, so changed lines stay visible.
+Chunked review summarizes only files whose Git header reports a deletion.
 The runner probes the selected Codex binary with `--version` and records its
 stdout in runner provenance and the saved review receipt. A failed probe uses
 RunnerBadOutput and existing family fallback before model input. Successful

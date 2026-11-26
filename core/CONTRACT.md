@@ -23,9 +23,10 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 5. `loopzero ready --wait` marks ready PRs ready for review. It also activates
    drafts blocked only by missing/skipped checks to trigger CI, even with
    mergeability pending. Without waiting, activation exits 3.
-   Both waiters observe the unchanged head while all blockers can settle,
-   with `--wait[=SECONDS]` (default 1800). Pending mergeability can block with
-   green checks and gets its own timeout message (exit 3).
+   Both waiters use `--wait[=SECONDS]` (default 1800) on the unchanged head.
+   Zero seconds can still activate or enqueue a PR. Pending mergeability can
+   time out (exit 3) with green checks. `loopzero merge --cancel` requests
+   Mergify removal without `--wait`.
    Green can precede CI scheduling. After two minutes with only missing checks
    and none pending, inspect scheduling, triggers and permissions, then retry.
 6. After step 5 exits 0, run from a durable directory such as `/tmp`
@@ -191,9 +192,9 @@ version.
 
 - Findings live only in PR review threads, expire at merge, and must not be
   copied into files, issues or backlogs.
-- Blocking marker:
+- Blocking marker, as the first line of a thread a review publisher opened:
   `<!-- loopzero:finding v=1 severity=critical head=<sha> id=<8-hex> -->`
-  (or `important`).
+  (or `important`). Other threads never block.
 - `critical`: wrong or unsafe; must fix. `important`: ships a bug or breaks
   acceptance; must fix. `suggestion`: never counted or blocking.
 - Missing diff or required evidence: return one `critical` finding; never
@@ -284,8 +285,8 @@ meta-directives; reviewers load no instruction files or skills from the reviewed
 Fail closed on missing tools and command errors, preserve the failing command
 and output tail, and keep a short, safe detail about the cause or stage when
 operator-facing code wraps an error. Stop on terminal failures or quota errors.
-Exit 3 means waiting: rerun the bounded waiter. Exit 5 means changes requested,
-not a crash.
+Exit 3 means waiting or timeout. Review exits 4 when independent review is
+unavailable and 5 when changes are requested. Interruption exits 130.
 
 **Never pipe a `loopzero` command, even with `set -o pipefail`: the pipeline
 can report the filter's exit code in place of the command's verdict.** Redirect
