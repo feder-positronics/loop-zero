@@ -1159,20 +1159,19 @@ def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
 
 
 @pytest.mark.parametrize("plant", [
-    "too_many", "loop", "undecodable", "dangling", "root_loop:.agents/skills", "root_loop:.codex/skills"])
+    "too_many", "loop", "undecodable", "dangling", "loop:.agents/skills", "loop:.codex/skills",
+    "loop:.agents", "loop:.codex", "dangling:.agents", "dangling:.codex"])
 def test_codex_skill_lists_it_cannot_disable_fail_before_any_codex_call(
     repo, fake_bin: Path, fake_tool, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, plant: str,
 ) -> None:
     if plant == "too_many":
         _plant_skills(repo)
         monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
-    elif plant in ("loop", "dangling"):
-        (repo / ".agents/skills").mkdir(parents=True)
-        (repo / ".agents/skills/x").symlink_to("x" if plant == "loop" else "/nonexistent/skills")
-    elif plant.startswith("root_loop:"):
-        root = repo / plant.partition(":")[2]
-        root.parent.mkdir(parents=True)
-        root.symlink_to(root.name)
+    elif plant != "undecodable":
+        kind, _, name = plant.partition(":")
+        link = repo / (name or ".agents/skills/x")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(link.name if kind == "loop" else "missing")
     else:
         skill = repo / ".codex/skills" / os.fsdecode(b"\xff")
         skill.mkdir(parents=True)
