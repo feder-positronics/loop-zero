@@ -382,3 +382,44 @@ def test_repost_confirms_historical_claude_publication(
         gh.respond(reviews_key(), [{**row, "body": body + "changed"}])
         assert run(capsys, "review", "--repost")[0] == 1
     assert_single_publication(gh, fake_bin)
+
+
+@pytest.mark.parametrize("altered", [False, True])
+def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkeypatch, altered):
+    head = head_of(wt)
+    arm_pr(gh, head)
+    result = support._native_codex_result(head, repo=REPO, publisher=LOGIN, cwd=str(wt))
+    cli._save_review(wt, result, {"repo": REPO, "number": 7, "publisher": LOGIN})
+    evidence = cli.runners.codex_evidence(result)
+    call = evidence["calls"][0]
+    assert "configured" not in call
+    body = (
+        f'{support.marker(head, "primary", "model")}\n'
+        f"{cli.runners.encode_codex_evidence(evidence)}\n"
+        f"loopzero primary review by codex on `{head}`, unknown: "
+        "**approve** (0 critical, 0 important, 0 suggestion)\n\n"
+        "Settings per native call (CLI claims, not backend attestation):\n"
+        f"- Call 1: requested model {call['requested']['model']} "
+        f"(effort {call['requested']['effort']}); "
+        f"CLI-reported model {call['reported']['model']} (effort {call['reported']['effort']})"
+        "\n\n<details><summary>Raw reviewer output</summary>\n\n```\n"
+        "Native Codex transcript retained in the restricted local review receipt; "
+        "public evidence is publisher-derived, not backend attestation. "
+        f"Exact raw SHA256: {evidence['raw_sha256']}\n```\n</details>"
+    )
+    if altered:
+        body += "changed"
+    gh.respond(reviews_key(), [
+        {"id": 17, "commit_id": head, "body": body, "state": "APPROVED", "user": {"login": LOGIN}},
+    ])
+    gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1", [])
+
+    def unexpected_launch(*args, **kwargs):
+        pytest.fail("repost launched a reviewer")
+
+    monkeypatch.setattr(cli.runners, "review_with", unexpected_launch)
+    code, _, err = run(capsys, "review", "--repost")
+    assert code == int(altered), err
+    if altered:
+        assert "conflicting or ambiguous review publication" in err
+    assert all("--input" not in call for call in gh.calls)

@@ -31,7 +31,9 @@ ownership and the contributor routine that keeps documentation current.
 
 For a picture of the whole flow, see the [workflow diagrams](docs/WORKFLOW.md).
 
-`loopzero status` prints where the current branch is in that sequence.
+`loopzero status` prints where the current branch is in that sequence. It
+requires authenticated access to the configured GitHub repository even before
+a PR exists.
 `loopzero resolve` lists the open blocking findings with their ids;
 `loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
 

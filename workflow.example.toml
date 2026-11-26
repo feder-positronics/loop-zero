@@ -11,7 +11,9 @@ base = "main"
 # Shell commands run in order by `loopzero check`, each inside the sandbox
 # (read-only worktree, no Git write, isolated HOME). The first nonzero exit
 # fails the run and prints the failing tails; the full report is written to
-# .loopzero/checks.json. These work out of the box for a uv project.
+# .loopzero/checks.json. These uv commands need Ruff and pytest in the dev
+# dependency group, a committed uv.lock, and actual host paths in the settings
+# below with a warmed uv cache for offline execution.
 commands = ["uv run --group dev ruff check .", "uv run --group dev pytest -q"]
 
 # Worktree-relative paths that get a fresh writable scratch mount per run.
