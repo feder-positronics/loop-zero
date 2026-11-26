@@ -420,9 +420,8 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
     lines = [f"Recorded for `{recorded[:12]}`" + ("" if recorded == head else " (not current head)")]
     if _check_report_problem(loaded, wt, config, head, require_pass=False):
         lines[0] += " (unverified, run `loopzero check`)"
-    lines += [
-        f"- `{r.command}`: exit {r.exit_code}" for r in results
-    ] or ["- (no check commands configured)"]
+    lines += [f"- `{github.redact_credentials(r.command)}`: exit {r.exit_code}"
+              for r in results] or ["- (no check commands configured)"]
     return "\n".join(lines)
 
 
