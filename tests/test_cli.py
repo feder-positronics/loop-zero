@@ -1044,6 +1044,43 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
+@pytest.mark.parametrize(
+    ("probe", "diagnostic"),
+    [
+        ("kill -TERM $$", "exit -15"),
+        ("echo 'fatal: unable to read commit' >&2; exit 128", "unable to read commit"),
+    ],
+)
+def test_pr_aborts_on_ancestry_probe_error(wt, gh, fake_tool, tmp_path, capsys, probe, diagnostic):
+    gh.respond_pr_list([pr_json(headRefOid=head_of(wt))])
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+    pushes = tmp_path / "pushes"
+    fake_tool("git", f'''\
+if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ]; then {probe}; fi
+if [ "$1" = "push" ]; then touch "{pushes}"; exit 0; fi
+exec /usr/bin/git "$@"
+''')
+
+    code, out, err = run(capsys, "pr")
+
+    assert (code, out) == (1, "")
+    assert "git merge-base --is-ancestor" in err and diagnostic in err
+    assert not pushes.exists()
+    assert all("--method" not in call["argv"] for call in gh.calls)
+
+
+def test_pr_aborts_on_missing_remote_head(wt, gh, fake_tool, tmp_path, capsys):
+    gh.respond_pr_list([pr_json(headRefOid="a" * 40)])
+    pushes = trace_pushes(fake_tool, tmp_path)
+
+    code, out, err = run(capsys, "pr")
+
+    assert (code, out) == (1, "")
+    assert "fetch and integrate it first" in err
+    assert not pushes.exists()
+    assert all("--method" not in call["argv"] for call in gh.calls)
+
+
 @pytest.mark.parametrize("hook_fails", [False, True])
 def test_pr_uses_lease_for_rewritten_open_pr(
     wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, hook_fails: bool
