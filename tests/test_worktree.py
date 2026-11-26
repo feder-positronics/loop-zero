@@ -41,11 +41,12 @@ def test_git_fixture_ignores_inherited_directory(tmp_path, monkeypatch):
     assert (checkout / ".git").is_dir() and not ambient.exists()
 
 
-def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
-    name = worktree.branch_name(repo, "zażółć\u00a0")
+@pytest.mark.parametrize("slug", ["zażółć\u00a0", "ok-1.2_x"])
+def test_branch_round_trips_valid_names(repo: Path, slug: str) -> None:
+    name = worktree.branch_name(repo, slug)
     git(repo, "switch", "-c", name)
 
-    assert worktree.branch(repo) == "lz/zażółć\u00a0"
+    assert worktree.branch(repo) == f"lz/{slug}"
 
 
 def test_branch_refuses_detached_head(repo: Path) -> None:
@@ -175,30 +176,23 @@ def test_start_excludes_worktrees_and_task_dir(repo: Path, monkeypatch, case: st
     assert exclude.read_text().count(".worktrees/") == 1
 
 
-def test_start_refuses_existing_branch(repo: Path) -> None:
-    git(repo, "branch", "lz/dup")
-    with pytest.raises(worktree.WorktreeError, match="branch already exists"):
+@pytest.mark.parametrize("collision", ["branch", "directory"])
+def test_start_refuses_an_existing_task_destination(repo: Path, collision: str) -> None:
+    path = repo / ".worktrees" / "dup"
+    if collision == "branch":
+        git(repo, "branch", "lz/dup")
+    else:
+        path.mkdir(parents=True)
+    with pytest.raises(worktree.WorktreeError, match=f"{collision} already exists"):
         worktree.start(repo, "dup", "main")
-    assert not (repo / ".worktrees" / "dup").exists()
+    assert path.exists() == (collision == "directory")
 
 
-def test_start_refuses_existing_directory(repo: Path) -> None:
-    (repo / ".worktrees" / "dup").mkdir(parents=True)
-    with pytest.raises(worktree.WorktreeError, match="directory already exists"):
-        worktree.start(repo, "dup", "main")
-
-
-@pytest.mark.parametrize("slug", ["../escape", "a/b", "bad..name", "trail.lock", "sp ace", ""])
+@pytest.mark.parametrize("slug", ["../escape", "a/b", "bad..name", "trail.lock", "sp ace", "has~tilde", ""])
 def test_start_rejects_bad_slug(repo: Path, slug: str) -> None:
     with pytest.raises(worktree.WorktreeError, match="invalid slug"):
         worktree.start(repo, slug, "main")
     assert not (repo / ".worktrees").exists(), "rejected before fetch or worktree add"
-
-
-def test_branch_name_uses_git_check_ref_format(repo: Path) -> None:
-    assert worktree.branch_name(repo, "ok-1.2_x") == "lz/ok-1.2_x"
-    with pytest.raises(worktree.WorktreeError):
-        worktree.branch_name(repo, "has~tilde")
 
 
 @pytest.mark.parametrize("change", [("remove", "origin"), ("rename", "origin", "upstream")])
@@ -282,6 +276,7 @@ def test_task_helpers_errors(repo: Path) -> None:
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
     monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
+    (wt / f".loopzero/reviewer-output-{worktree.head(wt)[:12]}-primary.json").write_text("{}")
     worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
