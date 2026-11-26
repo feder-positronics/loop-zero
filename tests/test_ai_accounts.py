@@ -570,3 +570,26 @@ def test_provider_deadline_covers_http_error_body(helper, monkeypatch):
     monkeypatch.setattr(helper.urllib.request, "urlopen", open_)
     with pytest.raises(TimeoutError, match="provider HTTP request timed out"):
         helper._http(request, timeout=1)
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_account_staging_preserves_colliding_path(helper, tmp_path, symlink):
+    path = helper.STATE / "status.json"
+    staged = path.with_name(f"{path.name}.{helper.os.getpid()}.{helper.threading.get_ident()}.tmp")
+    target = tmp_path / "unrelated" if symlink else staged
+    target.write_text("preserve")
+    if symlink:
+        staged.symlink_to(target)
+    helper.write_private(path, "{}")
+    assert path.read_text() == "{}" and target.read_text() == "preserve"
+
+
+def test_account_lock_preserves_existing_file_and_rejects_symlink(helper):
+    lock = helper.STATE / ".lock"
+    lock.write_text("preserve")
+    with helper._locked(lock.name):
+        assert lock.read_text() == "preserve"
+    (helper.STATE / ".codex-sync.lock").symlink_to(lock)
+    with pytest.raises(OSError), helper._locked(".codex-sync.lock"):
+        pytest.fail("redirected lock opened")
+    assert lock.read_text() == "preserve"
