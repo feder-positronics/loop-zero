@@ -68,7 +68,8 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
 [six steps](../core/CONTRACT.md#the-six-steps):
 
 1. `start` creates an isolated worktree and task branch from the configured base.
-   If checkout is interrupted, it discards its own incomplete Git initialization.
+   If checkout is interrupted, it records the expected branch head in Git's
+   existing worktree lock until rollback can finish.
    A retry can finish an interrupted initialization if the registered task
    worktree is clean, still at the remote base, and missing its task file.
 2. Implementation proves the owning behavior at the narrowest public seam;

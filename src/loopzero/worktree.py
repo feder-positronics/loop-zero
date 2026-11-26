@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import errno
+import fcntl
+import os
 import re
 import stat
+import sys
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -15,6 +18,7 @@ from loopzero._proc import ProcTimeout, Terminated, run
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 EXCLUDES = (".worktrees/", ".loopzero/")
 _BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
+_ROLLBACK_REASON = "loopzero interrupted checkout "
 _TASK_TEMPLATE = """# {title}
 
 ## Context and goal
@@ -136,6 +140,8 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     refusal = f"worktree directory already exists: {wt}"
     if wt.is_symlink() or task.exists() or task.is_symlink() or task.parent.is_symlink():
         raise WorktreeError(refusal)
+    if existing and _rollback_checkout(repo_root, wt, branch):
+        existing = False
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
     base_ref = f"refs/remotes/origin/{base_branch}"
@@ -173,8 +179,10 @@ def _add_task_worktree(repo_root: Path, wt: Path, branch: str, base: str) -> Non
     try:
         _git(repo_root, "worktree", "add", "--quiet", "-b", branch, str(wt), base)
     except (KeyboardInterrupt, Terminated, ProcTimeout):
-        with suppress(WorktreeError, ProcTimeout, OSError):
-            _discard_interrupted_checkout(repo_root, wt, branch, base)
+        try:
+            _rollback_checkout(repo_root, wt, branch, interrupted_base=base)
+        except (WorktreeError, ProcTimeout, OSError) as exc:
+            print(f"warning: checkout rollback for {branch} failed: {exc}", file=sys.stderr)
         raise
     except GitError:
         with suppress(OSError):
@@ -182,37 +190,93 @@ def _add_task_worktree(repo_root: Path, wt: Path, branch: str, base: str) -> Non
         raise
 
 
-def _discard_interrupted_checkout(repo_root: Path, wt: Path, branch_name: str, base: str) -> None:
-    task = task_file(wt)
-    if wt.is_symlink() or task.exists() or task.is_symlink() or task.parent.is_symlink():
-        return
+def _rollback_checkout(
+    repo_root: Path, wt: Path, branch_name: str, *, interrupted_base: str | None = None,
+) -> bool:
     if not (wt / ".git").is_file():
-        wt.rmdir()
-        return
+        if interrupted_base is not None:
+            wt.rmdir()
+        return False
+    if interrupted_base is None and not _rollback_base(_worktree_fields(repo_root, wt)):
+        return False
     common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
     if (_git(wt, *common_dir, preserve_whitespace=True)
             != _git(repo_root, *common_dir, preserve_whitespace=True)):
-        return
+        return False
     git_dir = Path(_git(wt, "rev-parse", "--absolute-git-dir", preserve_whitespace=True))
-    if (not (git_dir / "index.lock").is_file()
-            or (git_dir / "locked").read_text().strip() != "initializing"
-            or branch(wt) != branch_name or head(wt) != base):
-        return
-    # Git requires two force options to remove its own locked, incomplete checkout.
+    fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if os.path.samestat(os.fstat(fd), git_dir.stat()):
+            return _rollback_registered_checkout(repo_root, wt, branch_name, git_dir, interrupted_base)
+    finally:
+        os.close(fd)
+    return False
+
+
+def _rollback_base(fields: list[str]) -> str | None:
+    if len(fields) == 4:
+        match = re.fullmatch(rf"locked {_ROLLBACK_REASON}([0-9a-f]{{40}}|[0-9a-f]{{64}})", fields[3])
+        if match:
+            return match[1]
+    return None
+
+
+def _rollback_registered_checkout(
+    repo_root: Path, wt: Path, branch_name: str, git_dir: Path, interrupted_base: str | None,
+) -> bool:
+    task = task_file(wt)
+    if wt.is_symlink() or task.exists() or task.is_symlink() or task.parent.is_symlink():
+        return False
+    fields = _worktree_fields(repo_root, wt)
+    ref = f"refs/heads/{branch_name}"
+    if len(fields) != 4 or fields[2] != f"branch {ref}" or not (git_dir / "index.lock").is_file():
+        return False
+    base = _rollback_base(fields)
+    if interrupted_base is not None and fields[1:] == [
+        f"HEAD {interrupted_base}", f"branch {ref}", "locked initializing",
+    ]:
+        base = interrupted_base
+        _record_checkout_rollback(git_dir, base)
+    if base is None:
+        return False
+    # Keep Git's registration until the exact branch deletion succeeds. If the
+    # process stops between the two steps, Git reports the deleted branch as unborn.
+    if fields[1] != f"HEAD {'0' * len(base)}":
+        _git(repo_root, "update-ref", "--no-deref", "-d", ref, base)
     _git(repo_root, "worktree", "remove", "--force", "--force", str(wt))
-    _git(repo_root, "update-ref", "--no-deref", "-d", f"refs/heads/{branch_name}", base)
+    return True
+
+
+def _record_checkout_rollback(git_dir: Path, base: str) -> None:
+    # Replace Git's existing initialization lock with a recoverable reason.
+    locked = git_dir / "locked"
+    temp = locked.with_name(f".locked-{uuid4().hex}")
+    with temp.open("x", encoding="utf-8") as stream:
+        try:
+            stream.write(f"{_ROLLBACK_REASON}{base}\n")
+            stream.close()
+            temp.replace(locked)
+        finally:
+            temp.unlink(missing_ok=True)
+
+
+def _worktree_fields(repo_root: Path, wt: Path) -> list[str]:
+    raw = _git(repo_root, "worktree", "list", "--porcelain", "-z", preserve_newlines=True)
+    path_field = f"worktree {wt.resolve()}"
+    entry = next((item for item in raw.split("\0\0") if item.startswith(f"{path_field}\0")), "")
+    return entry.split("\0")
 
 
 def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | None:
-    registered = _git(repo_root, "worktree", "list", "--porcelain", "-z").split("\0\0")
-    path_field = f"worktree {wt.resolve()}"
-    entry = next((item for item in registered if item.startswith(f"{path_field}\0")), "")
-    fields = entry.split("\0")
+    fields = _worktree_fields(repo_root, wt)
     if (len(fields) != 3 or fields[2] != f"branch refs/heads/{expected_branch}"
             or not (wt / ".git").is_file()):
         return None
     common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-    if _git(wt, *common_dir) != _git(repo_root, *common_dir) or branch(wt) != expected_branch:
+    if (_git(wt, *common_dir, preserve_whitespace=True)
+            != _git(repo_root, *common_dir, preserve_whitespace=True)
+            or branch(wt) != expected_branch):
         return None
     current_head = head(wt)
     if fields[1] != f"HEAD {current_head}" or is_dirty(wt):

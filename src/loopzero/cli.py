@@ -89,7 +89,8 @@ def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
 
 
 def _toplevel() -> Path:
-    return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    return Path(worktree._git(Path.cwd(), "rev-parse", "--show-toplevel",
+                              timeout=GIT_TIMEOUT, preserve_whitespace=True))
 
 
 def _repo_root(wt: Path) -> Path:

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import shlex
-import signal
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from loopzero import worktree
+from loopzero import cli, worktree
 from tests.conftest import git
 
 
@@ -95,25 +94,24 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
 
 
 @pytest.mark.parametrize("interruption", ["sigint", "timeout"])
-def test_start_retries_after_interruption_during_git_checkout(repo, tmp_path, interruption):
+def test_start_retries_after_interruption_during_git_checkout(repo, tmp_path, monkeypatch, interruption):
     repo = repo.rename(repo.with_name("repo\r"))
     (repo / ".gitattributes").write_text("README.md filter=interrupt\n")
-    git(repo, "add", ".gitattributes")
+    (repo / "workflow.toml").write_text('[repo]\nname="owner/repo"\n')
+    git(repo, "add", ".gitattributes", "workflow.toml")
     git(repo, "commit", "-qm", "apply smudge filter")
     git(repo, "push", "-q", "origin", "main")
     pid_file, entered = tmp_path / "starter.pid", tmp_path / "checkout-entered"
-    smudge = tmp_path / "smudge"
-    interrupt = f'kill -INT "$(cat {shlex.quote(str(pid_file))})"\n' if interruption == "sigint" else ""
-    smudge.write_text(
-        f"#!/bin/sh\ncat >/dev/null\n: > {shlex.quote(str(entered))}\n{interrupt}exec sleep 30\n"
-    )
-    smudge.chmod(0o700)
-    git(repo, "config", "filter.interrupt.smudge", shlex.quote(str(smudge)))
     slug = "interrupted\u00a0"
+    ref_lock = repo / ".git" / "refs" / "heads" / "lz" / f"{slug}.lock"
+    interrupt = (f': > {shlex.quote(str(ref_lock))}\nkill -INT "$(cat {shlex.quote(str(pid_file))})"\n'
+                 if interruption == "sigint" else "")
+    smudge = f"cat >/dev/null\n: > {shlex.quote(str(entered))}\n{interrupt}exec sleep 30\n"
+    git(repo, "config", "filter.interrupt.smudge", smudge)
     start = """
 import os, sys
 from pathlib import Path
-from loopzero import worktree
+from loopzero import cli, worktree
 Path(sys.argv[1]).write_text(str(os.getpid()))
 git = worktree._git
 def git_with_short_checkout_timeout(cwd, *args, **kwargs):
@@ -122,22 +120,26 @@ def git_with_short_checkout_timeout(cwd, *args, **kwargs):
     return git(cwd, *args, **kwargs)
 if sys.argv[2] == "timeout":
     worktree._git = git_with_short_checkout_timeout
-worktree.start(Path.cwd(), sys.argv[3], "main")
+raise SystemExit(cli.main(sys.argv[3:]))
 """
-    command = [sys.executable, "-c", start, str(pid_file), interruption, slug]
+    args = ["start", slug]
+    command = [sys.executable, "-c", start, str(pid_file), interruption, *args]
     stopped = subprocess.run(command, cwd=repo, timeout=10, capture_output=True, text=True)
     assert entered.is_file()
-    assert stopped.returncode == (-signal.SIGINT if interruption == "sigint" else 1)
-    if interruption == "timeout":
-        assert "timed out" in stopped.stderr
+    assert stopped.returncode == (130 if interruption == "sigint" else 1)
+    assert ("checkout rollback" if interruption == "sigint" else "timed out") in stopped.stderr
+    ref_lock.unlink(missing_ok=interruption == "timeout")
     git(repo, "config", "--unset", "filter.interrupt.smudge")
-    wt = worktree.start(repo, slug, "main")
+    monkeypatch.chdir(repo)
+    assert cli.main(args) == 0
+    wt = worktree.worktree_dir(repo, slug)
     assert (wt / "README.md").read_text() == "hello\n"
     assert worktree.task_file(wt).is_file() and not worktree.is_dirty(wt)
 
 
 @pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base"])
 def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
+    repo = repo.rename(repo.with_name("repo\r"))
     base = commit_on_origin(repo, "base-change")
     wt = repo / ".worktrees" / "my-task"
     run_git = worktree._git
