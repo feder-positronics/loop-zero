@@ -1,4 +1,5 @@
 name: review eligibility
+run-name: "${{ inputs.pr && format('Refresh eligibility for PR #{0}', inputs.pr) || '' }}"
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, labeled, unlabeled]
