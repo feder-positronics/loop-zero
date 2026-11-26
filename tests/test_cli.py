@@ -688,7 +688,7 @@ def test_check_hour_long_stage_transcript(wt, head, gh, capsys, monkeypatch):
 
 
 @pytest.mark.parametrize("command,exit_code,tail", [
-    ("echo no; exit 3", 3, "no\n"),
+    ("echo no; exit 3 # https://fake-heading-secret@example.invalid", 3, "no\n"),
     ("seq 1 50; exit 1", 1, "".join(f"{i}\n" for i in range(11, 51)))])
 def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit_code, tail):
     (wt / "workflow.toml").write_text(WORKFLOW.replace(
@@ -696,10 +696,10 @@ def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit
     code, out, err = run(capsys, "--config", str(wt / "workflow.toml"), "check")
     assert code == 1 and out.endswith("FAIL\n")
     assert out.startswith("checks are unpinned because --config was provided\n")
-    assert sum(line.startswith(("stage 1/2: exit ", "exit "))
-               for line in out.splitlines()) == 1
+    heading = command.replace("fake-heading-secret", "[REDACTED]")
+    assert out.count(f"running: {heading}\n") == out.count("stage 1/2: exit ") == 1
     assert f"stage 1/2: exit {exit_code} (" in out and "README.md" not in out
-    assert err == f"--- {command} (exit {exit_code}) ---\n{tail}"
+    assert err == f"--- {heading} (exit {exit_code}) ---\n{tail}"
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert [result["command"] for result in report["results"]] == [command]
 
@@ -3208,26 +3208,29 @@ def test_ready_matches_effective_inherited_check_environment(capsys, monkeypatch
         assert code == 1 and "not ready: check receipt has an incompatible settings fingerprint." in out
 
 
-@pytest.mark.parametrize("worker", ["legacy", "different-path", "matching"])
+@pytest.mark.parametrize("worker", ["legacy", "different-environment", "matching"])
 def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
+    policy = WORKFLOW.replace(
+        '[checks]', '[checks]\nenv_allowlist = ["PATH", "LANG", "LC_ALL", "TERM", "HEAVY_SLOT_GRANTED_CORES"]')
+    publish_workflow(wt, policy.replace('[delivery]', '[checks.inputs]\n"*" = ["."]\n\n[delivery]'))
     arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
     with monkeypatch.context() as worker_env:
-        if worker == "different-path":
+        if worker == "different-environment":
             worker_env.setenv("PATH", str(tmp_path / "worker-bin"), prepend=":")
+            for name, value in {"LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8",
+                                "TERM": "dumb", "HEAVY_SLOT_GRANTED_CORES": "2"}.items():
+                worker_env.setenv(name, value)
         assert run(capsys, "check")[0] == 0
 
-    receipt = wt / ".loopzero/checks.json"
-    payload = json.loads(receipt.read_bytes())
     if worker == "legacy":
-        # Older producers serialize these results without a settings fingerprint.
+        receipt = wt / ".loopzero/checks.json"
+        payload = json.loads(receipt.read_bytes())
         del payload["settings_sha256"]
-    # Whole-job transport preserves the producer's fields.
-    receipt.write_text(json.dumps(payload))
-    assert run(capsys, "ready")[0] == (0 if worker == "matching" else 1)
-
-    if worker != "matching":
-        assert run(capsys, "check")[0] == 0
-        assert run(capsys, "ready")[0] == 0
+        receipt.write_text(json.dumps(payload))
+    assert run(capsys, "ready")[0] == int(worker == "legacy")
+    assert run(capsys, "check")[0] == 0
+    assert all(bool(stage.reused_from) == (worker == "matching") for stage in cli._load_report(wt).results)
+    assert run(capsys, "ready")[0] == 0
 
 
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -3955,14 +3958,17 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
-@pytest.mark.parametrize("command", ["ready", "merge", "resume"])
+@pytest.mark.parametrize(("command", "queue"), [
+    ("ready", None), ("merge", None), ("resume", None), ("ready", "ordered"),
+    ("ready", "empty"), ("ready", "ambiguous"), ("ready", "unavailable"),
+])
 def test_mergify_checks_current_target_before_queueing_or_resumes(
-    wt: Path, repo: Path, gh: FakeGh, capsys, monkeypatch, command
+    wt: Path, repo: Path, gh: FakeGh, capsys, monkeypatch, command, queue
 ) -> None:
     commit_mergify_configuration(wt)
     checker = (Path(__file__).resolve().parents[1] / "scripts/size_budget.sh").read_text()
     (repo / "scripts").mkdir()
-    commit_file(repo, "scripts/size_budget.sh", re.sub(r"(?m)^SRC_CAP=\d+$", "SRC_CAP=3", checker), "add budget")
+    commit_file(repo, "scripts/size_budget.sh", re.sub(r"(?m)^SRC_CAP=\d+$", f"SRC_CAP={5 if queue else 3}", checker), "add budget")
     publish_workflow(wt, (repo / "workflow.toml").read_text().replace(
         'commands = ["echo ok", "test -f README.md"]', 'commands = ["scripts/size_budget.sh"]'))
     for checkout, filename in ((wt, "feature"), (repo, "upstream")):
@@ -3970,6 +3976,26 @@ def test_mergify_checks_current_target_before_queueing_or_resumes(
         commit_file(checkout, f"src/loopzero/{filename}.py", "# first line\n# second line\n", filename)
     commit_file(wt, "ast.py", "raise AssertionError('loaded candidate module')\n", "add candidate module")
     git(repo, "push", str(repo.parent / "origin.git"), "main")  # leave origin/main stale locally
+    if queue:
+        main = head_of(repo)
+        batches = []
+        for number in (1146, 1219):
+            git(repo, "switch", "--detach", main)
+            commit_file(repo, f"src/loopzero/pr_{number}.py", "# predecessor\n", f"PR {number}")
+            git(repo, "push", str(repo.parent / "origin.git"), f"HEAD:refs/pull/{number}/head")
+            batches.append({"id": str(number), "parent_ids": [batches[0]["id"]] if batches else [],
+                            "queue_rule_name": "main", "pull_requests": [{"number": number}]})
+        if queue == "ambiguous":
+            batches[1]["parent_ids"] = []
+
+        def snapshot(_repo, endpoint):
+            assert endpoint == "/merge-queue/status?branch=main"
+            if queue == "unavailable":
+                raise mergify.MergifyError("snapshot unavailable")
+            return {"mode": "serial", "waiting_pull_requests": [], "forming_batches": [],
+                    "batches": [] if queue == "empty" else batches}
+
+        monkeypatch.setattr(mergify, "api_get", snapshot)
     head = head_of(wt)
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.append(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, isDraft=False)))
@@ -3980,8 +4006,13 @@ def test_mergify_checks_current_target_before_queueing_or_resumes(
     monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("must not submit a queue request"))
 
     args = ("merge", "--wait=1") if command == "resume" else (command,)
-    code, _out, err = run(capsys, *args)
+    code, out, err = run(capsys, *args)
     assert head_of(wt) == head and not (wt / "src/loopzero/upstream.py").exists()
+    if queue:
+        assert code == 0 and not err
+        assert ("warning: projected size budget after #1146, #1219:\nsrc=6 (base 2, delta 4, cap 5" in out
+                if queue == "ordered" else "warning: projected size budget" not in out)
+        return
     if command != "resume":
         assert code == 1 and "src=4 (base 2, delta 2, cap 3" in err and "loaded candidate module" not in err
         return
