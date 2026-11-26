@@ -5,19 +5,23 @@ from __future__ import annotations
 import base64
 import errno
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from select import select
 from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import quote
 
 import pytest
 
-from loopzero import cli, config, github, mergify
+from loopzero import cli, config, github, hosted, mergify
 from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
 from tests.conftest import git, init_git_repo
@@ -45,6 +49,7 @@ from tests.test_sandbox import FAKE_BWRAP, inject_check_timeout
 
 REPO = "acme/widgets"
 URL = f"https://github.com/{REPO}/pull/7"
+MERGIFY_QUEUE_FIXTURE = json.loads((Path(__file__).with_name("fixtures") / "mergify-queue.json").read_text())
 BRANCH_READ = branch_head_key().split()
 PR_LIST_READ = pr_list_key().split()
 LOOKUP_CALLS = [BRANCH_READ, PR_LIST_READ, ["api", f"repos/{REPO}/pulls/7"]]
@@ -2626,6 +2631,34 @@ def test_hold_blocks_ready_and_merge(wt, gh, capsys, monkeypatch, command, check
     assert any(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == (command == "ready")
 
 
+def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monkeypatch, capsys):
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    (trusted / "workflow.toml").write_text(WORKFLOW + f'review_publishers = ["{LOGIN}"]\n')
+    event = trusted / "event.json"
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+
+    for action, labels, expected in (
+        ("labeled", [{"name": "hold"}], 1), ("unlabeled", [], 0),
+    ):
+        arm_approved_ready_pr(gh, head, wt, isDraft=False, labels=labels)
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(
+            pr_json(headRefOid=head, isDraft=False, labels=labels)))
+        event.write_text(json.dumps({"action": action, "pull_request": {"number": 7}}))
+        code, out, _ = run(capsys, "ready")
+        assert code == expected
+        assert ("merge-authority hold" in out) == bool(labels)
+        with monkeypatch.context() as hosted_env:
+            hosted_env.chdir(trusted)
+            assert hosted.main() == expected
+        capsys.readouterr()
+        payload = json.loads(gh.calls[-1]["--input"])
+        assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{head}"
+        assert payload["state"] == ("failure" if labels else "success")
+
+
 @pytest.mark.parametrize("wait,elapsed,conclusion,expected", [
     (0, 0, None, 3), (1, 0, "failure", 1), (1, 0.25, "success", 0), (1, 6, "success", 3),
 ])
@@ -3101,6 +3134,43 @@ def test_ready_requires_receipt_from_current_check_environment(
     assert run(capsys, *args, "check")[0] == 1
 
 
+def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, head, tmp_path):
+    runner = tmp_path / "runner"
+    original = tmp_path / "runner-a"
+    replacement = tmp_path / "runner-b"
+    stage = (
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "frame = json.load(sys.stdin)\n"
+        "del frame['env']\n"
+        "frame.update(exit_code=0, duration_s=0, not_started=False, tail='')\n"
+    )
+    for target, extra in (
+        (original, f"from pathlib import Path\np = Path({str(runner)!r})\n"
+                   f"p.unlink()\np.symlink_to({str(replacement)!r})\n"),
+        (replacement, ""),
+    ):
+        target.write_text(stage + extra + "print(json.dumps(frame))\n")
+        target.chmod(0o755)
+    runner.symlink_to(original)
+    publish_workflow(wt, WORKFLOW.replace("[checks]", f"[checks]\nrunner = {json.dumps([str(runner)])}"))
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+
+    code, out, err = run(capsys, "check")
+    assert code == 1
+    assert "receipt produced:" not in out and "PASS" not in out
+    assert "stages passed but the receipt is unverified" in err
+    assert "rerun loopzero check from the task worktree with a stable, readable configured runner" in err
+    report = cli._load_report(wt)
+    assert report.head == head and not report.dirty and report.ok
+    assert report.settings_sha256 is None
+    assert run(capsys, "ready")[0] == 1
+
+    code, out, _ = run(capsys, "check")
+    assert code == 0 and "receipt produced:" in out
+    assert run(capsys, "ready")[0] == 0
+
+
 @pytest.mark.parametrize("base_sensitive", [False, True])
 def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     if base_sensitive:
@@ -3140,6 +3210,28 @@ def test_ready_matches_effective_inherited_check_environment(
         assert code == 0
     else:
         assert code == 1 and "not ready: check receipt has an incompatible settings fingerprint." in out
+
+
+@pytest.mark.parametrize("worker", ["legacy", "different-path", "matching"])
+def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    with monkeypatch.context() as worker_env:
+        if worker == "different-path":
+            worker_env.setenv("PATH", str(tmp_path / "worker-bin"), prepend=":")
+        assert run(capsys, "check")[0] == 0
+
+    receipt = wt / ".loopzero/checks.json"
+    payload = json.loads(receipt.read_bytes())
+    if worker == "legacy":
+        # Older producers serialize these results without a settings fingerprint.
+        del payload["settings_sha256"]
+    # Whole-job transport preserves the producer's fields.
+    receipt.write_text(json.dumps(payload))
+    assert run(capsys, "ready")[0] == (0 if worker == "matching" else 1)
+
+    if worker != "matching":
+        assert run(capsys, "check")[0] == 0
+        assert run(capsys, "ready")[0] == 0
 
 
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -3721,6 +3813,53 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     assert f"review:   primary on {head[:12]} (approved)" in out
     assert "ready:    no" in out and "  - required check 'checks' is pending" in out
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", reviews_key()[4:]]) == 1
+
+
+@pytest.mark.parametrize(("signum", "status"), [
+    (signal.SIGTERM, -signal.SIGTERM),
+    (signal.SIGINT, 130),
+])
+def test_status_reaps_gh_after_signal(wt, fake_tool, signum, status):
+    fake_tool("gh", "exec /bin/sleep 30")
+    driver = """
+import subprocess
+import sys
+from loopzero import cli, github
+
+github.app_token = lambda: ""
+communicate = subprocess.Popen.communicate
+
+def announce(process, *args, **kwargs):
+    if process.args[0] == "gh":
+        print(process.pid, flush=True)
+    return communicate(process, *args, **kwargs)
+
+subprocess.Popen.communicate = announce
+sys.exit(cli.main(["status"]))
+"""
+    env = {**os.environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[1])}
+    with subprocess.Popen(
+        [sys.executable, "-c", driver], cwd=wt, env=env, stdout=subprocess.PIPE, bufsize=0,
+    ) as process:
+        child = None
+        try:
+            # Read until the supervisor enters communicate on the offline gh child.
+            for _ in range(6):
+                assert select([process.stdout], [], [], 5)[0]
+                line = process.stdout.readline().strip()
+                if line.isdigit():
+                    child = int(line)
+                    break
+            assert child is not None
+            process.send_signal(signum)
+            assert process.wait(timeout=5) == status
+            with pytest.raises(ProcessLookupError):
+                os.kill(child, 0)
+        finally:
+            process.kill()
+            if child is not None:
+                with suppress(ProcessLookupError):
+                    os.killpg(child, signal.SIGKILL)
 
 
 def test_status_silently_ignores_legacy_report_without_dirty(
@@ -4409,29 +4548,49 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert message in out + err
 
 
-@pytest.mark.parametrize("report", ["current", "stale", None])
-def test_mergify_reports_admission_wait(wt, gh, capsys, monkeypatch, report):
+@pytest.mark.parametrize("confirmed,kind", [
+    (False, "current"), (False, "stale"), (False, "missing"),
+    (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"),
+    (False, "head"), (False, "requeue"), (False, "author"), (False, "landed"),
+])
+def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, confirmed, kind):
     commit_mergify_configuration(wt)
     head = head_of(wt)
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
-    comments = [{"user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
-                 "body": f"@mergifyio queue\n\n<!-- loopzero:mergify-request head={head} queue=main -->"}]
-    if report:
-        comments.append({
-            "id": 43, "user": {"login": "mergify[bot]"},
-            "updated_at": "2026-11-25T19:01:00Z" if report == "current" else "2026-11-25T18:59:00Z",
-            "body": "### ⏳ Waiting for queue conditions\n\n- [ ] `check-success = Queue Preflight`",
-        })
+    admission = kind in MERGIFY_QUEUE_FIXTURE["admission"]
+    comments = [{"id": 42, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
+                 "body": MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)}]
+    if kind != "missing":
+        template = MERGIFY_QUEUE_FIXTURE["admission_report"] if admission else MERGIFY_QUEUE_FIXTURE["report"]
+        body = template.replace("@url@", URL).replace("@sha@", "f" * 7 if kind == "head" else head[:7])
+        comments.append({"id": 43, "user": {"login": "someone-else" if kind == "author" else "mergify[bot]"},
+                         "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind),
+                         "body": body + MERGIFY_QUEUE_FIXTURE["attribution"].get(kind, "")})
+    if kind == "requeue":
+        comments.append({"id": 44, "user": {"login": LOGIN}, "body": "@mergifyio queue"})
     gh.respond(f"api repos/{REPO}/issues/7/comments", comments)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    membership = iter([mergify.Membership()] if confirmed else [])
+    monkeypatch.setattr(mergify, "membership", lambda *_: next(membership, None))
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
     monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("already requested"))
-
-    for args, expected_code in [(("status",), 0), (("merge", "--wait=0"), 3)]:
-        code, out, err = run(capsys, *args)
-        assert (code, err) == (expected_code, "")
-        assert "waiting for admission" in out
-        assert (f"{URL}#issuecomment-43" in out) is (report == "current")
+    if kind == "landed":
+        opened = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
+        gh.append(f"api repos/{REPO}/pulls/7", *([opened] * 3), merge_json(state="MERGED", head=head, sha="e" * 40))
+        gh.respond("api -X", "")
+    if admission:
+        status, summary, error = run(capsys, "status")
+        assert (status, error) == (0, "") and "waiting for admission" in summary
+        assert (f"{URL}#issuecomment-43" in summary) is (kind == "current")
+    code, out, err = run(capsys, "merge", "--wait=0")
+    if kind == "landed":
+        assert (code, err) == (0, "") and not wt.exists() and out.splitlines()[-1] == "e" * 40
+    elif kind in MERGIFY_QUEUE_FIXTURE["expected"]:
+        assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and "'checks'" in err
+        assert all(part in err for part in [*MERGIFY_QUEUE_FIXTURE["requeue_guidance"], *MERGIFY_QUEUE_FIXTURE["expected"][kind]])
+    else:
+        assert code == 3 and wt.exists() and "waiting for admission" in out
+        assert (f"{URL}#issuecomment-43" in out) is (kind == "current")
 
 
 @pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None])
@@ -4442,35 +4601,14 @@ def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, 
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, False))
     monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
-    condition = "check-success = Queue Quality Gate"
-    evaluation = None if result is None else {
-        "match": result != "blocking",
-        "label": "all of",
-        "subconditions": [
-            {"match": False, "label": condition, "subconditions": []}
-            if result == "blocking" else
-            {"match": True, "label": "any of", "subconditions": [
-                {"match": False, "label": "check-success = checks", "subconditions": []},
-                {"match": True, "label": f"check-{result} = checks", "subconditions": []},
-            ]},
-        ],
-    }
-    payload = {
-        "number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 1,
-        "mergeability_check": {
-            "queue_pull_request_number": 42,
-            "checks": [{"name": "checks", "state": result if result in ("neutral", "skipped") else "success"}],
-            "conditions_evaluation": evaluation,
-        },
-    }
-    responses = iter([None, payload])
+    responses = iter([None, MERGIFY_QUEUE_FIXTURE["candidate_responses"][result or "missing"]])
     monkeypatch.setattr(mergify, "api_get", lambda *_: next(responses))
 
     code, out, err = run(capsys, "merge", "--wait=0")
 
     assert (code, err) == (3, "")
     assert f"https://github.com/{REPO}/pull/42" in out
-    assert (condition in out) is (result == "blocking")
+    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) is (result == "blocking")
     assert "failed" not in out and "check-success = checks" not in out
 
 
@@ -4799,19 +4937,28 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert json.loads(writes[0]["--input"])["body"] == prose + suffix
 
 
-def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
+@pytest.mark.parametrize("refresh", ["resync", "automatic"])
+def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys, refresh):
     head = head_of(wt)
-    live = "# PR\n\n## Validation\nManual validation evidence.\n"
+    config = cli._load_config(SimpleNamespace(command="check", config=None), wt, pin_checks=True)
+    live = ("# PR\n\n## Validation\nManual validation evidence.\n\n"
+            "<!-- loopzero:checks:start -->\n"
+            f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0\n"
+            "<!-- loopzero:checks:end -->\n")
     gh.respond_pr_list([pr_json(headRefOid=head, body=live)])
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
-    cli._save_report(wt, CheckReport(head, False, (CheckResult("echo ok", 0, 0.0, ""),)))
+    stages = tuple(CheckResult(command, 0, 0.0, "") for command in config.checks)
+    cli._save_report(wt, CheckReport(head, False, stages))
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
 
-    assert run(capsys, "pr")[0] == 0
+    if refresh == "resync":
+        assert run(capsys, "pr")[0] == 0
+    else:
+        cli._refresh_pr_checks(wt, config)
     draft = json.loads(gh.calls[-1]["--input"])["body"]
     assert "unverified" in draft and "run `loopzero check`" in draft
     assert "Manual validation evidence." in draft
 
-    git(wt, "push", "-q", "-u", "origin", "lz/t1")
     gh.respond_pr_list([pr_json(headRefOid=head, body=draft)])
     assert run(capsys, "check")[0] == 0
     draft = json.loads(gh.calls[-1]["--input"])["body"]
