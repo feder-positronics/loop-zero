@@ -469,6 +469,24 @@ def test_post_review_reroutes_findings_outside_diff(gh: FakeGh) -> None:
     assert "Nit off diff" in payload["body"]
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: str) -> None:
+    path = "src/a.py"
+    patch = f"@@ -1 +1,2 @@\n-old\n+left{separator}right\n+second\n"
+    arm_review(gh, files=[{"filename": path, "patch": patch}])
+    findings = (
+        Finding("important", path, 2, "In diff", ""),
+        Finding("critical", path, 3, "Outside diff", ""),
+    )
+
+    github.post_review(REPO, 7, HEAD, review(findings=findings))
+
+    assert github._right_lines(patch) == ({1, 2}, 1)
+    comments = comments_posted(gh)
+    assert [(c["path"], c["line"]) for c in comments] == [(path, 2), (path, 1)]
+    assert "Reviewer location src/a.py:3 is not in the diff" in comments[1]["body"]
+
+
 def test_post_review_anchor_skips_files_without_hunks(gh: FakeGh) -> None:
     arm_review(gh, files=[{"filename": "img.png"},
                           {"filename": "src/d.py", "patch": "@@ -3,0 +4,2 @@\n+p\n+q"}])
@@ -485,19 +503,43 @@ def test_post_review_fails_loud_when_nothing_to_anchor(gh: FakeGh) -> None:
     assert calls_for(gh, REVIEWS_KEY) == []
 
 
-def test_post_review_paginates_files(gh: FakeGh) -> None:
-    page1 = [{"filename": f"f{i}.py", "patch": f"@@ -1 +1 @@\n+l{i}"} for i in range(100)]
+@pytest.mark.parametrize("location", ["first-page", "second-page", "missing"])
+def test_post_review_reads_only_pages_needed_for_placement(gh: FakeGh, location: str) -> None:
+    unrelated = [{"filename": f"f{i}.py", "patch": "@@ -1 +1 @@\n+new"} for i in range(100)]
+    file = PR_FILES[0]
+    page1, page2 = ([file, *unrelated[:99]], unrelated[99:]) if location == "first-page" else (
+        unrelated, [file]
+    )
+    finding = FINDINGS[0] if location != "missing" else replace(FINDINGS[0], path="missing.py")
     arm_review(gh)
-    gh.respond(FILES_KEY, page1, PR_FILES)
-    github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
+    gh.respond(FILES_KEY, page1, page2)
+    github.post_review(REPO, 7, HEAD, review(findings=(finding,)))
+    pages = ["page=1"] if location == "first-page" else ["page=1", "page=2"]
+    assert [c["argv"][-2] for c in calls_for(gh, FILES_KEY)] == pages
+    (comment,) = comments_posted(gh)
+    assert (comment["path"], comment["line"], comment["side"]) == (
+        ("f0.py", 1, "RIGHT") if location == "missing" else ("src/a.py", 10, "RIGHT")
+    )
+    assert ("anchored here" in comment["body"]) == (location == "missing")
+
+
+def test_post_review_searches_later_pages_for_fallback_hunk(gh: FakeGh) -> None:
+    page1 = [{"filename": f"image{i}.png"} for i in range(100)]
+    arm_review(gh)
+    gh.respond(FILES_KEY, page1, PR_FILES[:1])
+    result = review(findings=(Finding("important", None, None, "Global concern", ""),))
+    github.post_review(REPO, 7, HEAD, result)
+
     assert [c["argv"][-2] for c in calls_for(gh, FILES_KEY)] == ["page=1", "page=2"]
-    assert comments_posted(gh)[0]["path"] == "src/a.py"
+    (comment,) = comments_posted(gh)
+    assert (comment["path"], comment["line"]) == ("src/a.py", 11)
 
 
 def test_post_review_approve_event(gh: FakeGh) -> None:
     arm_review(gh)
     result = ReviewResult("codex", HEAD, "primary", "approve", (), "RAW", duration_s=0.25)
     github.post_review(REPO, 7, HEAD, result)
+    assert calls_for(gh, FILES_KEY) == []
     payload = review_payloads(gh)[0]
     assert payload["event"] == "APPROVE" and payload["comments"] == []
     assert "0.2s: **approve**" in payload["body"]
@@ -1085,6 +1127,30 @@ def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -
     assert result.waitable_failures == result.reasons
     pages = [c["argv"][-2] for c in gh.calls if "actions/runs" in c["argv"][1]]
     assert pages == ["page=1", "page=2"]
+
+
+@pytest.mark.parametrize(("replacement_fields", "waitable"), [
+    ({}, True),
+    ({"workflow_id": 8}, False),
+    ({"head_sha": "b" * 40}, False),
+])
+def test_readiness_recovers_workflow_producer_at_search_limit(
+    gh: FakeGh, replacement_fields: dict, waitable: bool,
+) -> None:
+    arm_workflow_check(gh, failed_check())
+    runs = [
+        replacement_run() | replacement_fields,
+        *(producing_run(id=i, check_suite_id=i, workflow_id=99) for i in range(100, 1099)),
+    ]
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
+               *({"workflow_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
+    gh.respond(f"api repos/{REPO}/actions/runs?check_suite_id=10",
+               {"workflow_runs": [producing_run()]})
+
+    result = readiness(workflow_wait=True)
+
+    assert not result.ready
+    assert result.waitable_failures == (result.reasons if waitable else ())
 
 
 def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
