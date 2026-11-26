@@ -1,7 +1,6 @@
 """Synthetic Codex 0.165.0 streams with inspection and no reported settings."""
 import dataclasses
 import json
-import shlex
 from pathlib import Path
 
 import pytest
@@ -16,6 +15,7 @@ from tests.test_runners import (
     _fake_codex,
     _review,
     fake_bwrap,  # noqa: F401
+    replace_codex_events,
 )
 
 
@@ -29,10 +29,7 @@ def test_refused_stream_fresh_launch_records_only_explicit_flags(fake_bin, tmp_p
         raw["events"][3]["item"]["exit_code"] = 1
     script = _fake_codex(fake_bin, raw["final_message"], version="codex-cli 0.165.0",
                          stderr="model: other-model" if mode == "reported-conflict" else "")
-    text = script.read_text()
-    start = text.index("echo '{\"type\":\"thread.started\"")
-    script.write_text(text[:start] + "printf '%s\\n' " + shlex.quote(
-        '\n'.join(json.dumps(e) for e in raw["events"])) + '\nexit 0\n')
+    replace_codex_events(script, raw["events"])
     pins = {} if mode == "default" else {"model": "gpt-6.2-astra", "effort": "medium"}
     if mode in ("model-only", "effort-only"):
         pins.pop("effort" if mode == "model-only" else "model")

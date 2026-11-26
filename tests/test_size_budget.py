@@ -45,80 +45,68 @@ def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_to
     source.parent.mkdir(parents=True)
     source.write_text("one\ntwo\n")
     source.with_name("z.py").write_text("three\n")
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
+    base = stage_tree(git_repo)
     if failure == "deleted":  # unstaged deletion: skipped, not an error
         source.unlink()
     elif failure == "show":
         fake_tool("git", 'if [ "$1" = show ]; then case "$2" in */a.py) exit 1;; esac; fi\n'
                   f'exec {shutil.which("git")} "$@"\n')
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
+    done = run_budget(git_repo, base)
     assert bool(done.returncode) is (failure == "show")
     if failure != "show":
         assert done.stdout.startswith("src=1 (base 3," if failure else "src=3 (base 3, delta 0,")
 
 
-@pytest.mark.parametrize("case,expected_rc", [
-    ("new_over_cap", 1),
-    ("existing_hold", 0),
-    ("existing_shrink", 0),
-    ("existing_grow", 1),
+def run_budget(repo, base, *, python=sys.executable):
+    return subprocess.run(["bash", str(SCRIPT), base], cwd=repo,
+                          env={**os.environ, "PYTHON": python},
+                          capture_output=True, text=True, check=False)
+
+
+def stage_tree(repo):
+    git(repo, "add", ".")
+    return git(repo, "write-tree").strip()
+
+
+@pytest.fixture
+def module_path(git_repo):
+    path = git_repo / "src/loopzero/mod.py"
+    path.parent.mkdir(parents=True)
+    return path
+
+
+_SIMPLE_FUNCTION = "def ok():\n    return 1\n"
+_HOT_FUNCTION = _branchy("hot", 11)
+
+
+_CONTEXT_MANAGERS = "".join(f"    with contextlib.suppress(ValueError):\n        y = {i}\n"
+                            for i in range(11))
+_PEP758 = "import contextlib\ndef pep758(x):\n" + _CONTEXT_MANAGERS + (
+    "    try:\n        return int(x) + y\n    except KeyError, TypeError:\n        return 0\n"
+)
+
+
+@pytest.mark.parametrize("before,after,over_cap,regressions", [
+    pytest.param(_SIMPLE_FUNCTION, _branchy("new_hot", 10), 1, 1, id="new_over_cap"),
+    pytest.param(_HOT_FUNCTION, _HOT_FUNCTION, 1, 0, id="existing_hold"),
+    pytest.param(_HOT_FUNCTION, _branchy("hot", 10), 1, 0, id="existing_shrink"),
+    pytest.param(_HOT_FUNCTION, _branchy("hot", 12), 1, 1, id="existing_grow"),
+    pytest.param(_PEP758, _PEP758, 0, 0, id="pep758_with_blocks"),
 ])
-def test_complexity_ratchet(git_repo, case, expected_rc):
-    src = git_repo / "src/loopzero/mod.py"
-    src.parent.mkdir(parents=True)
-    if case == "new_over_cap":
-        src.write_text("def ok():\n    return 1\n")
-    else:
-        src.write_text(_branchy("hot", 11))  # CC = 12 > 10
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
-
-    if case == "new_over_cap":
-        src.write_text(_branchy("new_hot", 10))  # CC = 11 > 10
-    elif case == "existing_shrink":
-        src.write_text(_branchy("hot", 10))  # CC = 11 <= 12
-    elif case == "existing_grow":
-        src.write_text(_branchy("hot", 12))  # CC = 13 > 12
-
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
-    assert done.returncode == expected_rc, done.stdout + done.stderr
-    assert ("complexity=FAIL" if expected_rc else "complexity=PASS") in done.stdout
+def test_complexity_ratchet(git_repo, module_path, before, after, over_cap, regressions):
+    module_path.write_text(before)
+    base = stage_tree(git_repo)
+    if after != before:
+        module_path.write_text(after)
+    done = run_budget(git_repo, base)
+    assert done.returncode == int(bool(regressions)), done.stdout + done.stderr
+    result = "FAIL" if regressions else "PASS"
+    assert f"complexity={result} (cap 10, over_cap {over_cap}, regressions {regressions})" in done.stdout
 
 
-def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo):
-    src = git_repo / "src/loopzero/mod.py"
-    src.parent.mkdir(parents=True)
-    with_blocks = "".join(f"    with contextlib.suppress(ValueError):\n        y = {i}\n"
-                          for i in range(11))
-    src.write_text(
-        "import contextlib\n"
-        "def pep758(x):\n"
-        f"{with_blocks}"
-        "    try:\n"
-        "        return int(x) + y\n"
-        "    except KeyError, TypeError:\n"
-        "        return 0\n"
-    )
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
-    assert done.returncode == 0, done.stdout + done.stderr
-    assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
-
-
-def test_complexity_rejects_old_python(git_repo, tmp_path):
-    src = git_repo / "src/loopzero/mod.py"
-    src.parent.mkdir(parents=True)
-    src.write_text("def ok():\n    return 1\n")
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
+def test_complexity_rejects_old_python(git_repo, module_path, tmp_path):
+    module_path.write_text(_SIMPLE_FUNCTION)
+    base = stage_tree(git_repo)
     fake_py = tmp_path / "old-python"
     fake_py.write_text(
         f"#!{sys.executable}\n"
@@ -128,28 +116,19 @@ def test_complexity_rejects_old_python(git_repo, tmp_path):
         "exec(compile(sys.stdin.read(), '<size_budget>', 'exec'), {'__name__': '__main__'})\n"
     )
     fake_py.chmod(0o755)
-    env = {**os.environ, "PYTHON": str(fake_py)}
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo, env=env,
-                          capture_output=True, text=True, check=False)
+    done = run_budget(git_repo, base, python=str(fake_py))
     assert done.returncode == 1
     assert "requires Python 3.14+" in done.stderr
 
 
-@pytest.mark.parametrize("path,cap,grew,expected_rc", [
-    ("core/CONTRACT.md", 1500, True, 1),
-    ("core/CONTRACT.md", 1500, False, 0),
-    ("docs/DELEGATION.md", 660, True, 1),
-    ("docs/DELEGATION.md", 660, False, 0),
-])
-def test_markdown_doc_budgets(git_repo, path, cap, grew, expected_rc):
+@pytest.mark.parametrize("path,cap", [("core/CONTRACT.md", 1500), ("docs/DELEGATION.md", 660)])
+@pytest.mark.parametrize("grew", [True, False])
+def test_markdown_doc_budgets(git_repo, path, cap, grew):
     doc = git_repo / path
     doc.parent.mkdir(parents=True)
     doc.write_text("line\n" * (cap + 5))
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
+    base = stage_tree(git_repo)
     if grew:
         doc.write_text("line\n" * (cap + 6))
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
-    assert done.returncode == expected_rc, done.stdout + done.stderr
+    done = run_budget(git_repo, base)
+    assert done.returncode == int(grew), done.stdout + done.stderr

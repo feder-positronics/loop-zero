@@ -34,42 +34,14 @@ with _proc.unwind_on_sigterm():
     assert result.returncode == -signal.SIGTERM, result.stderr.decode()
 
 
-def test_run_captures_output_exit_code_and_duration(tmp_path):
-    done = _proc.run(
-        [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"],
-        cwd=tmp_path,
-        env_allowlist=("PATH",),
-        timeout=30,
-    )
-    assert (done.exit_code, done.stdout, done.stderr) == (3, "out\n", "err\n")
-    assert done.duration_s >= 0
+@pytest.fixture
+def run_python(tmp_path):
+    def run(script, *, timeout=30, env_allowlist=("PATH",), unbuffered=False, args=(), **kwargs):
+        python = [sys.executable, "-u"] if unbuffered else [sys.executable]
+        return _proc.run([*python, "-c", script, *args], cwd=tmp_path, env_allowlist=env_allowlist,
+                         timeout=timeout, **kwargs)
 
-
-def test_run_strips_environment_to_allowlist(tmp_path, monkeypatch):
-    monkeypatch.delenv("LZ_ABSENT", raising=False)
-    monkeypatch.setenv("LZ_SECRET", "nope")
-    monkeypatch.setenv("LZ_KEEP", "yes")
-    done = _proc.run(
-        [sys.executable, "-c", "import os; print(sorted(k for k in os.environ if k.startswith('LZ_')))"],
-        cwd=tmp_path,
-        env_allowlist=("PATH", "LZ_KEEP", "LZ_ABSENT"),
-        extra_env={"LZ_EXTRA": "1"},
-        timeout=30,
-    )
-    assert done.stdout.strip() == "['LZ_EXTRA', 'LZ_KEEP']"
-
-
-def test_run_uses_cwd(tmp_path):
-    argv = [sys.executable, "-c", "import os; print(os.getcwd())"]
-    done = _proc.run(argv, cwd=tmp_path, env_allowlist=(), timeout=30)
-    assert done.stdout.strip() == str(tmp_path.resolve())
-
-
-def test_run_never_uses_a_shell(tmp_path):
-    marker = tmp_path / "pwned"
-    done = _proc.run(["true", ";", "touch", str(marker)], cwd=tmp_path, env_allowlist=("PATH",), timeout=30)
-    assert done.exit_code == 0
-    assert not marker.exists()
+    return run
 
 
 def test_run_raises_tool_missing(tmp_path):
@@ -77,14 +49,23 @@ def test_run_raises_tool_missing(tmp_path):
         _proc.run(["definitely-not-a-tool"], cwd=tmp_path, env_allowlist=("PATH",), timeout=30)
 
 
-def test_run_raises_on_timeout(tmp_path):
-    with pytest.raises(_proc.ProcTimeout, match="timed out"):
-        _proc.run(
-            [sys.executable, "-c", "import time; time.sleep(5)"],
-            cwd=tmp_path,
-            env_allowlist=("PATH",),
-            timeout=0.2,
-        )
+def test_run_reaps_child_before_propagating_keyboard_interrupt(run_python, monkeypatch):
+    children = []
+
+    class InterruptedPopen(subprocess.Popen):
+        def _communicate(self, *args, **kwargs):
+            children.append(self)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess, "Popen", InterruptedPopen)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_python("import time; time.sleep(30)", timeout=5)
+        assert children[0].returncode is not None
+    finally:
+        for child in children:
+            child.kill()
+            child.wait(timeout=5)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="checks Linux process state")
@@ -105,7 +86,7 @@ def test_timeout_stops_descendant_and_preserves_output(tmp_path, monkeypatch):
     with subprocess.Popen([sys.executable, "-c", wait]) as unrelated:
         monkeypatch.setattr(subprocess, "Popen", ReadyPopen)
         try:
-            with pytest.raises(_proc.ProcTimeout) as raised:
+            with pytest.raises(_proc.ProcTimeout, match="timed out") as raised:
                 _proc.run(
                     [sys.executable, "-c", parent], cwd=tmp_path, env_allowlist=(), timeout=0.75,
                 )
@@ -131,16 +112,22 @@ def test_timeout_stops_descendant_and_preserves_output(tmp_path, monkeypatch):
             unrelated.kill()
 
 
-def test_merge_output_interleaves_streams(tmp_path):
-    done = _proc.run(
-        [sys.executable, "-u", "-c", "import sys; print('a'); print('b', file=sys.stderr); print('c')"],
-        cwd=tmp_path,
-        env_allowlist=("PATH",),
-        timeout=30,
-        merge_output=True,
+@pytest.mark.parametrize("merge,stderr", [(True, ""), (False, "b\n")])
+def test_run_captures_streams_and_allowlisted_environment(tmp_path, run_python, monkeypatch, merge, stderr):
+    monkeypatch.delenv("LZ_ABSENT", raising=False)
+    monkeypatch.setenv("LZ_SECRET", "nope")
+    monkeypatch.setenv("LZ_KEEP", "yes")
+    done = run_python(
+        "import os,sys; print(os.getcwd()); print('b', file=sys.stderr); print(sys.argv[1]); "
+        "print(sorted(k for k in os.environ if k.startswith('LZ_'))); sys.exit(3)",
+        unbuffered=True, merge_output=merge, args=("argument with spaces",),
+        env_allowlist=("PATH", "LZ_KEEP", "LZ_ABSENT"), extra_env={"LZ_EXTRA": "1"},
     )
-    assert done.stdout.splitlines() == ["a", "b", "c"]
-    assert done.stderr == ""
+    assert (done.exit_code, done.stderr) == (3, stderr)
+    assert done.duration_s >= 0
+    assert done.stdout.splitlines() == [
+        str(tmp_path.resolve()), *(["b"] if merge else []), "argument with spaces", "['LZ_EXTRA', 'LZ_KEEP']",
+    ]
 
 
 def test_tail_keeps_last_lines():
@@ -149,7 +136,7 @@ def test_tail_keeps_last_lines():
     assert _proc.tail("", 3) == ""
 
 
-def test_explicit_utf8_input_under_ascii_parent_locale(tmp_path):
+def test_explicit_utf8_input_under_ascii_parent_locale(run_python):
     source = str(Path(_proc.__file__).resolve().parents[1])
     script = r"""
 import locale, sys
@@ -161,10 +148,8 @@ assert _proc.run(argv, input='ascii', **options).stdout.strip() == '6173636969'
 assert _proc.run(argv, input='\u03a9', **options).stdout.strip() == '3f'
 print(_proc.run(argv, input='\u03a9\r\n\u2028\r', encoding='utf-8', **options).stdout.strip())
 """
-    done = _proc.run(
-        [sys.executable, "-c", script], cwd=tmp_path, env_allowlist=(), timeout=30,
-        extra_env={"PYTHONPATH": source, "LC_ALL": "C", "PYTHONUTF8": "0",
-                   "PYTHONCOERCECLOCALE": "0"},
-    )
+    done = run_python(script, env_allowlist=(), extra_env={
+        "PYTHONPATH": source, "LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0",
+    })
     assert done.exit_code == 0, done.stderr
     assert done.stdout.strip() == "Ω\r\n\u2028\r".encode("utf-8").hex()
