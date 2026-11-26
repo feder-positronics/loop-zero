@@ -24,8 +24,10 @@
 
 Pin to a full commit SHA from `main` and upgrade by re-running with a new SHA.
 The `v0.4.x` tags refer to the retired tool.
-`loopzero --version` prints the installed revision. Never edit the installed
-package: a hotfix is a branch, a PR, and a reinstall from the merged SHA.
+`loopzero --version` prints the revision of a Git-URL install; the verified
+install below prints `unknown revision`, so record its checked-out SHA. Never
+edit the installed package: a hotfix is a branch, a PR, and a reinstall from
+the merged SHA.
 User-wide:
 
 ```sh
