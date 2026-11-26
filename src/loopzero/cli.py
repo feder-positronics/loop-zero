@@ -649,7 +649,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
-            f"running: {command}", flush=True),
+            f"running: {github.redact_credentials(command)}", flush=True),
             status=lambda message: print(message, flush=True),
             checkpoint=lambda partial: _save_report(wt, partial),
             workflow=args.config or f"origin/{config.base_branch}:workflow.toml")
@@ -659,7 +659,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     shortened = False
     for result in report.results:
         if result.exit_code != 0:
-            print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
+            heading = github.redact_credentials(result.command)
+            print(f"--- {heading} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
             preview = _check_failure_preview(tail)
             shortened |= preview != tail
