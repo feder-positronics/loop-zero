@@ -222,9 +222,8 @@ def _execution_settings(config: Config, base: str) -> dict:
         settings["base"] = base
     if config.check_runner:
         settings["runner_executable"] = _runner_identity(config)
-        settings["environment"] = _proc.build_env(config.env_allowlist)
-    else:
-        settings["environment"] = check_environment(config)
+    settings["environment"] = (_proc.build_env(config.env_allowlist) if config.check_runner
+                               else check_environment(config))
     return settings
 
 
@@ -268,9 +267,7 @@ def _has_inputs(config: Config, command: str) -> bool:
 def _input_key(config: Config, worktree: Path, command: str, base: str, *,
                status: Callable[[str], None] | None = None,
                workflow: str | Path = "workflow.toml") -> str | None:
-    if not _has_inputs(config, command):
-        return None
-    if not base and status is None:
+    if not _has_inputs(config, command) or (not base and status is None):
         return None
     entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
     try:

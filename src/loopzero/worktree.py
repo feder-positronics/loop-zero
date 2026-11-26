@@ -374,13 +374,10 @@ def _require_no_ignored_user_files(wt: Path) -> None:
         wt, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", preserve_newlines=True
     )
     for path in ignored.split("\0")[:-1]:
-        if (
-            (path in {".loopzero/task.md", ".loopzero/checks.json"}
-             or re.fullmatch(r"\.loopzero/review(?:er-output)?-[0-9a-f]{12}-(primary|delta)\.json", path))
-            and not (wt / path).is_symlink()
-        ):
-            continue
-        raise WorktreeError(f"worktree contains ignored file {path!r}, refusing to remove: {wt}")
+        if not ((path in {".loopzero/task.md", ".loopzero/checks.json"}
+                 or re.fullmatch(r"\.loopzero/review(?:er-output)?-[0-9a-f]{12}-(primary|delta)\.json", path))
+                and not (wt / path).is_symlink()):
+            raise WorktreeError(f"worktree contains ignored file {path!r}, refusing to remove: {wt}")
 
 
 def cleanup(wt: Path, expected_head: str) -> None:
