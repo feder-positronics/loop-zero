@@ -243,7 +243,7 @@ def task_text(wt: Path) -> str:
             "or recreate the file using the handoff template at "
             "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md"
         )
-    return task.read_text()
+    return task.read_text(encoding="utf-8")
 
 
 def base_sha(wt: Path) -> str:
@@ -301,7 +301,7 @@ def _require_no_ignored_user_files(wt: Path) -> None:
     for path in ignored.split("\0")[:-1]:
         if (
             (path in {".loopzero/task.md", ".loopzero/checks.json"}
-             or re.fullmatch(r"\.loopzero/review-[0-9a-f]{12}-(primary|delta)\.json", path))
+             or re.fullmatch(r"\.loopzero/review(?:er-output)?-[0-9a-f]{12}-(primary|delta)\.json", path))
             and not (wt / path).is_symlink()
         ):
             continue

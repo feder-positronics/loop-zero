@@ -147,9 +147,10 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float) -
     return suffix
 
 
-def run_git_paths(argv: Sequence[str], *, cwd: Path, env_allowlist: Sequence[str], timeout: float) -> Completed:
+def run_git_paths(argv: Sequence[str], *, cwd: Path, env_allowlist: Sequence[str], timeout: float,
+                  extra_env: Mapping[str, str] | None = None) -> Completed:
     """Read Git path records, removing the final LF from line-terminated output."""
-    done = run(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout,
+    done = run(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout, extra_env=extra_env,
                preserve_newlines=True, encoding=sys.getfilesystemencoding())
     return replace(done, stdout=done.stdout.removesuffix("\n"))
 
