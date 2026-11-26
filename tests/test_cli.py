@@ -3881,8 +3881,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: Fak
     gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED, remaining)
     gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
 
-    code, out, err = run(capsys, "resolve")
-    assert (code, err) == (0, "") and out == "0b9b59e7  important  src/a.py:3  Off by one\n"
+    expect_cli(capsys, 0, "resolve", stderr="", stdout="0b9b59e7  important  src/a.py:3  Off by one\n")
     assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
 
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
