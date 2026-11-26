@@ -269,29 +269,15 @@ sys.exit(7)
     assert peak - baseline < 4 * 1024 * 1024
 
 
-def test_local_stage_timeout_retains_drained_output(git_repo):
-    command = shlex.join([sys.executable, "-c", """
-import os
-import signal
-
-os.write(1, b"x" * 20_000)
-os.write(2, b"\\nlast available diagnostic\\n")
-signal.pause()
-"""])
-    result = sandbox._run_one(make_config(), git_repo, [], command, 1)
-    assert result.exit_code == sandbox.TIMEOUT_EXIT
-    assert result.tail.endswith("\nlast available diagnostic\n\n[loopzero] timed out after 1s")
-    assert len(result.tail.encode()) == 16 * 1024
-
-
-def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
-    inject_check_timeout(monkeypatch, b"x" * 20_000 + b"partial")
+def test_timeout_is_recorded_with_drained_output(git_repo, bwrap_log):
+    command = "printf '%20000s\\n' ''; echo last diagnostic >&2; exec sleep 30"
     report = sandbox.run_checks(
-        make_config(checks=("echo partial", "echo after")), git_repo, timeout=0.3
+        make_config(checks=(command, "echo after")), git_repo, timeout=1
     )
-    (first,) = report.results
-    assert (first.exit_code, len(first.tail.encode("utf-8"))) == (sandbox.TIMEOUT_EXIT, 16 * 1024)
-    assert "partial\n[loopzero] timed out" in first.tail and not report.ok
+    (result,) = report.results
+    assert result.exit_code == sandbox.TIMEOUT_EXIT and not report.ok
+    assert result.tail.endswith("\nlast diagnostic\n\n[loopzero] timed out after 1s")
+    assert len(result.tail.encode()) == 16 * 1024
 
 
 def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, monkeypatch):
