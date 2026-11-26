@@ -97,8 +97,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             "bwrap binary missing: bwrap not found on PATH\n"
             "sudo apt install bubblewrap"
         )
-    head = _git(config, worktree, "rev-parse", "HEAD")
-    dirty = bool(_git(config, worktree, "status", "--porcelain"))
+    head = _git(config, worktree, "rev-parse", "HEAD").strip()
+    dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     if config.check_runner and dirty:
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
                                                    "Runner requires a clean worktree"),))
@@ -157,8 +157,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                        f"({result.duration_s:.1f}s)")
             if result.exit_code != 0:
                 break
-    final_head = _git(config, worktree, "rev-parse", "HEAD")
-    final_dirty = bool(_git(config, worktree, "status", "--porcelain"))
+    final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
+    final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     if (final_head, final_dirty) != (head, dirty):
         results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
                     f"HEAD before: {head}; HEAD after: {final_head}; "
@@ -267,7 +267,7 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
     # Empty pathspecs must not accidentally mean the whole tree.
     if not paths:
         return ""
-    empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null")
+    empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     try:
         return _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
                     "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths)
@@ -591,7 +591,7 @@ def bwrap_argv(
 
 def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str:
     try:
-        return git(worktree, *args, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT, paths=paths)
+        return git(worktree, *args, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT, paths=paths, raw=True)
     except GitError as exc:
         raise SandboxUnavailable(f"{' '.join(exc.command)} failed in {worktree}: {_proc.tail(exc.tail, 1)}") from None
 
@@ -601,8 +601,8 @@ def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
 
 
 def _stage_unchanged(config: Config, worktree: Path, head: str) -> bool:
-    return (_git(config, worktree, "rev-parse", "HEAD") == head
-            and not _git(config, worktree, "status", "--porcelain"))
+    return (_git(config, worktree, "rev-parse", "HEAD").strip() == head
+            and not _git(config, worktree, "status", "--porcelain").strip())
 
 
 def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:

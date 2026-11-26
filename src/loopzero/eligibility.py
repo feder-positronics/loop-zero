@@ -72,8 +72,10 @@ def review_projection(review: dict, head: str, repo: str, number: int):
 
 
 def review_login(row: dict) -> str:
-    """The casefolded GitHub login of a REST review or comment row."""
-    return str((row.get("user") or {}).get("login") or "").casefold()
+    """The casefolded GitHub login of a REST review or comment row; empty when malformed."""
+    user = row.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    return login.casefold() if isinstance(login, str) else ""
 
 
 def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,

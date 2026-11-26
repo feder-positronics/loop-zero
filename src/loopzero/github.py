@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from itertools import count, pairwise
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -499,24 +499,26 @@ def record_full_page(endpoint: str, rows: list, seen: set[bytes]) -> None:
     seen.add(digest)
 
 
-def _iter_paged(endpoint: str, key: str = "check_runs", **kwargs) -> Iterator[dict]:
-    """Yield validated rows until the last page."""
+def _iter_paged(endpoint: str, key: str | None = None, **kwargs) -> Iterator[dict]:
+    """Yield validated rows of a list (or of `key` in an envelope) until the last of at most 100 pages."""
     seen: set[bytes] = set()
-    for page in count(1):
+    for page in range(1, 101):
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
                          "-F", f"page={page}", **kwargs)
-        if isinstance(chunk, dict):
-            chunk = chunk.get(key)
-        if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
+        if key is not None:
+            chunk = chunk.get(key) if isinstance(chunk, dict) else None
+        if (not isinstance(chunk, list) or len(chunk) > PAGE
+                or not all(isinstance(row, dict) for row in chunk)):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
-        if len(chunk) >= PAGE:
+        if len(chunk) == PAGE:
             record_full_page(endpoint, chunk, seen)
         yield from chunk
         if len(chunk) < PAGE:
             return
+    raise GhError(("gh", "api", endpoint), "pagination exceeds 100 pages")
 
 
-def paged(endpoint: str, key: str = "check_runs", **kwargs) -> list[dict]:
+def paged(endpoint: str, key: str | None = None, **kwargs) -> list[dict]:
     return list(_iter_paged(endpoint, key, **kwargs))
 
 
@@ -1219,7 +1221,7 @@ def _check_signals(
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
     latest_runs: dict[str, dict] = {}
-    runs = paged(f"repos/{repo}/commits/{head_sha}/check-runs")
+    runs = paged(f"repos/{repo}/commits/{head_sha}/check-runs", "check_runs")
     for cr in runs:
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):

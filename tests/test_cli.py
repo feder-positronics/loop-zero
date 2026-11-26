@@ -4402,6 +4402,16 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
 
 
+def test_queue_size_projection_git_failure_stays_advisory(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.mergify, "queue_predecessors", lambda *_: [5])
+    def fail(*_args, **_kwargs):
+        raise cli.worktree.GitError(("git", "fetch"), "fatal: couldn't find remote ref")
+    monkeypatch.setattr(cli, "_git", fail)
+    config = SimpleNamespace(repo=REPO, base_branch="main", mergify_queue="main")
+    cli._warn_queue_size(config, SimpleNamespace(number=7), tmp_path, "origin", "a" * 40,
+                         fail, lambda _: pytest.fail("projection must stop at the git failure"))
+
+
 def test_eligibility_rejects_non_object_review_row(gh, head):
     from loopzero import eligibility
     gh.respond_pr_view(pr_json(headRefOid=head))

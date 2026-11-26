@@ -891,6 +891,25 @@ def test_status_pagination_rejects_a_repeated_full_page(gh: FakeGh) -> None:
     assert len(gh.calls) == 2
 
 
+@pytest.mark.parametrize("pages,error", [
+    ([{"check_runs": []}], "invalid paginated response"),  # an envelope where a list is due
+    ([[{"id": i} for i in range(github.PAGE + 1)]], "invalid paginated response"),
+    ([[{"id": page * github.PAGE + i} for i in range(github.PAGE)] for page in range(100)],
+     "pagination exceeds 100 pages"),
+])
+def test_list_pagination_rejects_wrong_shapes_and_endless_pages(monkeypatch, pages, error) -> None:
+    responses = iter(pages)
+    monkeypatch.setattr(github, "_gh_json", lambda *args, **kwargs: next(responses))
+    with pytest.raises(github.GhError, match=error):
+        github.paged(f"repos/{REPO}/pulls/7/reviews")
+
+
+@pytest.mark.parametrize("user", [{"login": 123}, {"login": None}, "bot", None, {}])
+def test_malformed_review_login_is_untrusted(user) -> None:
+    from loopzero import eligibility
+    assert eligibility.review_login({"user": user}) == ""
+
+
 # --- readiness ----------------------------------------------------------------------------
 
 

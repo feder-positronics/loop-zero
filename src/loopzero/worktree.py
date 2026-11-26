@@ -60,13 +60,13 @@ class GitError(WorktreeError):
 
 
 def git(cwd: Path, *args: str, env_allowlist: tuple[str, ...] = GIT_ENV, timeout: float = 120,
-        paths: bool = False, **kwargs) -> str:
-    """Run git, raising GitError on failure; output is stripped unless it holds paths or newlines."""
+        paths: bool = False, raw: bool = False, **kwargs) -> str:
+    """Run git, raising GitError on failure; scalar output is stripped unless `raw`."""
     argv = ("git", *args)
     done = (run_git_paths if paths else run)(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout, **kwargs)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
-    return done.stdout if paths or kwargs.get("preserve_newlines") else done.stdout.strip()
+    return done.stdout if raw or paths or kwargs.get("preserve_newlines") else done.stdout.strip()
 
 
 def branch_name(repo_root: Path, slug: str) -> str:

@@ -866,6 +866,11 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
 
+def test_sandbox_git_output_stays_raw_for_input_keys(git_repo):
+    # Input keys hash diff-tree output byte for byte; stripping would invalidate saved receipts.
+    assert sandbox._git(make_config(), git_repo, "rev-parse", "HEAD").endswith("\n")
+
+
 @pytest.mark.parametrize("error", [errno.E2BIG, errno.ENOENT])
 def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkeypatch, error, cache_check):
     command = "echo stage ran"

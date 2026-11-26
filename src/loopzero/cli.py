@@ -1281,7 +1281,7 @@ def _warn_queue_size(
             integrated = git("-c", "user.name=loopzero", "-c", "user.email=loopzero@localhost",
                              "commit-tree", tree, "-p", integrated, "-p", source, "-m", "Queue size projection")
         result = evaluate(integrated)
-    except (LoopZeroError, OSError):
+    except (LoopZeroError, worktree.WorktreeError, OSError):
         return
     if result.exit_code and "size budget: FAIL" in result.stdout:
         predecessors = ", ".join(f"#{number}" for number in numbers)
