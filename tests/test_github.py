@@ -19,6 +19,10 @@ REPO = "acme/widgets"
 HEAD = "a" * 40
 
 
+def branch_head_key(branch: str = "lz/t1") -> str:
+    return f"api repos/{REPO}/branches/{quote(branch, safe='')}"
+
+
 def pr_list_key(branch: str = "lz/t1", state: str = "open") -> str:
     head = quote(f"{REPO.split('/')[0]}:{branch}", safe="")
     return (f"api repos/{REPO}/pulls?state={state}&head={head}"
@@ -73,9 +77,6 @@ class FakeGh:
 
     def respond_pr_list(self, *snapshots: list[dict], branch: str = "lz/t1") -> None:
         """Arm explicit REST list and selected detail responses for successive lookups."""
-        head = quote(f"{REPO.split('/')[0]}:{branch}", safe="")
-        prefix = f"api repos/{REPO}/pulls?"
-        suffix = f"&head={head}&sort=created&direction=desc&per_page=1"
         open_pages, closed_pages = [], []
         details: dict[int, list[dict]] = {}
         for snapshot in snapshots:
@@ -87,9 +88,9 @@ class FakeGh:
             if selected is not None:
                 number = selected["number"]
                 details.setdefault(number, []).append(rest_pr_json(selected, branch=branch))
-        self.append(prefix + "state=open" + suffix, *open_pages)
+        self.append(pr_list_key(branch), *open_pages)
         if closed_pages:
-            self.append(prefix + "state=closed" + suffix, *closed_pages)
+            self.append(pr_list_key(branch, "closed"), *closed_pages)
         for number, responses in details.items():
             self.append(f"api repos/{REPO}/pulls/{number}", *responses)
 
@@ -181,6 +182,7 @@ def rest_pr_json(data: dict, *, branch: str = "lz/t1") -> dict:
         "mergeable_state": (data.get("mergeStateStatus") or "unknown").lower(),
         "user": data.get("author", {"login": "someone-else"}),
         "body": data.get("body"),
+        "labels": data.get("labels", []),
     }
 
 
@@ -268,39 +270,20 @@ def test_generic_failure_carries_command_and_tail(gh: FakeGh) -> None:
 # --- PR lookup / creation -----------------------------------------------------------
 
 
-def test_pr_for_branch_none_when_empty(gh: FakeGh) -> None:
-    gh.respond_pr_list([], branch="lz/x")
-    assert github.pr_for_branch(REPO, "lz/x") is None
-    assert gh.argv(0) == [*pr_list_key("lz/x").split(" ", 1), "--include"]
-    assert gh.argv(1)[1].startswith(f"repos/{REPO}/pulls?state=closed")
-
-
-def test_pr_for_branch_prefers_open(gh: FakeGh) -> None:
-    gh.respond_pr_list([pr_json(number=3, state="CLOSED"), pr_json(number=9)], branch="lz/x")
-    pr = github.pr_for_branch(REPO, "lz/x")
-    assert pr == github.PR(9, f"https://github.com/{REPO}/pull/7", HEAD, "main", True,
-                           "OPEN", "MERGEABLE", "someone-else")
-
-
-def test_pr_for_branch_falls_back_to_latest_closed_or_merged(gh: FakeGh) -> None:
-    gh.respond_pr_list([pr_json(number=9, state="MERGED"),
-                        pr_json(number=3, state="CLOSED")], branch="lz/x")
-
-    pr = github.pr_for_branch(REPO, "lz/x")
-
-    assert pr is not None and pr.number == 9 and pr.state == "MERGED"
-    assert [c["argv"][1] for c in gh.calls[:2]] == [
-        pr_list_key("lz/x").split(" ", 1)[1],
-        pr_list_key("lz/x", "closed").split(" ", 1)[1],
-    ]
-
-
-def test_pr_for_branch_encodes_qualified_unicode_head(gh: FakeGh) -> None:
+@pytest.mark.parametrize("states, expected", [
+    ([], None), (["CLOSED", "OPEN"], "OPEN"), (["MERGED", "CLOSED"], "MERGED"),
+])
+def test_pr_lookup_fallback_for_deleted_branch(gh: FakeGh, states: list[str], expected: str | None) -> None:
     branch = "lz/fün/space name"
-    gh.respond_pr_list([pr_json()], branch=branch)
-
-    assert github.pr_for_branch(REPO, branch) is not None
-    assert gh.argv(0) == [*pr_list_key(branch).split(" ", 1), "--include"]
+    gh.respond_pr_list([pr_json(number=n, state=state) for n, state in enumerate(states, 8)], branch=branch)
+    pr = github.pr_for_branch(REPO, branch)
+    assert (pr.state if pr else None) == expected
+    assert gh.argv(0) == [*branch_head_key(branch).split(), "--include"]
+    assert gh.argv(1) == [*pr_list_key(branch).split(), "--include"]
+    if expected != "OPEN":
+        assert gh.argv(2) == [*pr_list_key(branch, "closed").split(), "--include"]
+    if pr:
+        assert pr.number == (8 if expected == "MERGED" else 9)
 
 
 @pytest.mark.parametrize("head_change", [
@@ -326,13 +309,14 @@ def test_pr_for_branch_rejects_changed_or_foreign_detail(gh: FakeGh, head_change
 def test_pr_view_maps_rest_merge_evidence(
     gh: FakeGh, mergeable, merge_state, expected
 ) -> None:
-    detail = rest_pr_json(pr_json())
+    detail = rest_pr_json(pr_json(labels=[{"name": "hold"}]))
     detail["mergeable"], detail["mergeable_state"] = mergeable, merge_state
     gh.respond(f"api repos/{REPO}/pulls/7", detail)
 
     pr = github.pr_view(REPO, 7)
 
     assert (pr.mergeable, pr.merge_state) == expected
+    assert pr.labels == ("hold",)
     assert pr.head_sha == HEAD and pr.base_ref == "main" and pr.is_draft
 
 
@@ -839,7 +823,7 @@ def test_gh_api_reads_with_fields_use_method_get(gh: FakeGh) -> None:
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    github.check_runs(REPO, HEAD)
+    github._check_signals(REPO, HEAD)
     reads = [c["argv"] for c in gh.calls if c["argv"][0] == "api" and "-F" in c["argv"]]
     assert len(reads) == 3, "files, check-runs and status all pass -F"
     for argv in reads:
@@ -857,7 +841,7 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
         {"context": "ci/legacy", "state": "failure"},
         {"context": "checks", "state": "pending"},
     ])
-    runs = github.check_runs(REPO, HEAD)
+    runs = github._check_signals(REPO, HEAD)[0]
     assert {k: v for k, v in runs.items() if not k.startswith("job")} == {
         "checks": "pending", "lint": "pending", "ci/legacy": "failure"}
     pages = [c["argv"][-2] for c in gh.calls if "check-runs" in c["argv"][1]]
@@ -887,7 +871,7 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
 def test_check_runs_ordering(gh: FakeGh, runs: list[dict], expected: dict) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    assert github.check_runs(REPO, HEAD) == expected
+    assert github._check_signals(REPO, HEAD)[0] == expected
 
 
 @pytest.mark.parametrize("page", [{"total_count": 1}, {"check_runs": 1}, {"check_runs": []}])
@@ -897,10 +881,10 @@ def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
 
     if page.get("check_runs") == []:
-        assert github.check_runs(REPO, HEAD) == {}
+        assert github._check_signals(REPO, HEAD)[0] == {}
     else:
         with pytest.raises(github.GhError, match=endpoint):
-            github.check_runs(REPO, HEAD)
+            github._check_signals(REPO, HEAD)
 
 
 def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
@@ -913,7 +897,7 @@ def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> N
         [{"context": "required-page-two", "state": "success"},
          {"context": "duplicate", "state": "success"}],
     )
-    runs = github.check_runs(REPO, HEAD)
+    runs = github._check_signals(REPO, HEAD)[0]
     assert runs["required-page-two"] == "success"
     assert runs["duplicate"] == "failure", "the first (latest) status wins"
 
@@ -1173,28 +1157,16 @@ def test_merge_command_failure(gh: FakeGh) -> None:
     assert "--rebase" in info.value.command and "mismatch" in info.value.tail
 
 
-@pytest.mark.parametrize("status", [404, 422])
-def test_delete_remote_branch_accepts_already_deleted_ref(gh: FakeGh, status: int) -> None:
-    gh.respond(f"api repos/{REPO}/git/ref/heads/lz/x", {"object": {"sha": HEAD}})
-    gh.fail("api -X", f"HTTP {status}: Reference does not exist")
-    assert github.delete_remote_branch(REPO, "lz/x", HEAD)
-
-
-@pytest.mark.parametrize("remote_head", [HEAD, "f" * 40, None])
+@pytest.mark.parametrize("remote_head", ["f" * 40, None])
 def test_delete_remote_branch_checks_encoded_ref(gh: FakeGh, remote_head: str | None) -> None:
-    ref = "heads/lz/fix%23516%3Fx%25"
-    get = f"api repos/{REPO}/git/ref/{ref}"
+    get = f"api repos/{REPO}/git/ref/heads/lz/fix%23516%3Fx%25"
     if remote_head is None:
         gh.fail(get, "gh: Not Found (HTTP 404)")
     else:
         gh.respond(get, {"object": {"sha": remote_head}})
-    gh.respond("api -X", "")
-    result = github.delete_remote_branch(REPO, "lz/fix#516?x%", HEAD)
-    assert result is (remote_head in (HEAD, None))
+    assert github.delete_remote_branch(REPO, "lz/fix#516?x%", HEAD) is (remote_head is None)
     assert gh.argv(0) == [*get.split(), "--include"]
-    assert len(gh.calls) == (2 if remote_head == HEAD else 1)
-    if remote_head == HEAD:
-        assert gh.argv(1) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/{ref}", "--include"]
+    assert len(gh.calls) == 1
 
 
 def _queue_json(queued: bool) -> dict:
@@ -1289,7 +1261,7 @@ def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, tmp_path, err
         worktree.rmdir()
         with pytest.raises(github.GhError, match="Rate limited"):
             github.pr_for_branch(REPO, "lz/x")
-    assert len(gh.calls) == 1
+    assert len(gh.calls) == 2  # Remote branch read, then the rate-limited fallback.
 
 
 @pytest.mark.parametrize(("remaining", "retry_after", "hint"), [
@@ -1324,7 +1296,10 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, remaining, retry_after
     if retry_after:
         assert f"Retry-After: {retry_after}" in error
     assert "never print this" not in error
-    assert len(gh.calls) == 1 and gh.argv(0)[-1] == "--include"
+    assert [call["argv"] for call in gh.calls] == [
+        [*branch_head_key("lz/x").split(), "--include"],
+        [*pr_list_key("lz/x").split(), "--include"],
+    ]
 
 
 def test_graphql_limit_reports_verified_reset_from_one_diagnostic(gh: FakeGh) -> None:
@@ -1378,16 +1353,19 @@ def test_invalid_merge_evidence_fails_closed(gh, view):
         github.merged_sha(REPO, 7, expected_head=HEAD)
 
 
-def test_merged_branch_history_reads_past_newer_closed_page(gh: FakeGh) -> None:
-    page = [closed_history_row(pr_json(number=n, state="CLOSED")) for n in range(1, 101)]
-    merged = pr_json(number=101, state="MERGED")
-    gh.respond(branch_history_key(), page)
-    gh.respond(branch_history_key(2), [closed_history_row(merged)])
-    gh.respond(f"api repos/{REPO}/pulls/101", rest_pr_json(merged))
-
+@pytest.mark.parametrize("merged", [None, pr_json(number=101, state="MERGED")])
+def test_merged_branch_history_reads_terminal_page(gh: FakeGh, merged: dict | None) -> None:
+    gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1", [])
+    gh.respond(branch_history_key(), [
+        closed_history_row(pr_json(number=n, state="CLOSED")) for n in range(1, 101)
+    ])
+    gh.respond(branch_history_key(2), [closed_history_row(merged)] if merged else [])
+    if merged:
+        gh.respond_pr_view(merged)
     pr = github.merged_pr_for_branch(REPO, "lz/t1")
-
-    assert pr is not None and pr.number == 101 and pr.state == "MERGED"
+    assert ((pr.number, pr.state) if pr else None) == ((101, "MERGED") if merged else None)
+    assert gh.argv(3) == [*branch_history_key(2).split(), "--include"]
 
 
 @pytest.mark.parametrize("change", [
@@ -1418,16 +1396,8 @@ def test_merged_branch_history_rejects_changed_detail(gh: FakeGh, detail: dict) 
         github.merged_pr_for_branch(REPO, "lz/t1")
 
 
-def test_merged_branch_history_requires_terminal_page(gh: FakeGh) -> None:
-    page = [closed_history_row(pr_json(number=n, state="CLOSED")) for n in range(1, 101)]
-    gh.respond(branch_history_key(), page)
-    gh.respond(branch_history_key(2), [])
-
-    assert github.merged_pr_for_branch(REPO, "lz/t1") is None
-    assert len(gh.calls) == 2
-
-
 def test_merged_branch_history_fails_at_page_limit(monkeypatch) -> None:
+    monkeypatch.setattr(github, "_branch_head", lambda repo, branch: None)
     monkeypatch.setattr(github, "PAGE", 1)
     pages = ({branch_history_key(page).removeprefix("api ").replace("per_page=100", "per_page=1"):
               [closed_history_row(pr_json(number=page, state="CLOSED"))]} for page in range(1, 101))
@@ -1435,6 +1405,26 @@ def test_merged_branch_history_fails_at_page_limit(monkeypatch) -> None:
     with pytest.raises(github.GhError, match="exceeds 100-page publication limit"):
         github.merged_pr_for_branch(REPO, "lz/t1")
     assert next(pages, None) is None
+
+
+@pytest.mark.parametrize("state", ["OPEN", "MERGED", "CLOSED"])
+def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, state: str) -> None:
+    row = closed_history_row(pr_json(number=6 if state == "CLOSED" else 7, state=state))
+    row["created_at"] = "2026-10-06T00:00:00Z"
+    fork = row | {"number": 9, "head": row["head"] | {"repo": {"full_name": "fork/widgets"}}}
+    other_branch = row | {"number": 8, "head": row["head"] | {"ref": "lz/other"}}
+    commits = f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1"
+    gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
+    gh.respond(commits, [fork, other_branch, row])
+    if state == "CLOSED":
+        gh.respond_pr_list([pr_json()])
+    else:
+        gh.respond(f"api repos/{REPO}/pulls/7", row)
+    lookup = github.merged_pr_for_branch if state == "MERGED" else github.pr_for_branch
+    pr = lookup(REPO, "lz/t1")
+    assert pr is not None and pr.number == 7 and pr.state == ("OPEN" if state == "CLOSED" else state)
+    endpoint = pr_list_key() if state == "CLOSED" else f"api repos/{REPO}/pulls/7"
+    assert gh.argv(2) == [*endpoint.split(), "--include"]
 
 
 @pytest.mark.parametrize("capped", [False, True])
@@ -1457,3 +1447,60 @@ def test_readiness_distinguishes_capped_check_suites_from_missing_check(gh: Fake
         f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"
         if capped else f"required check 'required-ci' missing on {HEAD[:12]}",
     )
+
+
+@pytest.mark.parametrize(("unrelated", "include_failure", "reason"), [
+    (1000, False, f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"),
+    (100, True, "required check 'required-ci' is failure"),
+    (100, False, None),
+])
+def test_readiness_requires_check_run_evidence_for_status_success_at_suite_cap(
+    gh: FakeGh, unrelated: int, include_failure: bool, reason: str | None,
+) -> None:
+    arm_readiness(gh)
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
+               [{"context": "required-ci", "state": "success"}])
+    runs = [
+        {"name": "unrelated", "conclusion": "success", "check_suite": {"id": suite}}
+        for suite in range(2, unrelated + 2)
+    ]
+    if include_failure:
+        runs.append({"name": "required-ci", "conclusion": "failure", "check_suite": {"id": 1}})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
+               *({"check_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
+
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
+                              "main", ("required-ci",), HEAD)
+
+    assert result.ready == (reason is None)
+    assert result.reasons == ((reason,) if reason else ())
+
+
+@pytest.mark.parametrize("changed_files,path,severity,live_head,anchor", [
+    (3001, "file-3001", "important", HEAD, None),
+    (3000, "file-3000", "important", HEAD, "file-3000"),
+    (3000, "outside-diff", "important", HEAD, "file-0001"),
+    (3001, "file-3001", "suggestion", HEAD, None),
+    (3000, "outside-diff", "important", "b" * 40, None),
+])
+def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: str,
+                           live_head: str, anchor: str | None) -> None:
+    files = [{"filename": f"file-{i:04d}", "patch": "@@ -1 +1 @@\n-before\n+after"}
+             for i in range(1, changed_files + 1)][:3000]
+    gh.respond(FILES_KEY, *(files[i:i + 100] for i in range(0, 3001, 100)))
+    detail_key = f"api repos/{REPO}/pulls/7"
+    gh.respond(detail_key, rest_pr_json(pr_json(headRefOid=live_head)) | {"changed_files": changed_files})
+    result = review(findings=(Finding(severity, path, 1, "Incorrect", "Fix this"),))
+
+    if severity == "suggestion":
+        payload = github.review_payload(REPO, 7, HEAD, result, "")
+        assert payload["comments"] == [] and "Incorrect" in payload["body"]
+    elif anchor is None:
+        message = rf"PR #7.*{path}.*3,000" if live_head == HEAD else "PR #7 head moved"
+        with pytest.raises(github.GhError, match=message):
+            github.review_payload(REPO, 7, HEAD, result, "")
+    else:
+        payload = github.review_payload(REPO, 7, HEAD, result, "")
+        (comment,) = payload["comments"]
+        assert (comment["path"], comment["line"]) == (anchor, 1)
+    assert len(calls_for(gh, detail_key)) == int(severity == "important" and path != "file-3000")

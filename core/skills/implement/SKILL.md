@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Implement a bounded change through behavior proof and the contract's owner queue route and merge authority.
+description: Deliver a bounded task or PR slice with behavior proof. Use work-issue for full GitHub issue delivery.
 ---
 
 # Implement
@@ -60,8 +60,7 @@ the job's scope, give the owner the
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head.
-Suggestions must not expand scope. Follow the contract's owner queue route and
-merge authority.
+Suggestions must not expand scope.
 Before the check and draft push for primary review, rebase your own commits onto `origin/<base>` using
 `[repo].base` (default `main`). For a stack, follow
 [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).

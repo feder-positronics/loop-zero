@@ -15,7 +15,6 @@ import shlex
 import shutil
 import stat
 import sys
-import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -1139,8 +1138,7 @@ def _review_claude(
         "--disallowedTools",
         "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
-    with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
-        home = Path(tmp)
+    with sandbox.private_directory("loopzero-review-home-") as home:
         auth_binds = _auth_binds("claude", home)
         prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths, auth_binds)
         argv[0] = str(binary)
@@ -1224,8 +1222,7 @@ def _review_codex(
     prompt: str, *, policy: str, cwd: Path, head: str, kind: str, timeout: int,
     ro_paths: tuple[str, ...], model: str | None, effort: str | None, review_context: dict | None = None,
 ) -> ReviewResult:
-    with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
-        home = Path(tmp)
+    with sandbox.private_directory("loopzero-review-home-") as home:
         schema_file = home / "schema.json"
         last_file = home / "last.json"
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")

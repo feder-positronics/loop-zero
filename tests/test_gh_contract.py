@@ -46,8 +46,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
     fake.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     fake.respond("pr ready", "")
     fake.respond("pr merge", "")
-    fake.respond(f"api repos/{REPO}/git/ref/heads/lz/x", {"object": {"sha": HEAD}})
-    fake.respond("api -X", "")
+    fake.fail(f"api repos/{REPO}/git/ref/heads/lz/x", "gh: Not Found (HTTP 404)")
 
     with pytest.MonkeyPatch.context() as env:
         env.setenv("PATH", str(tmp_path), prepend=os.pathsep)
@@ -61,7 +60,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
                               (Finding("important", "src/a.py", 10, "Problem", "Details"),), "raw")
         github.post_review(REPO, 7, HEAD, result)
         github.open_blocking_findings(REPO, 7, HEAD)
-        github.check_runs(REPO, HEAD)
+        github._check_signals(REPO, HEAD)
         github.mark_ready(REPO, 7)
         github.merge(REPO, 7, "squash", HEAD)
         github.delete_remote_branch(REPO, "lz/x", HEAD)
@@ -101,7 +100,7 @@ def offline_run(argv: list[str], tmp_path: Path, call: dict | None = None) -> st
 def test_contract_capture_covers_all_github_operations(captured_argv: list[dict]) -> None:
     calls = [call["argv"] for call in captured_argv]
     assert {tuple(argv[:2]) for argv in calls} >= {
-        ("pr", "ready"), ("pr", "merge"), ("api", "graphql"), ("api", "-X"),
+        ("pr", "ready"), ("pr", "merge"), ("api", "graphql"),
         ("api", f"repos/{REPO}/pulls"), ("api", f"repos/{REPO}/pulls/7"),
     }
     assert not any(argv[:2] in (["pr", "list"], ["pr", "view"], ["pr", "create"])
