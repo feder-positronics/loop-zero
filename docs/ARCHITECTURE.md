@@ -94,7 +94,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    newer duplicate exists. If the head commit cannot prove completion, the
    pull-list fallback also checks earlier commits of the branch. Failed,
    malformed, repeated or truncated history blocks publication, with a limit of
-   100 pages. An unfinished branch creates or refreshes a draft PR.
+   100 pages. An unfinished branch creates or refreshes a draft PR. Publication
+   checks that every effective origin push URL targets the configured GitHub
+   repository. A leased rewrite also requires the PR head in the task branch's
+   local history.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
    the PR-wide cap of one primary and one delta across head rewrites, and the
