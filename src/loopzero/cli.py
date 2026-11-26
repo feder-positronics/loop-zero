@@ -79,8 +79,8 @@ def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
 
 
 def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
-    done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV,
-                     extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
+    argv = ["git", *(os.fsdecode(arg.encode("utf-8", "surrogateescape")) for arg in args)]
+    done = _proc.run(argv, cwd=wt, env_allowlist=worktree.GIT_ENV, extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
     if done.exit_code != 0:
         detail = _proc.tail(done.stderr)[-2000:]
         if force_lease and any(line.startswith("!\t") and line.endswith("\t[rejected] (stale info)")
@@ -1650,7 +1650,7 @@ def _cleanup_remote_refs(wt: Path, config: Config, branch: str, expected_head: s
 def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
     if not branch.startswith("lz/") or branch.count("/") != 1:
         return
-    ref = f"refs/remotes/origin/{branch}"
+    ref = os.fsdecode(f"refs/remotes/origin/{branch}".encode("utf-8", "surrogateescape"))
     try:
         _repo_root(wt)
         current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref)

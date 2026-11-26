@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import errno
+import os
 import re
 import stat
 import tempfile
 from pathlib import Path
+from sys import getfilesystemencoding
 from uuid import uuid4
 
 from loopzero._proc import run
@@ -51,13 +53,11 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(
-    cwd: Path, *args: str, timeout: float = 120,
-    preserve_whitespace: bool = False, preserve_newlines: bool = False,
-) -> str:
+def _git(cwd: Path, *args: str, timeout: float = 120,
+         preserve_whitespace: bool = False, preserve_newlines: bool = False) -> str:
     argv = ("git", *args)
     done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-               encoding="utf-8", preserve_newlines=preserve_newlines)
+               encoding=None if preserve_newlines else getfilesystemencoding(), preserve_newlines=True)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
     if preserve_newlines:
@@ -175,7 +175,7 @@ def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | No
             or not (wt / ".git").is_file()):
         return None
     common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-    if _git(wt, *common_dir) != _git(repo_root, *common_dir) or branch(wt) != expected_branch:
+    if _git(wt, *common_dir) != _git(repo_root, *common_dir) or branch(wt, native=True) != expected_branch:
         return None
     current_head = head(wt)
     if fields[1] != f"HEAD {current_head}" or is_dirty(wt):
@@ -220,11 +220,11 @@ def is_linked_checkout(wt: Path) -> bool:
     return git_dir != common_dir
 
 
-def branch(wt: Path) -> str:
+def branch(wt: Path, *, native: bool = False) -> str:
     name = _git(Path(wt), "branch", "--show-current", preserve_whitespace=True)
     if not name:
         raise WorktreeError("HEAD is detached. Switch to a branch and retry.")
-    return name
+    return name if native else os.fsencode(name).decode("utf-8", "surrogateescape")
 
 
 def task_text(wt: Path) -> str:
@@ -266,7 +266,7 @@ def cleanup(wt: Path) -> None:
         raise WorktreeError(f"no such worktree: {wt}")
     if is_dirty(wt):
         raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-    name, gd = branch(wt), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
+    name, gd = branch(wt, native=True), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
     _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
     try:
         _git(gd, f"--git-dir={gd}", "branch", "-D", name)

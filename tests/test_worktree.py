@@ -231,11 +231,11 @@ def test_task_helpers_errors(repo: Path) -> None:
 
 
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
-    wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
+    wt, calls, real = worktree.start(repo, "zażółć", "main"), [], worktree._git
     monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
     worktree.cleanup(wt)  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
-    assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
+    assert not wt.exists() and not git(repo, "branch", "--list", "lz/zażółć") and "zażółć" not in git(repo, "worktree", "list")
 
 
 def test_cleanup_refuses_dirty(repo: Path) -> None:
