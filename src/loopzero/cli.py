@@ -1039,7 +1039,7 @@ def _run_review(
     task = worktree.task_text(wt)
     authors = runners.author_families(wt, head, lineage_base)
     candidates = [family for family in config.reviewers if family not in authors]
-    failures: list[str] = []
+    errors: dict[str, tuple[str, str]] = {}
     excluded = [family for family in config.reviewers if family in authors]
     def select(family: str) -> Callable[..., ReviewResult]:
         settings = config.review.get(family)
@@ -1073,7 +1073,7 @@ def _run_review(
     attempts = candidates + excluded
     for index, family in enumerate(attempts):
         if family in unusable:
-            failures.append(unusable[family])
+            errors[family] = unusable[family], ""
             continue
         if family in excluded and not fallback:
             fallback = ("independent reviewers failed: " + "; ".join(reasons)
@@ -1095,33 +1095,43 @@ def _run_review(
                 break
         except RUNNER_FAILURES as exc:
             reason, detail, fallback_reason = _review_failure(family, exc)
-            failures.append(detail)
+            errors[family] = detail, exc.tail if isinstance(exc, runners.RunnerMalformedOutput) else ""
             reasons.append(f"{family}: {fallback_reason}")
             if any(next_family in selected for next_family in attempts[index + 1:]):
                 print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
-            _independence_message(authors, excluded, failures)
+            _independence_message(authors, excluded, [detail for detail, _ in errors.values()])
+            + _save_review_failure_output(wt, head, kind, errors)
         )
     return dataclasses.replace(result, fallback=fallback)
 
 
+def _save_review_failure_output(wt: Path, head: str, kind: str, errors: dict[str, tuple[str, str]]) -> str:
+    if not (fragments := {family: tail for family, (_, tail) in errors.items() if tail}):
+        return ""
+    path = wt / ".loopzero" / f"reviewer-output-{head[:12]}-{kind}.json"
+    try:
+        with _lock_task_state(wt) as directory:
+            _write_json_atomically(directory, path.name, fragments)
+    except OSError as exc:
+        return f"\nCould not save reviewer output: {exc.strerror or exc}"
+    return f"\nReviewer output: {path.relative_to(wt)}"
+
+
 def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
     lines = str(exc).splitlines()
-    detail = "\n".join(lines[:3])
-    fallback_reason = _FALLBACK_REASONS[3]
+    detail = "\n".join(lines[:1 if isinstance(exc, runners.RunnerMalformedOutput) else 3])
     if isinstance(exc, runners.RunnerAuthFailed):
         login = "claude auth login" if family == "claude" else "codex login"
-        detail += f"\nFix: run `{login}`."
-        fallback_reason = _FALLBACK_REASONS[0]
-    elif isinstance(exc, runners.RunnerUsageLimit):
-        detail += "\nFix: wait for the limit to reset or switch this reviewer's account."
-        fallback_reason = _FALLBACK_REASONS[1]
-    elif isinstance(exc, runners.RunnerMissing):
+        return lines[0], detail + f"\nFix: run `{login}`.", _FALLBACK_REASONS[0]
+    if isinstance(exc, runners.RunnerUsageLimit):
+        fix = "\nFix: wait for the limit to reset or switch this reviewer's account."
+        return lines[0], detail + fix, _FALLBACK_REASONS[1]
+    if isinstance(exc, runners.RunnerMissing):
         package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
-        detail += f"\nFix: install it with `npm install -g {package}`."
-        fallback_reason = _FALLBACK_REASONS[2]
-    return lines[0], detail, fallback_reason
+        return lines[0], detail + f"\nFix: install it with `npm install -g {package}`.", _FALLBACK_REASONS[2]
+    return lines[0], detail, _FALLBACK_REASONS[3]
 
 
 def _independence_message(

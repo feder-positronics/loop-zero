@@ -57,7 +57,7 @@ verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
 
-Private review receipts and sidecars live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
+Private review receipts, sidecars and malformed output excerpts live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
 
 Private agent transcripts and metrics ledgers do not belong in this guide or in
 a new persistent store.

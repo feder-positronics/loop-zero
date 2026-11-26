@@ -1212,9 +1212,11 @@ def test_unknown_family_and_kind(tmp_path: Path) -> None:
     ],
 )
 def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) -> None:
-    _fake_codex(fake_bin, json.dumps({"verdict": "request_changes", "findings": [finding]}))
-    with pytest.raises(RunnerBadOutput):
+    message = json.dumps({"verdict": "request_changes", "findings": [finding]})
+    _fake_codex(fake_bin, message)
+    with pytest.raises(runners.RunnerMalformedOutput) as error:
         _review("codex", tmp_path)
+    assert error.value.tail == message + "\n"
 
 
 @pytest.mark.parametrize(("has_stderr", "size"), [(True, 0), (True, 3000), (False, 3000)])
