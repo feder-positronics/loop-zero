@@ -1535,7 +1535,7 @@ def _wait_for_checks(
             if allow_merged and current.state == "MERGED":
                 return current, None, kicked
             readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True,
-                                   mergify_deadline=started + timeout)
+                                   mergify_deadline=started + timeout if bounded else None)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             _require_receipt(wt, config, current.head_sha)
             github.mark_ready(config.repo, pr.number)
