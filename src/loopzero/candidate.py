@@ -495,16 +495,11 @@ def _attest_candidate_once(
         "Candidate head SHA is invalid",
     )
     candidate_path = f"/repos/{full_name}/pulls/{candidate_number}"
-    candidate_before = _object(
-        github_get(candidate_path),
-        "GitHub candidate lookup returned an invalid payload",
-    )
-    _candidate_snapshot(
-        candidate_before,
-        event_pr=event_pr,
-        repository=repository,
-        expected_identity=expected_identity,
-    )
+
+    def recheck_candidate(message: str = "GitHub candidate lookup returned an invalid payload") -> None:
+        current = _object(github_get(candidate_path), message)
+        _candidate_snapshot(current, event_pr=event_pr, repository=repository,
+                            expected_identity=expected_identity)
 
     def live_lineage() -> tuple[str, list[int], list[str]]:
         delay = 2
@@ -512,23 +507,19 @@ def _attest_candidate_once(
             try:
                 return _candidate_lineage(mergify_status(owner, repo, "main"), candidate_number)
             except CandidateBatchError:
-                def recheck_candidate() -> None:
-                    current = _object(github_get(candidate_path), "Invalid candidate lookup")
-                    _candidate_snapshot(current, event_pr=event_pr, repository=repository,
-                                        expected_identity=expected_identity)
-
-                recheck_candidate()
+                recheck_candidate("Invalid candidate lookup")
                 remaining = batch_deadline - _retry_clock()
                 if remaining <= 0:
                     raise
                 started = _retry_clock()
                 _retry_sleep(min(delay, remaining))
                 batch_wait[0] += _retry_clock() - started
-                recheck_candidate()
+                recheck_candidate("Invalid candidate lookup")
                 if _retry_clock() >= batch_deadline:
                     raise
                 delay = min(delay * 2, 30)
 
+    recheck_candidate()
     first_lineage = live_lineage()
     main_path = f"/repos/{full_name}/git/ref/heads/main"
     main_before = github_get(main_path) if first_lineage[2] else None
@@ -586,16 +577,7 @@ def _attest_candidate_once(
         "Mergify candidate membership changed during attestation",
         CandidateRaceError,
     )
-    candidate_after = _object(
-        github_get(candidate_path),
-        "GitHub candidate lookup returned an invalid payload",
-    )
-    _candidate_snapshot(
-        candidate_after,
-        event_pr=event_pr,
-        repository=repository,
-        expected_identity=expected_identity,
-    )
+    recheck_candidate()
     for number, (expected_sha, expected_fingerprint) in source_snapshots.items():
         current = _object(
             github_get(f"/repos/{full_name}/pulls/{number}"),

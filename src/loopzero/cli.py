@@ -525,8 +525,7 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
     return prefix + content.lstrip("\n")
 
 
-def _update_pr_checks(wt: Path, head: str, config: Config, pr: github.PR) -> None:
-    body = _pr_body(wt, head, config, pr.body)
+def _update_pr_body(config: Config, pr: github.PR, body: str) -> None:
     if body != (pr.body or "").replace("\r\n", "\n"):
         github.update_body(config.repo, pr.number, body)
 
@@ -574,7 +573,7 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         branch, head = worktree.branch(wt), worktree.head(wt)
         pr = github.pr_for_branch(config.repo, branch, open_only=True)
         if pr is not None and pr.head_sha == head:
-            _update_pr_checks(wt, head, config, pr)
+            _update_pr_body(config, pr, _pr_body(wt, head, config, pr.body))
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
@@ -682,8 +681,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     push.append(branch)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
-        if body != (pr.body or "").replace("\r\n", "\n"):
-            github.update_body(config.repo, pr.number, body)
+        _update_pr_body(config, pr, body)
     else:
         pr = github.create_draft_pr(
             config.repo, branch, config.base_branch, _pr_title(wt, branch), body

@@ -298,7 +298,7 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
     return ""
 
 
-def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
+def _gh(*args: str, timeout: float = 120,
         token: str | None = None, retry_idempotent: bool = False) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
     rest_api = args[:1] == ("api",) and args[:2] != ("api", "graphql")
@@ -307,11 +307,12 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     if (rest_api or diagnostic_api) and not {"--include", "-i"} & set(args):
         request_args = (*args, "--include")
     argv = ("gh", *request_args)
-    cwd = cwd or Path("/")
+    cwd = Path("/")
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
     delays = (None,) if scope and not scope[2] else (*RETRY_DELAYS, None)
+    rate_guidance = None
     for delay in delays:
         selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         try:
@@ -336,13 +337,9 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         tail = "\n".join(part for part in (done.stderr, body if rest_api else done.stdout) if part)
         if done.exit_code and ((rest_api and status == "429")
                                or re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)):
-            guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api
-                        else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
-            if diagnostic_api or patch_error:
-                detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
-                                           message_tail=None if diagnostic_api else tail)
-                raise GhError(("GitHub API request",), detail, token=selected, guidance=guidance)
-            raise GhError(argv, tail, token=selected, guidance=guidance)
+            rate_guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api
+                             else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
+            break
         if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
             break
         _retry_sleep(_read_timeout(delay) if scope else delay)
@@ -351,6 +348,8 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         error_tail = (_api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                         message_tail=None if diagnostic_api else tail)
                       if diagnostic_api or patch_error else tail)
+        if rate_guidance is not None:
+            raise GhError(error_command, error_tail, token=selected, guidance=rate_guidance)
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
@@ -979,7 +978,7 @@ def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
     """(marker id, thread id, finding) for every unresolved blocking thread, any head."""
     return [
         (MARKER_RE.search(node["comments"]["nodes"][0]["body"]).group("id") or node["id"], node["id"], f)
-        for node in _unresolved_threads(repo, number)
+        for node in _review_threads(repo, number)
         if (f := _parse_thread(node, None))
     ]
 
@@ -1078,12 +1077,8 @@ def open_blocking_findings(
     outdated thread is ignored unless its marker names that head.
     """
     return [
-        f for node in _unresolved_threads(repo, number) if (f := _parse_thread(node, current_head))
+        f for node in _review_threads(repo, number) if (f := _parse_thread(node, current_head))
     ]
-
-
-def _unresolved_threads(repo: str, number: int) -> list[dict]:
-    return _review_threads(repo, number)
 
 
 def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -> list[dict]:
