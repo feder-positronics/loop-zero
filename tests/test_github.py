@@ -283,6 +283,24 @@ def test_pr_lookup_fallback_for_deleted_branch(gh: FakeGh, states: list[str], ex
         assert pr.number == (8 if expected == "MERGED" else 9)
 
 
+@pytest.mark.parametrize("message, fallback", [
+    (f"No commit found for SHA: {HEAD}", True),
+    ("Validation failed", False),
+])
+def test_pr_lookup_with_local_head_handles_only_unknown_sha_422(gh: FakeGh, message: str, fallback: bool) -> None:
+    assoc = f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1"
+    gh.fail(assoc, f"gh: {message} (HTTP 422)")
+    gh.respond_pr_list([pr_json()])
+    if fallback:
+        pr = github.pr_for_branch(REPO, "lz/t1", head_sha=HEAD)
+        assert pr is not None and pr.number == 7
+        assert gh.argv(1) == [*pr_list_key().split(), "--include"]
+    else:
+        with pytest.raises(github.GhError, match="Validation failed"):
+            github.pr_for_branch(REPO, "lz/t1", head_sha=HEAD)
+        assert len(gh.calls) == 1
+
+
 @pytest.mark.parametrize("head_change", [
     {"ref": "lz/other"}, {"repo": {"full_name": "fork/widgets"}},
     {"repo": "malformed"},
