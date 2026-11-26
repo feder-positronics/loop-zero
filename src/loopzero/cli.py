@@ -793,21 +793,14 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
                     or not isinstance(publication.get("publisher"), str)
                     or not publication["publisher"]):
                 raise CliError("saved publication identity differs from this repository/PR")
-            confirmed, reviews = _recover_review(wt, config, pr, result,
+            confirmed, _ = _recover_review(wt, config, pr, result,
                                                  publication["publisher"], token)
             if confirmed:
                 return _review_verdict(result)
-        else:
-            reviews = _pr_reviews(config.repo, pr.number)
         # Exact read-back above may confirm an older published note; a new post needs the current form.
         candidates = [family for family in config.reviewers if family not in authors]
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             raise CliError("saved fallback note is not in the published form; run without --repost")
-        allowed, _ = _decide_kind(
-            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
-        )
-        if allowed != kind:
-            raise CliError("saved review kind differs from the remaining review budget")
     else:
         try:
             result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
@@ -833,24 +826,31 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         prefix = _repost_prefix(result)
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
     token = _refresh_publisher_token(token, publisher)
-    try:
-        github.post_review(
-            config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
-            publisher=publisher,
+    with github.pr_lock(config.repo, pr.number):
+        reviews = _pr_reviews(config.repo, pr.number)
+        allowed, _ = _decide_kind(
+            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
-    except (github.GhError, _proc.ProcTimeout) as exc:
-        path = _review_file(wt, head, kind)
+        if allowed != kind:
+            raise CliError("review round changed during publication; run loopzero review again")
         try:
-            if _recover_review(wt, config, pr, result, publisher, token)[0]:
-                return _review_verdict(result)
-        except (github.GhError, CliError, _proc.ProcTimeout) as recovery:
-            raise CliError(f"{exc} | publication read-back blocked: {recovery}; "
-                           f"review saved at {path}; retry `loopzero review --repost` "
-                           "after resolving the read-back failure") from recovery
-        raise CliError(
-            f"{exc} | publication unconfirmed; review saved at {path}; "
-            "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
-        ) from exc
+            github.post_review(
+                config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
+                publisher=publisher,
+            )
+        except (github.GhError, _proc.ProcTimeout) as exc:
+            path = _review_file(wt, head, kind)
+            try:
+                if _recover_review(wt, config, pr, result, publisher, token)[0]:
+                    return _review_verdict(result)
+            except (github.GhError, CliError, _proc.ProcTimeout) as recovery:
+                raise CliError(f"{exc} | publication read-back blocked: {recovery}; "
+                               f"review saved at {path}; retry `loopzero review --repost` "
+                               "after resolving the read-back failure") from recovery
+            raise CliError(
+                f"{exc} | publication unconfirmed; review saved at {path}; "
+                "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
+            ) from exc
     try:
         with _lock_task_state(wt):
             live = github.pr_view(config.repo, pr.number)

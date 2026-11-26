@@ -1326,21 +1326,42 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert f"- primary, claude, {head[:12]}, request_changes" in updated
 
 
-def test_overlapping_review_dispatches_and_publishes_once(wt, gh, fake_bin, capsys, monkeypatch):
-    prepare_review(wt, gh, fake_bin)
+@pytest.mark.parametrize("separate_checkout", [False, True])
+def test_overlapping_review_dispatches_and_publishes_once(
+    wt, repo, gh, fake_bin, capsys, monkeypatch, separate_checkout,
+):
+    head = prepare_review(wt, gh, fake_bin)
+    other = wt
+    if separate_checkout:
+        other = wt.parent / "other"
+        git(repo, "worktree", "add", "--force", str(other), "lz/t1")
+        shutil.copytree(wt / ".loopzero", other / ".loopzero")
+    post = github.post_review
+
+    def publish(*args, **kwargs):
+        post(*args, **kwargs)
+        gh.respond(reviews_key(), [rev(head, "primary")])
+
+    monkeypatch.setattr(github, "post_review", publish)
     review = cli._run_review
     dispatched, overlapping = [], []
 
     def overlap(*args, **kwargs):
         dispatched.append(args[2])
         if len(dispatched) == 1:
-            overlapping.append(run(capsys, "review"))
+            with monkeypatch.context() as nested:
+                nested.chdir(other)
+                overlapping.append(run(capsys, "review"))
         return review(*args, **kwargs)
 
     monkeypatch.setattr(cli, "_run_review", overlap)
-    assert run(capsys, "review")[0] == 0
-    assert len(dispatched) == 1
-    assert overlapping[0][0] == 1 and "review already running" in overlapping[0][2]
+    code, _, err = run(capsys, "review")
+    if separate_checkout:
+        assert code == 1 and "already has a primary review" in err, overlapping
+        assert len(dispatched) == 2 and overlapping[0][0] == 0
+    else:
+        assert code == 0 and len(dispatched) == 1
+        assert overlapping[0][0] == 1 and "review already running" in overlapping[0][2]
     assert sum(call["argv"][1] == post_key().split()[1] and "--method" in call["argv"]
                for call in gh.calls) == 1
 
@@ -1929,7 +1950,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": publisher}}})
     assert run(capsys, "review")[0] == 0
-    assert len(gh.calls) == 8  # Includes the body refresh after review publication.
+    assert len(gh.calls) == 9  # Includes the final round check and the body refresh.
     assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert not any("/files" in c["argv"][1] for c in gh.calls)
     assert posted_review(gh)["event"] == ("APPROVE" if publisher == LOGIN else "COMMENT")
