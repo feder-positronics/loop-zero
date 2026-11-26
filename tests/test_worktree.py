@@ -7,8 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import runners, worktree
-from loopzero.runners import split_diff
+from loopzero import worktree
 from tests.conftest import git
 
 
@@ -227,11 +226,12 @@ def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path)
 
 
 def test_split_diff_summarizes_only_files_git_reports_deleted(git_repo: Path) -> None:
+    from loopzero.runners import render_patch, split_diff  # keeps the shared import block untouched
     base = _commit_files(git_repo, {"gone.py": b"old\n", "padded.py": b"old\n", "carriage.py": b"old\n"})
     _commit_files(git_repo, {"gone.py": None, "padded.py": b"new = 'padded hunk'\n++ /dev/null\n" + b"x\n" * 300,
                              "carriage.py": b"new \rdiff --git a/carriage.py b/carriage.py\rdeleted file mode 100644\r"
                              + b"y\n" * 300})
-    joined = "".join(split_diff(runners.render_patch(worktree.diff_since(git_repo, base)), 1_000))
+    joined = "".join(split_diff(render_patch(worktree.diff_since(git_repo, base)), 1_000))
     assert "+++ /dev/null" in joined and "+new = 'padded hunk'" in joined and "+new \r" in joined
     assert "gone.py: deleted, 1 lines" in joined and joined.count(": deleted, ") == 1
 
