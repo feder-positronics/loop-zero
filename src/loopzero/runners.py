@@ -483,18 +483,29 @@ def _codex_repository_skill_overrides(cwd: Path) -> list[str]:
     Codex lists skills under the checkout's `.agents/skills` and `.codex/skills`, and a
     `$name` mention in the prompt injects one; the PR controls both. Codex matches the
     canonical SKILL.md path; its config offers no wildcard. A skill directory linking
-    outside the checkout, or too many skills to disable, fails the attempt.
+    outside the checkout, an unreadable one, or too many skills fails the attempt.
     """
+    try:
+        paths = _repository_skill_paths(cwd)
+        entries = ",".join(
+            f"{{path={json.dumps(path, ensure_ascii=False)},enabled=false}}" for path in sorted(paths)
+        )
+        size = len(f"skills.config=[{entries}]".encode())
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        raise RunnerBadOutput(f"codex: cannot list repository skills to disable: {exc}") from exc
+    if size > CODEX_SKILL_OVERRIDE_LIMIT:
+        raise RunnerBadOutput(f"codex: {len(paths)} repository skills are too many to disable")
+    return ["-c", f"skills.config=[{entries}]"] if paths else []
+
+
+def _repository_skill_paths(cwd: Path) -> set[str]:
     tree, paths, seen = cwd.resolve(), set(), set()
     pending = [cwd / ".agents" / "skills", cwd / ".codex" / "skills"]
     while pending:
         directory = pending.pop()
-        try:
-            if not directory.is_dir():
-                continue
-            real = directory.resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise RunnerBadOutput(f"codex: unreadable skill directory {directory}") from exc
+        if not directory.is_dir():
+            continue
+        real = directory.resolve(strict=True)
         # Checked before scanning: a link leaving the checkout stays visible to Codex.
         if not real.is_relative_to(tree):
             raise RunnerBadOutput(f"codex: skill directory {directory} links outside the checkout")
@@ -507,19 +518,7 @@ def _codex_repository_skill_overrides(cwd: Path) -> list[str]:
                     pending.append(directory / entry.name)
                 elif entry.name == "SKILL.md":
                     paths.add(os.path.realpath(entry.path))
-    return _codex_disabled_skills(paths)
-
-
-def _codex_disabled_skills(paths: set[str]) -> list[str]:
-    if not paths:
-        return []
-    entries = ",".join(
-        f"{{path={json.dumps(path, ensure_ascii=False)},enabled=false}}" for path in sorted(paths)
-    )
-    override = f"skills.config=[{entries}]"
-    if len(override.encode()) > CODEX_SKILL_OVERRIDE_LIMIT:
-        raise RunnerBadOutput(f"codex: {len(paths)} repository skills are too many to disable")
-    return ["-c", override]
+    return paths
 
 
 def _claude_provenance(envelope: dict, raw: str) -> dict[str, object]:
@@ -1272,6 +1271,7 @@ def _review_codex(
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
         auth_binds = _auth_binds("codex", home)
         prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
+        skill_overrides = _codex_repository_skill_overrides(cwd)  # before Codex runs at all
         cli_version = _observe_codex_version(binary, cwd, config.env_allowlist)
         ignore_user_config = _codex_supports_ignore_user_config(binary, cwd, config.env_allowlist)
         argv = [
@@ -1296,7 +1296,7 @@ def _review_codex(
             # The reviewed head controls AGENTS.md and its skills; keep both out of context.
             "-c",
             "project_doc_max_bytes=0",
-            *_codex_repository_skill_overrides(cwd),
+            *skill_overrides,
             "--output-schema",
             f"{sandbox.SANDBOX_HOME}/schema.json",
             "--output-last-message",

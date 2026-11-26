@@ -1100,9 +1100,16 @@ def test_codex_ignores_repository_instructions_and_skills(repo, fake_bin: Path, 
     )]
 
 
+def _logging_codex(fake_tool, fake_bin: Path) -> Path:
+    """A fake Codex that records every call, version and help probes included."""
+    fake_tool("codex", f'echo "$@" >> "{fake_bin}/codex.calls"\nexit 1\n')
+    return fake_bin / "codex.calls"
+
+
 @pytest.mark.parametrize("link", [".codex/skills/host", ".agents/skills"])
 def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
-    repo, fake_bin: Path, fake_bwrap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link: str,
+    repo, fake_bin: Path, fake_tool, fake_bwrap: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, link: str,
 ) -> None:
     outside = tmp_path / "outside"
     (outside / "skill").mkdir(parents=True)
@@ -1116,22 +1123,31 @@ def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
             scanned.append(Path(path))
         return real_scandir(path, *rest)
     monkeypatch.setattr("loopzero.runners.os.scandir", spy)
-    _fake_review(fake_bin, "codex")
+    calls = _logging_codex(fake_tool, fake_bin)
     with pytest.raises(RunnerBadOutput, match="links outside the checkout"):
         _review("codex", repo)
     assert not any(p.resolve().is_relative_to(outside.resolve()) for p in scanned)
-    assert not (fake_bin / "codex.stdin").exists()
+    assert not calls.exists()
 
 
-def test_codex_too_many_skills_to_disable_fails_before_launch(
-    repo, fake_bin: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("plant", ["too_many", "loop", "undecodable"])
+def test_codex_skill_lists_it_cannot_disable_fail_before_any_codex_call(
+    repo, fake_bin: Path, fake_tool, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, plant: str,
 ) -> None:
-    _plant_skills(repo)
-    monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
-    _fake_review(fake_bin, "codex")
-    with pytest.raises(RunnerBadOutput, match="3 repository skills are too many to disable"):
+    if plant == "too_many":
+        _plant_skills(repo)
+        monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
+    elif plant == "loop":
+        (repo / ".agents/skills").mkdir(parents=True)
+        (repo / ".agents/skills/self").symlink_to("self")
+    else:
+        skill = repo / ".codex/skills" / os.fsdecode(b"\xff")
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: x\ndescription: x\n---\n")
+    calls = _logging_codex(fake_tool, fake_bin)
+    with pytest.raises(RunnerBadOutput, match=r"too many to disable|cannot list repository skills"):
         _review("codex", repo)
-    assert not (fake_bin / "codex.stdin").exists()
+    assert not calls.exists()
 
 
 def test_codex_approve(repo,
