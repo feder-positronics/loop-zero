@@ -1274,7 +1274,7 @@ def behind_reason(pr: PR, reviewed_head: str | None) -> str:
     return (
         f"PR #{pr.number} is behind {pr.base_ref}. Finish any pending delta review, then run "
         f"`git fetch origin {shlex.quote(pr.base_ref)}`, "
-        f"`git merge {shlex.quote(f'origin/{pr.base_ref}')}` and `loopzero check` before retrying readiness."
+        f"`git merge {shlex.quote(f'origin/{pr.base_ref}')}`, `loopzero check` and `loopzero pr` before retrying readiness."
     )
 
 

@@ -1178,7 +1178,7 @@ def test_readiness_rerun_attempt_requires_start_after_old_failure(
 
 
 @pytest.mark.parametrize(("metadata", "reason"), [
-    ({"mergeStateStatus": "BEHIND"}, "PR #7 is behind main. Finish any pending delta review, then run `git fetch origin main`, `git merge origin/main` and `loopzero check` before retrying readiness."),
+    ({"mergeStateStatus": "BEHIND"}, "PR #7 is behind main. Finish any pending delta review, then run `git fetch origin main`, `git merge origin/main`, `loopzero check` and `loopzero pr` before retrying readiness."),
     ({"mergeable": "CONFLICTING"}, "PR #7 has merge conflicts with main"),
     ({"state": "MERGED"}, "PR #7 is MERGED, not open"),
 ], ids=["behind-base", "merge-conflict", "merged-pr"])
