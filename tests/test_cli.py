@@ -725,10 +725,10 @@ def test_check_reuses_checkpoint_after_interruption(wt, gh, capsys, monkeypatch,
             raise KeyboardInterrupt
         return CheckResult(command, 0, 0.0, "")
 
-    def check_git(config, path, *args):
+    def check_git(config, path, *args, **kwargs):
         if interrupt and len(calls) == 2 and args == ("rev-parse", "HEAD"):
             raise KeyboardInterrupt
-        return original_git(config, path, *args)
+        return original_git(config, path, *args, **kwargs)
 
     monkeypatch.setattr(cli, "_context", context)
     monkeypatch.setattr(cli.sandbox, "_dispatch_one", dispatch)
@@ -2611,9 +2611,7 @@ def source_queue_api(gh, monkeypatch):
 
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
-def test_source_wait_reads_once_before_first_interval(
-    wt, gh, capsys, monkeypatch, source_queue_api, command,
-):
+def test_source_wait_reads_once_before_first_interval(wt, gh, capsys, monkeypatch, source_queue_api, command):
     head = commit_mergify_configuration(wt)
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     repo, config_path, vendor_calls = source_queue_api
@@ -2622,15 +2620,16 @@ def test_source_wait_reads_once_before_first_interval(
 
     def after_sleep():
         observations.append(([call["argv"][1] for call in gh.calls], len(vendor_calls)))
-        arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
+        if clock.now >= 6:
+            arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
 
     clock = poll_clock(monkeypatch, jitter=1.0, after_sleep=after_sleep)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, False))
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
     monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: "e" * 40)
 
-    _out, _err = expect_cli(capsys, 0, command, "--wait=90", stderr="")
-    assert clock.now == cli.WAIT_INTERVAL
+    _out, _err = expect_cli(capsys, 0, command, "--wait=8", stderr="")
+    assert clock.now == pytest.approx(7.2)
     [(before_sleep, vendor_count)] = observations
     assert before_sleep.count(f"{repo}/pulls/7") == 1
     assert before_sleep.count(reviews_key().split(" ", 1)[1]) == 1
@@ -2815,8 +2814,8 @@ def test_ready_wait_revalidates_its_ready_transition(
 
     out, _err = expect_cli(capsys, expected, "ready", "--wait=40", stderr="")
     assert "waiting: required check 'checks' is cancelled" in out
-    assert clock.sleeps == ([30.0, 5.0, 5.0] if replacement == "pending" else
-                      [30.0, 5.0] if initial_pending else [30.0])
+    assert clock.sleeps == ([30.0, 9.0, 1.0] if replacement == "pending" else
+                      [30.0, 9.0] if initial_pending else [30.0])
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n" if expected == 1 else
                         f"timed out waiting for required checks on {head[:12]}. Run `loopzero ready --wait` to resume on this head.\n")
@@ -2855,7 +2854,7 @@ def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypat
     code, out, err = run(capsys, "ready", "--wait=40")
 
     assert code == (1 if after in {"head_move", "blocker", "cancelled"} else 3)
-    assert clock.sleeps == ([30.0, 5.0, 5.0] if after == "pending" else [30.0])
+    assert clock.sleeps == ([30.0, 9.0, 1.0] if after == "pending" else [30.0])
     assert "ready: https" not in out
     assert ("PR head changed while waiting" in err) == (after == "head_move")
     if after == "cancelled":
@@ -2889,7 +2888,7 @@ def test_ready_transition_missing_run_gets_observation_grace(
 
     assert (code, err) == (0 if run_appears else 3, "")
     assert marked_at == [210.0]
-    assert clock.sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [30.0, 30.0])
+    assert clock.sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [55.0, 5.0])
     assert out.endswith(f"ready: {URL}\n" if run_appears else
                         f"timed out waiting for required checks on {head[:12]}. Run `loopzero ready --wait` to resume on this head.\n")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
@@ -3359,14 +3358,14 @@ def test_merge_wait_times_out_on_pending_checks_with_exit_three(
     assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
-def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, head, replay_gh):
+@pytest.mark.parametrize("command", ["ready", "merge"])
+def test_source_wait_bounds_slow_check_read(wt, gh, capsys, monkeypatch, head, replay_gh, command):
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     budgets = []
     initial_check_seen = False
     run_gh = github.run
     clock = poll_clock(monkeypatch, start=1000.0)
     monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
-
     def slow_check(argv, *, timeout, **kwargs):
         nonlocal initial_check_seen
         if len(argv) > 2 and argv[2].endswith("/check-runs"):
@@ -3375,12 +3374,13 @@ def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, h
                 clock.now += timeout
                 raise cli._proc.ProcTimeout("gh api timed out", "")
             initial_check_seen = True
+            clock.now += 2.0
         return run_gh(argv, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(github, "run", slow_check)
-    out, _err = expect_cli(capsys, 3, "merge", "--wait=16", stderr="")
-    assert budgets == pytest.approx([8.0])
-    assert f"timed out waiting for required checks on {head[:12]}. Run `loopzero merge --wait` to resume on this head." in out
+    out, _err = expect_cli(capsys, 3, command, "--wait=16", stderr="")
+    assert budgets == pytest.approx([4.0])
+    assert f"timed out waiting for required checks on {head[:12]}. Run `loopzero {command} --wait` to resume on this head." in out
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 

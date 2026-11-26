@@ -61,6 +61,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -163,32 +164,50 @@ def shared(entry: Path) -> bool:
     return entry.name not in CODEX_PRIVATE and not entry.name.endswith(".lock")
 
 
-def sync_codex_home(home: Path) -> None:
-    """Keep an extra CODEX_HOME a mirror of ~/.codex except its own auth.json.
+class AccountLockTimeout(TimeoutError):
+    pass
 
-    Entries the account created itself move into ~/.codex (unless ~/.codex already has one),
-    then every shared ~/.codex entry is linked, including ones created after `add`.
-    """
+
+@contextmanager
+def _locked(name: str):
+    with (STATE / name).open("a") as lock:
+        deadline = time.monotonic() + 60
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(min(0.1, remaining))
+        else:
+            raise AccountLockTimeout(f"{name} is busy; retry when the other command finishes")
+        yield
+
+
+def sync_codex_home(home: Path, *, create: bool = False) -> None:
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # Own lock (check() holds .lock while calling this); Codex may still create entries
-    # concurrently, so a lost race on one entry is skipped, not fatal.
-    with open(STATE / ".codex-sync.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        for entry in home.iterdir():
-            target = CODEX_MAIN / entry.name
-            if shared(entry) and not entry.is_symlink() and not target.exists() \
-                    and not target.is_symlink():
-                try:
-                    os.rename(entry, target)
-                except FileNotFoundError:
-                    pass
-        for src in CODEX_MAIN.iterdir():
-            dst = home / src.name
-            if shared(src) and not dst.exists() and not dst.is_symlink():
-                try:
-                    dst.symlink_to(src)
-                except FileExistsError:
-                    pass
+    with _locked(".codex-sync.lock"):
+        if create:
+            home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _sync_codex_home(home)
+
+
+def _sync_codex_home(home: Path) -> None:
+    """Mirror shared Codex files while holding the home lock."""
+    for entry in home.iterdir():
+        target = CODEX_MAIN / entry.name
+        if shared(entry) and not entry.is_symlink() and not target.exists() \
+                and not target.is_symlink():
+            try:
+                os.rename(entry, target)
+            except FileNotFoundError:
+                pass
+    for src in CODEX_MAIN.iterdir():
+        dst = home / src.name
+        if shared(src) and not dst.exists() and not dst.is_symlink():
+            try:
+                dst.symlink_to(src)
+            except FileExistsError:
+                pass
 
 
 def identity(provider: str, name: str) -> str:
@@ -232,14 +251,14 @@ def managed_name(provider: str, env: dict[str, str]) -> str | None:
     return None
 
 
-def account_env(provider: str, name: str | None = None) -> dict[str, str]:
+def account_env(provider: str, name: str | None = None, *, sync_home: bool = True) -> dict[str, str]:
     name = active(provider) if name is None else name
     if name is None:
         return {}
     if provider == "claude":
         env = {"CLAUDE_CODE_OAUTH_TOKEN": claude_token(name)}
     else:
-        if name != "main":
+        if name != "main" and sync_home:
             sync_codex_home(codex_home(name))
         env = {"CODEX_HOME": str(codex_home(name)),
                "AI_ACCOUNTS_CODEX_HOME": str(codex_home(name))}
@@ -250,7 +269,7 @@ def with_accounts(providers: str, base: dict[str, str],
                   selected: dict[str, str | None] | None = None) -> dict[str, str]:
     """Rebind verified managed inheritance; caller credentials and billing always win."""
     env = dict(base)
-    for provider in providers.split(","):
+    for provider in dict.fromkeys(providers.split(",")):
         if provider not in PROVIDERS:
             continue
         credential = "CLAUDE_CODE_OAUTH_TOKEN" if provider == "claude" else "CODEX_HOME"
@@ -718,8 +737,7 @@ def snapshot_fields(result: dict, instance: str, checked_at: float) -> None:
 
 def check(quiet: bool = False) -> dict:
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(STATE / ".lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with _locked(".lock"):
         try:
             previous = json.loads((STATE / "status.json").read_text())
         except (OSError, ValueError):
@@ -727,11 +745,14 @@ def check(quiet: bool = False) -> dict:
         status = {"checked_at": now(), "providers": {},
                   "exhausted": previous.get("exhausted", {}),
                   "selections": previous.get("selections", {})}
+        codex_names = accounts("codex")
+        homes = [codex_home(name) for name in codex_names if name != "main"]
+        if homes:
+            with _locked(".codex-sync.lock"):
+                for home in homes:
+                    _sync_codex_home(home)
         for provider in PROVIDERS:
-            names = accounts(provider)
-            if provider == "codex":
-                for n in names[1:] if names[:1] == ["main"] else names:
-                    sync_codex_home(codex_home(n))
+            names = codex_names if provider == "codex" else accounts(provider)
             probe = check_claude if provider == "claude" else check_codex
             results = {n: probe(n) for n in names}
             if provider == "claude":
@@ -839,8 +860,7 @@ def cmd_add(provider: str, name: str) -> int:
         print(f"stored claude account {name}; run `ai-accounts check`")
         return 0
     home = STATE / "codex/homes" / name
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    sync_codex_home(home)
+    sync_codex_home(home, create=True)
     print(f"created {home} (shares ~/.codex except its own auth.json)")
     print(f"now log in with the other ChatGPT account:  CODEX_HOME={home} codex login")
     return 0
@@ -853,8 +873,7 @@ def cmd_exec(providers: str, argv: list[str]) -> int:
     # Caller-owned credentials and billing routes skip managed-account admission.
     if "claude" in providers.split(",") and not caller_credentials("claude", base):
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with open(STATE / ".lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with _locked(".lock"):
             name = active("claude")
             # The monitor switches only at the 95% margin; prefer any account under the reserve.
             if claude_exec_refusal(name) is not None:
@@ -900,8 +919,8 @@ def launch(provider: str, model: str, env: dict[str, str]) -> dict:
         return result("unsupported")
     if caller_credentials(provider, env) or not STATE.is_dir() or not accounts(provider):
         return result("unmanaged")
-    with open(STATE / ".lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    home_lock = _locked(".codex-sync.lock") if provider == "codex" else nullcontext()
+    with _locked(".lock"), home_lock:
         try:
             status = json.loads((STATE / "status.json").read_text())
         except (OSError, ValueError):
@@ -942,8 +961,7 @@ def cmd_pinned_exec(provider: str, revision: str, argv: list[str]) -> int:
     env = dict(os.environ)
     name = None
     if provider in PROVIDERS and STATE.is_dir() and not caller_credentials(provider, env):
-        with open(STATE / ".lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with _locked(".lock"):
             for candidate in accounts(provider):
                 try:
                     if identity(provider, candidate) == revision:
@@ -951,6 +969,8 @@ def cmd_pinned_exec(provider: str, revision: str, argv: list[str]) -> int:
                         if env.get(marker(provider)) == revision:
                             name = candidate
                         break
+                except AccountLockTimeout:
+                    raise
                 except (OSError, ValueError):
                     continue
     if name is None or not argv:
@@ -963,7 +983,7 @@ def cmd_pinned_exec(provider: str, revision: str, argv: list[str]) -> int:
     return 127
 
 
-def exhausted(provider: str, failed_identity: str, model: str) -> dict:
+def exhausted(provider: str, failed_identity: str, model: str, *, retry_env: dict[str, str] | None = None) -> dict:
     """Compare-and-select for one exact provider/model, serialized with monitor checks.
 
     The caller sends only the opaque managed revision from its effective environment.
@@ -979,8 +999,14 @@ def exhausted(provider: str, failed_identity: str, model: str) -> dict:
         return result("unsupported")
     if not STATE.is_dir():
         return result("unmanaged")
-    with open(STATE / ".lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    def prepare(name: str) -> None:
+        if retry_env is not None:
+            if provider == "codex" and name != "main":
+                _sync_codex_home(codex_home(name))
+            retry_env.update(account_env(provider, name, sync_home=False))
+
+    home_lock = _locked(".codex-sync.lock") if provider == "codex" else nullcontext()
+    with _locked(".lock"), home_lock:
         revisions = {}
         for name in accounts(provider):
             try:
@@ -1018,6 +1044,7 @@ def exhausted(provider: str, failed_identity: str, model: str) -> dict:
                     known = False
             if usable or not known:
                 if usable:
+                    prepare(current)
                     selected[selection_key] = {"identity": current_id, "until": now() + 300}
                 write_private(STATE / "status.json", json.dumps(status) + "\n")
                 return result("already-switched" if usable else "unknown", current)
@@ -1037,6 +1064,7 @@ def exhausted(provider: str, failed_identity: str, model: str) -> dict:
                 unknown = True
         if candidates:
             chosen = min(candidates)[1]
+            prepare(chosen)
             set_active(provider, chosen)
             selected[selection_key] = {"identity": identity(provider, chosen), "until": now() + 300}
             outcome = result("already-switched" if chosen == current else "switched", chosen)
@@ -1050,8 +1078,8 @@ def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None,
             base: dict[str, str] | None = None, model: str | None = None,
             retry_safe: bool = False) -> int:
     """Preserve stdout streaming; replay only one identified managed provider/model."""
+    env = with_accounts(providers, dict(os.environ) if base is None else base)
     for attempt in (1, 2):
-        env = with_accounts(providers, dict(os.environ) if base is None else base)
         proc = subprocess.Popen(argv, env=env, stderr=subprocess.PIPE)
         seen: list[bytes] = []
 
@@ -1073,10 +1101,11 @@ def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None,
                 or not USAGE_LIMIT_RE.search(text) or managed_name(providers, env) is None):
             return code
         before = env[marker(providers)]
-        outcome = exhausted(providers, before, model)
-        after = with_accounts(providers, env)
-        if not retry_safe or not outcome["changed"] or after.get(marker(providers)) == before:
+        after = {}
+        outcome = exhausted(providers, before, model, retry_env=after if retry_safe else None)
+        if not outcome["changed"] or not after or after.get(marker(providers)) == before:
             return code
+        env.update(after)
         print("ai-accounts: managed account changed; retrying once", file=sys.stderr)
     return code
 
@@ -1159,8 +1188,7 @@ def main(argv: list[str]) -> int:
         if argv[2] not in accounts(argv[1]):
             sys.exit(f"ai-accounts: unknown {argv[1]} account {argv[2]!r}")
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with open(STATE / ".lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with _locked(".lock"):
             set_active(argv[1], argv[2])
         log(f"{argv[1]}: manual -> {argv[2]}")
         print(f"{argv[1]} active: {argv[2]}")
@@ -1202,4 +1230,9 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     shim = Path(sys.argv[0]).name
-    sys.exit(cmd_shim(shim, sys.argv[1:]) if shim in SHIMS else main(sys.argv[1:]))
+    try:
+        code = cmd_shim(shim, sys.argv[1:]) if shim in SHIMS else main(sys.argv[1:])
+    except AccountLockTimeout as exc:
+        print(f"ai-accounts: {exc}", file=sys.stderr)
+        code = 1
+    sys.exit(code)
