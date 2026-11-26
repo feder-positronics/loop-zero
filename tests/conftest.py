@@ -72,3 +72,11 @@ def fake_tool(fake_bin: Path) -> Callable[[str, str], Path]:
         return path
 
     return make
+
+
+@pytest.fixture
+def app_token_helper(fake_tool, monkeypatch):
+    def install(body="echo synthetic-app-token\n"):
+        monkeypatch.setattr(github, "APP_TOKEN_HELPER", fake_tool("app-token", body))
+
+    return install
