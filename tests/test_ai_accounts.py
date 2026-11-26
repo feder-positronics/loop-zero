@@ -183,11 +183,25 @@ def test_codex_select_reserves_current_at_85_without_churn(helper):
 def test_codex_refresh_keeps_managed_binding_and_exhaustion_selection(helper, monkeypatch):
     auth = helper.CODEX_MAIN / 'auth.json'
     principal = {'account_id': 'account-a', 'id_token': 'e30.eyJzdWIiOiJ1c2VyLWEiLCJpc3MiOiJpc3N1ZXIifQ.x'}
-    helper.write_private(auth, json.dumps({'tokens': {**principal, 'access_token': 'old'}}))
+    helper.write_private(auth, json.dumps({'tokens': {**principal, 'access_token': 'old' * 100, 'refresh_token': 'old-refresh'}}))
     helper.write_private(helper.STATE / 'codex/homes/b/auth.json', json.dumps({'tokens': {'account_id': 'account-b', 'access_token': 'other'}}))
     helper.set_active('codex', 'main')
     inherited = helper.with_accounts('codex', {})
-    helper.write_private(auth, json.dumps({'tokens': {**principal, 'access_token': 'fresh', 'refresh_token': 'rotated'}}))
+    refreshed = {"access_token": "fresh", "refresh_token": "rotated"}
+    monkeypatch.setattr(helper, "_http", lambda _: (200, {}, json.dumps(refreshed)))
+    write = helper.os.pwrite
+
+    def interrupt(fd, data, offset):
+        write(fd, data, offset)
+        raise KeyboardInterrupt
+
+    with auth.open("rb") as pinned, monkeypatch.context() as patch:
+        patch.setattr(helper.os, "pwrite", interrupt)
+        patch.setattr(helper, "jwt_claims", lambda _: {"client_id": "test"})
+        with pytest.raises(KeyboardInterrupt):
+            helper.refresh_codex(auth, json.loads(auth.read_text()))
+        assert json.load(pinned)["tokens"] == {**principal, **refreshed}
+        assert auth.stat().st_ino == helper.os.fstat(pinned.fileno()).st_ino
     revision = inherited['AI_ACCOUNTS_CODEX_IDENTITY']
     assert helper.managed_name('codex', inherited) == 'main'
     monkeypatch.setattr(helper, 'check_codex', lambda name: {'tier': 2, 'util': 0, 'models': {'m': True}})

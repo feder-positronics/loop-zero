@@ -607,10 +607,13 @@ def refresh_codex(auth_file: Path, auth: dict) -> tuple[str, dict]:
     fresh = json.loads(raw)
     tokens.update({k: fresh[k] for k in ("id_token", "access_token", "refresh_token") if fresh.get(k)})
     auth["last_refresh"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-    # Rewrite in place like Codex: reviewers bind-mount this inode, so os.replace would detach them.
-    with open(auth_file, "r+", encoding="utf-8") as fh:
-        fh.write(json.dumps(auth, indent=2) + "\n")
-        fh.truncate()
+    # Reviewers bind-mount this inode. Pad shorter JSON with whitespace so
+    # the completed write is readable without a second, interruptible truncate.
+    payload = (json.dumps(auth, indent=2) + "\n").encode("utf-8")
+    with auth_file.open("r+b", buffering=0) as fh:
+        payload = payload.ljust(os.fstat(fh.fileno()).st_size, b" ")
+        if os.pwrite(fh.fileno(), payload, 0) != len(payload):
+            raise OSError("incomplete Codex auth write")
     log(f"codex: refreshed {auth_file}")
     return tokens["access_token"], tokens
 
