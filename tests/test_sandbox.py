@@ -771,6 +771,23 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
+@pytest.mark.parametrize("paths", [("ipnut.txt",), ()])
+def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, paths):
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    command = 'test "$(cat README.md)" = hello'
+    config = make_config(checks=(command,), inputs={command: paths})
+    first = sandbox.run_checks(config, git_repo)
+    assert first.ok
+    _save_report(git_repo, first)
+    (git_repo / "README.md").write_text("fail\n")
+    git(git_repo, "commit", "-qam", "change actual input")
+
+    result = sandbox.run_checks(config, git_repo, status=(messages := []).append)
+    assert result.results[0].exit_code == 1
+    assert any("workflow.toml: checks.inputs" in message and repr(paths) in message
+               for message in messages)
+
+
 def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base):
     (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
     path = git_repo / "README.md"
