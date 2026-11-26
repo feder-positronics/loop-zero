@@ -9,17 +9,21 @@ the Mergify Candidate Policy workflow pin in that directory as pinned_candidate.
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import subprocess
 from copy import deepcopy
+from functools import partial
 from importlib import import_module
 from itertools import cycle
 from os import environ
+from shutil import copytree
 
 import pytest
 
-from loopzero import candidate
+from loopzero import candidate, github
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
 from loopzero.types import LoopZeroError
+from tests.conftest import commit_file, git as isolated_git
 
 
 @pytest.fixture(autouse=True)
@@ -102,21 +106,24 @@ def payloads(candidate_event: dict) -> dict[str, object]:
 
 
 def run_attestation(
-    *,
     candidate_event: dict | None = None,
+    *,
     status_reads: list[dict] | None = None,
     github_payloads: dict[str, object] | None = None,
+    github_get=None,
+    mergify_status=None,
     source_policy=lambda _number, _source: None,
+    run=attest_candidate,
 ):
     candidate_event = candidate_event or event()
     reads, values = (
         cycle(status_reads or [status(), status()]),
         github_payloads or payloads(candidate_event),
     )
-    return attest_candidate(
+    return run(
         candidate_event,
-        github_get=lambda path: deepcopy(values[path]),
-        mergify_status=lambda *_: deepcopy(next(reads)),
+        github_get=github_get or (lambda path: deepcopy(values[path])),
+        mergify_status=mergify_status or (lambda *_: deepcopy(next(reads))),
         source_policy=source_policy,
     )
 
@@ -184,10 +191,8 @@ def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str)
 
     reads = iter([status(), status()])
     with pytest.raises(CandidateError, match=diagnostic):
-        attest_candidate(
-            candidate_event, github_get=github_get,
-            mergify_status=lambda *_: deepcopy(next(reads)), source_policy=lambda *_: None,
-        )
+        run_attestation(candidate_event, github_get=github_get,
+                        mergify_status=lambda *_: deepcopy(next(reads)))
 
 
 def test_same_head_still_obeys_source_policy() -> None:
@@ -205,38 +210,36 @@ def test_same_head_still_obeys_source_policy() -> None:
         run_attestation(github_payloads=values, source_policy=block)
 
 
+@pytest.fixture(scope="session")
+def candidate_seed(tmp_path_factory):
+    remote = tmp_path_factory.mktemp("candidate-seed")
+    git = partial(isolated_git, remote)
+    git("init", "-b", "main")
+    commit_file(remote, "base", "base\n", "base")
+    for branch, content in (("parent", "H1\n"), ("source", "reviewed\n")):
+        git("checkout", "-b", branch, "main")
+        commit_file(remote, branch, content, branch)
+    git("checkout", "-b", "candidate", "main")
+    git("merge", "--no-ff", "parent", "-m", "parent integration")
+    git("merge", "--no-ff", "source", "-m", "source integration")
+    git("checkout", "main")
+    git("merge", "--squash", "parent")
+    git("commit", "-m", "squashed parent")
+    return remote, *git("rev-parse", "source^", "parent", "source", "candidate", "main").split()
+
+
 @pytest.fixture
-def tree_candidate(tmp_path, monkeypatch):
-    remote = tmp_path / "remote"
-    remote.mkdir()
+def tree_candidate(candidate_seed, tmp_path, monkeypatch):
+    seed, base, parent, source, candidate_sha, main = candidate_seed
+    remote = copytree(seed, tmp_path / "remote")
 
     def git(*args):
-        return subprocess.run(["git", *args], cwd=remote, check=True, capture_output=True,
-                              text=True).stdout.strip()
-
-    git("init", "-b", "main")
-    git("config", "user.name", "Test")
-    git("config", "user.email", "test@example.org")
+        return isolated_git(remote, *args).strip()
 
     def commit(name, content):
-        (remote / name).write_text(content)
-        git("add", ".")
-        git("commit", "-m", name)
+        commit_file(remote, name, content, name)
         return git("rev-parse", "HEAD")
 
-    base = commit("base", "base\n")
-    git("checkout", "-b", "parent")
-    parent = commit("parent", "H1\n")
-    git("checkout", "-b", "source", base)
-    source = commit("source", "reviewed\n")
-    git("checkout", "-b", "candidate", base)
-    git("merge", "--no-ff", parent, "-m", "parent integration")
-    git("merge", "--no-ff", source, "-m", "source integration")
-    candidate_sha = git("rev-parse", "HEAD")
-    git("checkout", "main")
-    git("merge", "--squash", parent)
-    git("commit", "-m", "squashed parent")
-    main = git("rev-parse", "HEAD")
     popen = subprocess.Popen
 
     def isolated_fetch(argv, **kwargs):
@@ -281,13 +284,12 @@ def tree_candidate(tmp_path, monkeypatch):
         reads = cycle([main_head, main_after or main_head])
 
         def get(path):
-            if path.endswith("/git/ref/heads/main"):
-                sha = next(reads)
-                return {"object": {"sha": sha}} if sha else {}
-            return deepcopy(values[path])
+            if not path.endswith("/git/ref/heads/main"):
+                return deepcopy(values[path])
+            return {"object": {"sha": sha}} if (sha := next(reads)) else {}
 
-        return run(candidate_event, github_get=get, mergify_status=lambda *_: deepcopy(queue),
-                   source_policy=policy)
+        return run_attestation(candidate_event, github_get=get, status_reads=[queue],
+                               source_policy=policy, run=run)
 
     return attest, git, commit, base, parent, source, candidate_sha
 
@@ -520,7 +522,8 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(candidate, "_verify_tree", verify_tree)
-    assert attest_candidate(candidate_event, github_get=get, mergify_status=lineage, source_policy=policy) == [{"number": 102, "head_sha": source}]
+    assert run_attestation(candidate_event, github_get=get, mergify_status=lineage,
+                           source_policy=policy) == [{"number": 102, "head_sha": source}]
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
     assert candidate_reads == (4 if timing == "metadata" else 3)
     assert verified == [(main, head, [source])] and sleeps == [2]
@@ -545,12 +548,7 @@ def test_metadata_retry_evaluates_fresh_policy(field, value):
                 raise CandidateError("fresh policy rejects drift")
 
     with pytest.raises(CandidateError, match="fresh policy rejects drift"):
-        attest_candidate(
-            event(),
-            github_get=get,
-            mergify_status=lambda *_: status(),
-            source_policy=policy,
-        )
+        run_attestation(github_get=get, source_policy=policy)
     assert snapshots == [
         ("source 101", False),
         (value if field == "body" else "source 101", field == "draft"),
@@ -598,12 +596,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     with pytest.raises((CandidateError, LoopZeroError)) as caught:
-        attest_candidate(
-            event(),
-            github_get=get,
-            mergify_status=lambda *_: deepcopy(live),
-            source_policy=policy,
-        )
+        run_attestation(github_get=get, status_reads=[live], source_policy=policy)
     assert not isinstance(caught.value, CandidateRaceError) and len(attempts) == 1 and sleeps == []
     if failure == "policy":
         assert caught.value is expected and len(source_reads) == 2
@@ -632,12 +625,7 @@ def test_persistent_race_preserves_last_error_and_bounds_retry(
     monkeypatch.setattr(candidate, "_retry_clock", lambda: clock[0])
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     with pytest.raises(CandidateRaceError, match="membership changed") as caught:
-        attest_candidate(
-            event(),
-            github_get=lambda _: None,
-            mergify_status=lambda *_: None,
-            source_policy=lambda *_: None,
-        )
+        run_attestation(github_get=lambda _: None, status_reads=[None])
     assert len(attempts) == attempt_count and caught.value is attempts[-1]
     assert sum(sleeps) <= 4
 
@@ -673,7 +661,8 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
     monkeypatch.setattr(candidate, "_retry_clock", lambda: clock[0])
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     def run():
-        return attest_candidate(event(), github_get=lambda p: deepcopy(values[p]), mergify_status=read_status, source_policy=lambda n, _: seen.append(n))
+        return run_attestation(github_payloads=values, mergify_status=read_status,
+                               source_policy=lambda n, _: seen.append(n))
     if stop in {"settled", "changed"}:
         assert run() == [{"number": 101, "head_sha": "1" * 40}, {"number": 102, "head_sha": "2" * 40}]
         assert seen == [101, 102] * (2 if stop == "changed" and second else 1)
@@ -684,18 +673,16 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
         assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
 
 
-@pytest.mark.parametrize("exceeds_bound", [False, True])
-def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_bound):
-    waits = []
-    killed = []
-
+@pytest.mark.parametrize("outcome", ["normal", "bound", "fetch"])
+def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome):
+    waits, killed = [], []
     class Child:
         pid = 123
-        returncode = 0
-
         def __init__(self, argv, cwd, **kwargs):
-            self.root = cwd
-            self.running = "test-command" in argv
+            self.root, self.running = cwd, "test-command" in argv
+            self.returncode = 128 if outcome == "fetch" and "fetch" in argv else 0
+            if self.returncode:
+                kwargs["stderr"].write(b"fatal: The requested URL returned error: 503")
 
         def poll(self):
             return None if self.running else self.returncode
@@ -703,7 +690,7 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_
         def wait(self, timeout=None):
             if self.running:
                 waits.append(timeout)
-                if timeout is not None and exceeds_bound:
+                if timeout is not None and outcome == "bound":
                     (self.root / "oversized").write_bytes(b"x" * 65)
                     raise subprocess.TimeoutExpired("test-command", timeout)
                 self.running = False
@@ -715,12 +702,13 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_
     monkeypatch.setattr(candidate.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     monkeypatch.setattr(candidate.time, "sleep", lambda _: pytest.fail("used a fixed delay"))
 
-    with candidate.fetched_git("owner/repo", []) as git:
-        if exceeds_bound:
+    error = pytest.raises(github.GhUnavailable, match="temporarily unavailable") if outcome == "fetch" else nullcontext()
+    with error, candidate.fetched_git("owner/repo", []) as git:
+        if outcome == "bound":
             with pytest.raises(CandidateError, match="Git object/size bound exceeded"):
                 git("test-command")
         else:
             assert git("test-command") == ""
 
-    assert waits == ([0.02, None] if exceeds_bound else [0.02])
-    assert killed == ([(123, candidate.signal.SIGKILL)] if exceeds_bound else [])
+    assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": []}[outcome]
+    assert killed == ([(123, candidate.signal.SIGKILL)] if outcome == "bound" else [])

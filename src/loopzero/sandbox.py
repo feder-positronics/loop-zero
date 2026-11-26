@@ -80,7 +80,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
                checkpoint: Callable[[CheckReport], None] | None = None,
-               _resolved: bool = False) -> CheckReport:
+               workflow: str | Path = "workflow.toml", _resolved: bool = False) -> CheckReport:
     """Run checks, stopping at the first failure; status emits only stage metadata.
 
     progress receives each command before launch, as before. Optional status receives
@@ -122,14 +122,15 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 (worktree / entry).mkdir(parents=True, exist_ok=True)
             prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
             probe(config, worktree, prefix)
-            _preflight_alternates(config, worktree, prefix)
+            _preflight_alternates(config, worktree, prefix, common_dir)
         missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
         for index, command in enumerate(commands):
             if progress:
                 progress(command)
-            key = _input_key(config, worktree, command, base) if not dirty else None
+            key = _input_key(config, worktree, command, "" if dirty else base,
+                             status=status, workflow=workflow)
             old = previous.get(command)
             if key and old and old.input_key == key:
                 result = old
@@ -168,13 +169,16 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
 
+INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
+
+
 def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
                         report: CheckReport, previous: dict[str, CheckResult],
                         remaining: tuple[str, ...]) -> None:
     stage = report.results[-1]
     if checkpoint is not None and stage.input_key and stage.exit_code == 0:
         # Even the last stage leaves a nonpassing receipt until final validation.
-        incomplete = CheckResult("<checks incomplete>", 1, 0.0, "")
+        incomplete = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
         unvisited = tuple(previous[command] for command in remaining if command in previous)
         checkpoint(replace(report, results=(*report.results, *unvisited, incomplete)))
 
@@ -249,23 +253,50 @@ def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = N
     settings = _execution_settings(config, base)
     if config.check_runner and settings["runner_executable"] is None:
         return None
+    if not config.check_runner and "HEAVY_SLOT_GRANTED_CORES" not in config.env:
+        # The inherited local worker limit is transient. Stage reuse still binds it.
+        settings["environment"].pop("HEAVY_SLOT_GRANTED_CORES", None)
     payload = [settings, config.inputs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _input_key(config: Config, worktree: Path, command: str, base: str) -> str | None:
-    if not base or (command not in config.inputs and "." not in config.inputs.get("*", ())):
-        return None
-    paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
+def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str | None:
     # Empty pathspecs must not accidentally mean the whole tree.
+    if not paths:
+        return ""
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     try:
-        blobs = _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
-                     "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
+        return _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
+                    "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths)
     except OSError as exc:
         if exc.errno == errno.E2BIG:
             return None
         raise
+
+
+def _input_key(config: Config, worktree: Path, command: str, base: str, *,
+               status: Callable[[str], None] | None = None,
+               workflow: str | Path = "workflow.toml") -> str | None:
+    if command not in config.inputs and "." not in config.inputs.get("*", ()):
+        return None
+    if not base and status is None:
+        return None
+    entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
+    try:
+        blobs = _input_blobs(config, worktree, tuple(path for paths in entries.values() for path in paths))
+    except (SandboxUnavailable, _proc.ProcTimeout, OSError, ValueError):
+        if not base:
+            return None
+        raise
+    if blobs == "" and status:
+        status(f"{workflow}: checks.inputs for {command!r} matches no files in HEAD. "
+               f"Correct these entries: {entries!r}. Running the check fresh.")
+    if not blobs or not base:
+        return None
+    return _hash_inputs(config, worktree, command, base, blobs)
+
+
+def _hash_inputs(config: Config, worktree: Path, command: str, base: str, blobs: str) -> str | None:
     contents = []
     root = worktree.resolve()
     try:
@@ -313,8 +344,16 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
             reporter.join()
 
 
-def _preflight_alternates(config: Config, worktree: Path, prefix: list[str]) -> None:
-    # Git resolves relative/transitive paths; probe actual mounts without broadening visibility.
+def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], common_dir: Path) -> None:
+    env = _proc.build_env(config.env_allowlist)
+    if not {"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"} & env.keys():
+        try:
+            (common_dir / "objects/info/alternates").lstat()
+        except FileNotFoundError:
+            return
+        except OSError:
+            pass
+    # Git resolves relative and transitive paths; probe actual mounts without broadening visibility.
     output = _git(config, worktree, "-c", "core.quotepath=true", "count-objects", "-v")
     for alternate in re.findall(r"^alternate: (.*)$", output, re.MULTILINE):
         if alternate.startswith('"'):
@@ -410,6 +449,7 @@ def _run_one(
             env_allowlist=config.env_allowlist,
             timeout=timeout,
             merge_output=True,
+            tail_chars=CHECK_TAIL_BYTES,
         )
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,
@@ -464,17 +504,15 @@ def bwrap_argv(
     instead of cleared, so secrets never appear as ``--setenv`` arguments.
     ``writable_binds`` overlays specific paths inside the otherwise private HOME.
     """
-    argv = [
-        "bwrap", "--die-with-parent", "--new-session", "--unshare-all",
-        *(["--share-net"] if config.network else []),
-        "--cap-drop", "ALL",
-    ]
+    argv = ["bwrap", "--die-with-parent", "--new-session", "--unshare-all"]
+    if config.network:
+        argv.append("--share-net")
+    argv += ["--cap-drop", "ALL"]
     for path in SYSTEM_RO:
         if Path(path).exists():
             argv += ["--ro-bind", path, path]
     argv += ["--dev", "/dev", "--proc", "/proc"]
-    for path in ("/tmp", "/run", "/var/run"):
-        argv += ["--tmpfs", path]
+    argv += ["--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/var/run"]
     # Restore resolv.conf (or its parent for masked symlinks) over the private tmpfs.
     if config.network:
         resolv_conf = Path("/etc/resolv.conf")
@@ -485,12 +523,10 @@ def bwrap_argv(
         else:
             source, destination = resolved, resolv_conf
         argv += ["--ro-bind", str(source), str(destination)]
-    for path in config.sandbox_ro:
-        argv += ["--ro-bind-try", path, path]
-    for path in config.writable:
-        argv += ["--bind-try", path, path]
-    argv += ["--bind", str(home), SANDBOX_HOME]
-    for source, destination in writable_binds:
+    for flag, paths in (("--ro-bind-try", config.sandbox_ro), ("--bind-try", config.writable)):
+        for path in paths:
+            argv += [flag, path, path]
+    for source, destination in ((home, SANDBOX_HOME), *writable_binds):
         argv += ["--bind", str(source), str(destination)]
     # Read-only tree/Git binds follow tmpfs so paths under /tmp stay visible.
     binds = [worktree]

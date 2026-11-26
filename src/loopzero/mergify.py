@@ -73,7 +73,11 @@ _retry_sleep = time.sleep
 
 
 def _open(request: urllib.request.Request):
-    return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    try:
+        return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    except ValueError:
+        # The HTTP client can include the Authorization value in a header error.
+        raise MergifyError("Mergify API request has an invalid URL or header") from None
 
 
 def api_get(repo: str, suffix: str) -> object | None:
@@ -300,6 +304,8 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
         ("**The failure is in this pull request.** It failed tested alone on top of ", "isolated"),
         ("**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.", "stacked"),
     ) if any(line.startswith(prefix) for line in body.splitlines())), "")
+    if isinstance(reason, dict) and reason.get("code") == "CONFLICT_WITH_BASE_BRANCH":
+        attribution = "base_conflict"
     return Departure(f"{url}{latest['id']}", names, attribution)
 
 
