@@ -55,6 +55,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -286,12 +287,34 @@ def with_accounts(providers: str, base: dict[str, str],
 # ----------------------------------------------------------------- probes
 
 
-def _http(req: urllib.request.Request, timeout: int = 30) -> tuple[int, dict[str, str], bytes]:
+class _RequestDeadline(Exception):
+    """Skip transport handlers that treat OSError as retryable."""
+
+
+def _http(req: urllib.request.Request, timeout: float = 30) -> tuple[int, dict[str, str], bytes]:
+    """Read the response within the account command main thread deadline."""
+    def expire(_signum, _frame):
+        raise _RequestDeadline()
+
+    if timeout <= 0 or any(signal.getitimer(signal.ITIMER_REAL)):
+        raise TimeoutError("provider HTTP request cannot start without an available time budget")
+    handler = signal.signal(signal.SIGALRM, expire)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, {k.lower(): v for k, v in exc.headers.items()}, exc.read()
+        try:
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
+            except urllib.error.HTTPError as exc:
+                with exc:
+                    return exc.code, {k.lower(): v for k, v in exc.headers.items()}, exc.read()
+        finally:
+            try:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            finally:
+                signal.signal(signal.SIGALRM, handler)
+    except _RequestDeadline:
+        raise TimeoutError("provider HTTP request timed out") from None
 
 
 def reset_timestamp(value) -> float | None:
