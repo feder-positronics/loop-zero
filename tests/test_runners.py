@@ -1104,6 +1104,85 @@ def test_bwrap_unavailable_fails_closed(fake_bin, tmp_path, monkeypatch, fake_to
 # ----------------------------------------------------------------- codex
 
 
+def _plant_skills(repo: Path) -> None:
+    for skill in (repo / ".agents/skills/a/b", repo / ".agents/skills/e\x7f", repo / ".codex/skills/c", repo / "docs/d"):
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: planted\ndescription: planted\n---\n")
+    (repo / ".agents/skills/linked").symlink_to(repo / "docs/d")
+    (repo / ".agents/skills/loop").symlink_to(repo / ".agents/skills")
+
+
+def test_codex_ignores_repository_instructions_and_skills(repo, fake_bin: Path, fake_bwrap: Path) -> None:
+    _plant_skills(repo)
+    (repo / "AGENTS.md").write_text("planted")
+    _fake_review(fake_bin, "codex")
+    _review("codex", repo)
+    argv = _argv(fake_bin, "codex")
+    assert "project_doc_max_bytes=0" in argv
+    (override,) = [a for a in argv if a.startswith("skills.config=")]
+    disabled = tomllib.loads(override)["skills"]["config"]
+    real = repo.resolve()
+    assert disabled == [{"path": str(path), "enabled": False} for path in (
+        real / ".agents/skills/a/b/SKILL.md", real / ".agents/skills/e\x7f/SKILL.md", real / ".codex/skills/c/SKILL.md",
+        real / "docs/d/SKILL.md",
+    )]
+
+
+def _logging_codex(fake_tool, fake_bin: Path) -> Path:
+    """A fake Codex that records every call, version and help probes included."""
+    fake_tool("codex", f'echo "$@" >> "{fake_bin}/codex.calls"\nexit 1\n')
+    return fake_bin / "codex.calls"
+
+
+@pytest.mark.parametrize("link", [".codex/skills/host", ".agents/skills"])
+def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
+    repo, fake_bin: Path, fake_tool, fake_bwrap: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, link: str,
+) -> None:
+    outside = tmp_path / "outside"
+    (outside / "skill").mkdir(parents=True)
+    (outside / "skill/SKILL.md").write_text("---\nname: host\ndescription: host\n---\n")
+    (repo / link).parent.mkdir(parents=True, exist_ok=True)
+    (repo / link).symlink_to(outside)
+    scanned = []
+    real_scandir = os.scandir
+    def spy(path=".", *rest):
+        if not isinstance(path, int):
+            scanned.append(Path(path))
+        return real_scandir(path, *rest)
+    monkeypatch.setattr("loopzero.runners.os.scandir", spy)
+    calls = _logging_codex(fake_tool, fake_bin)
+    with pytest.raises(RunnerBadOutput, match="links outside the checkout"):
+        _review("codex", repo)
+    assert not any(p.resolve().is_relative_to(outside.resolve()) for p in scanned)
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize("plant", [
+    "too_many", "loop", "undecodable", "dangling", "root_loop:.agents/skills", "root_loop:.codex/skills"])
+def test_codex_skill_lists_it_cannot_disable_fail_before_any_codex_call(
+    repo, fake_bin: Path, fake_tool, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, plant: str,
+) -> None:
+    if plant == "too_many":
+        _plant_skills(repo)
+        monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
+    elif plant in ("loop", "dangling"):
+        (repo / ".agents/skills").mkdir(parents=True)
+        (repo / ".agents/skills/x").symlink_to("x" if plant == "loop" else "/nonexistent/skills")
+    elif plant.startswith("root_loop:"):
+        root = repo / plant.partition(":")[2]
+        root.parent.mkdir(parents=True)
+        root.symlink_to(root.name)
+    else:
+        skill = repo / ".codex/skills" / os.fsdecode(b"\xff")
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: x\ndescription: x\n---\n")
+    calls = _logging_codex(fake_tool, fake_bin)
+    with pytest.raises(RunnerBadOutput, match=r"too many to disable|cannot list repository skills"):
+        _review("codex", repo)
+    assert not calls.exists()
+
+
 def test_codex_approve(repo,
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1127,6 +1206,7 @@ def test_codex_approve(repo,
     assert "--ignore-user-config" in argv
     assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" not in argv
     assert "mcp_servers={}" in argv
+    assert "project_doc_max_bytes=0" in argv and not any(a.startswith("skills.") for a in argv)
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()
     assert isolated != str(configured) and "loopzero-review-home-" in isolated
