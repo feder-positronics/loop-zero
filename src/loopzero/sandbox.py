@@ -193,7 +193,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                     result = replace(result, input_key=key)
             if index >= len(preparations) or result.exit_code:
                 results.append(result)
-                _checkpoint_success(
+                _checkpoint_stage(
                     checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
                     previous, commands[index + 1:],
                 )
@@ -218,15 +218,21 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
 
-def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
-                        report: CheckReport, previous: dict[str, CheckResult],
-                        remaining: tuple[str, ...]) -> None:
+INCOMPLETE_CHECK = CheckResult("<checks incomplete>", 1, 0.0, "")
+
+
+def _checkpoint_stage(checkpoint: Callable[[CheckReport], None] | None,
+                      report: CheckReport, previous: dict[str, CheckResult],
+                      remaining: tuple[str, ...]) -> None:
+    if checkpoint is None:
+        return
     stage = report.results[-1]
-    if checkpoint is not None and stage.input_key and stage.exit_code == 0:
+    if stage.exit_code:
+        checkpoint(report)
+    elif stage.input_key:
         # Even the last stage leaves a nonpassing receipt until final validation.
-        incomplete = CheckResult("<checks incomplete>", 1, 0.0, "")
         unvisited = tuple(previous[command] for command in remaining if command in previous)
-        checkpoint(replace(report, results=(*report.results, *unvisited, incomplete)))
+        checkpoint(replace(report, results=(*report.results, *unvisited, INCOMPLETE_CHECK)))
 
 
 def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:

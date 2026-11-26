@@ -4766,12 +4766,45 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
     assert "Manual validation evidence." in draft
 
 
+def test_ready_rejects_check_interrupted_after_a_failed_stage(wt, head, gh, capsys, monkeypatch):
+    settings = wt / ".loopzero" / "workflow.toml"
+    settings.write_text(WORKFLOW.replace("test -f README.md", "test ! -e .loopzero/fail"))
+    args = ["--config", str(settings)]
+    assert cli.main([*args, "check"]) == 0
+    (wt / ".loopzero" / "fail").touch()
+    run_one, git_check = cli.sandbox._run_one, cli.sandbox._git
+    failed = False
+
+    def observe_stage(*stage_args):
+        nonlocal failed
+        result = run_one(*stage_args)
+        failed = result.exit_code != 0
+        return result
+
+    def interrupt_final_validation(*git_args):
+        if failed:
+            raise KeyboardInterrupt
+        return git_check(*git_args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.sandbox, "_run_one", observe_stage)
+        patch.setattr(cli.sandbox, "_git", interrupt_final_validation)
+        assert cli.main([*args, "check"]) == 130
+
+    assert failed
+    arm_approved_pr_with_check_result(
+        gh, head, wt, "success", isDraft=False, readiness={"local_exit": None},
+    )
+    assert cli.main([*args, "ready"]) == 1
+    assert "not ready: run loopzero check at this head" in capsys.readouterr().out
+
+
 def test_late_checkpoint_preserves_completed_pass(wt, head):
     cfg = config.load(wt / "workflow.toml")
     passed = CheckReport(head, False, tuple(CheckResult(c, 0, 0, "", input_key="key") for c in cfg.checks),
                          cli.sandbox.settings_fingerprint(cfg, wt))
     save = partial(cli._save_report, wt)
-    checkpoint = cli.sandbox._checkpoint_success
+    checkpoint = cli.sandbox._checkpoint_stage
     checkpoint(partial(save, checkpoint_checks=cfg.checks), passed, {}, ())
     assert cli._load_report(wt).results[0].input_key == "key"
     save(passed)

@@ -375,7 +375,8 @@ def _save_report(wt: Path, report: CheckReport, *, checkpoint_checks: tuple[str,
         current_head = worktree.head(wt)
         if report.head != current_head:
             return current_head
-        saved = _load_report(wt) if checkpoint_checks is not None else None
+        unfinished = checkpoint_checks is not None and report.results[-1] is sandbox.INCOMPLETE_CHECK
+        saved = _load_report(wt) if unfinished else None
         if (saved is not None and saved.ok and not saved.dirty and saved.head == report.head
                 and saved.settings_sha256 == report.settings_sha256
                 and tuple(result.command for result in saved.results) == checkpoint_checks):
