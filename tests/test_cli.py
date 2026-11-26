@@ -1942,6 +1942,13 @@ def test_review_repost_requires_valid_fallback(wt, gh, fake_bin, capsys, family,
         assert not any(call["argv"][1] == post_key().split(" ")[1] for call in gh.calls)
 
 
+@pytest.mark.parametrize("kind", ["primary", "delta"])
+def test_current_dismissed_review_names_recovery(kind, head):
+    previous = [cli.Marker("e" * 40, "primary", "APPROVED")] if kind == "delta" else []
+    with pytest.raises(cli.CliError, match=r"dismissed.*open a replacement PR"):
+        cli._decide_kind([*previous, cli.Marker(head, kind, "DISMISSED")], head)
+
+
 def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
     first = head_of(wt)
     commit_file(wt, "second.py", "x = 2\n", "second")
@@ -1974,7 +1981,7 @@ def conflict_merge(wt, repo):
     return reviewed
 
 
-@pytest.mark.parametrize("case", ["verified", "unverified", "second parent", "rewritten"])
+@pytest.mark.parametrize("case", ["verified", "unverified", "second parent", "rewritten", "missing"])
 def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isolated_git, case):
     if case == "second parent":
         reviewed = head_of(wt)
@@ -1982,6 +1989,8 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
         git(wt, "commit", "--allow-empty", "-qm", "independent branch work")
         git(wt, "merge", "--no-edit", reviewed)
         base = reviewed
+    elif case == "missing":
+        base, reviewed = head_of(wt), "f" * 40
     elif case == "rewritten":
         base = reviewed = head_of(wt)
         git(wt, "commit", "--amend", "-qm", "rewritten feature")
@@ -1998,7 +2007,9 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
     code, _, err = run(capsys, "review")
     if case != "verified":
         assert code == 1 and not list(fake_bin.glob("*.stdin"))
-        if case == "rewritten":
+        if case == "missing":
+            assert f"git fetch origin {reviewed}" in err
+        elif case == "rewritten":
             assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
             assert "git reflog" in err and "open a new PR" in err
             assert "run `loopzero pr`, then `loopzero review` before merging main" in err
@@ -2411,8 +2422,10 @@ def test_ready_after_reviewed_head(
     out, _ = expect_cli(capsys, 0 if ready else 1, "ready")
     if not resolved and comparison != "exact":
         assert ("no review recorded" in out) is (verdict == "request_changes")
-        if verdict == "approve":
-            assert "open important finding" in out
+        assert "open important finding" in out
+        if verdict == "request_changes":
+            with pytest.raises(cli.CliError, match="loopzero resolve"):
+                cli._delta_patch(wt, cli.config_mod.load_trusted(wt), reviewed, head, 7)
     if history != "clean":
         assert ("no eligible review" if kind == "delta" else "no review recorded") in out
     assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is ready
@@ -4623,7 +4636,8 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         assert (code, err) == (0, "") and not wt.exists() and out.splitlines()[-1] == "e" * 40
     elif kind in MERGIFY_QUEUE_FIXTURE["expected"]:
         assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and ("'checks'" in err) == (kind != "conflict")
-        assert all(part in err for part in [*MERGIFY_QUEUE_FIXTURE["requeue_guidance"], *MERGIFY_QUEUE_FIXTURE["expected"][kind]])
+        assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["expected"][kind])
+        assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["requeue_guidance"]) is (kind != "conflict")
     else:
         assert code == 3 and wt.exists() and "waiting for admission" in out
         assert (f"{URL}#issuecomment-43" in out) is (kind == "current")

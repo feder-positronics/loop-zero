@@ -144,7 +144,7 @@ def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
     if done.exit_code not in (0, 1):
         detail = _proc.tail(done.stderr or done.stdout, 1)
         raise CliError(f"git merge-base --is-ancestor failed (exit {done.exit_code}): "
-                       f"{detail or 'retry the ancestry check'}")
+                       f"{detail or 'retry the ancestry check'}. If the commit is missing, run `git fetch origin {sha}` and retry.")
     return done.exit_code == 0
 
 
@@ -241,6 +241,10 @@ def _review_cap_spent(markers: list[Marker]) -> bool:
 
 def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     """Return (kind, reviewed_head) or raise when the PR's review budget is spent."""
+    current = next((m for m in reversed(markers) if m.head == head), None)
+    if current and current.state == "DISMISSED":
+        raise CliError("review for the current head was dismissed. Push fixes for a remaining delta "
+                       "or open a replacement PR if the review budget is spent.")
     if _review_cap_spent(markers):
         raise CliError(
             "review cap reached: fix or reject the findings "
@@ -1050,6 +1054,11 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
             f"on the reviewed head {since[:12]}, including resolution edits. Push with `loopzero pr` "
             "and run `loopzero review`, or open a new PR"
         )
+    if not patch and github.open_blocking_findings(
+        config.repo, number, None, config.review_publishers or (github.login(),),
+    ):
+        raise CliError("empty base-merge delta leaves blocking findings open. Run `loopzero resolve` "
+                       "to list them, then address them before readiness.")
     return patch
 
 
@@ -1632,14 +1641,15 @@ def _mergify_departure(
     sha = _landed(config, pr, closed)
     if sha or closed:
         return sha
-    detail = MERGIFY_DEQUEUE_HINT
+    detail, requeue = MERGIFY_DEQUEUE_HINT, MERGIFY_REQUEUE
     if report is not None:
         detail = f"Mergify report: {report.url}."
         if report.attribution == "base_conflict":
             base = pr.base_ref
             detail = (f"The PR conflicts with {base}. Run `git fetch origin {base}` and resolve the base "
-                      f"integration according to the PR's review state. Requeue only after resolving the "
-                      f"conflict. {detail}")
+                      f"integration according to the PR's review state. {detail}")
+            requeue = ("After resolving the conflict, run `loopzero check`, `loopzero pr`, "
+                       "`loopzero review`, `loopzero ready --wait` and `loopzero merge --wait`.")
         else:
             if report.checks:
                 detail += " Failing checks: " + ", ".join(repr(check) for check in report.checks) + "."
@@ -1648,7 +1658,7 @@ def _mergify_departure(
                 "isolated": "Mergify tested this PR alone. Inspect or fix the failed check before requeueing unless it is a known flake.",
             }
             detail += " " + guidance.get(report.attribution, MERGIFY_DEQUEUE_HINT)
-    raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {MERGIFY_REQUEUE}")
+    raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {requeue}")
 
 
 def _wait_for_mergify(

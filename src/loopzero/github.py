@@ -1373,7 +1373,7 @@ def readiness(
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha,
+    for f in open_blocking_findings(repo, pr.number, None if ancestor_review or not reviewed_head else pr.head_sha,
                                     publishers):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
