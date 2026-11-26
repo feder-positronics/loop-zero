@@ -21,8 +21,9 @@ commitments require direction.
 
 Do not manipulate severity; corrections need evidence in-thread, and critical or
 security-path downgrades need requester authority. For conflicting findings,
-reconcile their acceptance and impact. New critical evidence requires a separate
-authorized PR review thread rather than silently expanding this batch.
+reconcile their acceptance and impact. Only threads a review publisher opens
+[block](../../CONTRACT.md#findings): report new critical evidence to the requester and fix it in
+this batch or file an issue.
 
 Before requesting the delta, compare the full repair with the primary-reviewed
 head. Identify affected callers and guarantees for each repaired behavior. Use

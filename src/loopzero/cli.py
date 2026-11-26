@@ -66,13 +66,7 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 # --------------------------------------------------------------------------- git / context
 
 
-def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False,
-         extra_env: dict[str, str] | None = None) -> str:
-    run = _proc.run_git_paths if paths else _proc.run
-    done = run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout, extra_env=extra_env)
-    if done.exit_code != 0:
-        raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
-    return done.stdout if paths else done.stdout.strip()
+_git = partial(worktree.git, timeout=GIT_TIMEOUT)
 
 
 def _require_push_target(wt: Path, repo: str) -> None:
@@ -102,6 +96,10 @@ def _toplevel() -> Path:
     return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel", paths=True))
 
 
+class PrimaryCheckout(CliError):
+    """The command runs in the primary checkout, which has no task worktree to remove."""
+
+
 def _repo_root(wt: Path) -> None:
     """Verify the primary checkout or bare repository owns this linked worktree."""
     first = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0]
@@ -109,7 +107,9 @@ def _repo_root(wt: Path) -> None:
         raise CliError("Git did not identify the primary worktree; refusing cleanup")
     root = Path(first.removeprefix("worktree "))
     common = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)).resolve()
-    if root.resolve() == wt.resolve() or common not in (root.resolve(), (root / ".git").resolve()):
+    if root.resolve() == wt.resolve():
+        raise PrimaryCheckout("this is the primary checkout, nothing to clean up")
+    if common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
 
 
@@ -139,7 +139,7 @@ def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
     if done.exit_code not in (0, 1):
         detail = _proc.tail(done.stderr or done.stdout, 1)
         raise CliError(f"git merge-base --is-ancestor failed (exit {done.exit_code}): "
-                       f"{detail or 'retry the ancestry check'}")
+                       f"{detail or 'retry the ancestry check'}. If the commit is missing, run `git fetch origin {sha}` and retry.")
     return done.exit_code == 0
 
 
@@ -185,21 +185,8 @@ def _require_pushed(pr: github.PR, head: str) -> None:
 # --------------------------------------------------------------------------- review markers
 
 
-def _rest_rows(endpoint: str, what: str, **kwargs) -> list[dict]:
-    """Every row of a REST list, oldest first, following pages until a short one."""
-    rows: list[dict] = []
-    for page in range(1, 101):
-        batch = github.api_get(f"{endpoint}?per_page={github.PAGE}&page={page}", **kwargs)
-        if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
-            raise CliError(f"invalid GitHub {what} response")
-        rows += batch
-        if len(batch) < github.PAGE:
-            return rows
-    raise CliError(f"GitHub {what} pagination limit exceeded")
-
-
 def _pr_reviews(repo: str, number: int, **kwargs) -> list[dict]:
-    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews", **kwargs)
+    return github.paged(f"repos/{repo}/pulls/{number}/reviews", **kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -224,7 +211,7 @@ def _pr_markers(reviews: list[dict], head: str,
             continue
         if not trusted:
             trusted = {github.login().casefold()}
-        if (review.get("user") or {}).get("login", "").casefold() not in trusted:
+        if eligibility.review_login(review) not in trusted:
             continue
         found.append(Marker(match.group(1), match.group(2), review.get("state") or ""))
     return found
@@ -236,6 +223,10 @@ def _review_cap_spent(markers: list[Marker]) -> bool:
 
 def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     """Return (kind, reviewed_head) or raise when the PR's review budget is spent."""
+    current = next((m for m in reversed(markers) if m.head == head), None)
+    if current and current.state == "DISMISSED":
+        raise CliError("review for the current head was dismissed. Push fixes for a remaining delta "
+                       "or open a replacement PR if the review budget is spent.")
     if _review_cap_spent(markers):
         raise CliError(
             "review cap reached: fix or reject the findings "
@@ -997,15 +988,15 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
         review_id = review.get("id")
         if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
-                or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
+                or eligibility.review_login(review) != publisher.casefold()
                 or type(review_id) is not int or review_id <= 0):
             hint = ("; for a publication format mismatch, use the publishing CLI revision or upgrade the recovery CLI"
                     if expected is None else "")
             raise CliError(f"conflicting or ambiguous review publication{hint}")
-        comments = _rest_rows(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
+        comments = github.paged(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
-                or (c.get("user") or {}).get("login", "").casefold() != publisher.casefold()
+                or eligibility.review_login(c) != publisher.casefold()
                 for c in comments)
                 or sorted((c.get("path"), c.get("body")) for c in comments)
                 != sorted((c.get("path"), c.get("body")) for c in expected["comments"])
@@ -1033,16 +1024,22 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
             f"run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR"
         )
     if not worktree.merges_since(wt, since):
-        return worktree.diff_since(wt, since)
-    patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
-             if number is not None else None)
-    if patch is None:
-        raise CliError(
-            f"could not verify merge history: {since[:12]} must be on the first-parent history and "
-            f"merged parents must come from {config.base_branch}. Check the first-parent log and merged parents. "
-            "If the history is correct, GitHub objects may be unavailable or exceed verification limits. "
-            "Open a new PR from the current base for a fresh review if verification still fails."
-        )
+        patch = worktree.diff_since(wt, since)  # Empty after an empty commit or a reverted change.
+    else:
+        patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
+                 if number is not None else None)
+        if patch is None:
+            raise CliError(
+                f"could not verify merge history: {since[:12]} must be on the first-parent history and "
+                f"merged parents must come from {config.base_branch}. Check the first-parent log and merged "
+                "parents. If the history is correct, GitHub objects may be unavailable or exceed verification "
+                "limits. Open a new PR from the current base for a fresh review if verification still fails."
+            )
+    if not patch and number is not None and github.open_blocking_findings(
+        config.repo, number, None, config.review_publishers or (github.login(),),
+    ):
+        raise CliError("empty delta leaves blocking findings open. Run `loopzero resolve` "
+                       "to list them, then address them before readiness.")
     return patch
 
 
@@ -1231,6 +1228,8 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         _repo_root(wt)
         name = worktree.branch(wt)
         worktree.cleanup(wt, pr.head_sha)
+    except PrimaryCheckout as exc:
+        print(f"note: merged; {exc}", file=sys.stderr)
     except (worktree.WorktreeError, CliError, OSError, _proc.ProcTimeout) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
@@ -1302,7 +1301,7 @@ def _warn_queue_size(
             integrated = git("-c", "user.name=loopzero", "-c", "user.email=loopzero@localhost",
                              "commit-tree", tree, "-p", integrated, "-p", source, "-m", "Queue size projection")
         result = evaluate(integrated)
-    except (LoopZeroError, OSError):
+    except (LoopZeroError, worktree.WorktreeError, OSError):
         return
     if result.exit_code and "size budget: FAIL" in result.stdout:
         predecessors = ", ".join(f"#{number}" for number in numbers)
@@ -1350,6 +1349,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if not readiness.ready:
         if args.wait is None and _pending_checks(config, pr, readiness):
             print(NEXT_WAIT)
+            return 3
         return 1
     print(f"ready: {pr.url}")
     return 0
@@ -1587,7 +1587,7 @@ def _wait_for_checks(
 
 def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str | None:
     """Merge SHA if landed; a closed-unmerged read is held as not final (GitHub lags a
-    queue merge) and re-raised by the caller only if it persists to the deadline."""
+    queue merge) until the next poll or the deadline."""
     try:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
     except github.ClosedUnmerged as exc:
@@ -1603,8 +1603,13 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
     closed: list[github.GhError] = []
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
     for _ in _poll_until(started, timeout):
+        was_closed = bool(closed)
         if sha := _landed(config, pr, closed):
             return sha
+        if closed:
+            if was_closed:
+                raise closed[0]
+            continue
         if not github.merge_pending(config.repo, pr.number, pr.head_sha):
             if sha := _landed(config, pr, closed):
                 return sha
@@ -1660,14 +1665,15 @@ def _mergify_departure(
     sha = _landed(config, pr, closed)
     if sha or closed:
         return sha
-    detail = MERGIFY_DEQUEUE_HINT
+    detail, requeue = MERGIFY_DEQUEUE_HINT, MERGIFY_REQUEUE
     if report is not None:
         detail = f"Mergify report: {report.url}."
         if report.attribution == "base_conflict":
             base = pr.base_ref
             detail = (f"The PR conflicts with {base}. Run `git fetch origin {base}` and resolve the base "
-                      f"integration according to the PR's review state. Requeue only after resolving the "
-                      f"conflict. {detail}")
+                      f"integration according to the PR's review state. {detail}")
+            requeue = ("After resolving the conflict, run `loopzero check`, `loopzero pr`, "
+                       "`loopzero review`, `loopzero ready --wait` and `loopzero merge --wait`.")
         else:
             if report.checks:
                 detail += " Failing checks: " + ", ".join(repr(check) for check in report.checks) + "."
@@ -1676,14 +1682,19 @@ def _mergify_departure(
                 "isolated": "Mergify tested this PR alone. Inspect or fix the failed check before requeueing unless it is a known flake.",
             }
             detail += " " + guidance.get(report.attribution, MERGIFY_DEQUEUE_HINT)
-    raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {MERGIFY_REQUEUE}")
+    raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {requeue}")
 
 
 def _mergify_wait_poll(
     config: Config, pr: github.PR, queue: str, deadline: float, closed: list[github.GhError], confirmed: bool,
 ) -> tuple[str | None, mergify.Membership | None, bool]:
+    was_closed = bool(closed)
     if sha := _landed(config, pr, closed):
         return sha, None, False
+    if closed:
+        if was_closed:
+            raise closed[0]
+        return None, None, False
     if not mergify.configured(config.repo, config.base_branch, queue, deadline):
         raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
     state = mergify.membership(config.repo, pr.number, queue, deadline)
@@ -1757,6 +1768,8 @@ def _merge_with_mergify(
     assert queue is not None
     if not readiness.ready:
         return _follow_blocked_mergify(config, pr, readiness, queue, deadline)
+    if pr.is_draft:
+        raise CliError(f"PR #{pr.number} is still a draft; next: loopzero ready --wait")
     with worktree.lock_local_state(wt):
         requested, confirmed_marker = mergify.markers(
             config.repo, pr.number, pr.head_sha, queue
@@ -1871,7 +1884,7 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
         current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref, paths=True).rstrip(" ")
         if current == f"{expected_head} {ref}":
             _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
-    except (CliError, OSError, _proc.ProcTimeout) as exc:
+    except (CliError, worktree.WorktreeError, OSError, _proc.ProcTimeout) as exc:
         print(f"warning: merged but tracking ref cleanup failed for {ref}: {exc}", file=sys.stderr)
 
 

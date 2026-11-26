@@ -343,10 +343,12 @@ that base and creates the task worktree from it.
 
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
-$EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
+$EDITOR .loopzero/task.md             # fill Goal, Problem, Context and Acceptance
 ```
 
-Make and commit a change in the task worktree, then run `loopzero check` there.
+Make and commit a change in the task worktree, then run `loopzero check` there;
+for a long check suite, run `loopzero pr` first so the draft exists
+([step 2](core/CONTRACT.md#the-six-steps)).
 Afterward, `loopzero status` shows the next step and requires authenticated
 access to the configured GitHub repository even before a PR exists. See the
 [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) and
@@ -369,8 +371,9 @@ Make a scratch clone standalone before queueing, for example with
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"
+loopzero pr      # open the draft before a long check
 loopzero check
-# After opening and reviewing the PR, keep this PATH for delivery.
+# After reviewing the PR, keep this PATH for delivery.
 loopzero ready --wait
 loopzero merge --wait
 ```

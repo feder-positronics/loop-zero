@@ -23,7 +23,7 @@ from pathlib import Path
 from . import _proc, installed_version
 from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
-from .worktree import WorktreeError, read_local_state
+from .worktree import GitError, WorktreeError, git, read_local_state
 
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
@@ -572,15 +572,10 @@ def bwrap_argv(
 
 
 def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str:
-    run = _proc.run_git_paths if paths else _proc.run
-    done = run(
-        ["git", *args], cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT
-    )
-    if done.exit_code != 0:
-        raise SandboxUnavailable(
-            f"git {' '.join(args)} failed in {worktree}: {_proc.tail(done.stderr, 1)}"
-        )
-    return done.stdout
+    try:
+        return git(worktree, *args, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT, paths=paths, raw=True)
+    except GitError as exc:
+        raise SandboxUnavailable(f"{' '.join(exc.command)} failed in {worktree}: {_proc.tail(exc.tail, 1)}") from None
 
 
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:

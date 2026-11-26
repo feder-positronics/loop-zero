@@ -1,6 +1,6 @@
 ---
 name: backlog
-description: Inspect live GitHub issues and PRs read-only for next work, backlog state, delivery retrospectives or digests. Use retro for weekly workflow decisions.
+description: Inspect live GitHub issues and PRs read-only for next work, backlog state, delivery coverage reports or digests. Use retro for weekly workflow decisions.
 ---
 
 # Backlog
@@ -21,7 +21,8 @@ missing issue links alone do not prove absent task context. Use
 For pickup, identify unmet acceptance, ownership, collisions and the smallest
 next action. Reconcile stale claims with dispatch authority; do not duplicate
 accepted work. If no pickup is justified, name missing evidence or the actual
-hold, owner and next action. Among ready items prefer open PRs, then items
+hold, owner and next action. Among ready items follow [Goal first and owner orders](../../../docs/DELEGATION.md#team-roles),
+then prefer open PRs, then items
 whose issue names an open parent step using [plan's `Unblocks:` format](../plan/SKILL.md). Route
 authorized pickup to [work-issue](../work-issue/SKILL.md), design to
 [write-design-doc](../write-design-doc/SKILL.md), briefs to [explain](../explain/SKILL.md).
@@ -31,9 +32,10 @@ relationships. Reminders without concrete work belong as dated-review
 recommendations on their owning issue/design.
 
 For count requests, state the consumer repository's counting rule and reconcile
-every open issue into counted work, standing tracking or unclassified; show held
+every open issue into counted work (unlabelled included, shown separately),
+ongoing duty or unclassified; show held
 work and classification gaps explicitly. Use consumer AGENTS.md conventions
 rather than inventing labels or another state store.
 
-For delivery retrospectives, follow [CODE-HEALTH](../../../docs/CODE-HEALTH.md#delivery-retrospectives);
+For delivery coverage reports, follow [CODE-HEALTH](../../../docs/CODE-HEALTH.md#delivery-retrospectives);
 for a delivery digest, follow its [replay/partial-output contract](../../../docs/CODE-HEALTH.md#replayable-partial-digest).

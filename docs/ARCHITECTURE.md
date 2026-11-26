@@ -63,6 +63,10 @@ verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
 
+Tests use disposable user and reviewer homes. Credential refresh tests bind
+only the synthetic files they create. The generic fake reviewer has no
+credential read or write behavior.
+
 Private review receipts and malformed output excerpts live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
 Outside the worktree the CLI keeps per-PR write locks in `~/.cache/loopzero/pr-locks`,
 runs the optional GitHub App token helper `~/.config/loopzero/app-token` (the
@@ -125,6 +129,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    suffix consisting only of verified base merges with a conflict. Isolated Git
    reconstructs the automatic merges to confirm the conflict. Unresolved
    blocking findings or a third recorded review rule out this allowance.
+   An empty base-merge delta cannot bypass unresolved blocking findings.
+   Without review coverage, readiness also shows outdated unresolved findings.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
