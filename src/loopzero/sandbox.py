@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import json
 import math
@@ -281,8 +282,13 @@ def _input_key(config: Config, worktree: Path, command: str, base: str) -> str |
     paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
     # Empty pathspecs must not accidentally mean the whole tree.
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
-    blobs = _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
-                 "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
+    try:
+        blobs = _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
+                     "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
+    except OSError as exc:
+        if exc.errno == errno.E2BIG:
+            return None
+        raise
     contents = []
     root = worktree.resolve()
     try:
