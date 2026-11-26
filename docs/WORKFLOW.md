@@ -11,11 +11,13 @@ flowchart TD
     A["Start a task<br/><sub>loopzero start my-task</sub>"] --> B["Make the change and commit it"]
     B --> E["Open a draft pull request<br/><sub>loopzero pr</sub>"]
     E --> C["Run checks in a sandbox<br/><sub>loopzero check</sub>"]
-    C -->|checks fail| D["Fix the problem"]
+    C -->|checks fail| D["Fix, commit and push<br/><sub>loopzero pr</sub>"]
     D --> C
     C -->|checks pass| F["Get a review of the exact version<br/><sub>loopzero review</sub>"]
-    F -->|changes requested| G["Fix the findings and push"]
+    F -->|changes requested, review budget left| G["Fix the findings, commit and push"]
     G --> C
+    F -->|changes requested after the delta| R["Reject findings with reasons,<br/>or fix in a replacement PR"]
+    R -->|findings rejected| H
     F -->|approved| H["Check it is ready: no open findings,<br/>required CI green on the same version<br/><sub>loopzero ready --wait</sub>"]
     H -->|review coverage lost and budget allows another review| F
     H -->|ready| I["Merge<br/><sub>loopzero merge --wait</sub>"]
@@ -39,9 +41,9 @@ flowchart TD
     A -->|fixes needed| B["Make all fixes in one batch"]
     B --> C["One review of only the new changes<br/><sub>delta</sub>"]
     C -->|approved| Z
-    C -->|findings remain| D["PR owner rejects findings with reasons;<br/>a fix needs a replacement PR"]
+    C -->|findings remain| D["PR owner rejects findings with reasons"]
     D -->|ready| Z
-    C -->|split needed| E["PR owner opens a replacement PR"]
+    C -->|code fix needed| E["PR owner opens a replacement PR"]
     G["Reviewer gives no verdict:<br/>tool or login failure"] --> H["Costs nothing: try the next<br/>eligible model family"]
     H -->|none can run| J["Same-family review in a fresh session,<br/>disclosed on the PR"]
     J -->|none can run| I["Wait for the PR owner"]

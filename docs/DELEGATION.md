@@ -183,8 +183,8 @@ Do not add a claim ledger, service or label system.
 ### Team practices
 
 Fresh bounded runs send nothing when evidence is unchanged. Workers report deltas
-on the owning PR or issue, directly or through the parent, and message the parent
-mid-task only for a blocker. Combine notices to one recipient into one message;
+on the owning PR or issue, directly or through the parent, and report a blocker
+as in [Worker](#worker). Combine notices to one recipient into one message;
 request an acknowledgement only when confirming arrival changes the next action. Blockers
 and changed holds still go at once. Count productive work by verified activity (completed tool
 calls or output on the deliverable), including nested reviewers; report test-slot,
@@ -426,7 +426,7 @@ Integration executor: <named executor for returned heads and one owner of any re
 Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
 Follow-ups: <ordered list of 1–2 already commissioned, bounded items, or none; assign only to delegates that can both write Git and post to GitHub themselves>
 Return: <authorized finish: evidence, readiness, or merge; deployment needs its own commission>. Continue until that boundary or a named blocker needs the parent; then follow only the preassigned list, otherwise return. Delegates that cannot do both: write Git and post to GitHub themselves (including sandboxed delegates, delegates without GitHub access, or delegates unable to write the shared Git directory) get no preassigned follow-ups and return after one item via their final Report. A progress summary is not completion.
-Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Message the parent mid-task only for a blocker.
+Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Report a blocker in this final message (see Worker).
 ```
 
 Follow the [Worker role](#worker) for blockers. An owner continues the
