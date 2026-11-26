@@ -12,7 +12,7 @@ import signal
 import subprocess
 import sys
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from select import select
 from types import SimpleNamespace
@@ -49,6 +49,7 @@ from tests.test_sandbox import FAKE_BWRAP, inject_check_timeout
 
 REPO = "acme/widgets"
 URL = f"https://github.com/{REPO}/pull/7"
+FAILED_CHECK_HINT = f". Inspect {URL}/checks. Fix reproducible failures before retrying. Rerun the failed job only for a transient failure. Once green, run `loopzero ready --wait`."
 MERGIFY_QUEUE_FIXTURE = json.loads((Path(__file__).with_name("fixtures") / "mergify-queue.json").read_text())
 BRANCH_READ = branch_head_key().split()
 PR_LIST_READ = pr_list_key().split()
@@ -1123,10 +1124,9 @@ def test_pr_accepts_angle_brackets_and_sublists_as_filled_text(wt: Path) -> None
 
 
 def test_progress_output_precedes_the_stderr_verdict_in_one_file(tmp_path: Path) -> None:
-    script = ("import argparse, sys\nfrom loopzero import cli\np = argparse.ArgumentParser()\n"
-              "def wait(args):\n    print('waiting')\n    raise cli.CliError('dequeued')\n"
-              "p.set_defaults(func=wait, command='merge')\ncli.build_parser = lambda: p\n"
-              "sys.exit(cli.main([]))\n")
+    script = ("import sys\nfrom loopzero import cli\ndef wait(args):\n"
+              "    print('waiting')\n    raise cli.CliError('dequeued')\n"
+              "cli.cmd_merge = wait\nsys.exit(cli.main(['merge']))\n")
     with (tmp_path / "log").open("w") as log:
         subprocess.run([sys.executable, "-c", script], stdout=log, stderr=subprocess.STDOUT, check=False)
     assert (tmp_path / "log").read_text().splitlines() == ["waiting", "loopzero merge: dequeued"]
@@ -1259,11 +1259,12 @@ def test_pr_refuses_to_overwrite_a_pr_head_it_has_never_seen(
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == pushed
 
 
-def test_version_names_the_installed_revision(capsys) -> None:
-    with pytest.raises(SystemExit) as stop:
-        cli.main(["--version"])
-    out = capsys.readouterr().out
-    assert stop.value.code == 0 and re.fullmatch(r"loopzero \S+ .+\n", out), out
+@pytest.mark.parametrize("flag, pattern", [("--version", r"loopzero \S+ .+\n\Z"), ("--help", r"usage: loopzero ")])
+def test_cli_info_leaves_delivery_backends_unloaded(flag, pattern):
+    for entry in (("-m", "loopzero.cli"), ("-c", "from loopzero._cli_entry import main; main()")):
+        done = subprocess.run([sys.executable, "-X", "importtime", *entry, flag], capture_output=True, text=True)
+        assert done.returncode == 0 and re.match(pattern, done.stdout), done
+        assert not re.search(r"loopzero\.(github|mergify|runners|sandbox)\b", done.stderr)
 
 
 def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
@@ -2319,6 +2320,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> No
     arm_check_runs(gh, head, [{"name": "checks", "status": "completed", "conclusion": "failure",
                               "check_suite": {"id": 10}}])
     code, out, _ = run(capsys, "ready")
+    out = out.replace(FAILED_CHECK_HINT, "")
     assert code == 1
     assert without_accepted_receipt(out).splitlines() == [
         f"not ready: Both review rounds are spent (primary + delta) and {head[:12]} has no eligible review. Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused.",
@@ -2330,7 +2332,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> No
 
 @pytest.mark.parametrize("retargeted,reason", [
     (True, "PR targets release, configured base is main"),
-    (False, "required check 'checks' is failure"),
+    (False, f"required check 'checks' is failure{FAILED_CHECK_HINT}"),
 ], ids=["retargeted", "trust-base-required-ci"])
 def test_ready_explains_trusted_policy_blocker(wt, gh, capsys, head, retargeted, reason):
     if retargeted:
@@ -2341,8 +2343,7 @@ def test_ready_explains_trusted_policy_blocker(wt, gh, capsys, head, retargeted,
 
     code, out, err = run(capsys, "ready")
 
-    assert (code, err) == (1, "")
-    assert without_accepted_receipt(out) == f"not ready: {reason}\n"
+    assert (code, err, without_accepted_receipt(out)) == (1, "", f"not ready: {reason}\n")
 
 
 def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -2391,14 +2392,14 @@ def test_skipped_required_check_activates_only_on_ready(wt, gh, capsys, head, dr
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
-def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypatch, head):
+def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypatch, head, git_calls):
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=True)
     arm_check_progress(gh, head, "skipped", "skipped", "pending", "success")
     gh.respond("pr ready", "")
-
+    git_calls.clear()
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
     code, out, err = run(capsys, "ready", "--wait")
-
+    assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in git_calls) == 1
     assert (code, err) == (0, "")
     assert out.count("receipt accepted:") == 1
     assert without_accepted_receipt(out).splitlines() == [
@@ -2645,7 +2646,7 @@ def test_ready_wait_verdict(wt, gh, capsys, monkeypatch, head, wait, elapsed, co
 
     assert (code, err) == (expected, "")
     assert out.endswith({
-        0: f"ready: {URL}\n", 1: "not ready: required check 'checks' is failure\n",
+        0: f"ready: {URL}\n", 1: f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n",
         3: f"timed out waiting for required checks on {head[:12]}\n",
     }[expected])
 
@@ -2682,7 +2683,7 @@ def test_ready_wait_tracks_the_replacement_workflow(
         assert "timed out waiting for required checks" in out
     else:
         assert out.endswith(f"ready: {URL}\n" if expected == 0 else
-                            "not ready: required check 'checks' is failure\n")
+                            f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n")
 
 
 @pytest.mark.usefixtures("replay_gh")
@@ -2730,13 +2731,13 @@ def test_ready_wait_revalidates_its_ready_transition(
     assert sleeps == ([30.0, 5.0, 5.0] if replacement == "pending" else
                       [30.0, 5.0] if initial_pending else [30.0])
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
-                        "not ready: required check 'checks' is failure\n" if expected == 1 else
+                        f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n" if expected == 1 else
                         f"timed out waiting for required checks on {head[:12]}\n")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
 
 @pytest.mark.parametrize("after", ["pending", "late_success", "head_move", "blocker", "cancelled"])
-def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypatch, head, after):
+def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypatch, head, after, replay_gh):
     arm_approved_pr_with_check_result(gh, head, wt, "pending")
     gh.respond("pr ready", "")
     clock, sleeps, transitioned = [0.0], [], [False]
@@ -2817,14 +2818,13 @@ def test_ready_transition_missing_run_gets_observation_grace(
 
 
 @pytest.mark.parametrize("wait,draft", [(True, True), (False, True), (True, False)])
-def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, wait, draft):
+def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, wait, draft, replay_gh):
     arm_approved_ready_pr(gh, head, wt, isDraft=draft)
     gh.respond("pr ready", "")
 
     code, out, err = run(capsys, "ready", *(["--wait"] if wait else []))
 
-    out = without_accepted_receipt(out)
-    assert (code, out, err) == (0, f"ready: {URL}\n", "")
+    assert (code, without_accepted_receipt(out), err) == (0, f"ready: {URL}\n", "")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == int(draft)
     observations = sum(c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/check-runs"]
                        for c in gh.calls)
@@ -2865,7 +2865,7 @@ def test_ready_wait_review_failure_freshness(
     wait,
     expected,
     waited,
-    head,
+    head, replay_gh,
 ) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
     arm_approved_pr_with_check_result(
@@ -2929,7 +2929,7 @@ def test_ready_wait_review_failure_freshness(
     )
     assert (code, err, bool(sleeps)) == (expected, "", waited)
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
-                        f"not ready: required check '{name}' is failure\n")
+                        f"not ready: required check '{name}' is failure{FAILED_CHECK_HINT}\n")
     assert (f"waiting: required check '{name}' is failure" in out) == waited
     assert out.count("predates the review; awaiting refresh") == int(
         waited and (age < 0 or age >= 120) and not pending
@@ -3022,7 +3022,7 @@ def test_ready_requires_clean_successful_local_report_at_head(
         if condition == "wrong-head":
             report["head"] = "0" * 40
         elif condition == "wrong-commands":
-            report["results"][0]["command"] = "true"
+            report["results"].pop()
         elif condition == "legacy":
             del report["settings_sha256"]
         else:
@@ -3036,8 +3036,10 @@ def test_ready_requires_clean_successful_local_report_at_head(
         assert f"not ready: {reason}." in out
         assert ("Run loopzero check in this worktree at this head with the same current CLI and effective "
                 "settings as ready, using a local coordinator for delegated stages." in out)
+    elif condition == "wrong-commands":
+        assert "not ready: check receipt's plan differs from the trusted workflow." in out
     elif condition != "matching":
-        assert out.endswith("not ready: run loopzero check at this head\n")
+        assert ("not ready: run loopzero check at this head" if condition == "missing" else "not ready: check receipt") in out
 
 
 @pytest.mark.parametrize("wait_for", [None, "ready", "merge"])
@@ -3197,14 +3199,13 @@ def test_ready_respects_latest_review_state(wt: Path, gh: FakeGh, capsys, state,
 def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_pr(gh, head, isDraft=False)
     gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt, threads=(
+    arm_readiness(gh, head, wt, conclusion="failure", threads=(
         {"isResolved": False, "isOutdated": False, "path": "feature.py", "line": 1,
          "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={head} -->"
                                          "\n**critical: Bad**"}]}},))
     code, out, err = run(capsys, "merge")
-    out = without_accepted_receipt(out)
-    assert code == 1 and out == ""
-    assert "not ready to merge: open critical finding at feature.py:1: Bad" in err
+    assert code == 1 and without_accepted_receipt(out) == ""
+    assert f"not ready to merge: open critical finding at feature.py:1: Bad; required check 'checks' is failure{FAILED_CHECK_HINT}" in err
     assert wt.exists()
 
 
@@ -3765,7 +3766,7 @@ def test_status_silently_ignores_legacy_report_without_dirty(
 
     assert code == 0 and err == ""
     assert "ready:    no" in out
-    assert "  - run loopzero check at this head" in out
+    assert "  - check receipt was recorded in a dirty worktree." in out
 
 
 def test_gh_errors_are_one_line_on_stderr(wt: Path, gh: FakeGh, capsys) -> None:
@@ -4453,22 +4454,22 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         assert (f"{URL}#issuecomment-43" in out) is (kind == "current")
 
 
-@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None])
+@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None, "long", "many"])
 def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result):
     head = commit_mergify_configuration(wt)
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (True, False))
-    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
-    responses = iter([None, MERGIFY_QUEUE_FIXTURE["candidate_responses"][result or "missing"]])
-    monkeypatch.setattr(mergify, "api_get", lambda *_: next(responses))
-
+    monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
+    payload = MERGIFY_QUEUE_FIXTURE["candidate_responses"]["blocking" if result in {"long", "many"} else result or "missing"]
+    if extra := {"long": 1, "many": 30}.get(result, 0):
+        conditions = payload["mergeability_check"]["conditions_evaluation"]
+        monkeypatch.setitem(conditions, "subconditions", conditions["subconditions"] + [{"match": False, "label": "界" * 3000}] * extra)
+    monkeypatch.setattr(mergify, "api_get", lambda *_: payload)
     code, out, err = run(capsys, "merge", "--wait=0")
-
-    assert (code, err) == (3, "")
-    assert f"https://github.com/{REPO}/pull/42" in out
-    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) is (result == "blocking")
+    assert (code, err) == (3, "") and f"https://github.com/{REPO}/pull/42" in out
+    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) == (result in {"blocking", "long", "many"})
     assert "failed" not in out and "check-success = checks" not in out
+    assert len(out.encode()) < 2048 and ("27 more" in out) == (extra == 30)
 
 
 @pytest.mark.parametrize("queue_state", ["unsafe", "error", "safe", "becomes_unsafe"])
@@ -4595,22 +4596,25 @@ def test_receipt_print_failure_preserves_verdict(wt, gh, capsys, head, monkeypat
     assert run(capsys, command)[0] == 0
 
 
-@pytest.mark.parametrize("invalid", ["stale", "red", "dirty", "commands"])
-def test_invalid_receipt_is_not_announced(wt, gh, capsys, head, invalid):
+@pytest.mark.parametrize("field,value,reason", [
+    ("head", "a" * 40, "check receipt is for aaaaaaaaaaaa."),
+    ("exit_code", 1, "check receipt records a failed stage."),
+    ("dirty", True, "check receipt was recorded in a dirty worktree."),
+    ("command", "changed", "check receipt's plan differs from the trusted workflow."),
+    ("results", [], "check receipt is incomplete."),
+    ("results", "checkpoint", "check receipt is incomplete."),
+])
+def test_invalid_receipt_is_not_announced(wt, gh, capsys, head, field, value, reason):
     arm_approved_ready_pr(gh, head, wt)
     path = wt / ".loopzero/checks.json"
     data = json.loads(path.read_text())
-    if invalid == "stale":
-        data["head"] = "a" * 40
-    elif invalid == "dirty":
-        data["dirty"] = True
-    elif invalid == "red":
-        data["results"][0]["exit_code"] = 1
-    else:
-        data["results"][0]["command"] = "changed"
+    target = data["results"][0] if field in {"exit_code", "command"} else data
+    if value == "checkpoint":
+        value = [data["results"][0], asdict(CheckResult("<checks incomplete>", 1, 0.0, ""))]
+    target[field] = value
     path.write_text(json.dumps(data))
     code, out, _ = run(capsys, "ready")
-    assert code == 1 and "run loopzero check at this head" in out
+    assert code == 1 and f"not ready: {reason}" in out
     assert "receipt accepted:" not in out
 
 

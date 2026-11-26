@@ -37,7 +37,7 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 1
     try:
-        with github.api_error_diagnostics(), github.bounded_reads(float("inf"), token=None, retry=True):
+        with github.api_error_diagnostics():
             return _run(cfg)
     except (github.GhUnavailable, github.ProcTimeout) as exc:
         print(f"Eligibility unconfirmed before pending status publication: {exc}", file=sys.stderr)
