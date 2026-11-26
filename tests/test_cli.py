@@ -3126,7 +3126,8 @@ def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, hea
                {"workflow_runs": [{"status": "queued"}] if running == "queued-run" else []})
     monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
 
-    wait = "--wait=0" if running and running != "skipped" else "--wait"
+    wait = "--wait=0" if running and running != "skipped" else "--wait=90"
+    poll_clock(monkeypatch, jitter=1.0)  # A regression times out on the fake clock instead of hanging.
     code, out, err = run(capsys, "ready", wait)
 
     if running == "skipped":  # r7-c2-2: diagnosed after the grace, not held for the whole timeout.
