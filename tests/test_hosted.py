@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loopzero import github, hosted
+from loopzero import eligibility, github, hosted
 from loopzero.candidate import CandidateError, CandidateRaceError
 from tests import test_github as fixtures
 from tests.test_candidate import event as candidate_event
@@ -96,6 +96,16 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     assert ([s["state"] for s in statuses] == ["pending", status]
             and all(s["context"] == "Loop-zero Eligibility" for s in statuses))
     assert status != "pending" or statuses[-1]["description"] == "Awaiting trusted review of current source head"
+
+
+def test_hosted_reviews_reject_a_repeated_full_page(publisher):
+    publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json()))
+    endpoint = f"api repos/{REPO}/pulls/7/reviews?per_page={github.PAGE}"
+    page = [{"id": i, "state": "COMMENTED"} for i in range(github.PAGE)]
+    for number in (1, 2):
+        publisher.respond(f"{endpoint}&page={number}", page)
+    with pytest.raises(github.GhError, match="GitHub repeated a full page"):
+        eligibility.evaluate(REPO, 7, HEAD, "main", ("trusted-publisher",))
 
 
 def test_merged_source_refresh_publishes_nothing(publisher):

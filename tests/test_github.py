@@ -947,6 +947,15 @@ def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> N
     assert runs["duplicate"] == "failure", "the first (latest) status wins"
 
 
+def test_status_pagination_rejects_a_repeated_full_page(gh: FakeGh) -> None:
+    endpoint = f"repos/{REPO}/commits/{HEAD}/statuses"
+    page = [{"id": i, "state": "success"} for i in range(github.PAGE)]
+    gh.respond(f"api {endpoint}", page, page)
+    with pytest.raises(github.GhError, match="GitHub repeated a full page"):
+        github._paged(endpoint)
+    assert len(gh.calls) == 2
+
+
 # --- readiness ----------------------------------------------------------------------------
 
 

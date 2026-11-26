@@ -476,9 +476,17 @@ def _gh_json(*args: str, token: str | None = None) -> object:
                       token=token or "") from None
 
 
+def record_full_page(endpoint: str, rows: list, seen: set[bytes]) -> None:
+    digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).digest()
+    if digest in seen:
+        raise GhError(("gh", "api", endpoint), "GitHub repeated a full page")
+    seen.add(digest)
+
+
 def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
     """Yield validated rows until the last page."""
     page = 1
+    seen: set[bytes] = set()
     while True:
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
                          "-F", f"page={page}")
@@ -486,6 +494,8 @@ def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
             chunk = chunk.get(key)
         if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
+        if len(chunk) >= PAGE:
+            record_full_page(endpoint, chunk, seen)
         yield from chunk
         if len(chunk) < PAGE:
             return
