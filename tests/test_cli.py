@@ -298,7 +298,7 @@ def arm_readiness(
         config = cli._load_config(SimpleNamespace(config=None, command="ready"), wt, pin_checks=True)
         results = tuple(CheckResult(command, local_exit, 0.1, "") for command in config.checks)
         cli._save_report(
-            wt, CheckReport(head, dirty, results, cli.sandbox.settings_fingerprint(config, wt))
+            wt, CheckReport(head, dirty, results, cli.sandbox.settings_fingerprint(config))
         )
 
 
@@ -564,7 +564,7 @@ def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, ca
         cli._save_report(wt, CheckReport(head, False, (
             CheckResult("echo ok", 0, 999.0, "ok"),
             CheckResult("test -f README.md", 0, 999.0, ""),
-        ), cli.sandbox.settings_fingerprint(config, wt)))
+        ), cli.sandbox.settings_fingerprint(config)))
     arm_pr_body_patch(gh, head)
     assert run(capsys, "pr")[0] == 0
     body = json.loads(gh.calls[-1]["--input"])["body"]
@@ -683,7 +683,7 @@ def test_check_hour_long_stage_transcript(wt, head, gh, capsys, monkeypatch):
                 pass
             status(f"stage {ordinal}/24: exit 0 ({duration:.1f}s)")
             results.append(CheckResult(command, 0, duration, ""))
-        return CheckReport(head, False, tuple(results), sandbox.settings_fingerprint(cfg, path))
+        return CheckReport(head, False, tuple(results), sandbox.settings_fingerprint(cfg))
 
     monkeypatch.setattr(sandbox, "run_checks", run_checks)
     code, out, err = run(capsys, "check")
@@ -981,7 +981,7 @@ def test_check_rejects_invalid_base_workflow(wt, repo, capsys, workflow, error):
     if workflow is None:
         cfg = cli._load_config(SimpleNamespace(config=None, command="ready"), wt, pin_checks=True)
         head = head_of(wt)
-        cli._save_report(wt, CheckReport(head, False, (), cli.sandbox.settings_fingerprint(cfg, wt)))
+        cli._save_report(wt, CheckReport(head, False, (), cli.sandbox.settings_fingerprint(cfg)))
         assert cli._current_check_report(wt, cfg, head) is None
 
 
@@ -1109,7 +1109,7 @@ def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, 
     cfg = config.load(private)
     head = head_of(wt)
     results = (CheckResult(command, 7, 0.1, ""), CheckResult("test -f README.md", 0, 0.1, ""))
-    cli._save_report(wt, CheckReport(head, False, results, cli.sandbox.settings_fingerprint(cfg, wt)))
+    cli._save_report(wt, CheckReport(head, False, results, cli.sandbox.settings_fingerprint(cfg)))
 
     if refresh:
         git(wt, "push", "-q", "-u", "origin", "lz/t1")
@@ -3179,7 +3179,7 @@ def test_ready_checks_effective_receipt_environment(wt, gh, capsys, head, monkey
                 if case == "fresh":
                     cfg = cli._load_config(SimpleNamespace(config=config_path, command=command), wt, pin_checks=True)
                     cli._save_report(wt, cli.dataclasses.replace(cli._load_report(wt),
-                                     settings_sha256=cli.sandbox.settings_fingerprint(cfg, wt)))
+                                     settings_sha256=cli.sandbox.settings_fingerprint(cfg)))
 
             monkeypatch.setattr(cli, "_sleep", change_policy)
             hint = "retry with the current settings" if case == "fresh" else "run loopzero check"
@@ -3229,21 +3229,36 @@ def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, 
     assert run(capsys, "ready")[0] == 0
 
 
-@pytest.mark.parametrize("base_sensitive", [False, True])
-def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
-    if base_sensitive:
-        publish_workflow(wt, WORKFLOW.replace('[delivery]', '[checks.inputs]\n"*" = ["."]\n\n[delivery]'))
-    args = SimpleNamespace(command="ready", config=None)
-    config = cli._load_config(args, wt, pin_checks=True)
-    head = head_of(wt)
-    git(repo, "commit", "-qm", "advance base without editing policy", "--allow-empty")
-    git(repo, "push", "-q", "origin", "main")
+@pytest.mark.parametrize("change,exit_code", [("plain", 0), ("unrelated", 0), ("order", 0), ("policy", 1), ("slow", 3)])
+def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatch, tmp_path, change, exit_code):
+    env = 'CHECK_A = "first", CHECK_B = "second"'
+    policy = WORKFLOW.replace("[checks]", f"[checks]\nenv = {{ {env} }}")
+    policy = policy.replace("[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]')
+    if change != "plain":
+        publish_workflow(wt, policy)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    external = tmp_path / "external"
+    git(tmp_path, "clone", "-q", "--branch", "main", str(repo.parent / "origin.git"), str(external))
+    clock, original = poll_clock(monkeypatch, jitter=1.0), cli._proc.run
 
-    if base_sensitive:
-        with pytest.raises(cli.CliError, match="check base changed while waiting; run loopzero check"):
-            cli._verify_wait_snapshot(args, wt, config, head, head)
-    else:
-        cli._verify_wait_snapshot(args, wt, config, head, head)
+    def fetch(argv, *, timeout, **kwargs):
+        if argv[:2] == ["git", "fetch"] and clock.now:
+            clock.fetch_timeout = timeout
+            if change == "slow":
+                clock.now += timeout
+                raise cli._proc.ProcTimeout("origin timed out")
+            path, body = "unrelated.txt", "advance main"
+            if change == "policy":
+                path, body = "workflow.toml", policy.replace('CHECK_A = "first"', 'CHECK_A = "changed"')
+            elif change == "order":
+                path, body = "workflow.toml", policy.replace(env, ", ".join(reversed(env.split(", "))))
+            commit_file(external, path, body, "advance main")
+            git(external, "push", "-q", "origin", "main")
+            arm_check_runs(gh, head, [{"name": "checks", "status": "completed", "conclusion": "success"}])
+        return original(argv, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(cli._proc, "run", fetch)
+    assert run(capsys, "ready", "--wait=1")[0] == exit_code and clock.fetch_timeout == 0.5
 
 
 @pytest.mark.parametrize("worker", ["legacy", "different-environment", "matching"])

@@ -3,6 +3,7 @@ import importlib.machinery
 import importlib.util
 import json
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -556,3 +557,16 @@ def test_account_lock_timeout_leaves_files_untouched(helper, monkeypatch):
     helper.set_active("codex", "b")
     assert helper.with_accounts("codex,codex", {})["CODEX_HOME"] == str(helper.codex_home("b"))
     assert home_lock_entries == [".codex-sync.lock"] * 2
+
+
+def test_provider_deadline_covers_http_error_body(helper, monkeypatch):
+    request = helper.urllib.request.Request("https://example.invalid")
+    body = BytesIO()
+    monkeypatch.setattr(body, "read", lambda: helper.signal.raise_signal(helper.signal.SIGALRM))
+
+    def open_(*args, **kwargs):
+        raise helper.urllib.error.HTTPError(request.full_url, 503, "Busy", {}, body)
+
+    monkeypatch.setattr(helper.urllib.request, "urlopen", open_)
+    with pytest.raises(TimeoutError, match="provider HTTP request timed out"):
+        helper._http(request, timeout=1)

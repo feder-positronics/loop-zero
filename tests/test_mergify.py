@@ -4,10 +4,12 @@ import base64
 import http.client
 import io
 import json
+import signal
 import ssl
 import subprocess
 import sys
 import traceback
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 
@@ -249,3 +251,33 @@ def test_api_get_retries_and_classifies_failures(monkeypatch, failure, expected_
             mergify.api_get("acme/widgets", "/merge-queue/status")
         assert str(failure) in str(info.value)
     assert sleeps == expected_sleeps
+
+
+@pytest.mark.parametrize("phase", ["headers", "body", "cleanup"])
+def test_request_deadline(monkeypatch, phase):
+    handler, setitimer = signal.getsignal(signal.SIGALRM), signal.setitimer
+
+    def open_(*args, **kwargs):
+        if phase == "headers":
+            try:
+                signal.raise_signal(signal.SIGALRM)
+            except OSError:
+                pytest.fail("address fallback would swallow the deadline")
+        return io.BytesIO(b"{}")
+
+    def arm(timer, seconds):
+        setitimer(timer, seconds)
+        if seconds == 0 and phase == "cleanup":
+            signal.raise_signal(signal.SIGALRM)
+
+    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_))
+    monkeypatch.setattr(signal, "setitimer", arm)
+    with (
+        pytest.raises(TimeoutError, match="Mergify HTTP request timed out"),
+        mergify._open(urllib.request.Request("https://example.invalid")),
+    ):
+        if phase == "body":
+            assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= 30
+            signal.raise_signal(signal.SIGALRM)
+    assert signal.getsignal(signal.SIGALRM) is handler
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
