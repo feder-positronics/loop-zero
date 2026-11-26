@@ -727,12 +727,9 @@ def test_api_get_and_login_helpers(gh: FakeGh) -> None:
         github.login()
 
 
-def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
-    helper = tmp_path / "app-token"
+def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatch, app_token_helper) -> None:
     counter = tmp_path / "helper-calls"
-    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-app-token\n")
-    helper.chmod(0o755)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    app_token_helper(f"echo called >> {counter}\necho synthetic-app-token\n")
     wall_time = boot_time = 10_000.0
     monkeypatch.setattr(github.time, "time", lambda: wall_time)
     monkeypatch.setattr(github.time, "CLOCK_BOOTTIME", 7, raising=False)
@@ -762,12 +759,9 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     assert counter.read_text().splitlines() == ["called", "called"]
 
 
-def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
-    helper = tmp_path / "app-token"
+def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path: Path, monkeypatch, app_token_helper) -> None:
     counter = tmp_path / "helper-calls"
-    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
-    helper.chmod(0o755)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    app_token_helper(f"echo called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
     boot, real_run = [1_000_000.0], github.run
     suspend = lambda: boot.append(boot.pop() + 3601)  # noqa: E731
     monkeypatch.setattr(github, "_app_token_clock", lambda: boot[0])
@@ -782,22 +776,16 @@ def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path
     assert [c["token"] for c in gh.calls] == ["operator-token", "synthetic-token-2", "synthetic-token-3"]
 
 
-def test_app_helper_failure_falls_back_to_operator(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
-    helper = tmp_path / "app-token"
-    helper.write_text("#!/bin/sh\nexit 1\n")
-    helper.chmod(0o755)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+def test_app_helper_failure_falls_back_to_operator(gh: FakeGh, monkeypatch, app_token_helper) -> None:
+    app_token_helper("exit 1\n")
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.respond("api repos/acme/widgets", {})
     github.api_get("repos/acme/widgets")
     assert gh.calls[0]["token"] == "operator-token"
 
 
-def test_app_review_is_comment_with_inline_findings(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
-    helper = tmp_path / "app-token"
-    helper.write_text("#!/bin/sh\necho synthetic-app-token\n")
-    helper.chmod(0o755)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+def test_app_review_is_comment_with_inline_findings(gh: FakeGh, app_token_helper) -> None:
+    app_token_helper()
     gh.respond(f"api repos/{REPO}/pulls/7/files", PR_FILES)
     gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 3})
     github.post_review(REPO, 7, HEAD, review(verdict="approve", findings=FINDINGS[:1]),
@@ -1006,19 +994,21 @@ def test_readiness_no_review(gh: FakeGh) -> None:
     assert r.reasons == ("no review recorded for the current head",)
 
 
-def test_readiness_blocking_finding(gh: FakeGh) -> None:
-    arm_readiness(gh, threads=(thread(f"{marker('important')}\n**important: Oops**"),))
-    r = readiness()
-    assert r.reasons == ("open important finding at src/a.py:3: Oops",)
-
-
-def test_readiness_blocks_on_anchored_unlocated_finding(gh: FakeGh) -> None:
-    body = f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n" \
-           "**critical: Global**\n\nno file"
-    arm_readiness(gh, threads=(thread(body, path="src/first.py", line=12),))
-    r = readiness()
-    assert not r.ready
-    assert r.reasons == ("open critical finding at src/first.py:12: Global",)
+@pytest.mark.parametrize("finding,reason", [
+    pytest.param(
+        thread(f"{marker('important')}\n**important: Oops**"),
+        "open important finding at src/a.py:3: Oops", id="located",
+    ),
+    pytest.param(
+        thread(f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n"
+               "**critical: Global**\n\nno file", path="src/first.py", line=12),
+        "open critical finding at src/first.py:12: Global", id="anchored",
+    ),
+])
+def test_readiness_blocking_finding(gh: FakeGh, finding: dict, reason: str) -> None:
+    arm_readiness(gh, threads=(finding,))
+    result = readiness()
+    assert not result.ready and result.reasons == (reason,)
 
 
 def test_readiness_resolved_or_suggestion_threads_do_not_block(gh: FakeGh) -> None:
@@ -1077,19 +1067,16 @@ def test_readiness_waits_only_for_newer_active_producing_workflow(gh, failure, c
     assert not result.ready
 
 
-def test_readiness_newer_run_in_same_second_waits(gh: FakeGh) -> None:
-    arm_workflow_check(gh, failed_check(id=100))
-    arm_workflow_runs(gh, producing_run(created_at="2026-09-23T21:54:21Z"), replacement_run())
-    result = readiness(workflow_wait=True)
-    assert result.waitable_failures == result.reasons
-
-
-def test_readiness_keeps_failing_commit_status_blocker(gh: FakeGh) -> None:
-    arm_workflow_check(gh, failed_check(id=100), [{"context": "checks", "state": "failure"}])
-    arm_workflow_runs(gh, producing_run(), replacement_run())
+@pytest.mark.parametrize("created_at,statuses,waitable", [
+    ("2026-09-23T21:54:21Z", [], True),
+    ("2026-09-23T21:53:00Z", [{"context": "checks", "state": "failure"}], False),
+], ids=["same-second-newer-run", "failing-commit-status"])
+def test_readiness_defers_only_replaceable_failure(gh: FakeGh, created_at, statuses, waitable):
+    arm_workflow_check(gh, failed_check(id=100), statuses)
+    arm_workflow_runs(gh, producing_run(created_at=created_at), replacement_run())
     result = readiness(workflow_wait=True)
     assert result.reasons == ("required check 'checks' is failure",)
-    assert result.waitable_failures == ()
+    assert result.waitable_failures == (result.reasons if waitable else ())
 
 
 def test_readiness_looks_up_only_required_failed_checks(gh: FakeGh) -> None:
