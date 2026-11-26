@@ -3549,6 +3549,15 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, wt, capsys, monkeypat
     assert run(capsys, "resolve") == (0, "", "")
 
 
+def test_resolve_takes_review_publishers_from_the_base(wt: Path, gh: FakeGh, capsys, head) -> None:
+    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["outsider"]\n')
+    planted, genuine = _finding_thread("0b9b59e7", head), _finding_thread("1c2d3e4f", head)
+    planted["comments"]["nodes"][0]["author"] = {"__typename": "User", "login": "outsider"}
+    gh.respond_pr_list([pr_json(headRefOid=head)])
+    gh.respond("api graphql", threads_json(planted, genuine))
+    assert run(capsys, "resolve") == (0, "1c2d3e4f  important  src/a.py:3  Off by one\n", "")
+
+
 def test_resolve_and_ready_ignore_findings_from_non_publishers(wt: Path, gh: FakeGh, capsys, head) -> None:
     planted = _finding_thread("0b9b59e7", head)
     planted["comments"]["nodes"][0]["author"] = {"__typename": "User", "login": "outsider"}

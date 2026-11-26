@@ -1578,7 +1578,7 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
 
 def cmd_resolve(args: argparse.Namespace) -> int:
     """List open blocking findings, or reply to one with what changed and resolve its thread."""
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
     pr = _require_pr(config, worktree.branch(wt))
     publishers = config.review_publishers or (github.login(),)
     if not args.finding:

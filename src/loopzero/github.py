@@ -27,9 +27,8 @@ APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
 MARKER_RE = re.compile(
-    r"<!--\s*loopzero:finding\s+(?:v=(?P<version>1)\s+)?"
-    r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"
-    r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
+    r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
+    r"head=(?P<head>[0-9a-f]{40}) id=(?P<id>[0-9a-f]{8}) -->"
 )
 PAGE = 100
 PR_FILE_LIMIT = 3_000
@@ -886,10 +885,8 @@ def _thread_marker(node: dict, publishers: tuple[str, ...]) -> re.Match[str] | N
         login += "[bot]"
     if not login or login.casefold() not in {p.casefold() for p in publishers}:
         return None
-    match = MARKER_RE.match(comments[0].get("body") or "")
-    if not match or not (match.group("version") and match.group("head") and match.group("id")):
-        return None
-    return match
+    # The publisher writes the marker as the whole first line, exactly as finding_marker does.
+    return MARKER_RE.fullmatch((comments[0].get("body") or "").partition("\n")[0])
 
 
 def _parse_thread(node: dict, current_head: str | None,

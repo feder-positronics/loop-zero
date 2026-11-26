@@ -678,6 +678,10 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     # Markers without a head and id are not tied to a reviewed head.
     ("<!-- loopzero:finding severity=important -->\nheadless", "bot-user"),
     (f"<!-- loopzero:finding severity=important head={HEAD} -->\nunversioned", "bot-user"),
+    # Only the exact emitted line counts: not split, trailed by prose or truncated.
+    (marker("critical").replace(" head=", "\nhead=") + "\n**critical: Split**", "bot-user"),
+    (marker("critical") + " trailing prose\n**critical: Trailed**", "bot-user"),
+    (marker("critical", head=HEAD[:7]) + "\n**critical: Short head**", "bot-user"),
 ])
 def test_open_findings_ignore_untrusted_or_quoted_markers(gh: FakeGh, body: str, author: str) -> None:
     gh.respond("api graphql", threads_json({**thread(body, author=author), "id": "T_1"}))
@@ -797,15 +801,12 @@ def test_app_review_is_comment_with_inline_findings(gh: FakeGh, tmp_path: Path, 
     assert payload["event"] == "COMMENT" and payload["comments"]
 
 
-def test_marker_parser_accepts_old_and_v1_forms() -> None:
-    old = github.MARKER_RE.search("<!-- loopzero:finding severity=critical -->")
-    assert old and old.groupdict() == {
-        "version": None, "severity": "critical", "head": None, "id": None,
-    }
+def test_marker_parser_accepts_only_the_emitted_v1_line() -> None:
+    assert github.MARKER_RE.fullmatch("<!-- loopzero:finding severity=critical -->") is None
     finding = Finding("important", "src/b.py", 2, "Missing check", "validate")
-    new = github.MARKER_RE.search(github.finding_marker("important", HEAD, finding))
+    new = github.MARKER_RE.fullmatch(github.finding_marker("important", HEAD, finding))
     assert new and new.groupdict() == {
-        "version": "1", "severity": "important", "head": HEAD,
+        "severity": "important", "head": HEAD,
         "id": github.finding_id(HEAD, "src/b.py", 2, "Missing check"),
     }
 
