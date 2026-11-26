@@ -19,7 +19,7 @@ import pytest
 
 from loopzero import cli, config, github, mergify
 from loopzero._proc import Completed, build_env
-from loopzero.types import CheckReport, CheckResult, ReviewResult
+from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
 from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
 from tests.test_github import (
@@ -77,6 +77,7 @@ def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
     git(checkout, "init", "-q", "--bare", "-b", "main", str(origin))
     git(checkout, "remote", "add", "origin", str(origin))
     git(checkout, "push", "-q", "origin", "main")
+    git(checkout, "remote", "set-head", "origin", "main")
     prepared = seed / "prepared"
     shutil.copytree(checkout, prepared)
     path = cli.worktree.start(prepared, "t1", "main")
@@ -195,6 +196,44 @@ def test_review_marker_parser_accepts_old_and_v1_forms() -> None:
     new = cli.review_marker("b" * 40, "delta")
     assert cli.REVIEW_MARKER_RE.search(old).groups() == ("a" * 40, "primary")
     assert cli.REVIEW_MARKER_RE.search(new).groups() == ("b" * 40, "delta")
+
+
+@pytest.mark.parametrize("source", ["model", "pair"])
+def test_review_marker_quoted_in_prose_neither_voids_nor_hides_a_review(gh: FakeGh, source: str) -> None:
+    head = "a" * 40
+    quote = cli.review_marker("b" * 40, "primary", source)
+    result = ReviewResult("claude", head, "primary", "approve",
+                          (Finding("suggestion", None, None, "Fixture", f"The fixture quotes {quote}."),),
+                          "raw", provenance={"session_ids": ["s"]})
+    gh.respond(f"api repos/{REPO}/pulls/7/files", [])
+    (payload,) = github.review_payloads(REPO, 7, head, result, [(marker(head, "primary"), "current", False)])
+    review = {"body": payload["body"], "state": "COMMENTED", "commit_id": head, "user": {"login": LOGIN}}
+    assert quote in review["body"]
+
+    assert cli.eligibility.eligible_review([review], head, (LOGIN,)) is review
+    assert cli.eligibility.readiness_review(
+        [review], head, (LOGIN,), repo=REPO, number=7, base_branch="main") is review
+    assert cli._pr_markers([review], head, (LOGIN,)) == [cli.Marker(head, "primary", "COMMENTED")]
+
+
+def test_second_review_marker_in_the_leading_block_voids_the_review() -> None:
+    head = "a" * 40
+    body = f"{marker(head, 'primary')}\n{marker('b' * 40, 'primary')}\nreview: **approve**"
+    review = {"body": body, "state": "APPROVED", "commit_id": head, "user": {"login": LOGIN}}
+    assert cli.eligibility.eligible_review([review], head, (LOGIN,)) is None
+    assert cli.eligibility.readiness_review(
+        [review], head, (LOGIN,), repo=REPO, number=7, base_branch="main") is None
+    assert cli._pr_markers([review], head, (LOGIN,)) == []
+
+
+def test_publication_recovery_ignores_markers_quoted_on_other_commits(wt: Path, gh: FakeGh, head) -> None:
+    config = cli.config_mod.load(wt / "workflow.toml")
+    result = ReviewResult("claude", head, "primary", "approve", (), "raw", provenance={"session_ids": ["s"]})
+    other = rev("f" * 40, "primary")
+    other["body"] += f"\nA finding quotes {marker(head, 'primary')}"
+    gh.respond_pr_view(pr_json(headRefOid=head))
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    assert cli._confirm_review(wt, config, pr, result, LOGIN, [other]) is False
 
 
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
@@ -619,7 +658,10 @@ def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> Non
     assert not (wt / ".loopzero" / "checks.json").exists()
 
 
-def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize("bootstrap", [False, True])
+def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys, bootstrap) -> None:
+    if bootstrap:
+        git(wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
     alt = tmp_path / "alt.toml"
     alt.write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"echo alt"'))
     code, out, _ = run(capsys, "--config", str(alt), "check")
@@ -627,11 +669,10 @@ def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys) -> None:
     assert out.startswith("checks are unpinned because --config was provided\n")
 
 
-@pytest.mark.parametrize("explicit_config", [False, True])
-def test_invalid_workflow_utf8_names_file(wt, capsys, explicit_config):
-    filename = "broken-workflow.toml" if explicit_config else "workflow.toml"
+def test_invalid_workflow_utf8_names_file(wt, capsys):
+    filename = "broken-workflow.toml"
     (wt / filename).write_bytes(bytes([255]))
-    args = ["--config", filename, "status"] if explicit_config else ["status"]
+    args = ["--config", filename, "status"]
 
     code, _, err = run(capsys, *args)
 
@@ -663,30 +704,33 @@ def test_check_reads_workflow_from_reported_base_commit(wt, repo, capsys):
     assert "running: echo ok" not in lines
 
 
-def test_check_uses_worktree_checks_when_base_has_no_workflow(
-    wt: Path, repo: Path, capsys
-) -> None:
-    (wt / "workflow.toml").write_text(
-        WORKFLOW.replace('"echo ok", "test -f README.md"', '"echo worktree"')
-    )
-    git(repo, "rm", "-q", "workflow.toml")
-    git(repo, "commit", "-q", "-m", "remove workflow")
+@pytest.mark.parametrize("command", ["check", "review", "ready", "merge"])
+def test_privileged_commands_resolve_policy_independently_of_task(wt, command):
+    (wt / "workflow.toml").write_text(WORKFLOW.replace('base = "main"', 'base = "topic"'))
+    (wt / ".loopzero/task.md").write_text(f"Base: {head_of(wt)}\n")
+
+    config = cli._load_config(SimpleNamespace(config=None, command=command), wt, pin_checks=True)
+
+    assert config.base_branch == "main"
+    assert config.checks == ("echo ok", "test -f README.md")
+
+
+def test_trusted_default_workflow_can_select_delivery_branch(wt, repo, capsys):
+    release_policy = WORKFLOW.replace('base = "main"', 'base = "release"')
+    (repo / "workflow.toml").write_text(release_policy)
+    git(repo, "add", "workflow.toml")
+    git(repo, "commit", "-qm", "select release")
     git(repo, "push", "-q", "origin", "main")
+    (repo / "workflow.toml").write_text(release_policy.replace("echo ok", "echo release"))
+    git(repo, "add", "workflow.toml")
+    git(repo, "commit", "-qm", "release checks")
+    git(repo, "push", "-q", "origin", "HEAD:refs/heads/release")
 
     code, out, err = run(capsys, "check")
 
-    assert code == 0 and err == ""
-    assert "running: echo worktree\n" in out
-    assert not out.startswith("checks pinned")
-
-
-def test_check_uses_task_base_when_remote_ref_is_missing(wt: Path, capsys) -> None:
-    git(wt, "update-ref", "-d", "refs/remotes/origin/main")
-
-    code, out, err = run(capsys, "check")
-
-    assert code == 0 and err == ""
-    assert "running: echo ok\n" in out and out.startswith("checks pinned to origin/main@")
+    assert (code, err) == (0, "")
+    assert f"checks pinned to origin/release@{head_of(repo)}" in out
+    assert "running: echo release" in out
 
 
 def test_primary_review_diffs_from_merge_base_not_base_tip(
@@ -717,6 +761,7 @@ def test_primary_review_stops_when_shallow_history_hides_merge_base(
     origin = tmp_path / "origin.git"
     git(repo, "clone", "-q", "--depth=1", "--no-single-branch", "--branch", "lz/t1",
         origin.as_uri(), str(shallow))
+    git(shallow, "remote", "set-head", "origin", "main")
     (shallow / ".git/info/exclude").write_text(".loopzero/\n")
     shutil.copytree(wt / ".loopzero", shallow / ".loopzero")
     monkeypatch.chdir(shallow)
@@ -1088,6 +1133,43 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
+@pytest.mark.parametrize(
+    ("probe", "diagnostic"),
+    [
+        ("kill -TERM $$", "exit -15"),
+        ("echo 'fatal: unable to read commit' >&2; exit 128", "unable to read commit"),
+    ],
+)
+def test_pr_aborts_on_ancestry_probe_error(wt, gh, fake_tool, tmp_path, capsys, probe, diagnostic):
+    gh.respond_pr_list([pr_json(headRefOid=head_of(wt))])
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+    pushes = tmp_path / "pushes"
+    fake_tool("git", f'''\
+if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ]; then {probe}; fi
+if [ "$1" = "push" ]; then touch "{pushes}"; exit 0; fi
+exec /usr/bin/git "$@"
+''')
+
+    code, out, err = run(capsys, "pr")
+
+    assert (code, out) == (1, "")
+    assert "git merge-base --is-ancestor" in err and diagnostic in err
+    assert not pushes.exists()
+    assert all("--method" not in call["argv"] for call in gh.calls)
+
+
+def test_pr_aborts_on_missing_remote_head(wt, gh, fake_tool, tmp_path, capsys):
+    gh.respond_pr_list([pr_json(headRefOid="a" * 40)])
+    pushes = trace_pushes(fake_tool, tmp_path)
+
+    code, out, err = run(capsys, "pr")
+
+    assert (code, out) == (1, "")
+    assert "fetch and integrate it first" in err
+    assert not pushes.exists()
+    assert all("--method" not in call["argv"] for call in gh.calls)
+
+
 @pytest.mark.parametrize("hook_fails", [False, True])
 def test_pr_uses_lease_for_rewritten_open_pr(
     wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, hook_fails: bool
@@ -1220,13 +1302,19 @@ def arm_approved_pr_with_check_result(
     arm_readiness(gh, head, wt, conclusion=conclusion, **(readiness or {}))
 
 
+def publish_workflow(wt: Path, policy: str, message: str = "configure delivery") -> None:
+    repo = wt.parent.parent
+    (repo / "workflow.toml").write_text(policy)
+    git(repo, "add", "workflow.toml")
+    git(repo, "commit", "-qm", message)
+    git(repo, "push", "-q", "origin", "main")
+
+
 def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> None:
-    workflow = wt / "workflow.toml"
-    workflow.write_text(workflow.read_text().replace(
+    policy = (wt.parent.parent / "workflow.toml").read_text().replace(
         'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
-    ))
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-q", "-m", message)
+    )
+    publish_workflow(wt, policy, message)
 
 
 @pytest.mark.parametrize("branch", [
@@ -1239,7 +1327,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
-    assert_git_cost(git_calls, 16, 2)
+    assert_git_cost(git_calls, 14, 1)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -1347,12 +1435,14 @@ def test_review_runtime_paths_use_only_verified_base(
         assert "reviewer paths" in out
 
 
-@pytest.mark.parametrize("command", ["check", "ready", "merge", "status"])
-@pytest.mark.parametrize("missing", ["remote", "workflow"])
-def test_runtime_pinning_preserves_other_command_fallbacks(
+@pytest.mark.parametrize("command", ["check", "review", "ready", "merge", "status"])
+@pytest.mark.parametrize("missing", ["default", "remote", "workflow"])
+def test_runtime_pinning_requires_trusted_workflow(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, command: str, missing: str,
 ) -> None:
-    if missing == "remote":
+    if missing == "default":
+        git(wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    elif missing == "remote":
         git(wt, "update-ref", "-d", "refs/remotes/origin/main")
     else:
         git(wt, "update-ref", "refs/remotes/origin/main",
@@ -1360,8 +1450,9 @@ def test_runtime_pinning_preserves_other_command_fallbacks(
     prepare_review(wt, gh, fake_bin)
     code, out, err = run(capsys, command)
     assert "reviewer paths" not in out + err
-    assert "--config" not in err
-    assert code == (0 if command == "check" else 1)
+    assert "--config" in err
+    assert code == 1
+    assert not gh.calls
 
 
 @pytest.mark.parametrize("family,options,model,effort", [
@@ -1375,15 +1466,12 @@ def test_review_passes_and_records_model_effort(
     configured_model = "opus" if family == "claude" else model
     configured_effort = "medium" if family == "claude" else effort
     reviewers = [family] if family == "codex" else ["claude", "codex"]
-    workflow = wt / "workflow.toml"
-    workflow.write_text(WORKFLOW.replace('["claude", "codex"]', json.dumps(reviewers)) + f"""
+    publish_workflow(wt, WORKFLOW.replace('["claude", "codex"]', json.dumps(reviewers)) + f"""
 [delivery.review.{family}]
 model = "{configured_model}"
 effort = "{configured_effort}"
 allowed_efforts = {json.dumps(["high"] if family == "codex" else ["medium", "high"])}
 """)
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-q", "-m", "configure review")
     head = prepare_review(wt, gh, fake_bin)
     if family == "codex":
         _fake_codex(fake_bin, json.dumps(APPROVE))
@@ -1402,14 +1490,11 @@ allowed_efforts = {json.dumps(["high"] if family == "codex" else ["medium", "hig
 def test_review_rejects_disallowed_effort_before_launch(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, options, configured: str
 ) -> None:
-    workflow = wt / "workflow.toml"
-    workflow.write_text(workflow.read_text() + f"""
+    publish_workflow(wt, WORKFLOW + f"""
 [delivery.review.claude]
 effort = "{configured}"
 allowed_efforts = ["medium"]
 """)
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-q", "-m", "configure review")
     head = head_of(wt)
     arm_empty_primary_review_history(gh, head)
 
@@ -1577,10 +1662,10 @@ def test_review_chunks_oversized_diff_with_same_family(
         'reviewers = ["claude", "codex"]',
         'reviewers = ["claude", "codex"]\nreview_chunk_bytes = 4096',
     )
-    (wt / "workflow.toml").write_text(workflow)
+    publish_workflow(wt, workflow)
     for name in ("large_a.py", "large_b.py"):
         (wt / name).write_text("x = 1\n" * 900)
-    git(wt, "add", "workflow.toml", "large_a.py", "large_b.py")
+    git(wt, "add", "large_a.py", "large_b.py")
     git(wt, "commit", "-q", "-m", "large review")
     head = head_of(wt)
     arm_empty_primary_review_post(gh, head, 8)
@@ -1683,9 +1768,7 @@ def test_review_repost_requires_valid_fallback(wt, gh, fake_bin, capsys, family,
     from dataclasses import replace
 
     if configured:
-        workflow = wt / "workflow.toml"
-        workflow.write_text(workflow.read_text().replace('reviewers = ["claude", "codex"]', f'reviewers = {configured}'))
-        git(wt, "add", "workflow.toml")
+        publish_workflow(wt, WORKFLOW.replace('reviewers = ["claude", "codex"]', f'reviewers = {configured}'))
     git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
     head = prepare_review(wt, gh, fake_bin)
     if family == "codex":
@@ -1932,13 +2015,11 @@ def test_review_falls_through_when_preferred_family_fails(
 def test_review_unusable_fallback_effort_waits_for_independent_result(
     wt: Path, gh: FakeGh, fake_bin: Path, fake_tool, capsys, codex_ok
 ) -> None:
-    workflow = wt / "workflow.toml"
-    workflow.write_text(workflow.read_text() + """
+    publish_workflow(wt, WORKFLOW + """
 [delivery.review.claude]
 allowed_efforts = ["medium"]
 """)
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-q", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
+    git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
     prepare_review(wt, gh, fake_bin, post_id=4)
     if codex_ok:
         _fake_codex(fake_bin, json.dumps(APPROVE))
@@ -1971,12 +2052,9 @@ def test_review_fallback_publishes_normalized_reason(
 def test_review_observes_new_codex_version_in_saved_receipt(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys,
 ) -> None:
-    workflow = wt / "workflow.toml"
-    workflow.write_text(workflow.read_text().replace(
+    publish_workflow(wt, WORKFLOW.replace(
         'reviewers = ["claude", "codex"]', 'reviewers = ["codex", "claude"]',
     ))
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-q", "-m", "prefer codex")
     prepare_review(wt, gh, fake_bin)
     version = "codex-cli 0.168.0"
     _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
@@ -2157,7 +2235,7 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch, git
     gh.respond("pr ready", "")
     git_calls.clear()
     code, out, err = run(capsys, "ready")
-    assert_git_cost(git_calls, 6, 1)
+    assert_git_cost(git_calls, 7, 1)
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
@@ -2995,6 +3073,23 @@ def test_ready_requires_receipt_from_current_check_environment(
     assert run(capsys, *args, "check")[0] == 1
 
 
+@pytest.mark.parametrize("base_sensitive", [False, True])
+def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
+    if base_sensitive:
+        publish_workflow(wt, WORKFLOW.replace('[delivery]', '[checks.inputs]\n"*" = ["."]\n\n[delivery]'))
+    args = SimpleNamespace(command="ready", config=None)
+    config = cli._load_config(args, wt, pin_checks=True)
+    head = head_of(wt)
+    git(repo, "commit", "-qm", "advance base without editing policy", "--allow-empty")
+    git(repo, "push", "-q", "origin", "main")
+
+    if base_sensitive:
+        with pytest.raises(cli.CliError, match="check base changed while waiting; run loopzero check"):
+            cli._verify_wait_snapshot(args, wt, config, head, head)
+    else:
+        cli._verify_wait_snapshot(args, wt, config, head, head)
+
+
 @pytest.mark.parametrize("fixed", [False, True])
 def test_ready_matches_effective_inherited_check_environment(
     wt, gh, capsys, head, tmp_path, monkeypatch, fixed,
@@ -3089,6 +3184,7 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     monkeypatch.chdir(linked)
     head = head_of(linked)
     git(primary, "update-ref", "refs/remotes/origin/main", head)
+    git(primary, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     arm_pr(gh, head, branch="lz/bare", isDraft=False, state="MERGED")
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head=head, sha='c' * 40))
     gh.respond("api -X", "")
@@ -3534,6 +3630,7 @@ def test_status_names_base_workflow_for_invalid_pinned_checks(git_repo, monkeypa
     git(git_repo, "add", "workflow.toml")
     git(git_repo, "commit", "-qm", "invalid base workflow")
     git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(git_repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     workflow.write_text(workflow.read_text().replace("false", '["true"]'))
 
     code, _, err = run(capsys, "status")
@@ -3543,7 +3640,7 @@ def test_status_names_base_workflow_for_invalid_pinned_checks(git_repo, monkeypa
     workflow.write_text(workflow.read_text().replace('"example/repo"', "false"))
     code, _, err = run(capsys, "status")
     assert code == 1
-    assert f"{workflow}: repo.name must be a str" in err
+    assert "origin/main:workflow.toml: checks.commands must be a list" in err
 
 
 def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch, capsys):
@@ -3579,7 +3676,7 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     (wt / "scratch").write_text("x")
     git_calls.clear()
     code, out, _ = run(capsys, "status")
-    assert_git_cost(git_calls, 6, 1)
+    assert_git_cost(git_calls, 7, 1)
     assert code == 0 and "dirty:    yes" in out
     assert f"pr:       #7 {URL} (draft, OPEN)" in out
     assert f"review:   primary on {head[:12]} (approved)" in out
@@ -3644,6 +3741,8 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
     if base == "main":
         git(wt, "checkout", "-q", "--ignore-other-worktrees", base)
     else:
+        publish_workflow(wt, workflow.read_text())
+        git(wt, "update-ref", f"refs/remotes/origin/{base}", "refs/remotes/origin/main")
         git(wt, "checkout", "-q", "-b", base)
     for command in ("pr", "review", "ready", "merge"):
         code, out, err = run(capsys, command)
@@ -4134,7 +4233,7 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
 def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatch):
     commit_mergify_configuration(wt)
     head = head_of(wt)
-    config = cli.config_mod.load(wt / "workflow.toml")
+    config = cli.config_mod.load_trusted(wt)
     pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
     detail = ["api", f"repos/{REPO}/pulls/7"]
     gh.respond(" ".join(detail), merge_json(state="OPEN", head=head))
@@ -4364,8 +4463,7 @@ def test_mergify_ready_draft_requires_safe_queue_before_ci_activation(
 
 
 def test_mergify_cancel_does_not_require_healthy_queue_or_review(wt, gh, capsys, monkeypatch):
-    (wt / "workflow.toml").write_text(WORKFLOW.replace(
-        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'))
+    commit_mergify_configuration(wt)
     arm_pr(gh, "a" * 40)
     monkeypatch.setattr(mergify, "configured", lambda *_: pytest.fail("cancel must remain available"))
     removals = []
