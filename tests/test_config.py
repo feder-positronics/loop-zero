@@ -60,6 +60,9 @@ def test_load_full_config(tmp_path):
         limits=ResourceLimits(memory_mb=1024, file_mb=512),
     )
 
+    padded = FULL.replace('"uv run pytest -q"', '" uv run pytest -q "')
+    assert config.load(write(tmp_path, padded)).checks[0] == " uv run pytest -q "
+
 
 def test_load_applies_defaults(tmp_path):
     loaded = config.load(write(tmp_path, '[repo]\nname = "o/n"\n'))
@@ -112,6 +115,8 @@ def test_invalid_toml(tmp_path):
         ('[repo]\nname = 3\n', "repo.name must be a str"),
         ('[repo]\nname = "o/n"\n[checks]\ncommands = "pytest"\n', "checks.commands must be a list"),
         ('[repo]\nname = "o/n"\n[checks]\ncommands = ["ok", 1]\n', "non-empty strings"),
+        ('[repo]\nname = "o/n"\n[checks]\ncommands = ["true", "   "]\n',
+         r"workflow\.toml: checks\.commands.*nonblank command"),
         ('[repo]\nname = "o/n"\n[checks]\nnetwork = "yes"\n', "checks.network must be a bool"),
         ('[repo]\nname = "o/n"\n[delivery]\nmerge = "ff"\n', "delivery.merge must be one of"),
         ('[repo]\nname = "o/n"\n[delivery]\nreviewers = ["gpt"]\n', "delivery.reviewers entries"),
