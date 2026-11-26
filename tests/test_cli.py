@@ -2655,7 +2655,7 @@ def test_source_wait_reads_once_before_first_interval(wt, gh, capsys, monkeypatc
             arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
 
     clock = poll_clock(monkeypatch, jitter=1.0, after_sleep=after_sleep)
-    stub_mergify_admission(monkeypatch, markers=(True, False))
+    stub_mergify_admission(monkeypatch, configured=None, markers=(True, False))
     monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: "e" * 40)
 
     _out, _err = expect_cli(capsys, 0, command, "--wait=8", stderr="")
