@@ -1039,9 +1039,9 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
     if patch is None:
         raise CliError(
             f"could not verify merge history: {since[:12]} must be on the first-parent history and "
-            f"merged parents must come from {config.base_branch}. Save your work, then replay the fixes "
-            f"on the reviewed head {since[:12]}, including resolution edits. Push with `loopzero pr` "
-            "and run `loopzero review`, or open a new PR"
+            f"merged parents must come from {config.base_branch}. Check the first-parent log and merged parents. "
+            "If the history is correct, GitHub objects may be unavailable or exceed verification limits. "
+            "Open a new PR from the current base for a fresh review if verification still fails."
         )
     return patch
 

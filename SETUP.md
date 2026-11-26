@@ -284,14 +284,13 @@ PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
   pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
   `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
   then log in as it prints; the monitor refreshes standby Codex logins before they expire.
-- Every 5 minutes the monitor probes each account and keeps the best one active:
-  Claude prefers Fable and Opus, then Opus only; Codex prefers every model
-  available. At 95% of any limit an account counts as spent. `ai-accounts status`
-  shows accounts, emails, tiers and resets.
-- Claude probes retain each window's utilization (`util`) and reset (`resets`, null
-  when absent), including healthy windows. Legacy `reset` and `next_reset` are
-  aggregate availability estimates; status labels 7d and 5h resets separately.
-  `weekly_used_percent` is the overall 7d usage, null when unknown.
+- The monitor checks accounts every five minutes. Claude prefers Fable and Opus,
+  then Opus only. Codex keeps the current usable account until it is spent at 95%
+  of any limit by default, then prefers an account with every model available.
+  Claude reads the OAuth usage API at most every 30 minutes and uses one-token
+  header probes between reads. `ai-accounts status` shows accounts, tiers and
+  per-window utilization and resets. `weekly_used_percent` is the overall 7d
+  usage, null when unknown.
 - Only `exec` (including `--identity`) refuses non-owner Claude launches with exit 3
   at >=85% overall weekly or five-hour utilization, or when that account's cached
   status is missing, unreadable or older than 20 minutes. The last 15 weekly points
