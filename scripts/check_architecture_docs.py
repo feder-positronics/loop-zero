@@ -16,7 +16,7 @@ WATCHED = {
 }
 # Compare selected owning interfaces rather than requiring doc churn for every bug fix.
 INTERFACES = {
-    "src/loopzero/cli.py": {"build_parser"},
+    "src/loopzero/_cli_args.py": {"build_parser", "WAIT_TIMEOUT"},
     "src/loopzero/config.py": {"_SECTIONS", "MERGE_STRATEGIES", "REVIEWER_FAMILIES"},
     "src/loopzero/types.py": {"Config", "ResourceLimits", "ReviewConfig"},
 }
