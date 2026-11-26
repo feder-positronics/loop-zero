@@ -790,30 +790,25 @@ def test_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: P
     assert result.verdict == "approve" and result.findings[0].title == "Handle 401 Unauthorized"
 
 
-def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_claude(fake_bin, "boom", exit_code=2)
-    with pytest.raises(RunnerBadOutput, match="exited 2"):
-        _review("claude", tmp_path)
-
-
-@pytest.mark.parametrize("family,phrase,error", [
-    ("claude", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit),
-    ("codex", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit),
-    ("codex", "Error: Not logged in. Run codex login first.", RunnerAuthFailed),
-    ("claude", "Prompt is too long", RunnerPromptTooLong),
-    ("claude", "prompt is too long", RunnerPromptTooLong),
-    ("codex", "context_length_exceeded", RunnerPromptTooLong),
-    ("codex", "maximum context length exceeded", RunnerPromptTooLong),
-    ("codex", 'data: {"input_error_code":"input_too_large"}', RunnerPromptTooLong),
-    ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit),
-    ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit),
+@pytest.mark.parametrize("family,phrase,error,exit_code", [
+    ("claude", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit, 1),
+    ("codex", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit, 1),
+    ("codex", "Error: Not logged in. Run codex login first.", RunnerAuthFailed, 1),
+    ("claude", "Prompt is too long", RunnerPromptTooLong, 1),
+    ("claude", "prompt is too long", RunnerPromptTooLong, 1),
+    ("codex", "context_length_exceeded", RunnerPromptTooLong, 1),
+    ("codex", "maximum context length exceeded", RunnerPromptTooLong, 1),
+    ("codex", 'data: {"input_error_code":"input_too_large"}', RunnerPromptTooLong, 1),
+    ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit, 1),
+    ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit, 1),
+    ("claude", "boom", RunnerBadOutput, 2),
 ])
-def test_provider_errors_are_typed(fake_bin: Path, tmp_path: Path, family, phrase, error) -> None:
+def test_provider_errors_are_typed(fake_bin: Path, tmp_path: Path, family, phrase, error, exit_code) -> None:
     if family == "claude":
-        _fake_claude(fake_bin, phrase, exit_code=1)
+        _fake_claude(fake_bin, phrase, exit_code=exit_code)
     else:
-        _fake_codex(fake_bin, "", exit_code=1, stderr=phrase)
-    with pytest.raises(error):
+        _fake_codex(fake_bin, "", exit_code=exit_code, stderr=phrase)
+    with pytest.raises(error, match="exited 2" if exit_code == 2 else None):
         _review(family, tmp_path)
 
 
