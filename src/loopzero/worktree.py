@@ -14,7 +14,7 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from select import select
 
-from loopzero._proc import build_env, run
+from loopzero._proc import build_env, defer_sigterm, run
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -59,10 +59,10 @@ class GitError(WorktreeError):
 
 def _git(
     cwd: Path, *args: str, timeout: float = 120,
-    preserve_whitespace: bool = False, preserve_newlines: bool = False,
+    preserve_whitespace: bool = False, preserve_newlines: bool = False, graceful_interrupt: bool = False,
 ) -> str:
     argv = ("git", *args)
-    done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
+    done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout, graceful_interrupt=graceful_interrupt,
                preserve_newlines=preserve_newlines or preserve_whitespace,
                encoding=sys.getfilesystemencoding() if preserve_whitespace else None)
     if done.exit_code != 0:
@@ -158,10 +158,12 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
             ) from None
         raise
     _git(repo_root, "update-ref", "--no-deref", f"refs/remotes/origin/{base_branch}", base)
+    detached = not existing
     if existing:
-        existing_head = _resumable_head(repo_root, wt, branch)
-        if existing_head is None:
+        checkout = _resumable_checkout(repo_root, wt, branch)
+        if checkout is None:
             raise WorktreeError(refusal)
+        existing_head, detached = checkout
         if existing_head != base:
             raise WorktreeError(
                 f"cannot resume start at {wt}: existing HEAD {existing_head} does not match "
@@ -170,26 +172,43 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     _ensure_excludes(repo_root)
     if not existing:
         wt.parent.mkdir(parents=True, exist_ok=True)
-        _git(repo_root, "worktree", "add", "--quiet", "-b", branch, str(wt), base)
+        # Let Git clean up the interrupted checkout before creating the final branch.
+        _git(repo_root, "worktree", "add", "--quiet", "--detach", str(wt), base, graceful_interrupt=True)
+    if detached:
+        with defer_sigterm():
+            _git(wt, "switch", "--quiet", "-c", branch, graceful_interrupt=True)
     _initialize_task(task, _TASK_TEMPLATE.format(
         title=title_from_slug(slug), base_branch=base_branch, base=base))
     return wt
 
 
-def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | None:
+def _resumable_checkout(repo_root: Path, wt: Path, expected_branch: str) -> tuple[str, bool] | None:
     registered = _git(repo_root, "worktree", "list", "--porcelain", "-z").split("\0\0")
     path_field = f"worktree {wt.resolve()}"
     entry = next((item for item in registered if item.startswith(f"{path_field}\0")), "")
     fields = entry.split("\0")
-    if (len(fields) != 3 or fields[2] != f"branch refs/heads/{expected_branch}"
+    if (len(fields) != 3 or fields[2] not in ("detached", f"branch refs/heads/{expected_branch}")
             or not (wt / ".git").is_file()):
         return None
-    if _git(wt, *_ABSOLUTE_COMMON_DIR) != _git(repo_root, *_ABSOLUTE_COMMON_DIR) or branch(wt) != expected_branch:
+    if _git(wt, *_ABSOLUTE_COMMON_DIR) != _git(repo_root, *_ABSOLUTE_COMMON_DIR):
+        return None
+    detached = fields[2] == "detached"
+    if detached:
+        admin = Path(_git(wt, "rev-parse", "--absolute-git-dir", preserve_whitespace=True))
+        try:
+            backlink = os.fsdecode((admin / "gitdir").read_bytes().removesuffix(b"\n"))
+        except OSError:
+            return None
+        if ((wt / ".git").is_symlink() or (admin / backlink).resolve() != (wt / ".git").resolve()
+                or _branch_exists(repo_root, expected_branch)
+                or _git(wt, "branch", "--show-current")):
+            return None
+    elif branch(wt) != expected_branch:
         return None
     current_head = head(wt)
     if fields[1] != f"HEAD {current_head}" or is_dirty(wt):
         return None
-    return current_head
+    return current_head, detached
 
 
 def _initialize_task(task: Path, text: str) -> None:
@@ -244,7 +263,7 @@ def task_text(wt: Path) -> str:
             "or recreate the file using the handoff template at "
             "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md"
         )
-    return task.read_text(encoding="utf-8")
+    return task.read_text()
 
 
 def base_sha(wt: Path) -> str:

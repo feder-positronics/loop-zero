@@ -158,6 +158,7 @@ def run(
     encoding: str | None = None,
     preserve_newlines: bool = False,
     tail_chars: int | None = None,
+    graceful_interrupt: bool = False,
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
 
@@ -194,6 +195,10 @@ def run(
                 else:
                     stdout, stderr = _read_output_tail(proc, tail_chars, timeout), ""
             except BaseException:
+                if graceful_interrupt and os.name == "posix":
+                    with suppress(ProcessLookupError, subprocess.TimeoutExpired):
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        proc.wait(timeout=5)
                 if os.name == "posix":
                     with suppress(ProcessLookupError):
                         os.killpg(proc.pid, signal.SIGKILL)

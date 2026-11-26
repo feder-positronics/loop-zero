@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -104,7 +106,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
 
     def interrupt_after_add(cwd, *args, **kwargs):
         output = run_git(cwd, *args, **kwargs)
-        if args[:2] == ("worktree", "add"):
+        if args[:2] == ("switch", "--quiet"):
             raise KeyboardInterrupt
         return output
 
@@ -334,3 +336,24 @@ def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> Non
         assert git(repo, "ls-remote", "origin", "refs/heads/lz/abandoned").split() == [
             head, "refs/heads/lz/abandoned"
         ]
+
+
+def test_start_retries_after_git_checkout_interrupt(repo, tmp_path, monkeypatch):
+    (repo / ".gitattributes").write_text("README.md filter=paused\n")
+    (repo / "workflow.toml").write_text('[repo]\nname="owner/repo"\n')
+    git(repo, "add", ".gitattributes", "workflow.toml")
+    git(repo, "commit", "-qm", "add checkout barrier")
+    git(repo, "push", "-q", "origin", "main")
+    pid_file, entered = tmp_path / "starter.pid", tmp_path / "checkout-entered"
+    git(repo, "config", "filter.paused.smudge",
+        f'cat >/dev/null; : > {shlex.quote(str(entered))}; '
+        f'kill -INT "$(cat {shlex.quote(str(pid_file))})"; exec sleep 30')
+    start = ("import os, sys; from pathlib import Path; from loopzero.cli import main; "
+             "Path(sys.argv[1]).write_text(str(os.getpid())); sys.exit(main(['start', 'paused']))")
+    command = [sys.executable, "-c", start, str(pid_file)]
+    first = subprocess.run(command, cwd=repo, capture_output=True, timeout=8, check=False)
+    assert entered.exists() and first.returncode in (-2, 130)
+    git(repo, "config", "--unset", "filter.paused.smudge")
+    resumed = subprocess.run(command, cwd=repo, capture_output=True, timeout=8, check=False)
+    assert resumed.returncode == 0, resumed.stderr
+    assert worktree.task_file(worktree.worktree_dir(repo, "paused")).is_file()
