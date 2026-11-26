@@ -58,7 +58,7 @@ def _git(
 ) -> str:
     argv = ("git", *args)
     done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-               preserve_newlines=preserve_newlines)
+               preserve_newlines=preserve_newlines or preserve_whitespace)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
     if preserve_newlines:
@@ -103,7 +103,8 @@ def _branch_exists(repo_root: Path, branch: str) -> bool:
 
 
 def _ensure_excludes(repo_root: Path) -> None:
-    common = Path(_git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    common = Path(_git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                       preserve_whitespace=True))
     exclude = common / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude = exclude.resolve()

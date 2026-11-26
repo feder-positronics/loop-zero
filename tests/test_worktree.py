@@ -96,6 +96,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
 
 @pytest.mark.parametrize("interruption", ["sigint", "timeout"])
 def test_start_retries_after_interruption_during_git_checkout(repo, tmp_path, interruption):
+    repo = repo.rename(repo.with_name("repo\r"))
     (repo / ".gitattributes").write_text("README.md filter=interrupt\n")
     git(repo, "add", ".gitattributes")
     git(repo, "commit", "-qm", "apply smudge filter")
@@ -132,7 +133,7 @@ worktree.start(Path.cwd(), sys.argv[3], "main")
     git(repo, "config", "--unset", "filter.interrupt.smudge")
     wt = worktree.start(repo, slug, "main")
     assert (wt / "README.md").read_text() == "hello\n"
-    assert worktree.task_file(wt).is_file()
+    assert worktree.task_file(wt).is_file() and not worktree.is_dirty(wt)
 
 
 @pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base"])
