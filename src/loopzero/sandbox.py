@@ -126,7 +126,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
-        for index, command in enumerate(commands):
+        for ordinal, command in enumerate(commands, 1):
             if progress:
                 progress(command)
             key = _input_key(config, worktree, command, "" if dirty else base,
@@ -137,19 +137,22 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 if status:
                     status(f"reused {(old.reused_from or head)[:8]}")
             else:
-                with _stage_status(status, index + 1, len(commands)):
+                with _stage_status(status, ordinal, len(commands)):
                     result = (_dispatch_one(config, worktree, head, base, command, timeout)
                               if config.check_runner else _run_one(config, worktree, prefix, command, timeout))
-                if key:
-                    result = replace(result, input_key=key)
-            if index >= len(preparations) or result.exit_code:
+                result = replace(result, input_key=key)
+            if ordinal > len(preparations) or result.exit_code:
                 results.append(result)
-                _checkpoint_success(
-                    checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
-                    previous, commands[index + 1:],
-                )
+                if checkpoint is not None and result.input_key and result.exit_code == 0:
+                    # The receipt stays nonpassing until final validation.
+                    incomplete = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
+                    unvisited = (
+                        previous[stage] for stage in commands[ordinal:] if stage in previous
+                    )
+                    checkpoint(CheckReport(head, dirty, (*results, *unvisited, incomplete),
+                                           settings_sha256))
             if status:
-                status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
+                status(f"stage {ordinal}/{len(commands)}: exit {result.exit_code} "
                        f"({result.duration_s:.1f}s)")
             if result.exit_code != 0:
                 break
@@ -170,17 +173,6 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
 
 
 INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
-
-
-def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
-                        report: CheckReport, previous: dict[str, CheckResult],
-                        remaining: tuple[str, ...]) -> None:
-    stage = report.results[-1]
-    if checkpoint is not None and stage.input_key and stage.exit_code == 0:
-        # Even the last stage leaves a nonpassing receipt until final validation.
-        incomplete = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
-        unvisited = tuple(previous[command] for command in remaining if command in previous)
-        checkpoint(replace(report, results=(*report.results, *unvisited, incomplete)))
 
 
 def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
@@ -632,7 +624,7 @@ def _dispatch_one(
                 raise ValueError("Worktree changed before fallback")
             local = run_checks(replace(config, check_runner=(), checks=(command,), inputs={}),
                                worktree, timeout=timeout, _resolved=True)
-            if local.dirty or not local.results:
+            if local.dirty:
                 raise ValueError("Local fallback failed")
             return local.results[-1]
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
