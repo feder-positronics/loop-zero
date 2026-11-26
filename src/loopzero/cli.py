@@ -1283,11 +1283,14 @@ def _warn_queue_size(
                              "commit-tree", tree, "-p", integrated, "-p", source, "-m", "Queue size projection")
         result = evaluate(integrated)
     except (LoopZeroError, OSError) as exc:  # best effort: never blocks ready
-        print(f"warning: could not project the queue size budget: {_one_line(exc)}", file=sys.stderr)
+        detail = github.redact_credentials(_one_line(exc))
+        print(f"warning: could not project the queue size budget: {detail}", file=sys.stderr)
         return
     if result.exit_code and "size budget: FAIL" in result.stdout:
         predecessors = ", ".join(f"#{number}" for number in numbers)
         print(f"warning: projected size budget after {predecessors}:\n{result.stdout.rstrip()}", file=sys.stderr)
+    elif result.exit_code:
+        print(f"warning: could not project the queue size budget: script exited {result.exit_code}", file=sys.stderr)
 
 
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:

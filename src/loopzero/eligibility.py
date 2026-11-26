@@ -258,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.publish:
             publish("success" if result.ready else "failure", "; ".join(result.reasons) or "Reviewed source head")
     except (LoopZeroError, OSError) as exc:
-        print(exc, file=sys.stderr)
+        print(" | ".join(line.strip() for line in str(exc).splitlines() if line.strip()), file=sys.stderr)
         return 1
     print("eligible" if result.ready else "; ".join(result.reasons))
     return 0 if result.ready else 1

@@ -4413,24 +4413,37 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
 
 
 def test_queue_size_projection_git_failure_stays_advisory(monkeypatch, tmp_path, capsys):
+    origin = "https://x-access-token:ghs_SECRET123@github.com/acme/widgets.git"
     monkeypatch.setattr(cli.mergify, "queue_predecessors", lambda *_: [5])
-    def fail(*_args, **_kwargs):
-        raise cli.worktree.GitError(("git", "fetch"), "fatal: couldn't find remote ref")
+    def fail(*args, **_kwargs):
+        raise cli.worktree.GitError(("git", *args[1:]), "fatal: couldn't find remote ref")
     monkeypatch.setattr(cli, "_git", fail)
     config = SimpleNamespace(repo=REPO, base_branch="main", mergify_queue="main")
-    cli._warn_queue_size(config, SimpleNamespace(number=7), tmp_path, "origin", "a" * 40,
+    cli._warn_queue_size(config, SimpleNamespace(number=7), tmp_path, origin, "a" * 40,
                          fail, lambda _: pytest.fail("projection must stop at the git failure"))
-    assert "warning: could not project the queue size budget: git fetch failed" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "warning: could not project the queue size budget: git fetch" in err and "ghs_SECRET123" not in err
+
+
+def test_queue_size_projection_reports_a_script_without_verdict(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli.mergify, "queue_predecessors", lambda *_: [5])
+    monkeypatch.setattr(cli, "_git", lambda *_a, **_k: "")
+    def git(*args):
+        return "b" * 40 if args[0] == "rev-parse" else "c" * 40
+    config = SimpleNamespace(repo=REPO, base_branch="main", mergify_queue="main")
+    cli._warn_queue_size(config, SimpleNamespace(number=7), tmp_path, "origin", "a" * 40, git,
+                         lambda _: cli._proc.Completed(2, "", "boom", 0.0))
+    assert "could not project the queue size budget: script exited 2" in capsys.readouterr().err
 
 
 def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head, capsys):
     from loopzero import eligibility
     cfg = wt / ".loopzero" / "hosted.toml"
     cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
-    gh.fail(f"api repos/{REPO}/pulls/7", "HTTP 404: Not Found")
+    gh.fail(f"api repos/{REPO}/pulls/7", "HTTP 404: Not Found\n{\"message\": \"Not Found\"}")
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
     out, err = capsys.readouterr()
-    assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err
+    assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err and "Not Found\"}" in err
 
 
 def test_eligibility_rejects_non_object_review_row(gh, head):
