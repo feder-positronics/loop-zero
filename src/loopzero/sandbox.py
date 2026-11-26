@@ -115,7 +115,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
-    with _proc.unwind_on_sigterm(), _private_directories() as stack:
+    with (_proc.unwind_on_sigterm(), _stage_checkpoints(checkpoint, bool(config.check_runner)) as save,
+          _private_directories() as stack):
         prefix = []
         if not config.check_runner:
             home = _enter_private_directory(stack, "loopzero-home-")
@@ -154,47 +155,54 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 result = replace(result, input_key=key)
             if ordinal > len(preparations) or result.exit_code:
                 results.append(result)
-                _checkpoint_stage(
-                    checkpoint if result.exit_code or not config.check_runner else None,
-                    CheckReport(head, dirty, tuple(results), settings_sha256), previous, commands[ordinal:],
-                )
+                save(CheckReport(head, dirty, tuple(results), settings_sha256), previous, commands[ordinal:])
             if status:
                 status(f"stage {ordinal}/{len(commands)}: exit {result.exit_code} "
                        f"({result.duration_s:.1f}s)")
             if result.exit_code != 0:
                 break
-    final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
-    if (final_head, final_dirty) != (head, dirty):
-        results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
-                    f"HEAD before: {head}; HEAD after: {final_head}; "
-                    f"dirty before: {dirty}; dirty after: {final_dirty}"
-        )))
-        dirty = True
-    # A runner upgrade during execution makes the resulting receipt unverified.
-    settings_sha256 = (
-        settings_sha256 if not config.check_runner
-        or settings_sha256 == settings_fingerprint(config) else None
-    )
-    return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
+        final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
+        final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+        if (final_head, final_dirty) != (head, dirty):
+            results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
+                        f"HEAD before: {head}; HEAD after: {final_head}; "
+                        f"dirty before: {dirty}; dirty after: {final_dirty}"
+            )))
+            dirty = True
+        # A runner upgrade during execution makes the resulting receipt unverified.
+        settings_sha256 = (
+            settings_sha256 if not config.check_runner
+            or settings_sha256 == settings_fingerprint(config) else None
+        )
+        return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
 
 INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
-INCOMPLETE_CHECK = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
 
 
-def _checkpoint_stage(checkpoint: Callable[[CheckReport], None] | None,
-                      report: CheckReport, previous: dict[str, CheckResult],
-                      remaining: tuple[str, ...]) -> None:
-    if checkpoint is None:
-        return
-    stage = report.results[-1]
-    if stage.exit_code:
-        checkpoint(report)
-    elif stage.input_key:
-        # Even the last stage leaves a nonpassing receipt until final validation.
-        unvisited = tuple(previous[command] for command in remaining if command in previous)
-        checkpoint(replace(report, results=(*report.results, *unvisited, INCOMPLETE_CHECK)))
+@contextmanager
+def _stage_checkpoints(checkpoint: Callable[[CheckReport], None] | None, delegated: bool):
+    pending = None
+
+    def save(report: CheckReport, previous: dict[str, CheckResult], remaining: tuple[str, ...]) -> None:
+        nonlocal pending
+        stage = report.results[-1]
+        if not stage.exit_code:
+            if not stage.input_key:
+                return
+            unvisited = (previous[command] for command in remaining if command in previous)
+            report = replace(report, results=(*report.results, *unvisited,
+                                              CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")))
+        pending = report if delegated and not stage.exit_code else None
+        if pending is None:
+            checkpoint(report)
+
+    try:
+        yield save if checkpoint is not None else lambda *_: None
+    except (KeyboardInterrupt, _proc.Terminated):
+        if pending is not None:
+            checkpoint(pending)
+        raise
 
 
 def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
@@ -651,7 +659,7 @@ def _dispatch_one(
     binding = {"worktree": str(worktree.resolve()), "head": head, "base": base, "command": command, "network": config.network,
                "env_sha256": hashlib.sha256(json.dumps(
                    env, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()}
-    runner_exit, failure_detail = 0, ""
+    runner_exit, stderr = 0, ""
     try:
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed before stage")
@@ -673,21 +681,15 @@ def _dispatch_one(
             try:
                 done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
                                  input=json.dumps({**binding, "env": env}), encoding="utf-8")
+                stdout, stderr, runner_exit = done.stdout, done.stderr, done.exit_code
             except _proc.ProcTimeout as exc:
-                done = _proc.Completed(TIMEOUT_EXIT, exc.stdout, exc.stderr, exc.duration_s or timeout)
-                failure_detail = f"timed out after {timeout:g}s"
-        runner_exit = done.exit_code
-        if runner_exit:
-            stderr = _proc.tail(_redact_check_output(config, done.stderr))[-2000:]
-            failure_detail = f"{failure_detail or f'process exit {runner_exit}'}\n{stderr}".rstrip()
-        frame = _stage_frame(done.stdout, binding, runner_exit)
+                stdout, stderr, runner_exit = exc.stdout, f"timed out after {timeout:g}s\n{exc.stderr}", TIMEOUT_EXIT
+        frame = _stage_frame(stdout, binding, runner_exit)
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed after stage")
         if frame["not_started"]:
             if frame["exit_code"] or frame["duration_s"] or frame["tail"]:
                 raise ValueError("inconsistent not-started result")
-            if not _stage_unchanged(config, worktree, head):
-                raise ValueError("Worktree changed before fallback")
             local = run_checks(replace(config, check_runner=(), checks=(command,), inputs={}),
                                worktree, timeout=timeout, _resolved=True)
             if local.dirty:
@@ -696,5 +698,7 @@ def _dispatch_one(
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
                            _check_tail(frame["tail"], config))
     except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
-        detail = failure_detail or _check_tail(str(exc), config)
-        raise StageRunnerFailure(runner_exit or 1, detail) from exc
+        if runner_exit:
+            tail = _proc.tail(_redact_check_output(config, stderr))[-2000:]
+            raise StageRunnerFailure(runner_exit, f"process exit {runner_exit}\n{tail}".rstrip()) from exc
+        raise StageRunnerFailure(1, _check_tail(str(exc), config)) from exc

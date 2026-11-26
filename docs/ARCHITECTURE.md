@@ -562,8 +562,9 @@ HEAD and atomically replace the receipt from a synced sibling temporary file.
 Successful local keyed stages are checkpointed in the same receipt for reuse.
 Their checkpoints preserve a clean pass for the same head, settings and
 commands. A reported failed stage replaces the receipt immediately. Successful
-delegated stages are published only with the final report. Final worktree
-validation is required before publishing a pass. Runners cannot select stages
+delegated stages are checkpointed if the coordinator is interrupted, and
+discarded if the runner fails. Final worktree validation is required before
+publishing a pass. Runners cannot select stages
 or mint receipts. Stage admission
 belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the

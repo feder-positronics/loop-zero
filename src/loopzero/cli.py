@@ -1932,13 +1932,10 @@ def main(argv: list[str] | None = None) -> int:
     return _run(parse_args(build_parser(), argv))
 
 
-def _run(args: argparse.Namespace) -> int:
+def _run(args: argparse.Namespace, *, console: bool = False) -> int:
     try:
         with _proc.unwind_on_sigterm():
             return globals()[f"cmd_{args.command}"](args)
-    except sandbox.StageRunnerFailure as exc:
-        print(f"loopzero {args.command}: {_one_line(exc)}", file=sys.stderr)
-        return exc.exit_code
     except IndependentReviewerUnavailable as exc:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
         return 4
@@ -1949,7 +1946,8 @@ def _run(args: argparse.Namespace) -> int:
         message = str(exc) if isinstance(exc, ReviewersUnavailable) else _one_line(exc)
         prefix = "unexpected response: " if isinstance(exc, UNEXPECTED) else ""
         print(f"loopzero {args.command}: {prefix}{message}", file=sys.stderr)
-        return 1
+        code = exc.exit_code if isinstance(exc, sandbox.StageRunnerFailure) else 1
+        return _proc.exit_status(code) if console else code
     except KeyboardInterrupt:
         print(f"loopzero {args.command}: interrupted", file=sys.stderr)
         return 130
@@ -1959,14 +1957,5 @@ def _one_line(exc: BaseException) -> str:
     return " | ".join(ln.strip() for ln in (str(exc) or type(exc).__name__).splitlines() if ln.strip())
 
 
-def _exit_status(code: int) -> int:
-    if code < 0:
-        import signal
-        if -code not in (signal.SIGKILL, signal.SIGSTOP):
-            signal.signal(-code, signal.SIG_DFL)
-        signal.raise_signal(-code)
-    return code
-
-
 if __name__ == "__main__":
-    sys.exit(_exit_status(_run(_module_args)))
+    sys.exit(_run(_module_args, console=True))
