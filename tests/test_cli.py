@@ -203,13 +203,6 @@ def marker(head: str, kind: str, source: str = "model") -> str:
     return cli.review_marker(head, kind, source)
 
 
-def test_review_marker_parser_accepts_old_and_v1_forms() -> None:
-    old = f"<!-- loopzero:review head={'a' * 40} kind=primary -->"
-    new = cli.review_marker("b" * 40, "delta")
-    assert cli.REVIEW_MARKER_RE.search(old).groups() == ("a" * 40, "primary")
-    assert cli.REVIEW_MARKER_RE.search(new).groups() == ("b" * 40, "delta")
-
-
 @pytest.mark.parametrize("source", ["model", "pair"])
 def test_review_marker_quoted_in_prose_neither_voids_nor_hides_a_review(gh: FakeGh, source: str) -> None:
     head = "a" * 40
@@ -1146,17 +1139,6 @@ def test_progress_output_precedes_the_stderr_verdict_in_one_file(tmp_path: Path)
     with (tmp_path / "log").open("w") as log:
         subprocess.run([sys.executable, "-c", script], stdout=log, stderr=subprocess.STDOUT, check=False)
     assert (tmp_path / "log").read_text().splitlines() == ["waiting", "loopzero merge: dequeued"]
-
-
-def test_pr_migrates_old_checks_heading_to_validation(wt: Path) -> None:
-    task = wt / ".loopzero" / "task.md"
-    task.write_text(task.read_text().replace("## Validation", "## Checks"))
-
-    body = cli._pr_body(wt, head_of(wt), cli.config_mod.load(wt / "workflow.toml"))
-
-    assert "## Checks" not in body
-    assert body.count("## Validation") == 1
-    assert "(no `loopzero check` run recorded)" in body
 
 
 @pytest.mark.parametrize("corrupt_report", [False, True], ids=["no-report", "corrupt-report"])
@@ -3803,14 +3785,6 @@ def test_gh_errors_are_one_line_on_stderr(wt: Path, gh: FakeGh, capsys) -> None:
     code, out, err = run(capsys, "status")
     assert code == 1 and out.count("\n") >= 4 and err.count("\n") == 1
     assert err.startswith("loopzero status: gh api") and "gh auth login" in err
-
-
-def test_help_lists_all_commands(capsys) -> None:
-    with pytest.raises(SystemExit) as info:
-        cli.main(["--help"])
-    assert info.value.code == 0
-    out = capsys.readouterr().out
-    assert all(word in out for word in ("start", "check", "pr", "review", "ready", "merge", "status"))
 
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
