@@ -1046,27 +1046,30 @@ def _review_claude(
             env_allowlist=(*config.env_allowlist, *CLAUDE_AUTH_ENV),
         )
     raw = done.stdout
+    def diagnostic(text=raw):
+        return _tail(_redact_keys("claude", text))
+
     try:
         envelope = _extract_json_object(raw)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerMalformedOutput("claude: stdout is not JSON", _tail(raw)) from exc
+        raise RunnerMalformedOutput("claude: stdout is not JSON", diagnostic()) from exc
     if not isinstance(envelope, dict):
-        raise RunnerMalformedOutput("claude: result envelope is not an object", _tail(raw))
+        raise RunnerMalformedOutput("claude: result envelope is not an object", diagnostic())
     if _claude_envelope_auth_failure(envelope):
         raise _auth_failure("claude", raw)
     if envelope.get("is_error") and _subscription_exhausted(raw, envelope):
-        raise RunnerUsageLimit("claude: usage limit reached", _tail(raw))
+        raise RunnerUsageLimit("claude: usage limit reached", diagnostic())
     if envelope.get("is_error") or envelope.get("subtype", "success") != "success":
         text = str(envelope.get("result", ""))
         if _looks_like_auth_failure(text):
             raise _auth_failure("claude", text)
         if _looks_too_long(text) or _looks_too_long(raw):
-            raise RunnerPromptTooLong("claude: prompt is too long", _tail(raw))
-        raise RunnerBadOutput(f"claude: {envelope.get('subtype', 'error')}", _tail(raw))
+            raise RunnerPromptTooLong("claude: prompt is too long", diagnostic())
+        raise RunnerBadOutput(diagnostic(f"claude: {envelope.get('subtype', 'error')}"), diagnostic())
     try:
         payload = _claude_payload(envelope)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerMalformedOutput("claude: result text is not JSON", _tail(str(envelope.get("result", "")))) from exc
+        raise RunnerMalformedOutput("claude: result text is not JSON", diagnostic(str(envelope.get("result", "")))) from exc
     usage = envelope.get("modelUsage")
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
     reported_model = ", ".join(models) or None
