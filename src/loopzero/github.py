@@ -126,8 +126,8 @@ _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str | None, bool] | None] = ContextVar("github_reads", default=None)
 _api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
-_GITHUB_TOKEN_RE = re.compile(
-    r"\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{10,})\b"
+_CREDENTIAL_TOKEN_RE = re.compile(
+    r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})"
 )
 
 
@@ -220,7 +220,7 @@ def _redact_tokens(value: str, token: str = "") -> str:
     value = re.sub(r"(?i)\b(authorization)\s*[:=]\s*"
                    r"(?:(?:basic|bearer|token)\s+)?[^\s,;]+", r"\1=[REDACTED]", value)
     value = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", value)
-    value = _GITHUB_TOKEN_RE.sub("[REDACTED]", value)
+    value = _CREDENTIAL_TOKEN_RE.sub("[REDACTED]", value)
     value = re.sub(r"(?i)\b(access_token|auth_token|token)\s*[:=]\s*"
                    r"[^\s,;]+", r"\1=[REDACTED]", value)
     value = re.sub(r"(?i)(https?://[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
@@ -780,7 +780,7 @@ def finding_marker(severity: str, head_sha: str, finding: Finding) -> str:
 
 
 def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
-    text = f"{prefix}**{f.severity}: {f.title}**\n\n{f.body}".rstrip()
+    text = prefix + _CREDENTIAL_TOKEN_RE.sub("[REDACTED]", f"**{f.severity}: {f.title}**\n\n{f.body}").rstrip()
     if f.severity in BLOCKING:
         return f"{finding_marker(f.severity, head_sha, f)}\n{text}"
     return text
@@ -832,7 +832,7 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         lines.extend(_review_settings_lines(result, include_configured=settings_layout == "current"))
     if unplaced:
         lines.append("\nFindings without a file location:\n")
-        lines += [f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —") for f in unplaced]
+        lines += [_CREDENTIAL_TOKEN_RE.sub("[REDACTED]", f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —")) for f in unplaced]
     return "\n".join(lines) + _review_transcript(result, legacy_display)
 
 
