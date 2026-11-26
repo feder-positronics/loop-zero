@@ -100,7 +100,9 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    which changes neither the selector nor the budget.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings,
-   target branch and required CI. The receipt must record a clean passing run
+   target branch and required CI. Readiness and merge require the selected workflow to
+   name its review publishers and declare its required CI list, which may be empty.
+   The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
    digest covers execution and stage reuse settings, including the effective

@@ -108,10 +108,11 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     path = args.config or root / "workflow.toml"
     if not pin_checks:
         return config_mod.load(path)
+    readiness = args.command in {"ready", "merge"} and not getattr(args, "cancel", False)
     if args.config:
         print("checks are unpinned because --config was provided")
-        return config_mod.load(path)
-    config = config_mod.load_trusted(root)
+        return config_mod.load(path, readiness=readiness)
+    config = config_mod.load_trusted(root, readiness=readiness)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
@@ -263,7 +264,7 @@ def _readiness(
         return github.Readiness(ready=False, reasons=(reason,))
     if reviews is None:
         reviews = _pr_reviews(config.repo, pr.number)
-    publishers = config.review_publishers or (github.login(),)
+    publishers = config.review_publishers
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
     )
