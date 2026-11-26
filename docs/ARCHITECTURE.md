@@ -109,9 +109,11 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    target branch and required CI. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
-   digest covers execution and stage reuse settings, including the effective
-   allowlisted environment, without recording raw environment values. Waiters
-   check for policy changes on every poll.
+   digest covers execution and stage reuse settings without recording raw
+   environment values. It excludes only inherited `HEAVY_SLOT_GRANTED_CORES`
+   for local sandbox receipts. Explicit settings, delegated runner environments
+   and stage reuse keys still bind the grant. Waiters check for policy changes
+   on every poll.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree

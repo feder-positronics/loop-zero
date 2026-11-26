@@ -4,6 +4,7 @@ import base64
 import http.client
 import io
 import json
+import ssl
 import subprocess
 import sys
 import traceback
@@ -250,3 +251,20 @@ def test_api_get_retries_transient_reads(monkeypatch, failure):
     monkeypatch.setattr(mergify, "_credential", lambda: "k")
     assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
     assert calls == ["GET", "GET"]
+
+@pytest.mark.parametrize("reason, expected_sleeps", [
+    ("DNS lookup failed", [2.0, 5.0]),
+    (ssl.SSLCertVerificationError("certificate verification failed"), []),
+])
+def test_api_get_classifies_terminal_transport_failure(monkeypatch, reason, expected_sleeps):
+    sleeps = []
+
+    def fail(_request):
+        raise urllib.error.URLError(reason)
+
+    monkeypatch.setattr(mergify, "_open", fail)
+    monkeypatch.setattr(mergify, "_retry_sleep", sleeps.append)
+    monkeypatch.setattr(mergify, "_credential", lambda: "k")
+    with pytest.raises(mergify.MergifyError, match="transport failed") as info:
+        mergify.api_get("acme/widgets", "/merge-queue/status")
+    assert str(reason) in str(info.value) and sleeps == expected_sleeps
