@@ -575,44 +575,48 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_failure_preview(tail: str, limit: int = 1536) -> str:
+    if len(tail.encode()) <= limit:
+        return tail
+    readable = "\n".join(line for line in tail.splitlines() if len(line.encode()) <= limit // 2)
+    return (readable or tail).encode()[-limit:].decode(errors="ignore")
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
-            f"running: {command}", flush=True),
-            status=lambda message: print(message, flush=True),
-            checkpoint=lambda partial: _save_report(wt, partial))
+            f"running: {command}", flush=True), status=partial(print, flush=True),
+            checkpoint=partial(_save_report, wt))
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
+    shortened = False
     for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
-            print(tail, file=sys.stderr)
+            preview = _check_failure_preview(tail)
+            shortened |= preview != tail
+            print(preview, file=sys.stderr)
             if not config.network and (result.command.startswith("uv sync --offline --locked")
                                        or OFFLINE_FAILURE_RE.search(tail)):
-                env = {
-                    **sandbox.SANDBOX_ENV,
-                    **_proc.build_env(config.env_allowlist),
-                    **dict(config.env),
-                }
+                env = sandbox.SANDBOX_ENV | _proc.build_env(config.env_allowlist) | dict(config.env)
                 print(
                     "\nThe sandbox has no network because `[checks] network = false`; "
                     f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
-                    "To prepare offline, run UV_CACHE_DIR=<effective-cache> uv sync --group dev "
-                    "(use the groups your checks require) on the host, or the same commands, so the cache "
-                    "under `[checks] writable` is warm, or set `[checks] env` UV_CACHE_DIR to "
-                    "that cache.",
-                    file=sys.stderr,
+                    "Run UV_CACHE_DIR=<effective-cache> uv sync --group dev on the host "
+                    "(use the required groups) so the cache under `[checks] writable` is warm, "
+                    "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
                 )
-    current_head = _save_report(wt, report)
-    if current_head is not None:
+    if (current_head := _save_report(wt, report)) is not None:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
               file=sys.stderr)
         return 1
+    if shortened:
+        print(f"Full diagnostic tail: {CHECKS_FILE} (head {report.head})", file=sys.stderr)
     if report.ok and not report.dirty:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
@@ -1161,9 +1165,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
-    if args.wait is not None and (
-        waiting or _pending_checks(config, pr, readiness, allow_skipped=not pr.is_draft)
-    ):
+    if args.wait is not None and (waiting or _pending_checks(config, pr, readiness, allow_skipped=not pr.is_draft)):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
                                      shown=readiness.reasons if kicked else (), args=args,
                                      allow_skipped=True, initial=None if kicked else readiness)
@@ -1209,14 +1211,10 @@ def _draft_checks_waiting(
 def _pending_checks(
     config: Config, pr: github.PR, readiness: github.Readiness, *, allow_skipped: bool = False
 ) -> tuple[str, ...]:
-    """Reasons worth waiting on: mergeability or required checks can still settle.
-
-    An explicit ready wait can observe a skipped result left over from draft CI.
-    """
+    """Wait for mergeability and required checks, including allowed draft skips."""
     states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if allow_skipped else [])]
     waitable = {f"required check '{n}' {state}" for n in config.required_ci for state in states}
-    waitable.update(readiness.waitable_failures)
-    waitable.add(MERGEABILITY_PENDING)
+    waitable.update(readiness.waitable_failures, (MERGEABILITY_PENDING,))
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
@@ -1251,14 +1249,13 @@ def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Ite
 
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
+    started: float, shown: tuple[str, ...] = (), args: argparse.Namespace,
     allow_merged: bool = False, allow_skipped: bool = False, initial: github.Readiness | None = None,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
-    started = time.monotonic() if started is None else started
+    observe = partial(_wait_for_checks, wt, config, pr, timeout, kicked=kicked, started=started,
+                      shown=shown, args=args, allow_merged=allow_merged, allow_skipped=allow_skipped, initial=initial)
     if timeout == 0:
-        return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                shown=shown, args=args, allow_merged=allow_merged,
-                                allow_skipped=allow_skipped, initial=initial)
+        return observe()
     deadline = started + timeout
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr)
@@ -1266,9 +1263,7 @@ def _wait_with_deadline(
     reported_timeout = False
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
-            waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged,
-                                      allow_skipped=allow_skipped, initial=initial)
+            waited = observe(bounded=True)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1278,10 +1273,8 @@ def _wait_with_deadline(
 
 
 def _print_check_wait_timeout(pr: github.PR) -> None:
-    if pr.mergeable == "UNKNOWN":
-        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
-    else:
-        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
+    reason = "GitHub to compute mergeability" if pr.mergeable == "UNKNOWN" else "required checks"
+    print(f"timed out waiting for {reason} on {pr.head_sha[:12]}")
 
 
 def _verify_wait_snapshot(
@@ -1303,13 +1296,22 @@ def _verify_wait_snapshot(
     raise CliError(f"{changed} changed while waiting; retry with the current settings")
 
 
+def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> None:
+    def by_check(reasons: tuple[str, ...]) -> dict[str, str]:
+        return {reason.rpartition("' ")[0] or reason: reason for reason in reasons}
+    previous, current = by_check(shown), by_check(pending)
+    if changed := [reason for key, reason in current.items() if previous.get(key) != reason]:
+        print("waiting: " + "; ".join(changed))
+    if cleared := [key.removeprefix("required check '") for key in previous if key not in current]:
+        print("cleared: " + "; ".join(cleared))
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
     args: argparse.Namespace | None = None, bounded: bool = False, allow_merged: bool = False,
     allow_skipped: bool = False, initial: github.Readiness | None = None,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
-    """Poll the same head until it settles, omitting readiness for an allowed merge."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
     current = pr
@@ -1335,24 +1337,19 @@ def _wait_for_checks(
         pending = _pending_checks(
             config, current, readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft),
         )
+        if pending or readiness.ready:
+            _print_wait_changes(shown, pending)
         if not pending:
             return current, readiness, kicked
-        if pending != shown:
-            print("waiting: " + "; ".join(pending))
-            shown = pending
+        shown = pending
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
-            print(
-                "waiting: required check verdict predates the review; awaiting refresh: "
-                + ", ".join(readiness.stale_verdicts)
-            )
+            print("waiting: required check verdict predates the review; awaiting refresh: "
+                  + ", ".join(readiness.stale_verdicts))
             stale_notice = True
-        # Missing check runs do not prove that no workflow was scheduled. Diagnose only
-        # when no visible pending check explains why the required jobs have not appeared.
-        if (
-            elapsed >= MISSING_RUN_GRACE
-            and all(" missing on " in r for r in pending)
-            and not readiness.has_pending_checks
+        # Diagnose missing runs only when no visible check is still pending.
+        if elapsed >= MISSING_RUN_GRACE and not readiness.has_pending_checks and all(
+            " missing on " in reason for reason in pending
         ):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "
@@ -1539,8 +1536,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
     admit_by = deadline if args.wait else None
     if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
-        # One waiter and one deadline span source checks and landing: a check created
-        # by the ready transition must not end the turn between `ready` and the queue.
+        # Share the merge deadline with checks scheduled after readiness.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
                                      args=args, allow_merged=True, initial=readiness)
         if waited is None:
