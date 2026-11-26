@@ -1416,16 +1416,20 @@ def _split_bytes(text: str, budget: int) -> list[str]:
     pieces: list[str] = []
     current = ""
     for line in text.splitlines(keepends=True):
-        if len(line.encode()) > budget:
+        encoded = line.encode()
+        if len(encoded) > budget:
             if current:
                 pieces.append(current)
                 current = ""
-            while line:
-                cut = min(len(line), budget)
-                while len(line[:cut].encode()) > budget:
+            start = 0
+            while start < len(encoded):
+                cut = min(len(encoded), start + budget)
+                while cut < len(encoded) and encoded[cut] & 0xC0 == 0x80:
                     cut -= 1
-                pieces.append(line[:cut])
-                line = line[cut:]
+                if cut <= start:
+                    raise ValueError("diff chunk budget cannot fit one UTF-8 character")
+                pieces.append(encoded[start:cut].decode())
+                start = cut
         elif current and len((current + line).encode()) > budget:
             pieces.append(current)
             current = line

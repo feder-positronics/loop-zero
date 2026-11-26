@@ -282,15 +282,15 @@ MERGEABILITY_PENDING = "GitHub is computing mergeability"
 
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
-    *, workflow_wait: bool = False, announce_receipt: bool = False, diagnose_all: bool = False,
+    *, workflow_wait: bool = False, announce_receipt: bool = False,
 ) -> github.Readiness:
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
     report = _load_report(wt)
     receipt_problem = _check_report_problem(report, wt, config, head)
-    if receipt_problem and not diagnose_all:
-        return github.Readiness(False, (receipt_problem,))
     if reviews is None:
+        if receipt_problem:
+            return github.Readiness(False, (receipt_problem,))
         reviews = _pr_reviews(config.repo, pr.number)
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
@@ -313,15 +313,18 @@ def _readiness(
         ),
         publishers=publishers,
     )
-    if receipt_problem:
-        result = github.Readiness(
-            ready=False,
-            reasons=(*result.reasons, receipt_problem),
-        )
-    elif announce_receipt:
+    result = (github.Readiness(False, (*result.reasons, receipt_problem))
+              if receipt_problem else result)
+    if announce_receipt and not receipt_problem:
         _print_receipt(wt, report, "accepted")
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
-        result = _queue_readiness(config, result, github.behind_reason(pr, head if review else None))
+        behind = github.behind_reason(pr, head if review else None)
+        reasons = result.reasons
+        if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
+            reasons = tuple(reason for reason in reasons if reason != behind)
+        else:
+            reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
+        result = dataclasses.replace(result, ready=not reasons, reasons=reasons)
     if github.MISSING_REVIEW_REASON in result.reasons:
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
         if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
@@ -335,15 +338,6 @@ def _readiness(
     if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
         result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
     return result
-
-
-def _queue_readiness(config: Config, result: github.Readiness, behind: str) -> github.Readiness:
-    reasons = result.reasons
-    if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
-        reasons = tuple(reason for reason in reasons if reason != behind)
-    else:
-        reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
-    return dataclasses.replace(result, ready=not reasons, reasons=reasons)
 
 
 # --------------------------------------------------------------------------- checks report
@@ -654,7 +648,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
-            f"running: {command}", flush=True),
+            f"running: {github.redact_credentials(command)}", flush=True),
             status=lambda message: print(message, flush=True),
             checkpoint=lambda partial: _save_report(wt, partial),
             workflow=args.config or f"origin/{config.base_branch}:workflow.toml")
@@ -664,7 +658,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     shortened = False
     for result in report.results:
         if result.exit_code != 0:
-            print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
+            heading = github.redact_credentials(result.command)
+            print(f"--- {heading} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
             preview = _check_failure_preview(tail)
             shortened |= preview != tail
@@ -1282,7 +1277,7 @@ _SIZE_BUDGET = "scripts/size_budget.sh"
 
 
 def _prequeue_size_budget(
-    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness,
+    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness, *, project: bool = True,
 ) -> None:
     if not readiness.ready or config.merge_strategy != "mergify" or _SIZE_BUDGET not in config.checks:
         return
@@ -1304,14 +1299,47 @@ def _prequeue_size_budget(
             raise CliError(f"could not fetch {config.base_branch} from origin for the size budget check")
         base = git("rev-parse", "FETCH_HEAD^{commit}")
         script = git("show", f"{base}:{_SIZE_BUDGET}")
-        tree = git("merge-tree", "--write-tree", base, pr.head_sha)
-        # A candidate symlink must not read files outside the temporary checkout.
-        git("-c", "core.symlinks=false", "read-tree", "--reset", "-u", tree)
-        result = _proc.run(["bash", "-s", "--", base], input=script + "\n", cwd=root,
-                           env_allowlist=("PATH",), extra_env=env, timeout=GIT_TIMEOUT,
-                           merge_output=True)
+
+        def evaluate(target: str) -> _proc.Completed:
+            tree = git("merge-tree", "--write-tree", target, pr.head_sha)
+            # A candidate symlink must not read files outside the temporary checkout.
+            git("-c", "core.symlinks=false", "read-tree", "--reset", "-u", tree)
+            return _proc.run(["bash", "-s", "--", base], input=script + "\n", cwd=root,
+                             env_allowlist=("PATH",), extra_env=env, timeout=GIT_TIMEOUT,
+                             merge_output=True)
+
+        result = evaluate(base)
         if result.exit_code:
             raise CliError("current target size budget failed:\n" + result.stdout.rstrip())
+        if project:
+            _warn_queue_size(config, pr, root, origin, base, git, evaluate)
+
+
+def _warn_queue_size(
+    config: Config, pr: github.PR, root: Path, origin: str, base: str,
+    git: Callable[..., str], evaluate: Callable[[str], _proc.Completed],
+) -> None:
+    assert config.mergify_queue is not None
+    try:
+        numbers = mergify.queue_predecessors(config.repo, config.base_branch, config.mergify_queue, pr.number)
+        if not numbers:
+            return
+        refs = [f"refs/pull/{number}/head:refs/loopzero/{number}" for number in numbers]
+        _git(root, "fetch", "--no-tags", "--no-recurse-submodules", "--", origin, *refs)
+        integrated = base
+        for number in numbers:
+            source = git("rev-parse", f"refs/loopzero/{number}^{{commit}}")
+            if git("merge-base", integrated, source) == source:
+                return  # A queued PR may already have landed or be represented by another head.
+            tree = git("merge-tree", "--write-tree", integrated, source)
+            integrated = git("-c", "user.name=loopzero", "-c", "user.email=loopzero@localhost",
+                             "commit-tree", tree, "-p", integrated, "-p", source, "-m", "Queue size projection")
+        result = evaluate(integrated)
+    except (LoopZeroError, OSError):
+        return
+    if result.exit_code and "size budget: FAIL" in result.stdout:
+        predecessors = ", ".join(f"#{number}" for number in numbers)
+        print(f"warning: projected size budget after {predecessors}:\n{result.stdout.rstrip()}")
 
 
 def cmd_ready(args: argparse.Namespace) -> int:
@@ -1728,7 +1756,7 @@ def _merge_with_mergify(
             return sha
         raise closed[0]
     if not confirmed and not requested:
-        _prequeue_size_budget(wt, config, pr, readiness)
+        _prequeue_size_budget(wt, config, pr, readiness, project=admit_by is None)
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
@@ -1889,7 +1917,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         print("review:   none on this PR")
-    readiness = _readiness(wt, config, pr, head, reviews, diagnose_all=True)
+    readiness = _readiness(wt, config, pr, head, reviews)
     print(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         print(f"  - {reason}")
