@@ -8,11 +8,12 @@ import os
 import selectors
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .types import LoopZeroError
@@ -144,6 +145,14 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float) -
     append(decode(b"", final=True))
     # Check tails strip trailing newlines on success, even when there are many.
     return suffix
+
+
+def run_git_paths(argv: Sequence[str], *, cwd: Path, env_allowlist: Sequence[str], timeout: float,
+                  extra_env: Mapping[str, str] | None = None) -> Completed:
+    """Read Git path records, removing the final LF from line-terminated output."""
+    done = run(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout, extra_env=extra_env,
+               preserve_newlines=True, encoding=sys.getfilesystemencoding())
+    return replace(done, stdout=done.stdout.removesuffix("\n"))
 
 
 def run(
