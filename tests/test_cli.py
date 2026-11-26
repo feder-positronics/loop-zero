@@ -2467,6 +2467,32 @@ def test_late_check_preserves_receipt_when_head_moves(wt, gh, capsys, monkeypatc
         assert "receipt accepted:" in ready
 
 
+@pytest.mark.parametrize("mode", ["commands", "settings", "same", "override"])
+def test_check_stops_stale_trusted_plan_between_stages(repo, wt, gh, capsys, monkeypatch, mode):
+    """Replay the old-plan runs from #1988 without waiting for their long stages."""
+    new_workflow = {
+        "settings": WORKFLOW.replace("[checks]", "[checks]\nnetwork = true"),
+        "same": WORKFLOW + "\n# unchanged settings",
+    }.get(mode, WORKFLOW.replace("echo ok", "echo new plan"))
+    commit_file(repo, "workflow.toml", new_workflow, "advance trusted plan")
+    seen = []
+
+    def stage(config, path, prefix, command, timeout):
+        seen.append(command)
+        git(wt, "update-ref", "refs/remotes/origin/main", head_of(repo))
+        return CheckResult(command, 0, 0.0, "")
+
+    monkeypatch.setattr(cli.sandbox, "_run_one", stage)
+    args = ("--config", "workflow.toml", "check") if mode == "override" else ("check",)
+    if mode in {"commands", "settings"}:
+        expect_cli(capsys, 1, *args, stderr_contains=("trusted check plan changed", "Run loopzero check"))
+        assert seen == ["echo ok"]
+        assert not (wt / ".loopzero/checks.json").exists()
+    else:
+        expect_cli(capsys, 0, *args, stdout_endswith="PASS\n")
+        assert seen == ["echo ok", "test -f README.md"]
+
+
 @pytest.mark.parametrize("first_exit", [0, 1])
 def test_overlapping_checks_share_only_a_pass(wt, capsys, monkeypatch, first_exit):
     started, waiting = Event(), Event()
