@@ -792,6 +792,14 @@ def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case):
                for message in messages)
 
 
+def test_input_diagnostic_failure_does_not_block_dirty_check(git_repo, bwrap_log, fetched_base):
+    (git_repo / "README.md").write_text("dirty\n")
+    command = 'test "$(cat README.md)" = dirty'
+    config = make_config(checks=(command,), inputs={command: (":(bogus)README.md",)})
+    report = sandbox.run_checks(config, git_repo, status=lambda _: None)
+    assert report.ok and report.dirty and report.results[0].command == command
+
+
 def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base):
     (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
     path = git_repo / "README.md"

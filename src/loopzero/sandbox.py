@@ -323,10 +323,17 @@ def _input_key(config: Config, worktree: Path, command: str, base: str, *,
                workflow: str | Path = "workflow.toml") -> str | None:
     if command not in config.inputs and "." not in config.inputs.get("*", ()):
         return None
+    if not base and status is None:
+        return None
     entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
-    blobs = _input_blobs(config, worktree, tuple(path for paths in entries.values() for path in paths))
+    try:
+        blobs = _input_blobs(config, worktree, tuple(path for paths in entries.values() for path in paths))
+    except (SandboxUnavailable, OSError):
+        if not base:
+            return None
+        raise
     if blobs == "" and status:
-        status(f"{workflow}: checks.inputs for {command!r} matches no tracked files. "
+        status(f"{workflow}: checks.inputs for {command!r} matches no files in HEAD. "
                f"Correct these entries: {entries!r}. Running the check fresh.")
     if not blobs or not base:
         return None
