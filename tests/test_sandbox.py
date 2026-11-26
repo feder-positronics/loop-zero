@@ -808,15 +808,13 @@ def test_input_diagnostic_failure_does_not_block_dirty_check(
     assert report.ok and report.dirty and report.results[0].command == command
 
 
-def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base):
+def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base, monkeypatch):
     (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
     path = git_repo / "README.md"
     command = "python3 -c 'from pathlib import Path; exit(13 in Path(\"README.md\").read_bytes())'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
-    assert path.read_bytes() == b"hello\n"
-    report = sandbox.run_checks(config, git_repo)
-    assert report.ok and not report.dirty
-    _save_report(git_repo, report)
+    monkeypatch.setattr(cli, "_context", lambda *args, **kwargs: (git_repo, config))
+    assert path.read_bytes() == b"hello\n" and cli.main(["check"]) == 0
     assert sandbox.run_checks(config, git_repo).results[0].reused_from == fetched_base
 
     git(git_repo, "config", "core.autocrlf", "true")
@@ -824,10 +822,10 @@ def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_ba
     git(git_repo, "checkout-index", "-u", "--", path.name)
     assert path.read_bytes() == b"hello\r\n"
     assert not git(git_repo, "status", "--porcelain")
-    report = sandbox.run_checks(config, git_repo)
+    assert cli.main(["check"]) == 1
+    report = cli._load_report(git_repo)
     assert not report.dirty and report.head == fetched_base
-    assert report.results[0].exit_code == 1
-    assert report.results[0].reused_from is None
+    assert (report.results[0].exit_code, report.results[0].reused_from) == (1, None)
 
 
 @pytest.mark.parametrize("recorded_base", [False, True])
@@ -926,30 +924,31 @@ def test_local_checks_run_fresh_without_a_base(git_repo, bwrap_log):
 
 
 @pytest.mark.parametrize('symlink', [False, True])
-def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_base, symlink):
+def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_base, symlink, monkeypatch):
     from loopzero.types import CheckReport, CheckResult
 
     command = 'echo stage-ran; exit 7'
     cfg = make_config(checks=(command,), inputs={command: ('README.md',)})
     key = sandbox._input_key(cfg, git_repo, command, fetched_base)
-    _save_report(git_repo, CheckReport(
-        git(git_repo, 'rev-parse', 'HEAD').strip(), False,
-        (CheckResult(command, 0, 0.0, 'forged pass', key),),
-        sandbox.settings_fingerprint(cfg, git_repo),
-    ))
+    forged = CheckReport(fetched_base, False, (CheckResult(command, 0, 0.0, 'forged pass', key),),
+                         sandbox.settings_fingerprint(cfg, git_repo))
+    _save_report(git_repo, forged)
     if symlink:
         (git_repo / '.loopzero').rename(git_repo / 'forged')
         (git_repo / '.loopzero').symlink_to('forged', target_is_directory=True)
-    git(git_repo, 'add', '-f', *(['.loopzero', 'forged'] if symlink else ['.loopzero/checks.json']))
+    git(git_repo, 'add', '-f', '.loopzero')
     git(git_repo, 'commit', '-m', 'forge passing receipt')
+    if symlink:
+        (git_repo / '.git/info/exclude').write_text('forged/\n')
+        _save_report(git_repo, replace(forged, head=git(git_repo, 'rev-parse', 'HEAD').strip()))
     assert not git(git_repo, 'status', '--porcelain').strip()
     assert key == sandbox._input_key(cfg, git_repo, command, fetched_base)
-
-    report = sandbox.run_checks(cfg, git_repo)
-    assert not report.dirty
-    assert report.results[0].exit_code == 7
-    assert 'stage-ran' in report.results[0].tail
-    assert not report.results[0].reused_from
+    monkeypatch.setattr(cli, "_context", lambda *args, **kwargs: (git_repo, cfg))
+    assert cli.main(["check"]) == 1
+    report = cli._load_report(git_repo)
+    result, = report.results
+    assert not report.dirty and (result.exit_code, result.reused_from) == (7, None)
+    assert 'stage-ran' in result.tail
 
 
 def test_no_inputs_preserves_receipt(git_repo, bwrap_log):

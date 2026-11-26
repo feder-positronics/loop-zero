@@ -598,6 +598,17 @@ def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
+    head = worktree.head(wt)
+    report = _current_check_report(wt, config, head)
+    if (report is not None and sandbox.receipt_inputs_match(config, wt, report)
+            and not worktree.is_dirty(wt) and worktree.head(wt) == head):
+        _refresh_pr_checks(wt, config)
+        print(f"PASS (reused {CHECKS_FILE} for {head[:12]} without running stages)")
+        return 0
+    return _run_check(args, wt, config)
+
+
+def _run_check(args: argparse.Namespace, wt: Path, config: Config) -> int:
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),
