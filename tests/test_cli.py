@@ -394,10 +394,11 @@ def test_initial_pr_keeps_human_validation(wt: Path, gh: FakeGh, capsys) -> None
 def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, capsys, command) -> None:
     head = head_of(wt)
     if command == "check":
+        config = cli._load_config(SimpleNamespace(config=None, command="ready"), wt, pin_checks=True)
         cli._save_report(wt, CheckReport(head, False, (
             CheckResult("echo ok", 0, 999.0, "ok"),
             CheckResult("test -f README.md", 0, 999.0, ""),
-        )))
+        ), cli.sandbox.settings_fingerprint(config, wt)))
     gh.respond_pr_list([pr_json(headRefOid=head)])
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     assert run(capsys, "pr")[0] == 0
@@ -443,15 +444,15 @@ def test_delayed_check_preserves_review_summary(wt, gh, fake_bin, capsys, monkey
     body = "# PR\n\n## Notes\nHuman evidence.\n"
     gh.respond_pr_list([pr_json(headRefOid=head, body=body)])
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
-    update = cli._update_pr_checks
+    refresh = cli._refresh_pr_checks
 
-    def delay(path, sha, config, pr):
+    def delay(path, config):
         assert run(capsys, "review")[0] == 0
         live = json.loads(gh.calls[-1]["--input"])["body"]
         gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=live)))
-        update(path, sha, config, pr)
+        refresh(path, config)
 
-    monkeypatch.setattr(cli, "_update_pr_checks", delay)
+    monkeypatch.setattr(cli, "_refresh_pr_checks", delay)
     assert run(capsys, "check")[0] == 0
     final = json.loads(gh.calls[-1]["--input"])["body"]
     assert all(text in final for text in ("Human evidence.", "Recorded for", "- primary, claude"))
@@ -943,7 +944,7 @@ def test_pr_migrates_old_checks_heading_to_validation(wt: Path) -> None:
     task = wt / ".loopzero" / "task.md"
     task.write_text(task.read_text().replace("## Validation", "## Checks"))
 
-    body = cli._pr_body(wt, head_of(wt))
+    body = cli._pr_body(wt, head_of(wt), cli.config_mod.load(wt / "workflow.toml"))
 
     assert "## Checks" not in body
     assert body.count("## Validation") == 1
@@ -4330,7 +4331,7 @@ def test_load_report_requires_integer_exit_code(wt, head, capsys, exit_code, ok)
 def test_passive_receipt_load_is_silent(wt, gh, capsys, head):
     arm_approved_ready_pr(gh, head, wt)
     cli._load_report(wt)
-    cli._validation_section(wt, head)
+    cli._validation_section(wt, head, cli.config_mod.load(wt / "workflow.toml"))
     assert "receipt " not in capsys.readouterr().out
 
 
@@ -4486,3 +4487,24 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert err == ""
         assert len(writes) == 1
         assert json.loads(writes[0]["--input"])["body"] == prose + suffix
+
+
+def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
+    head = head_of(wt)
+    live = "# PR\n\n## Validation\nManual validation evidence.\n"
+    gh.respond_pr_list([pr_json(headRefOid=head, body=live)])
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+    cli._save_report(wt, CheckReport(head, False, (CheckResult("echo ok", 0, 0.0, ""),)))
+
+    assert run(capsys, "pr")[0] == 0
+    draft = json.loads(gh.calls[-1]["--input"])["body"]
+    assert "unverified" in draft and "run `loopzero check`" in draft
+    assert "Manual validation evidence." in draft
+
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    gh.respond_pr_list([pr_json(headRefOid=head, body=draft)])
+    assert run(capsys, "check")[0] == 0
+    draft = json.loads(gh.calls[-1]["--input"])["body"]
+    assert "unverified" not in draft
+    assert f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0" in draft
+    assert "Manual validation evidence." in draft
