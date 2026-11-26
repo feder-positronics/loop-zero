@@ -245,9 +245,10 @@ The [dated design note](design/2026-10-07-deterministic-delivery-design-assumpti
 owns the implementation history, native comparison results and their limits.
 
 Reviewer provenance keeps requested, launch-configured and natively reported
-model/effort settings apart. Only native evidence (a Codex stderr banner or the
-matching session rollout captured in the temporary private HOME) becomes a
-CLI-reported claim; missing, malformed or conflicting evidence stays unknown or
+model/effort settings apart. Only native evidence becomes a CLI-reported claim:
+for Claude, `modelUsage` in each retained result envelope (effort stays
+unknown); for Codex, its stderr banner or the matching session rollout captured
+in the temporary private HOME; missing, malformed or conflicting evidence stays unknown or
 holds. Reviewers can write that evidence, so it stays inside the trusted
 publisher boundary below.
 
@@ -312,16 +313,19 @@ requests evaluate a temporary integration with the freshly fetched target. The
 target supplies the checker and baseline. Existing requests continue to the
 queue wait path. Readiness and new queue requests without an admission deadline can project an
 advisory budget after a single known chain of queued predecessors.
-Candidate attestation retries only typed races (no unique live batch match
-yet, concurrent source metadata, queue membership, main-ref drift, or a landed
-source still in lineage) inside one bounded window; the constants live in
-[candidate.py](../src/loopzero/candidate.py). A policy exception or non-open
-source counts as a landing race only when a fresh REST read confirms the PR
-merged at the snapshotted head. Each attempt resolves identity, lineage and
-source policy again; no evidence or approval survives a failed attempt, other
-failures (including source-head drift) stop at once, and success requires one
-complete attestation. Policy evidence is not atomic across reads. Source-PR
-eligibility does not retry; a merged source PR publishes nothing, so a late
+A candidate lineage read that finds zero or several live batch matches is
+reread within the current attempt, under a shared deadline. Separately,
+candidate attestation restarts as a complete fresh attempt, inside its own
+bounded window, on typed races: concurrent source metadata, queue membership,
+main-ref drift, or a landed source still in lineage. A closed source counts as
+a landing race only when its REST payload confirms the merge; a source-policy
+exception counts only when a fresh read confirms a merge at the snapshotted
+head. The limits live in [candidate.py](../src/loopzero/candidate.py). Each
+attempt resolves identity, lineage and source policy again; no evidence or
+approval survives a failed attempt, other failures (including source-head drift)
+stop at once, and success requires one complete attestation. Policy evidence is
+not atomic across reads. Source PRs skip these attestation retries but keep
+their mergeability polling; a merged source PR publishes nothing, so a late
 refresh cannot turn its landed head red.
 After GitHub acknowledges a pending status, SIGTERM during evaluation triggers a
 bounded failure write for that SHA. Once the final write starts, publication

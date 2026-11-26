@@ -39,6 +39,6 @@ and setup.
   dated video/skill/upstream research, cross-model discussion and ranked proposals;
   only the upstream-reading documentation is commissioned here.
 - [2026-11-25 loop-zero optimization and hardening roadmap](design/2026-11-25-loop-zero-optimization-hardening-roadmap.md) —
-  dated audit and trial findings and the Horizon 2–3 roadmap; its rules bind
-  only where the contract or DELEGATION.md carries them.
+  dated audit and trial findings, the rules agreed then, and the Horizon 2–3
+  roadmap.
 - [../models.toml](../models.toml) — current model/effort preferences and category defaults.

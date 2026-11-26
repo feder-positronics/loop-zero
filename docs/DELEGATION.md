@@ -468,8 +468,11 @@ including provider/capacity failures. Answer a request only within your
 authority; otherwise cancel, relaunch correctly or report the block in that
 turn. Inspect what ran before resuming interrupted work. A cancelled or declined
 tool call counts as a human stop only when the run is marked interrupted or the
-human owner says so; otherwise retry it once. For a terminal delegated task,
-launch a new task with the prior brief and result.
+human owner says so; otherwise retry it once. Held automation messages release
+on the next successful run; for held human messages and runs after an explicit
+stop (T3 `queueHeld=true`), save the full text, cancel with `t3_queue cancel`,
+combine still-needed messages into one fresh resend and confirm it arrived. For
+a terminal delegated task, launch a new task with the prior brief and result.
 Before yielding on any delegate or long command, arrange a
 wakeup whose timeout covers the awaited event: a completion notice plus a
 fallback timer, or a bounded blocking wait. Rely on T3 delegate completion

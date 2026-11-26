@@ -358,17 +358,16 @@ Use one pinned CLI revision and the same effective settings for `check`,
 writes the receipt. For remote stages, configure an operator-trusted
 `[checks].runner` using the [stage protocol](docs/ARCHITECTURE.md#check-stage-runners).
 
-Without a stage adapter, run the whole check locally. Use a local slot if the
-host requires one. On miki, if you used the isolated install, run these from
-the task worktree with the `install_dir` from that recipe.
+Without a stage adapter, run the whole check locally, through the host's slot
+wrapper where host policy requires one. If you used the isolated install, run
+these from the task worktree with the `install_dir` from that recipe.
 Make a scratch clone standalone before queueing, for example with
 `git clone --no-local`. If a Git object alternate is outside the check sandbox,
 `loopzero check` refuses it after the slot wait and before any stage runs.
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"
-# This host's slot wrapper, as an example; use your host's equivalent.
-HEAVY_SLOT_REMOTE_HOSTS="$HOME/.cache/intelflo-scratch/locks/no-remote-hosts.json" "$HOME/.cache/intelflo-scratch/locks/heavy-slot.sh" loopzero check
+loopzero check
 # After opening and reviewing the PR, keep this PATH for delivery.
 loopzero ready --wait
 loopzero merge --wait
