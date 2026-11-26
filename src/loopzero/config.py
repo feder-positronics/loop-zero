@@ -108,16 +108,15 @@ def _has_replacement_refs(common_dir: Path) -> bool:
 def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
                      refresh: bool, require_ci: bool, read_timeout: Callable[[float], float]) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
-    hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
+    hint = "Check repo.base in origin/HEAD:workflow.toml or supply --config for bootstrap or an override."
     ref = f"refs/remotes/origin/{branch}"
     if refresh:
         fetched = run_git(worktree, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
                           "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:{ref}", timeout=read_timeout(60))
         if fetched.exit_code != 0:
             message = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@",
-                             _proc.tail(fetched.stderr or fetched.stdout, 1))
-            raise ConfigError(f"could not refresh origin/{branch}: {message or f'git exited {fetched.exit_code}'}. "
-                              "Use --config for bootstrap or an override.")
+                             _proc.tail(fetched.stderr or fetched.stdout, 1) or f"git exited {fetched.exit_code}")
+            raise ConfigError(f"could not refresh origin/{branch}: {message}. {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
     # Stage-boundary reads reuse the existing ref without fetching absent objects.
     local_env = {"GIT_NO_LAZY_FETCH": "1"} if previous is not None and not refresh else None
@@ -126,7 +125,7 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), extra_env=local_env,
     )
     if resolved.exit_code != 0:
-        raise ConfigError(f"{source} has no remote-tracking base commit. {hint}")
+        raise ConfigError(f"{source} has no remote-tracking base commit. Fetch origin/{branch}. {hint}")
     common_dir, _, revision = resolved.stdout.rpartition("\n")
     if (previous is not None and previous.base_branch == branch and previous.trusted_base_revision == revision
             and common_dir and not _has_replacement_refs(Path(common_dir))):
@@ -155,13 +154,8 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
         )
     branch = ref.removeprefix(prefix)
     for _ in range(2):
-        try:
-            policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh,
-                                                require_ci=require_ci, read_timeout=read_timeout)
-        except ConfigError as exc:
-            if branch == ref.removeprefix(prefix):
-                raise
-            raise ConfigError(f"origin/HEAD:workflow.toml sets repo.base to {branch!r}. {exc}") from exc
+        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh,
+                                            require_ci=require_ci, read_timeout=read_timeout)
         if policy.base_branch == branch:
             return replace(policy, trusted_base_revision=revision)
         branch = policy.base_branch
