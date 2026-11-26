@@ -1590,6 +1590,8 @@ def _queue_wait(deadline: float, poll: Callable[[float], str | None], *, bounded
     with github.bounded_reads(deadline, token=None, retry=True, check_on_exit=False):
         try:
             return poll(github.read_timeout())
+        except (github.MergeFailed, github.ClosedUnmerged, CliError):
+            raise  # Concluded from reads that finished inside the budget.
         except (LoopZeroError, github.GhError, _proc.ProcTimeout):
             github.read_timeout(0)
             raise
@@ -1599,11 +1601,11 @@ def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str 
     try:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
     except github.ClosedUnmerged as exc:
+        github.read_timeout(0)  # A late observation is a timeout, not evidence.
         closed[:] = [exc]
-        sha = None
-    else:
-        closed.clear()
+        return None
     github.read_timeout(0)
+    closed.clear()
     return sha
 
 
@@ -1627,11 +1629,8 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
 
 
 def _report_closed_observation(closed: list[github.GhError]) -> None:
-    if closed:
-        with suppress(github.ReadDeadline):
-            github.read_timeout(0)
-            raise closed[0]
-        print(f"last queue observation: {closed[0]}")
+    if closed:  # Recorded only from reads that finished inside the budget.
+        raise closed[0]
 
 
 def _merge_and_follow(

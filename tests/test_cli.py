@@ -4128,7 +4128,7 @@ def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
         assert code == 1 and "PR head changed" in err
         assert wt.exists(), "no cleanup after an unreviewed head"
     elif outcome == "still-closed":
-        assert code == 3 and "closed without a verified merge" in out and wt.exists()
+        assert code == 1 and "closed without a verified merge" in err and wt.exists()
     elif ejected:
         assert (code, wt.exists()) == ((0, False) if landed else (1, True))
         assert ("e" * 40 if landed else "left the merge queue unmerged") in out + err
@@ -4919,7 +4919,7 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
 
 
 @pytest.mark.parametrize("wait, latency, state, expected", [
-    (1, 3.0, "MERGED", 3), (1, 0.25, "MERGED", 0), (0, 0.0, "MERGED", 0), (1, 0.0, "CLOSED", 3),
+    (1, 3.0, "MERGED", 3), (1, 0.25, "MERGED", 0), (0, 0.0, "MERGED", 0), (1, 0.0, "CLOSED", 1),
 ])
 def test_merge_queue_landing_within_budget(
     wt, gh, capsys, monkeypatch, head, replay_gh, wait, latency, state, expected,
@@ -4957,10 +4957,11 @@ def test_merge_queue_landing_within_budget(
 
     code, out, err = run(capsys, "merge", f"--wait={wait}")
 
-    assert (code, err, bool(cleaned)) == (expected, "", expected == 0)
+    assert (code, bool(cleaned)) == (expected, expected == 0)
     assert write_timeouts == [300]
     assert budgets == ([1.0, 1.0, 0.5] if state == "CLOSED" else [1.0 if wait else 120.0] * 2)
-    assert ("closed without a verified merge" in out) is (state == "CLOSED")
+    assert ("closed without a verified merge" in err) is (state == "CLOSED")
+    assert (err == "") is (state != "CLOSED")
     assert ("timed out waiting for the merge queue" in out) is (expected == 3)
 
 

@@ -1492,20 +1492,19 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         write_error = exc
     # A direct merge already in flight still needs verification and cleanup.
     scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
+    queue_error = None
     try:
+        if sha := merged_sha(repo, number, expected_head=head_sha):
+            return sha
+        try:
+            if merge_pending(repo, number, head_sha):
+                return None
+        except MergeFailed as exc:
+            queue_error = exc
+        # The queue may have landed the PR between the two reads.
         sha = merged_sha(repo, number, expected_head=head_sha)
     finally:
         _read_scope.reset(scope)
-    if sha:
-        return sha
-    queue_error = None
-    try:
-        if merge_pending(repo, number, head_sha):
-            return None
-    except MergeFailed as exc:
-        queue_error = exc
-    # The queue may have landed the PR between the two reads.
-    sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
     if queue_error:
