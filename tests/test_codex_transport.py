@@ -365,13 +365,11 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
         git(native[2], "config", "core.autocrlf", "false")
         content = b"hello\r\n" if kind == "delta" else b"caf\xe9\r\n"
         (native[2] / "README.md").write_bytes(content)
-        git(native[2], "add", "README.md")
-        git(native[2], "commit", "-qm", "delta repair")
+        git(native[2], "commit", "-qam", "delta repair")
         head = git(native[2], "rev-parse", "HEAD").strip()
         git(native[2], "update-ref", "refs/remotes/origin/main", merge_base)
-        task = native[2] / ".loopzero/task.md"
-        task.parent.mkdir()
-        task.write_text("Inspect the delta")
+        (native[2] / ".loopzero").mkdir()
+        (native[2] / ".loopzero/task.md").write_text("Inspect the delta")
         tool = fake_bin / "codex"
         old_range, new_range = f"{merge_base!r},{reviewed!r}", f"{reviewed!r},{head!r}"
         tool.write_text(tool.read_text().replace(old_range, new_range))
@@ -379,9 +377,8 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
                                  publication=(repo, 7, "bot"))
         proof = runners.codex_evidence(result)
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
-        delta_diff = subprocess.check_output(
-            ["git", "diff", "--no-color", reviewed, head], cwd=native[2]
-        )
+        argv = ["git", "diff", "--no-color", reviewed, head]
+        delta_diff = subprocess.check_output(argv, cwd=native[2])
         assert b"-hello\n+" + content in delta_diff
         if kind == "delta_legacy":
             assert "+caf\\xe9\r\n" in runners.render_patch(delta_diff)
