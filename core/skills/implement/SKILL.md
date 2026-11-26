@@ -35,9 +35,9 @@ receipt under the [contract's reuse rules](../../CONTRACT.md#gate-execution-and-
 
 Run commands expected to take more than about two minutes detached as in
 [Long-running jobs](../../../docs/DELEGATION.md#long-running-jobs).
-Use the [wait limits](../../../docs/DELEGATION.md#briefs-and-ownership) and
-[output limits](../../../docs/DELEGATION.md#coordinator-rollover); set
-`runLimit 1` for thread reads.
+Use [wait and output limits](../../../docs/DELEGATION.md#briefs-and-ownership).
+Use `gh api --jq` at source. Thread reads set `limit 2`,
+`maxCharsPerItem 600`, `runLimit 1`.
 Do not end the turn, settle or
 report done while a job you started has no `LOG.exit`, unless the unit is gone
 and you report the job as killed and the result as failed. If the turn must
