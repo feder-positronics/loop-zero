@@ -3058,6 +3058,43 @@ def test_ready_requires_receipt_from_current_check_environment(
     assert run(capsys, *args, "check")[0] == 1
 
 
+def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, head, tmp_path):
+    runner = tmp_path / "runner"
+    original = tmp_path / "runner-a"
+    replacement = tmp_path / "runner-b"
+    stage = (
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "frame = json.load(sys.stdin)\n"
+        "del frame['env']\n"
+        "frame.update(exit_code=0, duration_s=0, not_started=False, tail='')\n"
+    )
+    for target, extra in (
+        (original, f"from pathlib import Path\np = Path({str(runner)!r})\n"
+                   f"p.unlink()\np.symlink_to({str(replacement)!r})\n"),
+        (replacement, ""),
+    ):
+        target.write_text(stage + extra + "print(json.dumps(frame))\n")
+        target.chmod(0o755)
+    runner.symlink_to(original)
+    publish_workflow(wt, WORKFLOW.replace("[checks]", f"[checks]\nrunner = {json.dumps([str(runner)])}"))
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+
+    code, out, err = run(capsys, "check")
+    assert code == 1
+    assert "receipt produced:" not in out and "PASS" not in out
+    assert "stages passed but the receipt is unverified" in err
+    assert "rerun loopzero check from the task worktree with a stable, readable configured runner" in err
+    report = cli._load_report(wt)
+    assert report.head == head and not report.dirty and report.ok
+    assert report.settings_sha256 is None
+    assert run(capsys, "ready")[0] == 1
+
+    code, out, _ = run(capsys, "check")
+    assert code == 0 and "receipt produced:" in out
+    assert run(capsys, "ready")[0] == 0
+
+
 @pytest.mark.parametrize("base_sensitive", [False, True])
 def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     if base_sensitive:
