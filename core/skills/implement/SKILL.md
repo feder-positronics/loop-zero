@@ -32,7 +32,7 @@ Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../
 Follow [long-running jobs](../../../docs/DELEGATION.md#long-running-jobs) for commands
 expected to exceed about two minutes, and the [wait/output](../../../docs/DELEGATION.md#briefs-and-ownership)
 and [caps](../../../docs/DELEGATION.md#coordinator-rollover) rules. Set `runLimit 1` on thread reads.
-Do not end the turn, settle or report done before `LOG.exit` unless the unit is gone and you report it killed and failed.
+Do not end the turn, settle or report done before your job has `LOG.exit` unless the unit is gone and you report it killed and failed.
 If you must yield, first schedule a one-shot T3 wakeup (`schedule:{type:once,runAt:<ISO time>}`)
 to read `LOG.exit` and resume its delivery step.
 
@@ -54,6 +54,8 @@ Before the check and draft push for primary review, rebase your own commits onto
 Leave base merges out of a branch awaiting its delta.
 After review, follow the [Review budget](../../CONTRACT.md#review-budget) for base or check-script
 changes. Keep the primary as the delta's base and reserve the delta for post-review fixes.
+If a reviewed branch needs a conflict refresh, confirm the review path and
+merge the base before starting the check for the resolved head.
 
 Never bypass the sandbox, change the check list or enable `[checks].network` to pass checks.
 Report base failures without working around them.
