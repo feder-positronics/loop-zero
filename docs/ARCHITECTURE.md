@@ -82,8 +82,9 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
 3. Branch PR lookup starts with the remote head and GitHub's commit-to-PR
    endpoint. It matches the source branch and repository, then re-reads PR
-   detail. Other commands prefer open PRs, then the newest closed PR, with
-   pull-list fallback when the branch or a matching open PR is absent. Before pushing
+   detail. Lookup falls back to listing open PRs if the branch or matching open
+   PR is absent, then checks the newest closed PR when requested. Check refresh
+   is open-only. Before pushing
    or writing, `pr` requires a confirmed merge or a complete closed-history read
    through GitHub REST. A confirmed merge completes that branch even when a
    newer duplicate exists. If the head commit cannot prove completion, the
@@ -495,8 +496,8 @@ either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.
-Only this worktree's clean passing keyed receipt is eligible; dirty trees run
-fresh. A tracked receipt is never eligible for reuse.
+Reuse only successful keyed stages from this worktree's clean receipt or
+checkpoint. Dirty trees run fresh. A tracked receipt is never eligible for reuse.
 Receipts that use saved stage results bind the current head and check settings.
 For delegated checks, both the receipt and the stage key bind the runner's launch
 path, resolved executable path and executable bytes. Unavailable runner identity
