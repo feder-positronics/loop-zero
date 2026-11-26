@@ -550,8 +550,9 @@ def bwrap_argv(
     return argv
 
 
-def _git(config: Config, worktree: Path, *args: str) -> str:
-    done = _proc.run(
+def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str:
+    run = _proc.run_git_paths if paths else _proc.run
+    done = run(
         ["git", *args], cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT
     )
     if done.exit_code != 0:
@@ -562,8 +563,7 @@ def _git(config: Config, worktree: Path, *args: str) -> str:
 
 
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
-    raw = Path(_git(config, worktree, "rev-parse", flag).strip())
-    return (raw if raw.is_absolute() else worktree / raw).resolve()
+    return (worktree / _git(config, worktree, "rev-parse", flag, paths=True)).resolve()
 
 
 def _stage_unchanged(config: Config, worktree: Path, head: str) -> bool:

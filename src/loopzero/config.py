@@ -121,13 +121,13 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *, re
         if fetched.exit_code != 0:
             raise ConfigError(f"could not refresh origin/{branch}. {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
-    resolved = _proc.run(
+    resolved = _proc.run_git_paths(
         ["git", "rev-parse", *directory_args, "--verify", f"{ref}^{{commit}}"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
     )
     if resolved.exit_code != 0:
         raise ConfigError(f"{source} has no remote-tracking base commit. {hint}")
-    common_dir, _, revision = resolved.stdout.rstrip("\n").rpartition("\n")
+    common_dir, _, revision = resolved.stdout.rpartition("\n")
     if (previous is not None and previous.base_branch == branch and previous.trusted_base_revision == revision
             and common_dir and not _has_replacement_refs(Path(common_dir))):
         return previous, revision
