@@ -242,6 +242,14 @@ def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
             "total_cost_usd": 0.01, "duration_api_ms": 25, **extra}
 
 
+def replace_codex_events(script: Path, events, *, prepend=False) -> None:
+    text = script.read_text()
+    start = text.index("echo '{\"type\":\"thread.started\"")
+    lines = "\n".join(json.dumps(event) for event in events)
+    suffix = text[start:] if prepend else "exit 0\n"
+    script.write_text(text[:start] + f"printf '%s\\n' {shlex.quote(lines)}\n" + suffix)
+
+
 def _fake_review(bin_dir, family):
     if family == "claude":
         return _fake_claude(bin_dir, _claude_envelope(APPROVE))
@@ -650,13 +658,23 @@ def test_linked_worktree_and_git_directory_are_read_only(
     assert (str(common),) * 2 in binds
 
 
-def test_claude_request_changes_escalates_verdict(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_claude(fake_bin, _claude_envelope(CHANGES))
-    result = _review("claude", tmp_path)
+@pytest.mark.parametrize("family", ["claude", "codex"])
+def test_review_escalates_verdict_with_blocking_finding(fake_bin, tmp_path, family):
+    if family == "claude":
+        _fake_claude(fake_bin, _claude_envelope(CHANGES))
+    else:
+        _fake_codex(fake_bin, json.dumps(CHANGES), stderr="model: fallback")
+
+    result = _review(family, tmp_path)
+
     assert result.verdict == "request_changes"
-    assert [f.severity for f in result.findings] == ["important", "suggestion"]
-    assert result.findings[0].path == "a.py" and result.findings[0].line == 3
-    assert result.findings[1].path is None and result.findings[1].line is None
+    assert [(f.severity, f.path, f.line) for f in result.findings] == [
+        ("important", "a.py", 3), ("suggestion", None, None),
+    ]
+    if family == "codex":
+        assert result.model == "fallback"
+        assert json.loads(result.raw)["session_id"] == "codex-session-123"
+        assert result.provenance["token_usage"]["input_tokens"] == 123
 
 
 def test_claude_falls_back_to_result_text(fake_bin: Path, tmp_path: Path) -> None:
@@ -772,30 +790,25 @@ def test_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: P
     assert result.verdict == "approve" and result.findings[0].title == "Handle 401 Unauthorized"
 
 
-def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_claude(fake_bin, "boom", exit_code=2)
-    with pytest.raises(RunnerBadOutput, match="exited 2"):
-        _review("claude", tmp_path)
-
-
-@pytest.mark.parametrize("family,phrase,error", [
-    ("claude", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit),
-    ("codex", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit),
-    ("codex", "Error: Not logged in. Run codex login first.", RunnerAuthFailed),
-    ("claude", "Prompt is too long", RunnerPromptTooLong),
-    ("claude", "prompt is too long", RunnerPromptTooLong),
-    ("codex", "context_length_exceeded", RunnerPromptTooLong),
-    ("codex", "maximum context length exceeded", RunnerPromptTooLong),
-    ("codex", 'data: {"input_error_code":"input_too_large"}', RunnerPromptTooLong),
-    ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit),
-    ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit),
+@pytest.mark.parametrize("family,phrase,error,exit_code", [
+    ("claude", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit, 1),
+    ("codex", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit, 1),
+    ("codex", "Error: Not logged in. Run codex login first.", RunnerAuthFailed, 1),
+    ("claude", "Prompt is too long", RunnerPromptTooLong, 1),
+    ("claude", "prompt is too long", RunnerPromptTooLong, 1),
+    ("codex", "context_length_exceeded", RunnerPromptTooLong, 1),
+    ("codex", "maximum context length exceeded", RunnerPromptTooLong, 1),
+    ("codex", 'data: {"input_error_code":"input_too_large"}', RunnerPromptTooLong, 1),
+    ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit, 1),
+    ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit, 1),
+    ("claude", "boom", RunnerBadOutput, 2),
 ])
-def test_provider_errors_are_typed(fake_bin: Path, tmp_path: Path, family, phrase, error) -> None:
+def test_provider_errors_are_typed(fake_bin: Path, tmp_path: Path, family, phrase, error, exit_code) -> None:
     if family == "claude":
-        _fake_claude(fake_bin, phrase, exit_code=1)
+        _fake_claude(fake_bin, phrase, exit_code=exit_code)
     else:
-        _fake_codex(fake_bin, "", exit_code=1, stderr=phrase)
-    with pytest.raises(error):
+        _fake_codex(fake_bin, "", exit_code=exit_code, stderr=phrase)
+    with pytest.raises(error, match="exited 2" if exit_code == 2 else None):
         _review(family, tmp_path)
 
 
@@ -1131,15 +1144,6 @@ def test_codex_approve(repo,
     assert command[command.index("--output-last-message") + 1] == f"{SANDBOX_HOME}/last.json"
 
 
-def test_codex_request_changes(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_codex(fake_bin, json.dumps(CHANGES), stderr="model: fallback")
-    result = _review("codex", tmp_path)
-    assert result.verdict == "request_changes" and len(result.findings) == 2
-    assert result.model == "fallback"
-    assert json.loads(result.raw)["session_id"] == "codex-session-123"
-    assert result.provenance["token_usage"]["input_tokens"] == 123
-
-
 def test_unknown_family_and_kind(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         _review("gemini", tmp_path)
@@ -1165,14 +1169,14 @@ def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) 
         _review("codex", tmp_path)
 
 
-def test_timeout_becomes_bad_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bin: Path, fake_bwrap: Path
-) -> None:
-    from loopzero import _proc, runners
+@pytest.mark.parametrize(("has_stderr", "size"), [(True, 0), (True, 3000), (False, 3000)])
+def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap, has_stderr, size):
     from loopzero.cli import _review_failure
 
     def timeout(*args, **kwargs):
-        raise _proc.ProcTimeout("timed out", "partial reviewer output", stderr="x" * 3000 + "waiting for proxy")
+        diagnostic = "connecting\r" + "界" * size + "waiting for proxy"
+        stdout, stderr = ("partial reviewer output", diagnostic) if has_stderr else (diagnostic, "")
+        raise runners._proc.ProcTimeout("timed out", stdout, stderr=stderr)
 
     _fake_claude(fake_bin, {})
     monkeypatch.setattr(runners, "_git_dirs", lambda cwd, env: (cwd, cwd))
@@ -1180,10 +1184,10 @@ def test_timeout_becomes_bad_output(
     monkeypatch.setattr(runners._proc, "run", timeout)
     with pytest.raises(RunnerBadOutput, match="timed out") as info:
         _review("claude", tmp_path)
-    assert "partial reviewer output" in info.value.tail
     reason, detail, fallback = _review_failure("claude", info.value)
     assert reason.startswith("claude: timed out after ") and detail.endswith("waiting for proxy")
-    assert len(detail.splitlines()[-1]) <= runners.TAIL_CHARS and "waiting for proxy" not in fallback
+    assert "partial reviewer output" not in info.value.tail and "waiting for proxy" not in fallback
+    assert len(detail.encode()) < 450 and ("…" in detail) == bool(size)
 
 
 def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:

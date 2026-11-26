@@ -1,0 +1,150 @@
+{
+  "request": "@mergifyio queue\n\n<!-- loopzero:mergify-request head=@head@ queue=main -->",
+  "report": "<!---\nDO NOT EDIT\n-*- Mergify Payload -*-\n{\"version\": 1, \"state\": \"dequeued\", \"queue_rule_name\": \"main\", \"dequeue_reason\": {\"code\": \"CHECKS_FAILED\", \"checks\": [\"checks\"]}}\n-*- Mergify Payload End -*-\n-->\n\n### ❌ Left the queue · `checks` failed\n\n**So far**\n- ✅ **Entered the queue** Wed 25 Nov, 22:12 · rule `main` · triggered by @eowca with the [`@mergifyio queue` command](@url@#issuecomment-42)\n- ❌ **Checks failed** · draft [#965](/feder-positronics/loop-zero/pull/965)\n- 🚫 **Left the queue** 22:13 · `@sha@`\n\n",
+  "conflict_report": "<!---\nDO NOT EDIT\n-*- Mergify Payload -*-\n{\"version\": 1, \"state\": \"dequeued\", \"queue_rule_name\": \"main\", \"dequeue_reason\": {\"code\": \"CONFLICT_WITH_BASE_BRANCH\"}}\n-*- Mergify Payload End -*-\n-->\n\n### 🚫 Left the queue · conflict with base branch\n\n**So far**\n- ✅ **Entered the queue** Wed 25 Nov, 22:12 · rule `main` · triggered by @eowca with the [`@mergifyio queue` command](@url@#issuecomment-42)\n- ❌ **Checks failed** · draft [#965](/feder-positronics/loop-zero/pull/965)\n- 🚫 **Left the queue** 22:13 · `@sha@`\n\n",
+  "attribution": {
+    "stacked": "**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.",
+    "isolated": "**The failure is in this pull request.** It failed tested alone on top of `main`."
+  },
+  "expected": {
+    "stacked": [
+      "stack",
+      "earlier"
+    ],
+    "isolated": [
+      "tested this PR alone",
+      "flake"
+    ],
+    "conflict": ["conflicts with main", "git fetch origin main", "Requeue only after"],
+    "unknown": ["Address it before requeueing"]
+  },
+  "admission": {
+    "current": "2026-11-25T19:01:00Z",
+    "stale": "2026-11-25T18:59:00Z",
+    "missing": null
+  },
+  "admission_report": "### ⏳ Waiting for queue conditions\n\n- [ ] `check-success = Queue Preflight`",
+  "requeue_guidance": [
+    "as the whole PR comment (same login)",
+    "`loopzero merge --wait`"
+  ],
+  "candidate_responses": {
+    "blocking": {
+      "number": 7,
+      "queue_rule_name": "main",
+      "queued_at": "now",
+      "position": 1,
+      "mergeability_check": {
+        "queue_pull_request_number": 42,
+        "checks": [
+          {
+            "name": "checks",
+            "state": "success"
+          }
+        ],
+        "conditions_evaluation": {
+          "match": false,
+          "label": "all of",
+          "subconditions": [
+            {
+              "match": false,
+              "label": "check-success = Queue Quality Gate",
+              "subconditions": []
+            }
+          ]
+        }
+      }
+    },
+    "neutral": {
+      "number": 7,
+      "queue_rule_name": "main",
+      "queued_at": "now",
+      "position": 1,
+      "mergeability_check": {
+        "queue_pull_request_number": 42,
+        "checks": [
+          {
+            "name": "checks",
+            "state": "neutral"
+          }
+        ],
+        "conditions_evaluation": {
+          "match": true,
+          "label": "all of",
+          "subconditions": [
+            {
+              "match": true,
+              "label": "any of",
+              "subconditions": [
+                {
+                  "match": false,
+                  "label": "check-success = checks",
+                  "subconditions": []
+                },
+                {
+                  "match": true,
+                  "label": "check-neutral = checks",
+                  "subconditions": []
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "skipped": {
+      "number": 7,
+      "queue_rule_name": "main",
+      "queued_at": "now",
+      "position": 1,
+      "mergeability_check": {
+        "queue_pull_request_number": 42,
+        "checks": [
+          {
+            "name": "checks",
+            "state": "skipped"
+          }
+        ],
+        "conditions_evaluation": {
+          "match": true,
+          "label": "all of",
+          "subconditions": [
+            {
+              "match": true,
+              "label": "any of",
+              "subconditions": [
+                {
+                  "match": false,
+                  "label": "check-success = checks",
+                  "subconditions": []
+                },
+                {
+                  "match": true,
+                  "label": "check-skipped = checks",
+                  "subconditions": []
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "missing": {
+      "number": 7,
+      "queue_rule_name": "main",
+      "queued_at": "now",
+      "position": 1,
+      "mergeability_check": {
+        "queue_pull_request_number": 42,
+        "checks": [
+          {
+            "name": "checks",
+            "state": "success"
+          }
+        ],
+        "conditions_evaluation": null
+      }
+    }
+  },
+  "candidate_condition": "check-success = Queue Quality Gate"
+}

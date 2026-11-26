@@ -15,6 +15,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from select import select
+from unittest.mock import Mock
 
 import pytest
 
@@ -319,18 +320,20 @@ def test_probe_timeout_reports_only_the_timeout(git_repo, monkeypatch):
     assert info.value.__suppress_context__
 
 
-def test_alternate_probe_timeout_traceback_omits_process_diagnostics(git_repo, monkeypatch):
-    def timed_out(*args, **kwargs):
-        raise sandbox._proc.ProcTimeout("private alternate probe diagnostic")
-
-    monkeypatch.setattr(sandbox, "_git", lambda *_: "alternate: /tmp/objects\n")
-    monkeypatch.setattr(sandbox._proc, "run", timed_out)
+def test_alternate_probe_skips_default_inventory_and_honors_override(git_repo, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sandbox, "_git", lambda *args: calls.append(args) or "alternate: /tmp/objects\n")
+    monkeypatch.setattr(sandbox._proc, "run", Mock(side_effect=sandbox._proc.ProcTimeout("private alternate probe diagnostic")))
+    cfg = make_config(env_allowlist=("GIT_ALTERNATE_OBJECT_DIRECTORIES",))
+    monkeypatch.delenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", raising=False)
+    prefix, common = ["bwrap", "--"], git_repo / ".git"
+    sandbox._preflight_alternates(cfg, git_repo, prefix, common)
+    assert not calls
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/objects")
     with pytest.raises(sandbox.SandboxUnavailable, match="Git alternate visibility probe timed out") as info:
-        sandbox._preflight_alternates(make_config(), git_repo, ["bwrap", "--"])
-
+        sandbox._preflight_alternates(cfg, git_repo, prefix, common)
     rendered = "".join(traceback.format_exception(info.value))
-    assert "private alternate probe diagnostic" not in rendered
-    assert "Create a standalone clone" in rendered
+    assert "private alternate probe diagnostic" not in rendered and "Create a standalone clone" in rendered
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):
@@ -358,9 +361,7 @@ def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_
     objects = git_repo / ".git/objects"
     worktree = shared
     if layout == "relative":
-        (shared / ".git/objects/info/alternates").write_text(
-            os.path.relpath(objects, shared / ".git/objects") + "\n"
-        )
+        (shared / ".git/objects/info/alternates").write_text(os.path.relpath(objects, shared / ".git/objects") + "\n")
     elif layout == "linked":
         worktree = tmp_path / "linked"
         git(shared, "worktree", "add", "-q", "-b", "linked", str(worktree))
@@ -374,9 +375,8 @@ def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_
         objects = tmp_path / ("zażółć" if layout == "unicode" else "alternate objects; $(false)")
         shutil.copytree(git_repo / ".git/objects", objects)
         (shared / ".git/objects/info/alternates").write_text(str(objects) + "\n")
-    config = make_config(checks=("echo first-stage",))
-    if layout == "transitive":
-        config = make_config(checks=config.checks, sandbox_ro=(str(shared / ".git/objects"),))
+    visible_stores = (str(shared / ".git/objects"),) if layout == "transitive" else ()
+    config = make_config(checks=("echo first-stage",), sandbox_ro=visible_stores)
     started = []
 
     with pytest.raises(sandbox.SandboxUnavailable) as failure:
@@ -769,6 +769,43 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     assert all(bool(r.reused_from) == (change == 'other') for r in report.results)
     assert any('reused ' in m for m in messages) == (change == 'other')
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
+
+
+@pytest.mark.parametrize("case", ["typo", "empty", "dirty", "no_base"])
+def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case):
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    command = 'test "$(cat README.md)" = hello'
+    paths = () if case == "empty" else ("ipnut.txt",)
+    config = make_config(checks=(command,), inputs={command: paths})
+    first = sandbox.run_checks(config, git_repo)
+    assert first.ok
+    _save_report(git_repo, first)
+    (git_repo / "README.md").write_text("fail\n")
+    if case != "dirty":
+        git(git_repo, "commit", "-qam", "change actual input")
+    if case == "no_base":
+        git(git_repo, "update-ref", "-d", "refs/remotes/origin/main")
+
+    result = sandbox.run_checks(config, git_repo, status=(messages := []).append)
+    assert result.results[0].exit_code == 1
+    assert any("workflow.toml: checks.inputs" in message and repr(paths) in message
+               for message in messages)
+
+
+@pytest.mark.parametrize("path", [":(bogus)README.md", "README\0.md", "README.md"])
+def test_input_diagnostic_failure_does_not_block_dirty_check(
+    git_repo, bwrap_log, fetched_base, monkeypatch, path,
+):
+    if path == "README.md":
+        def timed_out(*args):
+            raise sandbox._proc.ProcTimeout("input lookup timed out")
+
+        monkeypatch.setattr(sandbox, "_input_blobs", timed_out)
+    (git_repo / "README.md").write_text("dirty\n")
+    command = 'test "$(cat README.md)" = dirty'
+    config = make_config(checks=(command,), inputs={command: (path,)})
+    report = sandbox.run_checks(config, git_repo, status=lambda _: None)
+    assert report.ok and report.dirty and report.results[0].command == command
 
 
 def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base):

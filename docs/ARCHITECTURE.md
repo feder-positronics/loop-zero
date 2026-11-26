@@ -72,7 +72,8 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    worktree is clean, still at the remote base, and missing its task file.
 2. Implementation proves the owning behavior at the narrowest public seam;
    focused tests start early. `check` runs deterministic checks in a read-only
-   source sandbox. Its simple-command preflight catches missing local scripts,
+   source sandbox. It inventories Git object stores only when alternates may be
+   present. Its simple-command preflight catches missing local scripts,
    prepares recognized uv dependency groups offline in that sandbox and prints
    progress before each command, metadata-only stage heartbeats every 30 seconds
    (including silent children), and exit code/duration immediately after each stage.
@@ -287,6 +288,9 @@ review publication; the existing reviewer selector and delivery gates still appl
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
+Local readiness and hosted source and candidate eligibility reject PRs with
+merge-authority holds. Adding or removing a hold refreshes source eligibility
+even when the head stays the same. Merge admission rechecks the live hold.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
@@ -505,4 +509,11 @@ Receipts that use saved stage results bind the current head and check settings.
 For delegated checks, both the receipt and the stage key bind the runner's launch
 path, resolved executable path and executable bytes. Unavailable runner identity
 prevents receipt reuse.
+
+A worker running the entire check is itself the coordinator and writes a
+receipt with its own effective settings. Transferring it preserves the
+fingerprint, if present. Local readiness applies the same receipt predicate
+as for any other coordinator. See [check receipts with remote execution](../SETUP.md#check-receipts-with-remote-execution)
+for the operator route.
+
 CI and merge-queue candidates run fresh without a local worktree receipt.
