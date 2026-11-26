@@ -14,18 +14,16 @@ import fcntl
 import hashlib
 import json
 import os
-import shlex
 import random
 import re
+import shlex
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial, wraps
 from pathlib import Path
-from uuid import uuid4
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
 from loopzero import config as config_mod
@@ -253,7 +251,7 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     """Return (kind, reviewed_head) or raise when the PR's review budget is spent."""
     if _review_cap_spent(markers):
         raise CliError(
-            "review cap reached (2 rounds per PR): fix or reject the findings "
+            "review cap reached: fix or reject the findings "
             "(resolve-findings) and run `loopzero ready`, or split the PR"
         )
     primary = next((m for m in markers if m.kind == "primary"), None)
@@ -263,6 +261,44 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     if head.startswith(reviewed) or reviewed.startswith(head):
         raise CliError(f"head {head[:12]} already has a primary review; run `loopzero ready`, or push fixes for the delta")
     return "delta", reviewed
+
+
+def _conflict_delta_base(config: Config, pr: github.PR, head: str, reviews: list[dict],
+                         markers: list[Marker], publishers: tuple[str, ...]) -> str | None:
+    rounds = list(dict.fromkeys((marker.kind, marker.head) for marker in markers))
+    if [kind for kind, _ in rounds] != ["primary", "delta"]:
+        return None
+    (_, primary), (_, reviewed) = rounds
+    if len({primary, reviewed, head}) != 3:
+        return None
+    publishers = publishers or (github.login(),)
+    if not eligibility.approved_delta(reviews, reviewed, publishers, repo=config.repo, number=pr.number):
+        return None
+    if eligibility.base_merge_material(
+        config.repo, pr.number, reviewed, head, config.base_branch, clean=False, conflict_only=True,
+    ) is None:
+        return None
+    if github.open_blocking_findings(config.repo, pr.number, None, publishers):
+        return None
+    return reviewed
+
+
+def _select_review_round(config: Config, pr: github.PR, head: str, reviews: list[dict]) -> tuple[str, str | None]:
+    publishers = config.review_publishers
+    markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
+    if reviewed := _conflict_delta_base(config, pr, head, reviews, markers, publishers):
+        return "delta", reviewed
+    return _decide_kind(markers, head)
+
+
+def _review_cap_reason(config: Config, pr: github.PR, head: str, reviews: list[dict],
+                       markers: list[Marker], publishers: tuple[str, ...]) -> str:
+    if _conflict_delta_base(config, pr, head, reviews, markers, publishers):
+        return f"Run `loopzero review` for the available conflict-resolution delta on {head[:12]}."
+    return (
+        f"The review budget is exhausted and {head[:12]} has no eligible review. "
+        "Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused."
+    )
 
 
 MERGEABILITY_PENDING = "GitHub is computing mergeability"
@@ -314,10 +350,7 @@ def _readiness(
     if github.MISSING_REVIEW_REASON in result.reasons:
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
         if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
-            exhausted = (
-                f"Both review rounds are spent (primary + delta) and {head[:12]} has no eligible review. "
-                "Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused."
-            )
+            exhausted = _review_cap_reason(config, pr, head, reviews, markers, publishers)
             result = dataclasses.replace(result, reasons=tuple(
                 exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
             ))
@@ -374,18 +407,6 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
         return
 
 
-@contextmanager
-def _lock_task_state(wt: Path) -> Iterator[int]:
-    directory = wt / ".loopzero"
-    directory.mkdir(parents=True, exist_ok=True)
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield fd
-    finally:
-        os.close(fd)
-
-
 def _save_report(wt: Path, report: CheckReport) -> str | None:
     """Publish the receipt or return the current HEAD if the result is stale."""
     payload = {
@@ -397,34 +418,15 @@ def _save_report(wt: Path, report: CheckReport) -> str | None:
     }
     if report.settings_sha256 is not None:
         payload["settings_sha256"] = report.settings_sha256
-    with _lock_task_state(wt) as directory:
-        current_head = worktree.head(wt)
-        if report.head != current_head:
-            return current_head
-        _write_json_atomically(directory, CHECKS_FILE.name, payload)
-    return None
-
-
-def _write_json_atomically(directory: int, name: str, payload: dict) -> None:
-    temp = f".{name}-{uuid4().hex}"
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(json.dumps(payload, indent=2) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp, name, src_dir_fd=directory, dst_dir_fd=directory)
-    finally:
-        with suppress(FileNotFoundError):
-            os.unlink(temp, dir_fd=directory)
+    return worktree.write_local_state(
+        wt, CHECKS_FILE.name, json.dumps(payload, indent=2) + "\n", expected_head=report.head,
+    )
 
 
 def _load_report(wt: Path) -> CheckReport | None:
     path = wt / CHECKS_FILE
-    if not path.exists():
-        return None
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(worktree.read_local_state(wt, path.name))
         results = tuple(CheckResult(**item) for item in data["results"])
         if any(not is_check_exit_code(result.exit_code) for result in results):
             raise TypeError("exit_code must be an integer")
@@ -433,6 +435,8 @@ def _load_report(wt: Path) -> CheckReport | None:
             raise TypeError("dirty must be a bool")
         return CheckReport(head=str(data["head"]), dirty=dirty, results=results,
                            settings_sha256=data.get("settings_sha256"))
+    except FileNotFoundError:
+        return None
     except (TypeError, KeyError, ValueError) as exc:
         print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
         return None
@@ -560,7 +564,7 @@ def _append_review(body: str, result: ReviewResult) -> str:
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
     """Best-effort refresh only when local HEAD is the existing PR head."""
     try:
-        with _lock_task_state(wt):
+        with worktree.lock_local_state(wt):
             upstream = config_mod.run_git(wt, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
             if upstream.exit_code == 0:
                 branch, head = worktree.branch(wt), worktree.head(wt)
@@ -569,7 +573,7 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
                     body = _pr_body(wt, head, config, pr.body)
                     if body != (pr.body or "").replace("\r\n", "\n"):
                         github.update_body(config.repo, pr.number, body)
-    except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError) as exc:
+    except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError, worktree.WorktreeError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
@@ -616,6 +620,7 @@ def _check_failure_preview(tail: str, limit: int = 1536) -> str:
 
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
+    worktree.local_state_files(wt, CHECKS_FILE.name)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     try:
@@ -701,7 +706,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
-        with _lock_task_state(wt):
+        with worktree.lock_local_state(wt):
             live = github.pr_view(config.repo, pr.number)
             if live.state != "OPEN":
                 raise CliError(f"PR #{pr.number} closed during publication")
@@ -777,6 +782,10 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         runtime_source = f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}"
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
+    kinds = ("primary", "delta")
+    _, *saved_files = worktree.local_state_files(
+        wt, "task.md", *(_review_file(wt, head, kind).name for kind in kinds)
+    )
     _require_clean(wt)
     pr = _require_review_pr(config, branch, repost=args.repost)
     _require_pushed(pr, head)
@@ -788,21 +797,18 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         login.casefold() for login in config.review_publishers
     }:
         raise CliError("current GitHub login is not a configured review publisher")
-    saved = [kind for kind in ("primary", "delta") if _review_file(wt, head, kind).exists()] if args.repost else []
+    saved = [kind for kind, exists in zip(kinds, saved_files, strict=True) if exists] if args.repost else []
     if len(saved) > 1:
         raise CliError("multiple saved reviews for HEAD; publication is ambiguous")
     reviews = [] if saved else _pr_reviews(config.repo, pr.number)
     if saved:
         kind = saved[0]
     else:
-        kind, reviewed = _decide_kind(
-            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
-        )
+        kind, reviewed = _select_review_round(config, pr, head, reviews)
     publication_context = {"repo": config.repo, "number": pr.number, "publisher": publisher}
     if args.repost:
-        result = _load_review(wt, head, kind)
+        result, publication = _load_review(wt, head, kind)
         candidates, excluded = _repost_reviewer_families(wt, config, head, result)
-        publication = json.loads(_review_file(wt, head, kind).read_text()).get("publication")
         if publication is not None:
             if (not isinstance(publication, dict) or publication.get("repo") != config.repo
                     or publication.get("number") != pr.number
@@ -818,9 +824,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         # Exact read-back above may confirm an older published note; a new post needs the current form.
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             raise CliError("saved fallback note is not in the published form; run without --repost")
-        allowed, reviewed = _decide_kind(
-            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
-        )
+        allowed, reviewed = _select_review_round(config, pr, head, reviews)
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget")
         _delta_patch(wt, config, reviewed, head, pr.number)
@@ -872,7 +876,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
-        with _lock_task_state(wt):
+        with worktree.lock_local_state(wt):
             live = github.pr_view(config.repo, pr.number)
             github.update_body(config.repo, pr.number, _append_review(live.body, result))
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
@@ -926,7 +930,7 @@ def _has_recoverable_review(
     if not _review_file(wt, head, kind).exists() or _review_file(wt, head, other_kind).exists():
         return False
     try:
-        result = _load_review(wt, head, kind, publication=publication)
+        result, _ = _load_review(wt, head, kind, publication=publication)
         candidates, excluded = _repost_reviewer_families(wt, config, head, result)
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             return False
@@ -1127,10 +1131,9 @@ def _save_review_failure_output(wt: Path, head: str, kind: str, errors: dict[str
         return ""
     path = wt / ".loopzero" / f"reviewer-output-{head[:12]}-{kind}.json"
     try:
-        with _lock_task_state(wt) as directory:
-            _write_json_atomically(directory, path.name, fragments)
-    except OSError as exc:
-        return f"\nCould not save reviewer output: {exc.strerror or exc}"
+        worktree.write_local_state(wt, path.name, json.dumps(fragments, indent=2) + "\n", private=True)
+    except (OSError, worktree.WorktreeError) as exc:
+        return f"\nCould not save reviewer output: {_one_line(exc)}"
     return f"\nReviewer output: {path.relative_to(wt)}"
 
 
@@ -1168,31 +1171,20 @@ def _review_file(wt: Path, head: str, kind: str) -> Path:
 
 def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None) -> None:
     path = _review_file(wt, result.head, result.kind)
-    data = dataclasses.asdict(result)
-    if publication is not None:
-        data["publication"] = publication
-    with _lock_task_state(wt) as directory:
-        os.fchmod(directory, 0o700)
-        if path.is_symlink():
-            raise OSError(f"refusing to replace symbolic link: {path}")
-        _write_json_atomically(directory, path.name, data)
+    data = dataclasses.asdict(result) | ({"publication": publication} if publication is not None else {})
+    worktree.write_local_state(wt, path.name, json.dumps(data, indent=2) + "\n", private=True)
 
 
 def _load_review(
     wt: Path, head: str, kind: str, *, publication: dict | None = None,
-) -> ReviewResult:
+) -> tuple[ReviewResult, object]:
     path = _review_file(wt, head, kind)
-    if not path.exists():
-        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost")
     try:
-        data = json.loads(path.read_text())
-    except (ValueError, OSError) as exc:
-        raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
-    if not isinstance(data, dict):
-        raise CliError(f"{path} is not runner-produced: invalid saved review")
-    if data.get("head") != head:
-        raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
-    try:
+        data = json.loads(worktree.read_local_state(wt, path.name))
+        if not isinstance(data, dict):
+            raise ValueError("review receipt must be an object")
+        if data.get("head") != head:
+            raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
         saved_publication = data.pop("publication", None)
         if data.get("kind") != kind or (publication is not None and saved_publication != publication):
             raise ValueError("saved review kind or publication mismatch")
@@ -1203,11 +1195,13 @@ def _load_review(
             if data.pop(field, default) != default:
                 raise ValueError("retired paired review")
         result = ReviewResult(**{**data, "findings": findings})
-    except (KeyError, TypeError, ValueError) as exc:
+    except FileNotFoundError:
+        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost") from None
+    except (KeyError, OSError, TypeError, ValueError) as exc:
         raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
     if not runners.validate_runner_result(result):
         raise CliError(f"{path} is not runner-produced: provenance/envelope mismatch")
-    return result
+    return result, saved_publication
 
 
 def _pr_readiness(
