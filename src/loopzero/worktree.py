@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import re
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from uuid import uuid4
@@ -57,10 +58,11 @@ def _git(
 ) -> str:
     argv = ("git", *args)
     done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-               preserve_newlines=preserve_newlines)
+               preserve_newlines=preserve_newlines,
+               encoding=sys.getfilesystemencoding() if preserve_newlines and preserve_whitespace else None)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
-    if preserve_newlines:
+    if preserve_newlines and not preserve_whitespace:
         return done.stdout
     return done.stdout.removesuffix("\n") if preserve_whitespace else done.stdout.strip()
 
@@ -266,7 +268,8 @@ def cleanup(wt: Path) -> None:
         raise WorktreeError(f"no such worktree: {wt}")
     if is_dirty(wt):
         raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-    name, gd = branch(wt), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
+    common = _git(wt, "rev-parse", "--git-common-dir", preserve_whitespace=True, preserve_newlines=True)
+    name, gd = branch(wt), (wt / common).resolve()
     _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
     try:
         _git(gd, f"--git-dir={gd}", "branch", "-D", name)

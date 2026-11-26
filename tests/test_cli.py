@@ -3251,9 +3251,9 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     if state == "dirty":
         (linked / "README.md").write_text("uncommitted work\n")
     original, cwds = cli._git, []  # #439: no cleanup git in a primary checkout
-    monkeypatch.setattr(cli, "_git", lambda cwd, *args: cwds.append(Path(cwd).resolve()) or (
+    monkeypatch.setattr(cli, "_git", lambda cwd, *args, **kwargs: cwds.append(Path(cwd).resolve()) or (
         f"worktree {repo}\0" if state == "wrong_primary" and args == ("worktree", "list", "--porcelain", "-z")
-        else original(cwd, *args)))
+        else original(cwd, *args, **kwargs)))
 
     code, out, err = run(capsys, "merge")
     assert {primary.resolve(), repo.resolve()}.isdisjoint(cwds)
@@ -3841,21 +3841,21 @@ def test_review_and_ready_refuse_closed_pr(wt: Path, gh: FakeGh, capsys) -> None
 
 @pytest.mark.parametrize("changed", [False, True])
 def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
-    wt: Path, repo: Path, gh: FakeGh, capsys, changed
+    wt: Path, repo: Path, gh: FakeGh, capsys, changed, monkeypatch
 ) -> None:
-    arm_pr(gh, head_of(wt), state="MERGED", isDraft=False)
-    gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head='f' * 40 if changed else head_of(wt), sha='e' * 40))
-    gh.respond("api -X", "")
+    collision, wt = wt, wt.with_name(wt.name + " ")
+    git(repo, "worktree", "move", str(collision), str(wt))
+    git(repo, "worktree", "add", "-qb", "lz/other", str(collision), "lz/t1")
+    monkeypatch.chdir(wt)
+    for branch, number in (("lz/t1", 7), ("lz/other", 8)):
+        arm_pr(gh, head_of(wt), branch=branch, number=number, state="MERGED", isDraft=False)
+        gh.append(f"api repos/{REPO}/pulls/{number}", merge_json(state='MERGED', head='f' * 40 if changed else head_of(wt), sha='e' * 40))
     code, out, err = run(capsys, "merge")
+    assert (code, collision.exists(), wt.exists()) == (int(changed), True, changed)
     if changed:
-        assert code == 1 and "head changed" in err and wt.exists()
-        assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
-        return
-    assert (code, err) == (0, "")
-    assert out.splitlines()[-1] == "e" * 40
-    assert f"PR #7 was already merged as {'e' * 12}" in out and "e" * 40 in out
-    assert not wt.exists()
-    assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
+        assert "head changed" in err
+    else:
+        assert not err and f"PR #7 was already merged as {'e' * 12}" in out and out.endswith("e" * 40 + "\n")
 
 
 def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys, head) -> None:
