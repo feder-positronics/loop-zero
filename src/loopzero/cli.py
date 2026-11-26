@@ -570,7 +570,10 @@ def cmd_start(args: argparse.Namespace) -> int:
     listing = _git(root, "worktree", "list", "--porcelain", "-z", paths=True)
     primary = Path(listing.split("\0", 1)[0].removeprefix("worktree "))
     # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
-    if current.stdout.strip().startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
+    branch = current.stdout.strip()
+    if branch.startswith("lz/") and root == primary:
+        raise CliError(f"primary checkout {root} is on task branch {branch}; switch it to another branch first")
+    if branch.startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
         raise CliError(f"already inside task worktree {root}; run start from {primary}")
     config = _load_config(args, root)
     print(worktree.start(primary, args.slug, config.base_branch))

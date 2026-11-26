@@ -4342,6 +4342,14 @@ def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, monkeypatch, c
     assert "lz/nested" not in git(repo, "branch", "--list", "lz/nested")
 
 
+def test_start_on_primary_task_branch_says_to_switch_branch(repo: Path, monkeypatch, capsys) -> None:
+    git(repo, "switch", "-q", "-c", "lz/stray")
+    monkeypatch.chdir(repo)
+    _, err = expect_cli(capsys, 1, "start", "nested", stdout="", stderr_contains=("switch it to another branch first",))
+    assert f"primary checkout {repo} is on task branch lz/stray" in err and "run start from" not in err
+    assert not (repo / ".worktrees" / "nested").exists()
+
+
 def test_start_accepts_primary_clone_inside_worktrees_directory(repo: Path, tmp_path: Path, monkeypatch, capsys) -> None:
     clone = shutil.copytree(repo, tmp_path / ".worktrees" / "project")
     monkeypatch.chdir(clone)
