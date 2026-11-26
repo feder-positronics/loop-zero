@@ -23,10 +23,6 @@ Before publication, inspect the issue and links for its lifecycle blueprint and
 include required completion in the closing delivery. A child does not own its parent's blueprint.
 Recheck collisions, live acceptance, prior delivery and ownership before
 publication and merge. Reconcile changes before proceeding.
-Defer optional changes after approval. With a current passing receipt, follow
-[contract Step 5](../../CONTRACT.md#the-six-steps) at the approved head before
-investigating missing or skipped draft checks. Use its scheduling guidance if
-checks remain missing after activation.
 Before queueing, check the candidate merged with the current base against
 every repository size cap, including the combined effect of any batch.
 Verify the replacement is installed and works before retiring a deployment workaround.
@@ -35,9 +31,10 @@ criterion or verified defect. Own review, CI and post-merge acceptance waits.
 Use the [acceptance evidence](reference.md#acceptance-evidence) and
 [re-entry](reference.md#re-entry) safeguards when applicable.
 
-Partial delivery uses `Refs #N` and never closes the issue, including work needing
-post-merge observation. Closing keywords belong only to complete acceptance;
-inspect rendered descriptions and commit messages, since even negated closing
+For complete acceptance, change the task template's `Refs #N` line to `Closes #N`,
+except for p0 owner orders and QA issues, which [keep `Refs`](../../../docs/DELEGATION.md#team-roles).
+Partial delivery keeps `Refs #N` and never closes the issue, including work needing
+post-merge observation. Inspect rendered descriptions and commit messages, since even negated closing
 prose can close issues. Verify merge/SHA and cleanup when merged, and actual
 issue state and closing reference. Unobservable required conditions remain open.
 Follow the linked safeguards when [partial delivery auto-closes the issue](reference.md#premature-closure),
