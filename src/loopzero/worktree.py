@@ -53,12 +53,12 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(cwd: Path, *args: str, timeout: float = 120) -> str:
+def _git(cwd: Path, *args: str, timeout: float = 120, preserve_whitespace: bool = False) -> str:
     argv = ("git", *args)
     done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
-    return done.stdout.strip()
+    return done.stdout.removesuffix("\n") if preserve_whitespace else done.stdout.strip()
 
 
 def branch_name(repo_root: Path, slug: str) -> str:
@@ -217,7 +217,7 @@ def is_linked_checkout(wt: Path) -> bool:
 
 
 def branch(wt: Path) -> str:
-    name = _git(Path(wt), "branch", "--show-current")
+    name = _git(Path(wt), "branch", "--show-current", preserve_whitespace=True)
     if not name:
         raise WorktreeError("HEAD is detached. Switch to a branch and retry.")
     return name

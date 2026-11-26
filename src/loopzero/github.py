@@ -99,6 +99,7 @@ class PR:
     author: str = ""  # login of the PR author
     merge_state: str = "UNKNOWN"  # GitHub mergeStateStatus, e.g. "BEHIND" | "CLEAN"
     body: str = ""
+    labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -497,6 +498,13 @@ def _api(endpoint: str, payload: dict, method: str = "POST",
         path.unlink(missing_ok=True)
 
 
+MERGE_HOLD_MESSAGE = "has a merge-authority hold; ask the decisions owner to release it"
+
+
+def _pr_labels(data: dict) -> tuple[str, ...]:
+    return tuple(label["name"] for label in data.get("labels", []))
+
+
 def _pr_from_rest(data: object) -> PR:
     """Normalize one REST pull detail without treating absent merge evidence as clean."""
     try:
@@ -527,6 +535,7 @@ def _pr_from_rest(data: object) -> PR:
             merge_state=merge_state.upper() if merge_state else "UNKNOWN",
             author=str((data.get("user") or {}).get("login") or ""),
             body=str(data.get("body") or ""),
+            labels=_pr_labels(data),
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
@@ -804,7 +813,7 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     lines: set[int] = set()
     first_added: int | None = None
     current = None
-    for raw in patch.splitlines():
+    for raw in patch.removesuffix("\n").split("\n"):
         hunk = _HUNK_RE.match(raw)
         if hunk:
             current = int(hunk.group(1))
@@ -1164,7 +1173,17 @@ def _check_signals(
             workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
         if _has_active_replacement(cr, workflows, head_sha):
             superseded.append(name)
-    return states, (*stale, *superseded), stale_verdicts, _check_suites_at_limit(runs)
+    capped = _check_suites_at_limit(runs)
+    _discard_unverified_successes(states, latest_status.keys() - latest_runs.keys(), capped)
+    return states, (*stale, *superseded), stale_verdicts, capped
+
+
+def _discard_unverified_successes(states: dict[str, str], status_only: set[str], capped: bool) -> None:
+    # A status-only success may hide a failed run outside the returned suites.
+    if capped:
+        for name in status_only:
+            if states[name] == "success":
+                del states[name]
 
 
 def _check_suites_at_limit(runs: list[dict]) -> bool:
@@ -1293,8 +1312,10 @@ class ClosedUnmerged(GhError):
     """A PR read as closed but not merged; right after a queue merge this can be transient."""
 
 
-def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> str | None:
-    """The merge commit of PR `number` once GitHub reports it MERGED, else None."""
+def merged_sha(
+    repo: str, number: int, *, expected_head: str | None = None, check_hold: bool = False,
+) -> str | None:
+    """The verified merge commit, or None while open. Admission may check the hold label."""
     argv = ("gh", "api", f"repos/{repo}/pulls/{number}")
     view = api_get(argv[2])
     if not isinstance(view, dict) or type(view.get("merged")) is not bool:
@@ -1307,6 +1328,8 @@ def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> s
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
             return sha
     elif not view["merged"] and view.get("state") == "open":
+        if check_hold and "hold" in _pr_labels(view):
+            raise GhError(argv, f"PR #{number} {MERGE_HOLD_MESSAGE}")
         return None  # An open PR's merge_commit_sha is only a test merge.
     if not view["merged"] and view.get("state") == "closed":
         raise ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")
@@ -1370,32 +1393,43 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
-def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
-    """Return False if the remote ref moved, or True if deleted or absent."""
-    ref = f"heads/{quote(branch, safe='/')}"
-    endpoint = f"repos/{repo}/git/ref/{ref}"
+def _remote_branch_head(endpoint: str) -> str | None:
     try:
         current = api_get(endpoint)
     except GhError as exc:
         if re.search(r"\bHTTP 404\b", exc.tail):
-            return True
+            return None
         raise
     obj = current.get("object") if isinstance(current, dict) else None
     sha = obj.get("sha") if isinstance(obj, dict) else None
     if not isinstance(sha, str) or not sha:
         raise GhError(("gh", "api", endpoint), "missing remote ref SHA")
-    if sha != expected_head:
-        return False
-    try:
-        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/{ref}")
-    except GhError as exc:
-        absent = re.search(r"\bHTTP 404\b", exc.tail) or (
-            re.search(r"\bHTTP 422\b", exc.tail)
-            and re.search(r"reference does not exist", exc.tail, re.IGNORECASE)
-        )
-        if not absent:
-            raise
-    return True
+    return sha
+
+
+def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
+    """Return False if the remote ref moved, or True if deleted or absent."""
+    endpoint = f"repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
+    current = _remote_branch_head(endpoint)
+    if current != expected_head:
+        return current is None
+    ref = f"refs/heads/{branch}"
+    argv = ("git", "-c", "credential.helper=!gh auth git-credential",
+            "push", f"--force-with-lease={ref}:{expected_head}",
+            f"https://github.com/{repo}.git", f":{ref}")
+    env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
+    with tempfile.TemporaryDirectory(prefix="loopzero-cleanup-") as scratch:
+        init = ("git", "init", "--bare", "--template=")
+        done = run(init, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
+        if done.exit_code != 0:
+            raise GhError(init, done.stderr or done.stdout)
+        done = run(argv, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
+    if done.exit_code == 0:
+        return True
+    current = _remote_branch_head(endpoint)
+    if current != expected_head:
+        return current is None
+    raise GhError(argv, done.stderr or done.stdout)
 
 
 def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:
