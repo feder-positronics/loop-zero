@@ -37,3 +37,9 @@ description: Judge recent workflow changes and choose at most one next change in
 
 Return the verdicts, defect referrals and at most one proposed change to the
 commissioner, who records them and issues any orders.
+
+The commissioner runs the retro early once if a guard is outside its band two
+days running or independent incidents repeat. For structural changes, reverts
+or safeguard removals, it commissions a short read-only check on the same
+evidence from a different family's [deep route](../../../docs/DELEGATION.md#resolve-the-model-before-delegation),
+and adopts on agreement or defers with the disputed fact.
