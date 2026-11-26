@@ -6,7 +6,7 @@ description: Simplify a named or current-task diff, or delete evidenced dead cod
 # Refine Code
 
 Preserve observable behavior and public contracts in the user-named or current-task diff.
-Confirm task and branch in the outer worktree and follow [the contract](../../CONTRACT.md).
+Confirm task and branch in the task worktree and follow [the contract](../../CONTRACT.md).
 Use clear names, control flow and local patterns without unrelated cleanup or compatibility layers.
 
 Treat concurrency, exception timing, transactions, ordering, query predicates,
@@ -23,5 +23,5 @@ Explain and preserve uncertain candidates. Keep removals recoverable in Git and 
 build, packaging, deployment and docs boundaries.
 
 Explain the clarity gain and any apparently behavioral edit. Run focused success
-and relevant failure/cancellation tests and [contract checks](../../CONTRACT.md#blockers); record evidence and
+and relevant failure/cancellation tests; record evidence and
 limits in task Notes.

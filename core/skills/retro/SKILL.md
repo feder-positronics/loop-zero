@@ -8,12 +8,12 @@ description: Judge recent workflow changes and choose at most one next change in
 ## Evidence
 
 - Run [retro_metrics.py](../../../scripts/retro_metrics.py) once with the
-  commissioned repo, fixed UTC window end, outcome, order and p0 labels,
+  commissioned repo, fixed UTC window end, the outcome and order (`p0`) labels its AGENTS.md names,
   agreed stall threshold, and available receipt and host inputs. Save JSON
   stdout to scratch. Take numbers only from the script and query fields needed for decisions.
   Compare the last seven days with the prior seven and the four-week trend.
   Lead with outcomes closed and order-to-acceptance time. Name the source of
-  each `UNKNOWN`. Replay with the same end and frozen inputs.
+  each `UNKNOWN`.
 - Use `weekly_sample.items` directly. Explain any shortfall below six from the
   report. Read each sampled case once for its wait, who could move it and first
   real consumer use or missing proof. Use a sampled contrary case to test the
@@ -31,7 +31,8 @@ description: Judge recent workflow changes and choose at most one next change in
    evidence, name the next observation and date. Extend once, then escalate
    unresolved verdicts to the commissioner.
 2. Name a deletion candidate first or explain why none qualifies. Choose at
-   most one change for the evidenced constraint, or none when the case is weak.
+   most one change for the evidenced constraint under
+   [Workflow health](../../../docs/DELEGATION.md#team-roles), or none when the case is weak.
    Give its owning issue, script target, two script guards, review date,
    revert action and install marker.
 

@@ -20,8 +20,8 @@ failure modes, and identify inconsistencies. Each concern needs evidence,
 consequence, and a concrete direction.
 
 Use a concise opinion pass for directional requests: assessment, highest-value
-concerns, recommended direction. Use findings for requested audits, exhaustive
-assessment, or gate input.
+concerns, recommended direction. Use findings for requested audits or exhaustive
+assessment.
 
 Select relevant lenses:
 

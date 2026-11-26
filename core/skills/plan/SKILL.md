@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Plan outcome-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or planned blueprints.
+description: Plan outcome-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or blueprints.
 ---
 
 # Plan
@@ -22,9 +22,9 @@ data or environments first and derive targets from them. Record each task's obje
 acceptance, paths, owners, constraints and proving `workflow.toml` checks. Add checks only where existing
 checks cannot cover the behavior.
 
-When authorized to file slices from an active goal or planned blueprint, use its
-tracking issue as the parent. Give each task a plain issue title and
-use the task shape above for its body. Name the parent step and the evidence it
+When authorized to file slices from an active goal or blueprint, use its
+tracking issue as the parent. Create each issue per
+[BACKLOG](../../../docs/BACKLOG.md#for-agents). Name the parent step and the evidence it
 needs in an `Unblocks: #<parent> (step N) — <evidence>` line. Link each child with
 `gh api "repos/$repo/issues/$parent/sub_issues" -F sub_issue_id="$id"`. Use
 `owner/repo` for `repo`, the parent issue number for `parent`, and the child's
