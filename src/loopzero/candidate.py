@@ -385,7 +385,10 @@ def attest_candidate(
     mergify_status: MergifyStatus,
     source_policy: SourcePolicy,
 ) -> list[dict[str, object]]:
-    """Retry races afresh; the deadline bounds retry admission, not synchronous I/O."""
+    """Retry races afresh, bounded by retry admission rather than synchronous I/O.
+
+    Source policy must raise CandidateError for an expected rejection.
+    """
     batch_wait = [0.0]
     batch_deadline = _retry_clock() + _BATCH_SECONDS
     deadline = _retry_clock() + _ATTEST_SECONDS
@@ -507,10 +510,7 @@ def _attest_candidate_once(
         source_snapshots[number] = (source_sha, _source_fingerprint(source))
         try:
             source_policy(number, source)
-        except Exception as exc:
-            # Standalone consumers supply their own policy error types.
-            if isinstance(exc, TypeError):
-                raise
+        except CandidateError as exc:
             current = None
             with contextlib.suppress(Exception):
                 current = _lookup_source(github_get, full_name, number)
