@@ -135,6 +135,7 @@ def base_merge_material(
                 or not re.fullmatch(r"[0-9a-f]{40}", base)):
             return None
         with candidate.fetched_git(repo, [reviewed, head, base]) as git:
+            git("merge-base", "--is-ancestor", reviewed, head)
             if not _verified_base_chain(git, reviewed, head, base, clean=clean, conflict_only=conflict_only):
                 return None
             if clean:

@@ -24,8 +24,7 @@ this guide and the delivery contract describe current behavior.
 The smallest useful unit is one task, one branch and one draft PR. A deterministic
 check gives an exit-code verdict. A model reviews the authored head, independently
 by default, with a fresh same-family fallback and visible disclosure when
-independent runners are unavailable. The [bounded owner exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
-permits disclosed contributor review with reduced assurance.
+independent runners are unavailable.
 Readiness combines that evidence with live checks and findings. Merge verifies
 what actually landed. CLI checks stay strict, with no waiver file or unsandboxed
 fallback. The contract's owner queue route uses GitHub and the queue for
@@ -114,10 +113,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    repository. A leased rewrite also requires the PR head in the task branch's
    local history.
 4. `review` publishes one native review of the exact authored SHA. The contract's
-   [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
-   the PR-wide review budget across head rewrites, and the
-   [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
-   which changes neither the selector nor the budget.
+   [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion
+   and the PR-wide review budget across head rewrites; truthful all-writer
+   trailers decide the reviewer family.
    The delta requires the reviewed commit on the current head's first-parent
    history and verifies merged parents against the live configured base. The
    runner receives topic patches in first-parent order and the difference
@@ -370,7 +368,7 @@ against its owning code and consumer before calling it open or closed.
 The October 5 direction keeps this guide as the current entry point, preserves
 the small delivery toolkit, and makes architecture upkeep part of contribution
 and review. Early owning tests, truthful model attribution, independent review
-by default with the bounded owner exception, changed-only writes and explicit
+by default with a disclosed same-family fallback, changed-only writes and explicit
 ownership remain the design constraints.
 The approved execution direction is T3 V2 for coordination, with loop-zero
 retaining checks, formal native review under that policy, readiness and verified

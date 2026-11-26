@@ -73,14 +73,6 @@ symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
-Before resuming automated PR check refreshes or explicit PR resyncs after an
-upgrade, advance every PR-body writer to the selected CLI revision. For
-unverified receipt warnings, use a revision containing
-[3ff80bd9 (#1160)](https://github.com/feder-positronics/loop-zero/commit/3ff80bd91c92f12d557cead31776df40d4328097).
-Once the writers are updated, run `loopzero check` for the current head to
-replace old receipts. If you roll back across that fix, pause those writes before
-switching the CLI and resume them once the writers support the warning again.
-
 If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
 after GitHub may have accepted a Claude review, run `loopzero review --repost`
 with the publishing CLI revision or a newer compatible revision. The rollback
@@ -292,14 +284,13 @@ PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
   pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
   `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
   then log in as it prints; the monitor refreshes standby Codex logins before they expire.
-- Every 5 minutes the monitor probes each account and keeps the best one active:
-  Claude prefers Fable and Opus, then Opus only; Codex prefers every model
-  available. At 95% of any limit an account counts as spent. `ai-accounts status`
-  shows accounts, emails, tiers and resets.
-- Claude probes retain each window's utilization (`util`) and reset (`resets`, null
-  when absent), including healthy windows. Legacy `reset` and `next_reset` are
-  aggregate availability estimates; status labels 7d and 5h resets separately.
-  `weekly_used_percent` is the overall 7d usage, null when unknown.
+- The monitor checks accounts every five minutes. Claude prefers Fable and Opus,
+  then Opus only. Codex keeps the current usable account until it is spent at 95%
+  of any limit by default, then prefers an account with every model available.
+  Claude reads the OAuth usage API at most every 30 minutes and uses one-token
+  header probes between reads. `ai-accounts status` shows accounts, tiers and
+  per-window utilization and resets. `weekly_used_percent` is the overall 7d
+  usage, null when unknown.
 - Only `exec` (including `--identity`) refuses non-owner Claude launches with exit 3
   at >=85% overall weekly or five-hour utilization, or when that account's cached
   status is missing, unreadable or older than 20 minutes. The last 15 weekly points
@@ -509,23 +500,11 @@ Local readiness reads that list from the base configuration (legacy installation
 without it use the local GitHub login). Hosted evaluation requires an explicit list;
 its CI token's login is never a reviewer identity.
 
-Codex evidence v1 can include configured settings. For that shape the hosted
-reader needs [07ad5643 (#344)](https://github.com/feder-positronics/loop-zero/commit/07ad5643b3fc32541eee3c9f88ff5f4e917b7de7)
-or a newer compatible revision. An older reader can report `no review recorded
-for the current head` even when the publisher recorded a valid approval. Advance
-the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
-(the loop-zero checkout ref or installed package revision). Dispatch the
-eligibility workflow for the existing PR, or run the command below with its
-unchanged source SHA. The refreshed reader can use the approval already on GitHub.
-
-For inherited review coverage, advance both source and candidate workflow pins to
-a revision containing [23219dd3 (#1081)](https://github.com/feder-positronics/loop-zero/commit/23219dd39e641549164c346e137f4e09718115f6).
-The updated reader accepts an ancestor approval only across verified clean merges
-from the configured base. After deploying both pins, refresh eligibility for open
-sources judged by the older reader so their statuses reflect the updated policy.
-
-From a trusted base checkout, replace the placeholders with the trusted
-Loop-zero pin and the source PR head SHA:
+Advance the consumer CI pin that supplies `loopzero.hosted` or
+`loopzero.eligibility` (the loop-zero checkout ref or installed package revision)
+before relying on a new reader or writer behaviour. To refresh an open PR judged
+by an older reader, dispatch the eligibility workflow for it, or run this from a
+trusted base checkout with the trusted Loop-zero pin and the source PR head SHA:
 
 ```sh
 uv run --no-project --with "git+https://github.com/feder-positronics/loop-zero@<sha>" \
