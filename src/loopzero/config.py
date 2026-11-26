@@ -89,16 +89,39 @@ def base_revision(worktree: Path, base_branch: str) -> str:
     raise ConfigError(f"git rev-parse origin/{base_branch} failed: {message}")
 
 
-def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
+def _has_replacement_refs(common_dir: Path) -> bool:
+    # A replacement can change what Git reads at a fixed object name.
+    for entry in ("refs/replace", "reftable"):
+        try:
+            (common_dir / entry).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        return True
+    try:
+        packed = (common_dir / "packed-refs").read_bytes()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return b" refs/replace/" in packed
+
+
+def _remote_workflow(worktree: Path, branch: str, previous: Config | None) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
+    directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
     resolved = _proc.run(
-        ["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+        ["git", "rev-parse", *directory_args, "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
     )
     if resolved.exit_code != 0:
         raise ConfigError(f"{source} has no remote-tracking base commit. {hint}")
-    revision = resolved.stdout.strip()
+    common_dir, _, revision = resolved.stdout.rstrip("\n").rpartition("\n")
+    if (previous is not None and previous.base_branch == branch and previous.trusted_base_revision == revision
+            and common_dir and not _has_replacement_refs(Path(common_dir))):
+        return previous, revision
     shown = _proc.run(
         ["git", "show", f"{revision}:workflow.toml"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
@@ -115,7 +138,7 @@ def _remote_workflow(worktree: Path, branch: str) -> tuple[Config, str]:
         raise ConfigError(f"{source}: {exc}. {hint}") from None
 
 
-def load_trusted(worktree: Path) -> Config:
+def load_trusted(worktree: Path, *, previous: Config | None = None) -> Config:
     """Select delivery policy using Git's origin default and its trusted workflow."""
     prefix = "refs/remotes/origin/"
     default = _proc.run(
@@ -129,10 +152,10 @@ def load_trusted(worktree: Path) -> Config:
             "or supply --config for bootstrap or an override."
         )
     branch = ref.removeprefix(prefix)
-    policy, revision = _remote_workflow(worktree, branch)
+    policy, revision = _remote_workflow(worktree, branch, previous)
     if policy.base_branch == branch:
         return replace(policy, trusted_base_revision=revision)
-    base, revision = _remote_workflow(worktree, policy.base_branch)
+    base, revision = _remote_workflow(worktree, policy.base_branch, previous)
     if base.base_branch != policy.base_branch:
         raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
     return replace(base, trusted_base_revision=revision)
