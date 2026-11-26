@@ -48,8 +48,8 @@ GitHub; keep acceptance changes in both task.md and the PR by rerunning `pr`.
 
 Review publication records duration and distinguishes requested model/effort from
 CLI-reported claims, which are not backend attestation; saved artifacts preserve
-them for `--repost`. The full transcript stays in `.loopzero/review-<head>-<kind>.json`;
-`loopzero review --repost` uses it without rerunning the model.
+them in `.loopzero/review-<head12>-<kind>.json`. `loopzero review --repost` uses
+the saved review without a model call and rejects `--model` and `--effort`.
 
 Waits observe immediately, then use 30/60/120-second intervals with up to 10%
 earlier jitter, bounded by the timeout. Each readiness observation rechecks
