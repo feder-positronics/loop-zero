@@ -1184,11 +1184,9 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
 
 
 def _pr_readiness(
-    wt: Path, config: Config, *, allow_merged: bool = False, workflow_wait: bool = False,
-    branch: str | None = None,
+    wt: Path, config: Config, branch: str, *, allow_merged: bool = False, workflow_wait: bool = False
 ) -> tuple[github.PR, github.Readiness | None]:
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
-    branch = branch if branch is not None else worktree.branch(wt)
     head = worktree.head(wt)
     _require_task_branch(config, branch)
     pr = _require_pr(config, branch, allow_merged=allow_merged)
@@ -1213,7 +1211,7 @@ def _cleanup(wt: Path, pr: github.PR, branch: str | None = None) -> None:
 
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
-    pr, readiness = _pr_readiness(wt, config, workflow_wait=args.wait is not None)
+    pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None)
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
     kicked = bool(waiting)
@@ -1628,34 +1626,43 @@ def _merge_with_mergify(
     return None
 
 
-def _merge_pr_readiness(
-    wt: Path, config: Config, *, workflow_wait: bool
-) -> tuple[str, github.PR, github.Readiness | None]:
-    if previous := worktree.detached_from(wt):
-        _repo_root(wt)
-        _require_task_branch(config, previous)
-        pr = github.merged_pr_at_head(config.repo, previous, worktree.head(wt))
-        if pr is None:
-            raise CliError(f"no merged PR proves cleanup of detached worktree for {previous!r}")
-        return previous, pr, None
-    branch = worktree.branch(wt)
-    pr, readiness = _pr_readiness(wt, config, allow_merged=True, workflow_wait=workflow_wait, branch=branch)
-    return branch, pr, readiness
+def _detached_merge_pr(wt: Path, config: Config) -> tuple[str, github.PR] | None:
+    if not (previous := worktree.detached_from(wt)):
+        return None
+    _repo_root(wt)
+    _require_task_branch(config, previous)
+    pr = github.merged_pr_at_head(config.repo, previous, worktree.head(wt))
+    if pr is None:
+        raise CliError(f"no merged PR proves cleanup of detached worktree for {previous!r}")
+    return previous, pr
+
+
+def _already_merged_sha(config: Config, pr: github.PR) -> str:
+    sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+    if sha is None:
+        raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
+    print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
+    return sha
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
     if args.cancel and args.wait is not None:
         raise CliError("merge --cancel cannot be combined with --wait")
     wt, config = _context(args, pin_checks=True)
+    if not args.cancel and (detached := _detached_merge_pr(wt, config)):
+        branch, pr = detached
+        return _finish_merge(wt, config, branch, pr, _already_merged_sha(config, pr))
+    branch = worktree.branch(wt)
     if args.cancel:
-        branch = worktree.branch(wt)
         if config.merge_strategy != "mergify":
             raise CliError("merge --cancel is only available with delivery.merge = 'mergify'")
         pr = _require_pr(config, branch)
         mergify.dequeue(config.repo, pr.number)
         print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
-    branch, pr, readiness = _merge_pr_readiness(wt, config, workflow_wait=args.wait is not None)
+    pr, readiness = _pr_readiness(
+        wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None
+    )
     started = time.monotonic()
     deadline = None if args.wait is None else started + args.wait
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
@@ -1669,13 +1676,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             return 3
         pr, readiness, _ = waited
     if readiness is None:
-        sha = github.merged_sha(
-            config.repo, pr.number,
-            expected_head=pr.head_sha,
-        )
-        if sha is None:
-            raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
-        print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
+        sha = _already_merged_sha(config, pr)
     elif config.merge_strategy == "mergify":
         try:
             sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by)
@@ -1703,6 +1704,10 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "next: loopzero merge --wait follows the queue, verifies and cleans up"
             )
             return 0
+    return _finish_merge(wt, config, branch, pr, sha)
+
+
+def _finish_merge(wt: Path, config: Config, branch: str, pr: github.PR, sha: str) -> int:
     _cleanup_remote_refs(wt, config, branch, pr.head_sha)
     _cleanup(wt, pr, branch)
     print(sha)
