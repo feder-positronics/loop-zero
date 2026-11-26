@@ -6,7 +6,9 @@ import base64
 import http.client
 import json
 import os
+import re
 import stat
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -72,7 +74,11 @@ _retry_sleep = time.sleep
 
 
 def _open(request: urllib.request.Request):
-    return urllib.request.build_opener(_NoRedirect).open(request, timeout=github.read_timeout(30))
+    try:
+        return urllib.request.build_opener(_NoRedirect).open(request, timeout=github.read_timeout(30))
+    except ValueError:
+        # The HTTP client can include the Authorization value in a header error.
+        raise MergifyError("Mergify API request has an invalid URL or header") from None
 
 
 def api_get(repo: str, suffix: str) -> object | None:
@@ -97,7 +103,11 @@ def api_get(repo: str, suffix: str) -> object | None:
                 return None
             if delay is None or not (exc.code >= 500 or exc.code == 429):
                 raise MergifyError(f"Mergify queue lookup failed with HTTP {exc.code}") from exc
-        except (OSError, ValueError, http.client.IncompleteRead) as exc:
+        except (OSError, http.client.IncompleteRead) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if delay is None or isinstance(reason, ssl.SSLCertVerificationError):
+                raise MergifyError(f"Mergify queue transport failed: {reason}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             if delay is None:
                 raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
         _retry_sleep(github.read_timeout(delay))
@@ -238,6 +248,74 @@ def _admission_report(comments: list[dict], requested_at: str) -> int | None:
     return None
 
 
+def _queue_command(body: str, queue: str) -> bool:
+    words = body.partition("\n")[0].split()
+    return (len(words) in (2, 3) and words[0].lower() in ("@mergify", "@mergifyio")
+            and words[1].lower() in ("queue", "requeue") and words[2:] in ([], [queue]))
+
+
+@dataclass(frozen=True)
+class Departure:
+    url: str
+    checks: tuple[str, ...]
+    attribution: str
+
+
+def _departure_payload(body: str, queue: str) -> dict:
+    _, _, text = body.partition("-*- Mergify Payload -*-\n")
+    try:
+        payload = json.loads(text.partition("\n-*- Mergify Payload End -*-")[0])
+    except json.JSONDecodeError:
+        return {}
+    if (isinstance(payload, dict) and payload.get("version") == 1
+            and payload.get("state") == "dequeued" and payload.get("queue_rule_name") == queue):
+        return payload
+    return {}
+
+
+def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
+    """Use a bot report only when it identifies the latest command and current head."""
+    try:
+        comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+    except github.GhError:
+        return None
+    comments = [item for item in comments if type(item.get("id")) is int and item["id"] > 0]
+    command = max(
+        (item for item in comments if _queue_command(str(item.get("body") or ""), queue)),
+        key=lambda item: item["id"], default={},
+    )
+    latest = max(
+        (item for item in comments if isinstance(user := item.get("user"), dict)
+         and user.get("login") == "mergify[bot]"),
+        key=lambda item: (str(item.get("updated_at") or ""), item["id"]), default={},
+    )
+    body = str(latest.get("body") or "")
+    payload = _departure_payload(body, queue)
+    if not command or not payload:
+        return None
+
+    url = f"https://github.com/{repo}/pull/{number}#issuecomment-"
+    entered = next((line for line in body.splitlines() if line.startswith("- ✅ **Entered the queue** ")), "")
+    source = re.search(r"^- 🚫 \*\*Left the queue\*\* [^\n]+ · `([0-9a-f]{7,40})`$", body, re.M)
+    if f"]({url}{command['id']})" not in entered or not source or not head.startswith(source[1]):
+        return None
+    markers = [line for line in str(command.get("body") or "").splitlines()
+               if line.startswith(f"<!-- {REQUEST} ")]
+    if markers and _marker(REQUEST, head, queue) not in markers:
+        return None
+
+    reason = payload.get("dequeue_reason")
+    checks = reason.get("checks") if isinstance(reason, dict) else None
+    names = tuple(name for name in checks if isinstance(name, str) and name) if isinstance(checks, list) else ()
+    attribution = next((kind for prefix, kind in (
+        ("**The failure is in this pull request.** It failed tested alone on top of ", "isolated"),
+        ("**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.", "stacked"),
+    ) if any(line.startswith(prefix) for line in body.splitlines())), "")
+    if isinstance(reason, dict) and reason.get("code") == "CONFLICT_WITH_BASE_BRANCH":
+        attribution = "base_conflict"
+    return Departure(f"{url}{latest['id']}", names, attribution)
+
+
 def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
     login, requested, confirmed = github.login(token=""), False, False
     requested_at = ""
@@ -246,9 +324,7 @@ def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool,
         user = item.get("user")
         if isinstance(user, dict) and user.get("login") == login:
             lines = str(item.get("body") or "").splitlines()
-            words = lines[0].split() if lines else []
-            requeue = (len(words) in (2, 3) and words[0].lower() in ("@mergify", "@mergifyio")
-                       and words[1].lower() in ("queue", "requeue") and words[2:] in ([], [queue]))
+            requeue = _queue_command(str(item.get("body") or ""), queue)
             if _marker(REQUEST, head, queue) in lines or (requeue and confirmed):
                 requested, requested_at = True, str(item.get("created_at") or "")
             confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)

@@ -17,9 +17,9 @@ two days running or independent incidents repeat.
   threshold to include stalled p0s. Compare the last seven days with the
   previous seven and use the four-week trend for context. Lead with outcomes
   closed and order-to-acceptance time.
-- Take all numbers from the script. Read the selected issues, PRs and change
-  records directly for qualitative evidence. Keep missing data as `UNKNOWN`
-  and name the missing source.
+- Take all numbers from the script. Save JSON stdout to a scratch file (`mktemp`).
+  Use the stderr table and query needed fields. Read selected issues, PRs and
+  change records directly. Keep missing data as `UNKNOWN` and name its source.
 - Use `weekly_sample.items`. The script reserves two seeded merged controls,
   two slowest orders accepted that week and the longest stalled p0 when
   available, then takes up to four oldest open orders from the order input

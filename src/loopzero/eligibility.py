@@ -18,6 +18,14 @@ REVIEW_MARKER_RE = runners.REVIEW_MARKER_RE
 CONTEXT = "Loop-zero Eligibility"
 
 
+def leading_marker(body: str) -> re.Match[str] | None:
+    """The review marker opening the publisher's leading machine block; prose never counts."""
+    block, span = runners.leading_review_block(body if isinstance(body, str) else "")
+    if not block or len(REVIEW_MARKER_RE.findall(span)) != 1:
+        return None
+    return REVIEW_MARKER_RE.fullmatch(block[0])
+
+
 def review_envelopes(body: str) -> tuple[str, list[dict]]:
     """Decode only the publisher's raw-output block, not quoted findings/prose."""
     if not isinstance(body, str):
@@ -40,7 +48,7 @@ def review_projection(review: dict, head: str, repo: str, number: int):
     block, span = runners.leading_review_block(body)
     positions = [i for i, line in enumerate(block) if line.lstrip().startswith("<!-- loopzero:codex-evidence")]
     # Retired pair markers must never fall back to ordinary review evidence.
-    if any("source=pair" in marker[0] for marker in REVIEW_MARKER_RE.finditer(body)):
+    if any("source=pair" in marker[0] for marker in REVIEW_MARKER_RE.finditer(span)):
         return True, None
     if not positions:
         return False, None
@@ -72,8 +80,8 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     if latest is None or latest.get("state") not in {"APPROVED", "COMMENTED", "CHANGES_REQUESTED"}:
         return None
     body = latest.get("body") or ""
-    matches = list(REVIEW_MARKER_RE.finditer(body))
-    if len(matches) != 1 or matches[0].group(1) != head or not re.fullmatch(r"[0-9a-f]{40}", head):
+    marker = leading_marker(body)
+    if not marker or marker.group(1) != head or not re.fullmatch(r"[0-9a-f]{40}", head):
         return None
     verdict = latest.get("state") in {"APPROVED", "CHANGES_REQUESTED"} or any(
         f"**{value}**" in body for value in ("approve", "request_changes")
@@ -113,6 +121,8 @@ def _clean_base_merges(repo: str, number: int, reviewed: str, head: str, base_br
                     return False
                 cursor = first
             return cursor == reviewed
+    except github.GhUnavailable:
+        raise
     except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError):
         return False
 
@@ -126,7 +136,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     if not marked or any(r.get("commit_id") == head for r in marked):
         return eligible_review(marked, head, publishers, repo=repo, number=number)
     latest = marked[-1]
-    marker = REVIEW_MARKER_RE.search(latest["body"])
+    marker = leading_marker(latest["body"])
     if not marker or marker[2] not in {"primary", "delta"}:
         return None
     reviewed = marker[1]
@@ -144,7 +154,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
         verdict = summary.partition(": **")[2]
         state = latest.get("state")
         if verdict.startswith("request_changes** (") and state in {"CHANGES_REQUESTED", "COMMENTED"}:
-            if github.open_blocking_findings(repo, number, reviewed):
+            if github.open_blocking_findings(repo, number, reviewed, publishers):
                 return None
         elif not (verdict.startswith("approve** (") and state in {"APPROVED", "COMMENTED"}):
             return None
@@ -161,18 +171,25 @@ def evaluate(repo: str, number: int, head: str, base: str,
     pr = github.pr_view(repo, number)
     if pr.head_sha != head:
         return github.Readiness(False, ("source head changed; refresh eligibility",))
+    if hold := github.merge_hold(pr.number, pr.labels):
+        return github.Readiness(False, (hold,))
     reviews, page = [], 1
+    seen: set[bytes] = set()
+    endpoint = f"repos/{repo}/pulls/{number}/reviews"
     while True:
-        batch = github.api_get(f"repos/{repo}/pulls/{number}/reviews?per_page=100&page={page}")
+        batch = github.api_get(f"{endpoint}?per_page={github.PAGE}&page={page}")
         if not isinstance(batch, list):
             raise LoopZeroError("invalid GitHub reviews response")
+        if len(batch) >= github.PAGE:
+            github.record_full_page(endpoint, batch, seen)
         reviews.extend(batch)
-        if len(batch) < 100:
+        if len(batch) < github.PAGE:
             break
         page += 1
     review = readiness_review(reviews, head, publishers, repo=repo, number=number, base_branch=base)
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
-                              ancestor_review=review is not None and review["commit_id"] != head)
+                              ancestor_review=review is not None and review["commit_id"] != head,
+                              publishers=publishers)
     if github.pr_view(repo, number).head_sha != head:
         return github.Readiness(False, ("source head changed during eligibility refresh",))
     return result

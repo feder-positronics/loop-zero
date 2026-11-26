@@ -1,4 +1,5 @@
 """Exercise the documentation check as a contributor/CI subprocess in real Git."""
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,24 @@ def prepare(repo):
 def run(repo, base, *args):
     return subprocess.run([sys.executable, str(SCRIPT), base, *args], cwd=repo,
                           text=True, capture_output=True, check=False)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires raw pathname bytes")
+@pytest.mark.parametrize("staged", [False, True])
+def test_architecture_check_accepts_non_utf8_path(git_repo, staged):
+    base = prepare(git_repo)
+    path = os.fsdecode(b"caf\xe9.txt")
+    (git_repo / path).write_text("unrelated file\n")
+    if staged:
+        git(git_repo, "add", "--", path)
+
+    done = run(git_repo, base)
+    assert done.returncode == 0, done.stderr
+
+    (git_repo / "core/CONTRACT.md").write_text("# New authority\n")
+    done = run(git_repo, base)
+    assert done.returncode == 1
+    assert "without guide update or reasoned Architecture-Review trailer" in done.stderr
 
 
 @pytest.mark.parametrize("sync", ["missing", "guide", "trailer", "empty", "squash"])
@@ -62,7 +81,7 @@ def test_broken_local_link_fails_even_with_guide_update(git_repo, target):
 
 def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo):
     base = prepare(git_repo)
-    path = git_repo / "src/loopzero/cli.py"
+    path = git_repo / "src/loopzero/_cli_args.py"
     path.parent.mkdir(parents=True)
     path.write_text("def build_parser():\n    return 'public'\n\ndef _fix():\n    return 1\n")
     git(git_repo, "add", ".")
