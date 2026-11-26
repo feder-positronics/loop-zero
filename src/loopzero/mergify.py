@@ -28,7 +28,7 @@ class MergifyError(LoopZeroError):
     """Authentication, transport, or response failure from Mergify."""
 
 
-class ReadDeadline(TimeoutError):
+class ReadDeadline(MergifyError):
     """The caller's Mergify read budget expired."""
 
 
@@ -85,9 +85,9 @@ def _open(request: urllib.request.Request, timeout: float = 30):
         raise MergifyError("Mergify API request has an invalid URL or header") from None
 
 
-def _read_timeout(deadline: float | None) -> float:
+def _read_timeout(deadline: float | None, *, reserve: float = 0.0) -> float:
     remaining = 30.0 if deadline is None else deadline - time.monotonic()
-    if remaining <= 0:
+    if remaining <= reserve:
         raise ReadDeadline("Mergify read deadline exceeded")
     return min(30.0, remaining)
 
@@ -108,6 +108,8 @@ def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | N
         try:
             with _open(request, timeout) as response:
                 data = json.load(response)
+            _read_timeout(deadline)
+            return data
         except urllib.error.HTTPError as exc:
             _read_timeout(deadline)
             if exc.code == 404:
@@ -123,11 +125,7 @@ def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | N
             _read_timeout(deadline)
             if delay is None:
                 raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
-        else:
-            _read_timeout(deadline)
-            return data
-        if deadline is not None and time.monotonic() + delay >= deadline:
-            raise ReadDeadline("Mergify read retry would exceed the wait deadline")
+        _read_timeout(deadline, reserve=delay)
         _retry_sleep(delay)
     return None
 
