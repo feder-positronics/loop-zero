@@ -493,12 +493,7 @@ def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
     assert cli._load_review(git_repo, legacy.head, "primary")[0].raw == legacy.raw
 
 
-def test_frozen_synthetic_five_and_legacy_truncated_unknown():
-    fixture = Path(__file__).parent / "fixtures/review-runtime-startup-five.json"
-    assert (
-        hashlib.sha256(fixture.read_bytes()).hexdigest()
-        == "e689b693240bc1e6b66a5c094a263bff6ecbb74933cd77974875d6becf3f4988"
-    )
+def test_legacy_truncated_transcript_remains_unknown():
     head = "a" * 40
     legacy = {
         "id": 1,

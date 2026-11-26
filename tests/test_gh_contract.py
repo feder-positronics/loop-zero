@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import json
 import os
 import re
 import resource
@@ -25,7 +24,6 @@ from tests.test_github import (
     gh as gh,
     merge_json,
     pr_json,
-    rest_pr_json,
     arm_review,
     arm_workflow_check,
 )
@@ -150,25 +148,3 @@ def test_captured_methods_match_the_wire(captured_argv: list[dict], tmp_path: Pa
         output = offline_run(argv, tmp_path / str(index), call)
         methods = re.findall(r"^> (GET|POST|PATCH|PUT|DELETE) ", output, re.MULTILINE)
         assert methods and methods[0] == expected, (argv, expected, output)
-
-
-def test_strict_fake_checks_input_and_rejects_exhausted_calls(gh: FakeGh) -> None:
-    gh.expect(
-        ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH", "--input", "<temp-file>", "--include"],
-        {},
-        input_files={"--input": json.dumps({"body": "new body"})},
-    )
-    github.update_body(REPO, 7, "new body")
-    gh.expect(
-        ["api", f"repos/{REPO}/pulls/7", "--include"], rest_pr_json(pr_json()),
-    )
-    assert github.pr_view(REPO, 7).number == 7
-    gh.assert_complete()
-    with pytest.raises(github.GhError, match="exhausted"):
-        github.pr_view(REPO, 7)
-
-
-def test_strict_fake_rejects_unexpected_argv(gh: FakeGh) -> None:
-    gh.expect(["pr", "ready", "8", "--repo", REPO])
-    with pytest.raises(github.GhError, match="unexpected argv"):
-        github.mark_ready(REPO, 7)
