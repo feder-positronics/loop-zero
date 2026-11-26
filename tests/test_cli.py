@@ -3848,34 +3848,34 @@ REPLY_ACCEPTED = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id":
 THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
 
 
-@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "dispatch failed"])
-def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, outcome) -> None:
-    listing = threads_json(finding_pr)
-    remaining = listing if outcome == "remaining" else threads_json()
-    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED, remaining)
-    gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
-
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "retry", "unknown"])
+def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, monkeypatch, outcome):
+    listing, backoffs = threads_json(finding_pr), []
+    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED, listing if outcome == "remaining" else threads_json())
+    endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml"
+    transient = outcome in {"applied", "retry", "unknown"}
+    gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": "HTTP 503" if transient else "HTTP 403"} if transient or outcome == "denied" else "", "")
+    monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
+    runs = [] if outcome == "retry" else [{"display_title": "Refresh eligibility for PR #7" if outcome == "applied" else "unknown"}]
+    monkeypatch.setattr(github.time, "time", lambda: 1795640554)
+    gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs)})
     expect_cli(capsys, 0, "resolve", stderr="", stdout="0b9b59e7  important  src/a.py:3  Off by one\n")
     assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
-
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
     assert out.splitlines()[0] == "resolved 0b9b59e7: Off by one"
     calls = [c["argv"] for c in gh.calls
              if c["argv"][:2] == ["api", "graphql"] and "viewer {" not in c["argv"][3]][2:]
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
-    endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
-    dispatches = [c["argv"] for c in gh.calls if endpoint in c["argv"]]
-    if outcome == "remaining":
-        assert (code, err, dispatches) == (0, "", [])
-        assert len(out.splitlines()) == 1
+    dispatches = [c["argv"] for c in gh.calls if f"{endpoint}/dispatches" in c["argv"]]
+    assert dispatches == [["api", "-X", "POST", f"{endpoint}/dispatches", "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "retry": 2}.get(outcome, 1)
+    assert backoffs == ([5] if transient else [])
+    if outcome in {"denied", "unknown"}:
+        assert code == 1 and "is resolved." in err and ("HTTP 403" if outcome == "denied" else "identify all recent refresh runs") in err
+        assert f"gh api -X POST {endpoint}/dispatches -f ref=main -f 'inputs[pr]=7'" in err
     else:
-        assert dispatches == [["api", "-X", "POST", endpoint, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]]
-        if outcome == "refreshed":
-            assert (code, err) == (0, "") and out.splitlines()[-1] == "refreshed Loop-zero Eligibility for PR #7"
-        else:
-            assert code == 1 and "HTTP 403" in err
-            assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
+        assert (code, err) == (0, "")
+        assert out.splitlines()[1:] == ([] if outcome == "remaining" else ["refreshed Loop-zero Eligibility for PR #7"])
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
