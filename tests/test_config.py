@@ -65,7 +65,8 @@ def test_missing_file(tmp_path):
         config.load(tmp_path / "nope.toml")
 
 
-MINIMAL = '[repo]\nname = "o/n"\n'
+FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc/1", "/dev",
+             "/var/run/docker.sock", "/sys/fs", "/tmp/../run"]
 
 
 @pytest.mark.parametrize("text,message", [
@@ -102,6 +103,7 @@ MINIMAL = '[repo]\nname = "o/n"\n'
     (MINIMAL + '[delivery.review.codex]\nallowed_efforts = "medium"\n',
      "allowed_efforts must be a list"),
     (MINIMAL + '[checks]\nro_paths = ["rel/path"]\n', "must be absolute"),
+    *((MINIMAL + table("checks", ro_paths=[path]), "must not expose") for path in FORBIDDEN),
     (MINIMAL + '[checks]\nwritable = ["/run/x"]\n', "writable must not expose"),
     *((MINIMAL + f'[checks]\nscratch = ["{path}"]\n', "scratch entries must be relative")
       for path in ("../x", "/abs")),
@@ -127,24 +129,12 @@ def test_invalid_content(tmp_path, text, message):
     assert str(info.value).startswith(str(tmp_path / "workflow.toml"))
 
 
-FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc/1", "/dev"]
-FORBIDDEN += ["/var/run/docker.sock", "/sys/fs", "/tmp/../run"]
-
-
 @pytest.mark.parametrize("runner", [("dispatch", "--stage"), ("python3", "tools/run_stage.py"),
                                     ("dispatch", "--opt=/operator/run.py")])
 def test_runner_prefix(tmp_path, runner):
     assert config.load(write(tmp_path, MINIMAL + f"[checks]\nrunner = {list(runner)!r}")).check_runner == runner
 
 
-@pytest.mark.parametrize("path,allowed", [
-    *((path, False) for path in FORBIDDEN),
-    *((path, True) for path in ("/home/me/.local/bin", "/opt/tool", "/tmp/x")),
-])
-def test_ro_path_boundary(tmp_path, path, allowed):
-    cfg = write(tmp_path, f'[repo]\nname = "o/n"\n[checks]\nro_paths = ["{path}"]\n')
-    if allowed:
-        assert config.load(cfg).sandbox_ro == (path,)
-    else:
-        with pytest.raises(config.ConfigError, match="must not expose"):
-            config.load(cfg)
+@pytest.mark.parametrize("path", ["/home/me/.local/bin", "/opt/tool", "/tmp/x"])
+def test_ro_path_boundary(tmp_path, path):
+    assert config.load(write(tmp_path, MINIMAL + table("checks", ro_paths=[path]))).sandbox_ro == (path,)
