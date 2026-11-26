@@ -834,8 +834,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         )
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget")
-        if reviewed is not None:
-            _delta_patch(wt, config, reviewed, head, pr.number)
+        _delta_patch(wt, config, reviewed, head, pr.number)
     else:
         try:
             result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
@@ -986,7 +985,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     return True
 
 
-def _delta_patch(wt: Path, config: Config, since: str, head: str, number: int | None) -> bytes:
+def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number: int | None) -> bytes:
+    if since is None:
+        return b""
     if not _is_ancestor(wt, since, head):
         raise CliError(
             f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original tip with `git reflog`. "
