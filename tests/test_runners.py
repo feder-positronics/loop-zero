@@ -6,13 +6,18 @@ import hashlib
 import json
 import os
 import shlex
+import signal
+import subprocess
+import sys
 import textwrap
+import time
 import tomllib
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
 
-from loopzero import sandbox
+from loopzero import runners, sandbox, worktree
 from loopzero.runners import (
     REVIEW_SCHEMA,
     RunnerAuthFailed,
@@ -24,6 +29,7 @@ from loopzero.runners import (
     build_prompt,
     codex_evidence,
     merge_reviews,
+    render_patch,
     review_with,
     split_diff,
 )
@@ -108,8 +114,17 @@ def _bwrap_argv(log: Path) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def fake_bwrap(fake_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"):
+def fake_bwrap(fake_tool, tmp_path: Path, tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Keep reviewer state outside tmp_path, which many tests mount as the checkout.
+    home = tmp_path_factory.mktemp("reviewer-home")
+    monkeypatch.setenv("HOME", str(home))
+    for name in (
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        *runners.CLAUDE_AUTH_ENV,
+        *runners.CODEX_AUTH_ENV,
+    ):
         monkeypatch.delenv(name, raising=False)
     log = tmp_path / "review-bwrap.argv"
     fake_tool("bwrap", FAKE_BWRAP.format(log=log))
@@ -1258,6 +1273,25 @@ def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
     assert any("gone.py: deleted, 3 lines" in chunk for chunk in chunks)
 
 
+@pytest.mark.parametrize("name", ["zażółć gęślą.txt", "gone with spaces.txt", "gone.txt"])
+def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str) -> None:
+    git(git_repo, "config", "core.quotePath", "true")
+    path = git_repo / name
+    path.write_text("deleted line\n" * 600)
+    git(git_repo, "add", "--", name)
+    git(git_repo, "commit", "-qm", "add file")
+    base = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "rm", "--", name)
+    git(git_repo, "commit", "-qm", "delete file")
+    diff = render_patch(worktree.diff_since(git_repo, base))
+
+    chunks = split_diff(diff, 4096)
+
+    assert all(len(chunk.encode()) <= 4096 for chunk in chunks)
+    assert any(f"{name}: deleted, 600 lines" in chunk for chunk in chunks)
+    assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
+
+
 # ----------------------------------------------------------------- family detection
 
 
@@ -1359,3 +1393,82 @@ def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, case
                 {"model": "native-model", "effort": "high"} if case == "valid" else
                 {"model": None, "effort": None})
     assert json.loads(raw)["reported_settings"] == expected
+
+
+@pytest.mark.parametrize("family", ["claude", "codex"])
+def test_sigterm_removes_only_cancelled_review_home(family, fake_tool, tmp_path):
+    binary = fake_tool(family, """#!/usr/bin/python3
+import os
+import signal
+from pathlib import Path
+
+signal.alarm(15)
+home = Path.home()
+(home / "starting").write_text(str(os.getpid()))
+(home / "starting").rename(home / "pid")
+signal.pause()
+""")
+    script = """
+import sys
+from pathlib import Path
+from loopzero import runners
+
+family, binary = sys.argv[1:]
+runners._auth_binds = lambda *args: ()
+runners._sandbox_prefix = lambda family, cwd, home, *args: (
+    ["env", f"HOME={home}"], runners._review_config(family, Path(binary), ()), Path(binary)
+)
+runners._observe_codex_version = lambda *args: None
+runners._codex_supports_ignore_user_config = lambda *args: False
+runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
+                    diff="diff", task_text="task")
+"""
+    host_home = tmp_path / "host"
+    host_home.mkdir()
+    marker = host_home / "marker"
+    marker.write_text("keep")
+    env = {**os.environ, "TMPDIR": str(tmp_path), "HOME": str(host_home)}
+
+    with ExitStack() as stack:
+        def start_review():
+            process = stack.enter_context(subprocess.Popen(
+                [sys.executable, "-c", script, family, str(binary)], env=env,
+            ))
+            stack.callback(process.kill)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and process.poll() is None:
+                for pid_file in tmp_path.glob("loopzero-review-home-*/pid"):
+                    if pid_file.parent not in homes:
+                        homes.add(pid_file.parent)
+                        pid = int(pid_file.read_text())
+                        stack.callback(stop_if_running, pid)
+                        return process, pid_file.parent, pid
+                time.sleep(0.02)
+            pytest.fail("native reviewer did not start")
+
+        def running(pid):
+            try:
+                stat = Path(f"/proc/{pid}/stat").read_text()
+            except FileNotFoundError:
+                return False
+            return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+        def stop_if_running(pid):
+            if running(pid):
+                os.kill(pid, signal.SIGKILL)
+
+        homes = set()
+        concurrent, concurrent_home, concurrent_pid = start_review()
+        cancelled, cancelled_home, cancelled_pid = start_review()
+        cancelled.terminate()
+        assert cancelled.wait(timeout=5) == -signal.SIGTERM
+        assert not cancelled_home.exists()
+        assert not running(cancelled_pid)
+        assert concurrent.poll() is None
+        assert running(concurrent_pid)
+        assert concurrent_home.is_dir()
+        assert marker.read_text() == "keep"
+        concurrent.terminate()
+        assert concurrent.wait(timeout=5) == -signal.SIGTERM
+        assert not concurrent_home.exists()
+        assert not running(concurrent_pid)

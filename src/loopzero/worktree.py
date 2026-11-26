@@ -51,12 +51,18 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(cwd: Path, *args: str, timeout: float = 120) -> str:
+def _git(
+    cwd: Path, *args: str, timeout: float = 120,
+    preserve_whitespace: bool = False, preserve_newlines: bool = False,
+) -> str:
     argv = ("git", *args)
-    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
+    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
+               preserve_newlines=preserve_newlines)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
-    return done.stdout.strip()
+    if preserve_newlines:
+        return done.stdout
+    return done.stdout.removesuffix("\n") if preserve_whitespace else done.stdout.strip()
 
 
 def branch_name(repo_root: Path, slug: str) -> str:
@@ -215,7 +221,7 @@ def is_linked_checkout(wt: Path) -> bool:
 
 
 def branch(wt: Path) -> str:
-    name = _git(Path(wt), "branch", "--show-current")
+    name = _git(Path(wt), "branch", "--show-current", preserve_whitespace=True)
     if not name:
         raise WorktreeError("HEAD is detached. Switch to a branch and retry.")
     return name
@@ -243,8 +249,9 @@ def is_dirty(wt: Path) -> bool:
     return bool(_git(Path(wt), "status", "--porcelain", "--untracked-files=all"))
 
 
-def diff_since(wt: Path, sha: str) -> str:
-    return _git(Path(wt), "diff", "--no-color", sha, "HEAD")
+def diff_since(wt: Path, sha: str) -> bytes:
+    diff = _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
+    return diff.encode("utf-8", errors="surrogateescape")
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:

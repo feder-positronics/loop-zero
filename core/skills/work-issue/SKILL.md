@@ -30,8 +30,10 @@ blueprint. Include required completion in the closing delivery. A child issue
 does not own its parent's blueprint.
 Recheck collisions before publication and again before merge, rereading live
 acceptance, prior delivery and ownership. Reconcile changed state before proceeding.
-Review, CI and observable post-merge acceptance waits remain this task;
-neither bypass them nor start another issue.
+On approval, run readiness at the approved head and defer suggestions and cleanup.
+Before making a source edit for the [delta](../../CONTRACT.md#review-budget), name
+the unmet acceptance criterion or newly verified defect that requires it.
+Review, CI and post-merge acceptance waits remain this task.
 Before using [CI or observation-based acceptance](reference.md#acceptance-evidence)
 or [resuming after interruption or context loss](reference.md#re-entry),
 follow the linked safeguards.
