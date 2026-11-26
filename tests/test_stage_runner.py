@@ -45,7 +45,7 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         git(git_repo, 'update-ref', 'refs/remotes/origin/main', base)
     if base_ref == 'missing':
         git(git_repo, 'branch', '-D', 'main')
-    configured = {"UV_CACHE_DIR": "/operator/cache", "AUDIT_VALUE": "ghs_FAKE0123"}
+    configured = {"UV_CACHE_DIR": "/operator/cache", "AUDIT_VALUE": "opaque-fake-db-password"}
     body = (f'repo=r["worktree"]\nassert r["base"] == "{base}"\n'
             'assert not Path.cwd().is_relative_to(Path(repo))\n'
             f'env=r.pop("env");assert env == {dict(sandbox.SANDBOX_ENV, **configured)!r}\n'
@@ -155,10 +155,10 @@ def test_runner_timeout(git_repo, monkeypatch):
     original = sandbox._proc.run
     def run(argv, **kwargs):
         if argv[0] == sys.executable:
-            raise sandbox._proc.ProcTimeout('deadline', 'partial ghs_FAKE0123', duration_s=0.25)
+            raise sandbox._proc.ProcTimeout('deadline', 'partial opaque-fake-db-password', duration_s=0.25)
         return original(argv, **kwargs)
     monkeypatch.setattr(sandbox._proc, 'run', run)
-    cfg = make_config(check_runner=(sys.executable,), env=(("AUDIT_VALUE", "ghs_FAKE0123"),))
+    cfg = make_config(check_runner=(sys.executable,), env=(("AUDIT_VALUE", "opaque-fake-db-password"),))
     report = sandbox.run_checks(cfg, git_repo, timeout=0.1)
     assert not report.ok
     result = report.results[0]
