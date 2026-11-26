@@ -123,8 +123,11 @@ to the base branch before starting your first task. If the base has a
 `[checks]` is absent. To try task-side changes explicitly, run
 `loopzero --config workflow.toml check` from the task worktree. Then:
 
-- Run `[checks] commands` as described in the [delivery steps](core/CONTRACT.md#the-six-steps).
-  For uv projects, `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
+- Before pushing the base, set `checks.commands` to checks your project can run.
+  For a shell-only first check, use `commands = ["test -f greeting.txt"]` under
+  `[checks]` and commit `greeting.txt` in your first task. Replace or omit the
+  example's uv-specific `scratch`, `env`, `writable`, and `ro_paths` entries
+  to match your tools. With just shell checks, you can omit all four.
 - Configure hosted check names, mounts, scratch and environment in the
   [commented workflow example](workflow.example.toml). See the contract's
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
