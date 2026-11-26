@@ -250,7 +250,7 @@ def _pr_markers(reviews: list[dict], head: str,
         if not eligibility.review_projection(review, head, repo, number)[0] and any(
                 runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1]):
             continue
-        match = REVIEW_MARKER_RE.search(body)
+        match = eligibility.leading_marker(body)
         if not match or review.get("commit_id") != match.group(1):
             continue
         if not trusted:
