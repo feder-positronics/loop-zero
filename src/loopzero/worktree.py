@@ -200,8 +200,7 @@ def _resumable_checkout(repo_root: Path, wt: Path, expected_branch: str) -> tupl
         except OSError:
             return None
         if ((wt / ".git").is_symlink() or (admin / backlink).resolve() != (wt / ".git").resolve()
-                or _branch_exists(repo_root, expected_branch)
-                or _git(wt, "branch", "--show-current")):
+                or _branch_exists(repo_root, expected_branch)):
             return None
     elif branch(wt) != expected_branch:
         return None
@@ -263,7 +262,7 @@ def task_text(wt: Path) -> str:
             "or recreate the file using the handoff template at "
             "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md"
         )
-    return task.read_text()
+    return task.read_text(encoding="utf-8")
 
 
 def base_sha(wt: Path) -> str:

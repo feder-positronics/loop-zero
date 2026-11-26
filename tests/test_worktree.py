@@ -98,7 +98,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
 
 
-@pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base"])
+@pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base", "detached"])
 def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     base = commit_on_origin(repo, "base-change")
     wt = repo / ".worktrees" / "my-task"
@@ -106,7 +106,8 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
 
     def interrupt_after_add(cwd, *args, **kwargs):
         output = run_git(cwd, *args, **kwargs)
-        if args[:2] == ("switch", "--quiet"):
+        interrupted_step = ("worktree", "add") if state == "detached" else ("switch", "--quiet")
+        if args[:2] == interrupted_step:
             raise KeyboardInterrupt
         return output
 
@@ -115,7 +116,8 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         with pytest.raises(KeyboardInterrupt):
             worktree.start(repo, "my-task", "main")
     task = worktree.task_file(wt)
-    assert worktree.branch(wt) == "lz/my-task" and worktree.head(wt) == base
+    assert git(wt, "branch", "--show-current").strip() == ("" if state == "detached" else "lz/my-task")
+    assert worktree.head(wt) == base
     assert not task.exists()
     if state == "dirty":
         (wt / "untracked").write_text("work in progress")

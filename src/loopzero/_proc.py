@@ -195,17 +195,19 @@ def run(
                 else:
                     stdout, stderr = _read_output_tail(proc, tail_chars, timeout), ""
             except BaseException:
-                if graceful_interrupt and os.name == "posix":
-                    with suppress(ProcessLookupError, subprocess.TimeoutExpired):
-                        os.killpg(proc.pid, signal.SIGTERM)
-                        proc.wait(timeout=5)
-                if os.name == "posix":
-                    with suppress(ProcessLookupError):
-                        os.killpg(proc.pid, signal.SIGKILL)
-                else:
-                    proc.kill()
-                # Popen's context exit can skip reaping after KeyboardInterrupt.
-                proc.wait()
+                try:
+                    if graceful_interrupt and os.name == "posix":
+                        with suppress(ProcessLookupError, subprocess.TimeoutExpired):
+                            os.killpg(proc.pid, signal.SIGTERM)
+                            proc.wait(timeout=5)
+                finally:
+                    if os.name == "posix":
+                        with suppress(ProcessLookupError):
+                            os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                    # Popen's context exit can skip reaping after KeyboardInterrupt.
+                    proc.wait()
                 raise
     except FileNotFoundError as exc:
         if exc.filename == str(cwd):
