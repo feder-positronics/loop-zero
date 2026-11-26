@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
-from tests.conftest import commit_file, git
+from tests.conftest import commit_file, git, git_environment, init_git_repo
 
 
 @pytest.fixture
@@ -32,6 +32,13 @@ def commit_on_origin(repo: Path, name: str) -> str:
     commit_file(clone, name, name, name)
     git(clone, "push", "-q", "origin", "main")
     return git(clone, "rev-parse", "HEAD").strip()
+
+
+def test_git_fixture_ignores_inherited_directory(tmp_path, monkeypatch):
+    ambient = tmp_path / "ambient.git"
+    monkeypatch.setenv("GIT_DIR", str(ambient))
+    checkout = init_git_repo(tmp_path / "checkout")
+    assert (checkout / ".git").is_dir() and not ambient.exists()
 
 
 def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
@@ -273,7 +280,7 @@ def test_task_helpers_errors(repo: Path) -> None:
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
     monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
-    worktree.cleanup(wt)  # #439: no cleanup git runs in (or -C) the primary checkout
+    worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
@@ -284,13 +291,13 @@ def test_cleanup_preserves_user_files(repo: Path, file: str) -> None:
     wt = worktree.start(repo, "dirty", "main")
     (wt / file).write_text("x")
     with pytest.raises(worktree.WorktreeError, match="worktree is dirty" if file == "scratch.txt" else "ignored file"):
-        worktree.cleanup(wt)
+        worktree.cleanup(wt, worktree.head(wt))
     assert (wt / file).read_text() == "x" and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
 def test_cleanup_missing_worktree(repo: Path) -> None:
     with pytest.raises(worktree.WorktreeError, match="no such worktree"):
-        worktree.cleanup(repo / ".worktrees" / "ghost")
+        worktree.cleanup(repo / ".worktrees" / "ghost", worktree.head(repo))
 
 
 @pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])
@@ -321,7 +328,7 @@ def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> Non
     commands = section.split("```sh\n", 1)[1].split("```", 1)[0]
     result = subprocess.run(
         ["sh", "-c", commands, "cleanup-guide", str(wt), "abandoned", head],
-        cwd=caller, capture_output=True, text=True, check=False,
+        cwd=caller, env=git_environment(), capture_output=True, text=True, check=False,
     )
 
     assert (result.returncode == 0) == (state == "clean"), result.stderr

@@ -13,7 +13,7 @@ import pytest
 from loopzero import cli, eligibility, github, runners
 from loopzero.types import CheckReport, CheckResult, Config
 from tests import test_cli, test_runners
-from tests.conftest import commit_file, git
+from tests.conftest import commit_file, git, git_environment
 
 fake_bwrap = test_runners.fake_bwrap
 gh = test_cli.gh
@@ -382,7 +382,7 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
         proof = runners.codex_evidence(result)
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
         argv = ["git", "diff", "--no-color", reviewed, head]
-        delta_diff = subprocess.check_output(argv, cwd=native[2])
+        delta_diff = subprocess.check_output(argv, cwd=native[2], env=git_environment())
         assert b"-hello\n+" + content in delta_diff
         if kind == "delta_legacy":
             assert "+caf\\xe9\r\n" in runners.render_patch(delta_diff)
