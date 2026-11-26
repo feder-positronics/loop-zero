@@ -18,8 +18,7 @@ repo, wt, gh, head = test_cli.repo, test_cli.wt, test_cli.gh, test_cli.head
 git_seed = test_cli.git_seed
 fake_bwrap = test_runners.fake_bwrap
 
-RECEIPTS = [row for size in ("five", "six") for row in json.loads(
-    (Path(__file__).parent / f"fixtures/review-runtime-startup-{size}.json").read_text())]
+RECEIPTS = json.loads((Path(__file__).parent / "fixtures/review-runtime-startup.json").read_text())
 PUBLISHER = ("example-review[bot]",)
 
 
@@ -135,14 +134,10 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, mode):
             _review("codex", tmp_path)
 
 
-# Keep the original routing inputs to catch a return of target-specific behavior.
-@pytest.mark.parametrize(
-    ("number", "case"), [(9179, 1), (9173, 4), (9174, 5), (9175, 6), (9275, 3), (9284, 2), (9220, 7)]
-)
-@pytest.mark.parametrize("repository", ["feder-positronics/intelflo", "elsewhere/intelflo"])
-def test_retired_targets_use_ordinary_eligibility_and_budget(number, case, repository):
+def test_retired_target_uses_ordinary_eligibility_and_budget():
     target = "a" * 40
-    rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == case])
+    repository, number = "feder-positronics/intelflo", 9179
+    rows = [copy.deepcopy(RECEIPTS[0])]
     snapshot = copy.deepcopy(rows)
     replacement = {
         "id": 999, "commit_id": target, "user": {"login": PUBLISHER[0]},

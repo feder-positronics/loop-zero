@@ -68,10 +68,12 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 
 class GhError(Exception):
     def __init__(self, command: tuple[str, ...], tail: str, *,
-                 token: str = "", guidance: str = "", confirmed_rate_limit: bool = False) -> None:
+                 token: str = "", guidance: str = "", confirmed_rate_limit: bool = False,
+                 rate_reset: int | None = None) -> None:
         self.command = tuple(_redact_tokens(arg, token) for arg in command)
         self.tail = _redact_tokens(tail, token) + guidance
         self.confirmed_rate_limit = confirmed_rate_limit
+        self.rate_reset = rate_reset
         command_text = _redact_tokens(" ".join(command), token)
         super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
 
@@ -412,8 +414,12 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
     error = GhUnavailable if transient else GhError
+    confirmed_limit = rate_limited and status in {"403", "429"}
+    reset = headers.get("x-ratelimit-reset", "")
+    rate_reset = int(reset) if (confirmed_limit and headers.get("x-ratelimit-remaining") == "0"
+                                and re.fullmatch(r"[0-9]{1,18}", reset)) else None
     raise error(error_command, detail, token=selected, guidance=guidance,
-                confirmed_rate_limit=rate_limited and status in {"403", "429"})
+                confirmed_rate_limit=confirmed_limit, rate_reset=rate_reset)
 
 
 def _rest_rate_limit(headers: dict[str, str]) -> str:
@@ -439,7 +445,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
         guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}; No automatic retry."
     elif remaining is not None or retry_seconds or retry_date:
         delay = f"{retry_after} s" if retry_seconds else retry_after if retry_date else "~60 s"
-        guidance = f"\nRate limited: short-window limit: retry after {delay}; No automatic retry."
+        guidance = f"\nRate limited: short-window limit: retry after {delay}."
     return "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None) + guidance
 
 
@@ -639,26 +645,39 @@ def _branch_head(repo: str, branch: str) -> str | None:
     return _branch_sha(endpoint, "commit", "invalid remote branch SHA", full_sha=True)
 
 
-def _commit_branch_prs(repo: str, branch: str) -> tuple[str, list[dict]]:
-    sha = _branch_head(repo, branch)
+def _matches_commit_pr(row: dict, repo: str, branch: str, endpoint: str) -> bool:
+    if not isinstance(row, dict) or not isinstance(row.get("head"), dict):
+        raise GhError(("gh", "api", endpoint), "invalid commit PR head")
+    if not _matches_branch(row["head"], repo, branch):
+        return False
+    if (row.get("state") not in ("open", "closed")
+            or type(row.get("number")) is not int or row["number"] < 1
+            or not isinstance(row.get("created_at"), str)):
+        raise GhError(("gh", "api", endpoint), "invalid commit PR")
+    return True
+
+
+def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> tuple[str, list[dict]]:
+    sha = head_sha if head_sha is not None else _branch_head(repo, branch)
     if sha is None:
         return "", []
 
     matches: list[dict] = []
     for page in range(1, 101):
         endpoint = f"repos/{repo}/commits/{sha}/pulls?per_page={PAGE}&page={page}"
-        rows = api_get(endpoint)
+        try:
+            rows = api_get(endpoint)
+        except GhError as exc:
+            # A local head can be unpushed. Let the branch fallback find its actual PR.
+            missing_commit = re.search(r"\bHTTP 404\b", exc.tail) or (
+                f"No commit found for SHA: {sha}" in exc.tail and re.search(r"\bHTTP 422\b", exc.tail)
+            )
+            if head_sha is not None and page == 1 and missing_commit:
+                return endpoint, []
+            raise
         if not isinstance(rows, list) or len(rows) > PAGE:
             raise GhError(("gh", "api", endpoint), "invalid commit PR page")
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("head"), dict):
-                raise GhError(("gh", "api", endpoint), "invalid commit PR head")
-            if _matches_branch(row["head"], repo, branch):
-                if (row.get("state") not in ("open", "closed")
-                        or type(row.get("number")) is not int or row["number"] < 1
-                        or not isinstance(row.get("created_at"), str)):
-                    raise GhError(("gh", "api", endpoint), "invalid commit PR")
-                matches.append(row)
+        matches.extend(row for row in rows if _matches_commit_pr(row, repo, branch, endpoint))
         if len(rows) < PAGE:
             return endpoint, matches
     raise GhError(("gh", "api", endpoint), "commit PRs exceed 100 pages")
@@ -673,14 +692,13 @@ def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state
     return pr
 
 
-def pr_for_branch(repo: str, branch: str, *, open_only: bool = False, list_only: bool = False) -> PR | None:
+def pr_for_branch(repo: str, branch: str, *, open_only: bool = False, head_sha: str | None = None) -> PR | None:
     """Return the open PR, falling back to the most recent closed PR unless open_only."""
-    if not list_only:
-        endpoint, matches = _commit_branch_prs(repo, branch)
-        newest = max((row for row in matches if row["state"] == "open"),
-                     key=lambda row: (row["created_at"], row["number"]), default=None)
-        if newest is not None:
-            return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
+    endpoint, matches = _commit_branch_prs(repo, branch, head_sha)
+    newest = max((row for row in matches if row["state"] == "open"),
+                 key=lambda row: (row["created_at"], row["number"]), default=None)
+    if newest is not None:
+        return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
 
     # A closed association cannot rule out an open PR or newer closed history.
     owner = repo.split("/", 1)[0]
@@ -1064,7 +1082,7 @@ def _has_thread_reply(node: dict, reply: str) -> bool:
     while page.get("hasNextPage"):
         cursor = _next_thread_cursor(page, seen)
         data = _gh_json("api", "graphql", "-f", f"query={_THREAD_REPLIES_QUERY}",
-                        "-F", f"thread={node['id']}", "-f", f"after={cursor}")
+                        "-F", f"thread={node['id']}", "-f", f"after={cursor}", token="")
         try:
             comments = data["data"]["node"]["comments"]
             page = comments["pageInfo"]
@@ -1328,9 +1346,7 @@ def _aggregate_signal(states: list[str]) -> str:
     return next((state for state in states if state not in _NONFAILING_CHECKS), "pending")
 
 
-def behind_reason(pr: PR, reviewed_head: str | None) -> str:
-    if reviewed_head != pr.head_sha:
-        return f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+def behind_reason(pr: PR) -> str:
     return (
         f"PR #{pr.number} is behind {pr.base_ref}. Finish any pending delta review, then run "
         f"`git fetch origin {shlex.quote(pr.base_ref)}`, "
@@ -1368,7 +1384,7 @@ def readiness(
     if blocker := mergeability_blocker(pr):
         reasons.append(blocker)
     if pr.merge_state == "BEHIND" and not allow_behind:
-        reasons.append(behind_reason(pr, reviewed_head))
+        reasons.append(behind_reason(pr))
     if not reviewed_head:
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:

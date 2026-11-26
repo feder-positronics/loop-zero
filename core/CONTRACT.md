@@ -23,7 +23,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
    passes. A PR whose only blockers are missing or skipped required checks
    (with or without pending mergeability) also leaves draft but is not ready
-   yet; without a wait that exits 3. Both waiters use `--wait[=SECONDS]` (default 1800) on the same
+   yet; without a wait that exits 3. Both waiters use `--wait[=SECONDS]` (default 5400) on the same
    head. Zero can take a PR out of draft or enqueue. Mergeability can time out (exit 3)
    with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`.
    Green can precede CI scheduling. After two minutes of missing checks with
@@ -165,17 +165,18 @@ work, through the repository's queue priority if it has one. Infra-only fixes
 may use the infra-only route above.
 
 Finish planned base updates before starting checks. Reuse an identical check
-already queued or running at the same head and fingerprint. A second local
+already queued or running at the same head and settings fingerprint. A second local
 check times out after 60 seconds if the first still holds the task lock. Before a fallback
 check on a published head, run `loopzero ready` and reuse any receipt it accepts.
 The session the brief assigns verification to (the worker, or under parent
 verification the parent or the integration executor it names) runs each full
 local check once and records its command,
-exact head SHA, environment fingerprint (for `loopzero check`, the settings
-fingerprint in its check receipt; for other suites, as consumer AGENTS.md/docs
-define it), result, time and log path. Workers, reviewers and coordinators
-reuse green receipts at the same head and fingerprint. Rerun only if head or inputs changed (including rebase), the fingerprint
-changed or cannot be shown, or the receipt is missing, red, partial or unverifiable.
+exact head SHA, result, time and log path; a `loopzero check` receipt also
+carries the settings fingerprint the CLI computes. Workers, reviewers and
+coordinators reuse green results at the same head (and, for `loopzero check`,
+the same settings fingerprint). Rerun only if head or inputs changed (including
+rebase), a `loopzero check` receipt's settings fingerprint changed or is
+missing, or the result is missing, red, partial or unverifiable.
 Reviewers still verify tests prove the claimed behavior. Hosted CI and sandboxed
 receipt requirements remain.
 
@@ -232,8 +233,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   configured family and reports reasons/nonzero if all fail. Only
   runner-produced reviews count. If no independent reviewer can run, try the
   preferred configured family in a fresh session and publish a visible same-family
-  fallback line. When no configured reviewer can run (exit 4), report the
-  blocker to whoever commissioned the PR.
+  fallback line. When no configured reviewer can run (exit 4), wait for the PR
+  owner.
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.
@@ -257,14 +258,14 @@ Outside that confirmed scope, retain all-writer trailers.
 
 Local checks run with read-only source/Git, scratch writes, isolated HOME, only
 configured `[checks].ro_paths`/`[checks].writable` home paths, no network unless
-`[checks].network = true`, and allowlisted environment (default
-`PATH HOME LANG LC_ALL TERM`) plus `[checks].env`.
+`[checks].network = true`, and allowlisted environment plus `[checks].env`.
+The configured default allowlist is `PATH HOME LANG LC_ALL TERM`. Within the
+sandbox, the default forwarded host variables are `PATH LANG LC_ALL TERM` and
+`HOME` is set to `/tmp/home`.
 
 Local checks and native reviews require working `bwrap` and fail without it.
-A configured [stage runner](../docs/ARCHITECTURE.md#check-stage-runners) can
-execute checks without local `bwrap`. If the runner reports that it did not
-start a stage, local fallback requires `bwrap`. Checks and reviews recheck HEAD
-and dirtiness after running. Changes during the run invalidate results.
+Checks and reviews recheck HEAD and dirtiness after running. Changes during the
+run invalidate results.
 
 Reviews use read-only worktree/Git, private HOME, reviewer runtime paths and
 network. Auth binds remain route-specific exceptions to state isolation;
@@ -280,11 +281,11 @@ meta-directives; reviewers load no instruction files or skills from the reviewed
 ## Failure
 
 Fail closed on missing tools or command errors. Preserve the command and output
-tail, name the cause or stage safely, and stop on terminal failures or quota errors.
+tail, name the cause or stage safely, and stop on terminal failures.
 `check` exits 0 when stages pass, including local dirty runs that cannot satisfy
 readiness. Exit 1 can mean a failed stage, a discarded or unverified result, or
 a command error. Read the diagnostic and verify the receipt before classifying
-the failure. Exit 2 covers invalid arguments and sandbox unavailability in
+the failure. Exit 2 covers usage errors and sandbox unavailability in
 `check` or fresh `review`.
 
 Exit 3 means waiting or timeout. Review exits 4 when no configured
@@ -302,4 +303,5 @@ Other polling needs a deadline, visible progress, preserved stderr and a stop on
 Never poll GraphQL-backed `gh pr view`, `gh pr checks` or `gh pr list` (shared quota).
 Use REST `gh api` for one-off PR reads and comments. After a quota error, wait for
 a verified reset or `Retry-After` before GitHub-backed commands, including
-`loopzero` waiters. REST `/rate_limit` does not prove GraphQL capacity.
+`loopzero` waiters. An active waiter can resume a fresh poll after a verified
+hourly reset within its original deadline. REST `/rate_limit` does not prove GraphQL capacity.

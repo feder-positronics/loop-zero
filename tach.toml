@@ -84,7 +84,7 @@ depends_on = [
 
 [[modules]]
 path = "loopzero._cli_args"
-depends_on = []
+depends_on = ["loopzero"]
 
 [[modules]]
 path = "loopzero._cli_entry"

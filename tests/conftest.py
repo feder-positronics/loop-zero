@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import textwrap
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -18,8 +19,8 @@ GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 def isolate_github_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token", raising=False)
-    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0), raising=False)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token")
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
 
 
 @pytest.fixture(autouse=True)
@@ -76,17 +77,21 @@ def fake_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return directory
 
 
+def bwrap_argv(log: Path) -> list[str]:
+    return log.read_text().splitlines()
+
+
+def write_fake_tool(directory: Path, name: str, body: str) -> Path:
+    path = directory / name
+    body = textwrap.dedent(body)
+    path.write_text(body if body.startswith("#!") else "#!/bin/sh\n" + body)
+    path.chmod(0o755)
+    return path
+
+
 @pytest.fixture
 def fake_tool(fake_bin: Path) -> Callable[[str, str], Path]:
-    """Write an executable script named `name` with `body` into `fake_bin`."""
-
-    def make(name: str, body: str) -> Path:
-        path = fake_bin / name
-        path.write_text(body if body.startswith("#!") else "#!/bin/sh\n" + body)
-        path.chmod(0o755)
-        return path
-
-    return make
+    return lambda name, body: write_fake_tool(fake_bin, name, body)
 
 
 @pytest.fixture
