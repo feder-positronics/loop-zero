@@ -43,7 +43,8 @@ The CLI also writes a head-bound checks receipt and saved review output in
 `.loopzero/` for local readiness and reposting. They do not form a second authoritative delivery history; new Codex native audit
 receipts have the restricted retention requirement described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
-review evidence using trusted base configuration. Losing local artifacts may
+review evidence using trusted base configuration. Local readiness and merge
+fetch the configured origin base before loading its publisher policy. Losing local artifacts may
 require rerunning checks or review, and never creates a hosted approval.
 Saved runner artifacts also retain the repository, PR and actual request publisher
 before publication. A lost POST reply triggers a read-only reconciliation bounded

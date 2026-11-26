@@ -112,7 +112,12 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
     config = config_mod.load(path, checks={})
-    base, revision = config_mod.load_base(root, config.base_branch)
+    revision = None
+    if args.command in {"ready", "merge"}:
+        _git(root, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+             "origin", f"refs/heads/{config.base_branch}")
+        revision = _git(root, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+    base, revision = config_mod.load_base(root, config.base_branch, revision=revision)
     if base is None:
         return config_mod.load(path)
     base_checks = config_mod.base_section(base, config.base_branch, "checks")

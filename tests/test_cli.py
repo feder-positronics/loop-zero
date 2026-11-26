@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 import pytest
 
-from loopzero import cli, config, github, mergify
+from loopzero import cli, config, github, hosted, mergify
 from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git, init_git_repo
@@ -2487,6 +2487,52 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, sett
         assert code == (0 if command == "ready" else 3)
     assert requests == ([(REPO, 7, head, "main")]
                         if command == "merge" and settled == "MERGEABLE" else [])
+
+
+@pytest.mark.parametrize("publisher,expected", [
+    ("retired-publisher", "pending"), ("replacement-publisher", "success"),
+])
+def test_readiness_and_hosted_use_current_base_publishers(wt, gh, head, tmp_path, monkeypatch, capsys,
+                                                          publisher, expected):
+    git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), "trusted")
+    trusted = tmp_path / "trusted"
+    workflow = trusted / "workflow.toml"
+    retired_workflow = (WORKFLOW.replace('required_ci = ["checks"]',
+                                        'required_ci = ["checks", "Loop-zero Eligibility"]')
+                        + 'review_publishers = ["retired-publisher"]\n')
+    workflow.write_text(retired_workflow)
+    git(trusted, "commit", "-qam", "trust old review publisher")
+    git(trusted, "push", "-q", "origin", "main")
+    git(wt, "fetch", "-q", "origin", "main")
+    stale = git(wt, "rev-parse", "origin/main")
+
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False, review_login=publisher)
+    gh.respond(f"api repos/{REPO}/commits/{head}/statuses",
+               [{"context": "Loop-zero Eligibility", "state": "success"}])
+    workflow.write_text(retired_workflow.replace("retired-publisher", "replacement-publisher"))
+    git(trusted, "commit", "-qam", "rotate review publisher")
+    git(trusted, "push", "-q", "origin", "main")
+    assert git(wt, "rev-parse", "origin/main") == stale
+    assert git(trusted, "rev-parse", "HEAD") != stale
+
+    code, out, _ = run(capsys, "ready")
+    assert code == (0 if expected == "success" else 1)
+    assert (github.MISSING_REVIEW_REASON in out) == (expected == "pending")
+    if expected == "pending":
+        explicit = tmp_path / "explicit.toml"
+        explicit.write_text(retired_workflow)
+        assert run(capsys, "--config", str(explicit), "ready")[0] == 0
+
+    event = trusted / "event.json"
+    event.write_text(json.dumps({"inputs": {"pr": "7"}}))
+    monkeypatch.chdir(trusted)
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    assert hosted.main() == 0
+    payload = json.loads(gh.calls[-1]["--input"])
+    assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{head}"
+    assert payload["state"] == expected
 
 
 @pytest.mark.parametrize("command,check,hold_at_admission", [
