@@ -78,8 +78,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    prepares recognized uv dependency groups offline in that sandbox and prints
    progress before each command, metadata-only stage heartbeats every 30 seconds
    (including silent children), and exit code/duration immediately after each stage.
-   Heartbeats stop on completion or cancellation and never supply a verdict; child
-   streams remain captured for the existing final report and failing output tail.
+   Heartbeats stop on completion or cancellation and never supply a verdict.
+   Local stages drain merged child output and retain a bounded diagnostic tail.
    Trusted-base commands remain authoritative;
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
@@ -94,7 +94,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    newer duplicate exists. If the head commit cannot prove completion, the
    pull-list fallback also checks earlier commits of the branch. Failed,
    malformed, repeated or truncated history blocks publication, with a limit of
-   100 pages. An unfinished branch creates or refreshes a draft PR.
+   100 pages. An unfinished branch creates or refreshes a draft PR. Publication
+   checks that every effective origin push URL targets the configured GitHub
+   repository. A leased rewrite also requires the PR head in the task branch's
+   local history.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
    the PR-wide cap of one primary and one delta across head rewrites, and the
@@ -287,7 +290,9 @@ Git configuration so URL rewrites cannot change its destination.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal
-requires a clean worktree at the merged PR head with no ignored user files.
+requires a clean worktree with no ignored user files. A Git ref lock keeps the
+worktree at the merged PR head during removal. Cleanup then deletes the branch
+only if it still points at that head.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and latest ordering. It cannot recompute private raw or defeat a
 coherent forgery by a trusted publisher/editor; native claims do not attest the

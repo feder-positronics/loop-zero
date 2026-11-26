@@ -39,8 +39,8 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    Merge rechecks readiness, uses the configured strategy, verifies the landed
    SHA, and deletes the branch and worktree. If cleanup warns, the merge landed.
    Follow the recovery step it names. A queue initially enqueues;
-   `--wait` shares a budget across source-check and landing waits. Cleanup follows
-   verified landing. Enqueueing without `--wait` returns 0 without cleanup.
+   `--wait` shares a budget across source-check and landing waits. Enqueueing
+   without `--wait` returns 0 without cleanup.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
@@ -215,9 +215,9 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
   another may advise read-only and review independently. Before committing
   imported work, record every actual writing delegate in truthful
   `Co-Authored-By` trailers; the committer does not replace the writer.
-  Preserve all actual contributors through squash/amend except under the
-  authorized disclosure route below; otherwise retain every writer's
-  truthful trailers. Missing attribution stays unknown; never invent it.
+  Preserve every actual contributor's truthful trailers through squash/amend
+  except under the authorized disclosure route below. Missing attribution
+  stays unknown; never invent it.
 - Primary and delta prefer families absent from recognized trailers across
   all commits/trailers from configured-base merge-base through HEAD,
   including repairs. Narrower diffs, prose and a main-author-only HEAD cannot

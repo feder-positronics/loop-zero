@@ -13,11 +13,13 @@ import pytest
 
 from loopzero import github
 from loopzero.types import Finding, ReviewResult
+from tests.conftest import isolate_github_auth
 from tests.test_github import (
     HEAD,
     PR_FILES,
     REPO,
     FakeGh,
+    gh as gh,
     merge_json,
     pr_json,
     rest_pr_json,
@@ -50,8 +52,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
 
     with pytest.MonkeyPatch.context() as env:
         env.setenv("PATH", str(tmp_path), prepend=os.pathsep)
-        env.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token")
-        env.setattr(github, "_app_token_cache", ("", 0.0))
+        isolate_github_auth(tmp_path, env)
         github.pr_for_branch(REPO, "lz/x")
         github.pr_view(REPO, 7)
         github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body\n")
@@ -146,32 +147,27 @@ def test_captured_pr_mutations_use_graphql_post(
     assert re.search(r"^> POST ", output, re.MULTILINE), output
 
 
-def test_strict_fake_rejects_exhausted_calls(
-    fake_bin: Path, tmp_path: Path
-) -> None:
-    fake = FakeGh(fake_bin, tmp_path)
-    fake.expect(
+def test_strict_fake_rejects_exhausted_calls(gh: FakeGh) -> None:
+    gh.expect(
         ["api", f"repos/{REPO}/pulls/7", "--include"], rest_pr_json(pr_json()),
     )
     assert github.pr_view(REPO, 7).number == 7
-    fake.assert_complete()
+    gh.assert_complete()
     with pytest.raises(github.GhError, match="exhausted"):
         github.pr_view(REPO, 7)
 
 
-def test_strict_fake_rejects_unexpected_argv(fake_bin: Path, tmp_path: Path) -> None:
-    fake = FakeGh(fake_bin, tmp_path)
-    fake.expect(["pr", "ready", "8", "--repo", REPO])
+def test_strict_fake_rejects_unexpected_argv(gh: FakeGh) -> None:
+    gh.expect(["pr", "ready", "8", "--repo", REPO])
     with pytest.raises(github.GhError, match="unexpected argv"):
         github.mark_ready(REPO, 7)
 
 
-def test_strict_fake_matches_input_contents(fake_bin: Path, tmp_path: Path) -> None:
-    fake = FakeGh(fake_bin, tmp_path)
-    fake.expect(
+def test_strict_fake_matches_input_contents(gh: FakeGh) -> None:
+    gh.expect(
         ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH", "--input", "<temp-file>", "--include"],
         {},
         input_files={"--input": json.dumps({"body": "new body"})},
     )
     github.update_body(REPO, 7, "new body")
-    fake.assert_complete()
+    gh.assert_complete()
