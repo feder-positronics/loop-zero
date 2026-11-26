@@ -76,6 +76,13 @@ def private_directory(prefix: str):
         yield _enter_private_directory(stack, prefix)
 
 
+def _check_head(config: Config, worktree: Path, expected_head: str | None) -> str:
+    head = _git(config, worktree, "rev-parse", "HEAD").strip()
+    if expected_head is not None and head != expected_head:
+        raise SandboxUnavailable(f"HEAD moved before checks started: {expected_head} to {head}")
+    return head
+
+
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
@@ -93,9 +100,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             "bwrap binary missing: bwrap not found on PATH\n"
             "sudo apt install bubblewrap"
         )
-    head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    if expected_head is not None and head != expected_head:
-        raise SandboxUnavailable(f"HEAD moved before checks started: {expected_head} to {head}")
+    head = _check_head(config, worktree, expected_head)
     dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     if config.check_runner and dirty:
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
