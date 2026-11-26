@@ -43,10 +43,10 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
-On every start/resume, run `loopzero status`, then rerun the last `--wait`
-command if any; both are idempotent. Status derives the branch's stage from
-Git, GitHub and the check receipt. Never end a turn waiting for notice of an
-event that may already have happened; notifications never replace the waiter.
+On start/resume, run `loopzero status` if the worktree exists. Resume a pending
+`--wait`; after queue ejection, read the departure reason before requeueing.
+If cleanup removed the worktree, verify the merge in GitHub. Notifications
+never replace the waiter.
 Before yielding, record head, last exit code, awaited event and next command
 in one PR comment per owner. Post on first yield; update the existing comment ID
 with the full replacement Markdown from `body_file` on later yields:
