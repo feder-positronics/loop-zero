@@ -324,7 +324,8 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         }
         deadline = time.monotonic() + _TREE_SECONDS
 
-        def git(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False) -> str:
+        def git(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False,
+                merge_conflict_status: bool = False) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
                     [sys.executable, "-I", "-S", "-c", _LIMITED_GIT, str(_TREE_BYTES),
@@ -348,11 +349,15 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                         _require(time.monotonic() < deadline, "Git time bound exceeded")
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             process.wait(timeout=0.02)
-                    _require_git_exit(args[0], process.returncode, output)
+                    report_status = merge_conflict_status and args[0] == "merge-tree" and process.returncode in {0, 1}
+                    if not report_status:
+                        _require_git_exit(args[0], process.returncode, output)
                     _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
                     output.seek(0)
                     result = output.read(_TREE_OUTPUT + 1)
                     _require(len(result) <= _TREE_OUTPUT, "Git object/output bound exceeded")
+                    if report_status:
+                        return str(process.returncode)
                     if preserve_newlines:
                         return result.decode("utf-8", errors="surrogateescape")
                     return result.decode().strip()
