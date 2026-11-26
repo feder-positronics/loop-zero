@@ -184,14 +184,14 @@ def _untracked_task_state(config: Config, worktree: Path) -> bool:
     return not _git(config, worktree, "ls-files", "--", ".loopzero")
 
 
-def receipt_inputs_match(config: Config, worktree: Path, report: CheckReport) -> bool:
-    if not _untracked_task_state(config, worktree):
+def receipt_checkout_matches(config: Config, worktree: Path, report: CheckReport) -> bool:
+    if not _stage_unchanged(config, worktree, report.head) or not _untracked_task_state(config, worktree):
         return False
     base = _check_base(config, worktree)
     return all(
         result.input_key is not None and result.input_key == _input_key(config, worktree, result.command, base)
         for result in report.results if _has_inputs(config, result.command)
-    )
+    ) and _stage_unchanged(config, worktree, report.head)
 
 
 def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
