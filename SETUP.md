@@ -365,6 +365,9 @@ writes the receipt. For remote stages, configure an operator-trusted
 Without a stage adapter, run the whole check locally. Use a local slot if the
 host requires one. On miki, if you used the isolated install, run these from
 the task worktree with the `install_dir` from that recipe.
+Make a scratch clone standalone before queueing, for example with
+`git clone --no-local`. If a Git object alternate is outside the check sandbox,
+`loopzero check` refuses it after the slot wait and before any stage runs.
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"
