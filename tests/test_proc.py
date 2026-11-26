@@ -14,6 +14,26 @@ import pytest
 from loopzero import _proc
 
 
+def test_unwind_on_sigterm_when_signal_arrives_during_disposition_restore():
+    script = """
+import signal
+from loopzero import _proc
+
+set_disposition = signal.signal
+
+def deliver_before_restore(signum, disposition):
+    if signum == signal.SIGTERM and disposition is signal.SIG_DFL and callable(signal.getsignal(signum)):
+        signal.raise_signal(signum)
+    return set_disposition(signum, disposition)
+
+signal.signal = deliver_before_restore
+with _proc.unwind_on_sigterm():
+    pass
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=5)
+    assert result.returncode == -signal.SIGTERM, result.stderr.decode()
+
+
 @pytest.fixture
 def run_python(tmp_path):
     def run(script, *, timeout=30, env_allowlist=("PATH",), unbuffered=False, **kwargs):

@@ -5,12 +5,16 @@ from __future__ import annotations
 import base64
 import errno
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from select import select
 from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import quote
@@ -45,6 +49,7 @@ from tests.test_sandbox import FAKE_BWRAP, inject_check_timeout
 
 REPO = "acme/widgets"
 URL = f"https://github.com/{REPO}/pull/7"
+MERGIFY_QUEUE_FIXTURE = json.loads((Path(__file__).with_name("fixtures") / "mergify-queue.json").read_text())
 BRANCH_READ = branch_head_key().split()
 PR_LIST_READ = pr_list_key().split()
 LOOKUP_CALLS = [BRANCH_READ, PR_LIST_READ, ["api", f"repos/{REPO}/pulls/7"]]
@@ -3569,6 +3574,53 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", reviews_key()[4:]]) == 1
 
 
+@pytest.mark.parametrize(("signum", "status"), [
+    (signal.SIGTERM, -signal.SIGTERM),
+    (signal.SIGINT, 130),
+])
+def test_status_reaps_gh_after_signal(wt, fake_tool, signum, status):
+    fake_tool("gh", "exec /bin/sleep 30")
+    driver = """
+import subprocess
+import sys
+from loopzero import cli, github
+
+github.app_token = lambda: ""
+communicate = subprocess.Popen.communicate
+
+def announce(process, *args, **kwargs):
+    if process.args[0] == "gh":
+        print(process.pid, flush=True)
+    return communicate(process, *args, **kwargs)
+
+subprocess.Popen.communicate = announce
+sys.exit(cli.main(["status"]))
+"""
+    env = {**os.environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[1])}
+    with subprocess.Popen(
+        [sys.executable, "-c", driver], cwd=wt, env=env, stdout=subprocess.PIPE, bufsize=0,
+    ) as process:
+        child = None
+        try:
+            # Read until the supervisor enters communicate on the offline gh child.
+            for _ in range(6):
+                assert select([process.stdout], [], [], 5)[0]
+                line = process.stdout.readline().strip()
+                if line.isdigit():
+                    child = int(line)
+                    break
+            assert child is not None
+            process.send_signal(signum)
+            assert process.wait(timeout=5) == status
+            with pytest.raises(ProcessLookupError):
+                os.kill(child, 0)
+        finally:
+            process.kill()
+            if child is not None:
+                with suppress(ProcessLookupError):
+                    os.killpg(child, signal.SIGKILL)
+
+
 def test_status_silently_ignores_legacy_report_without_dirty(
     wt: Path, gh: FakeGh, capsys, head
 ) -> None:
@@ -4226,28 +4278,48 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert message in out + err
 
 
-@pytest.mark.parametrize("report", ["current", "stale", None])
-def test_mergify_reports_admission_wait(wt, gh, capsys, monkeypatch, report):
+@pytest.mark.parametrize("confirmed,kind", [
+    (False, "current"), (False, "stale"), (False, "missing"),
+    (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"),
+    (False, "head"), (False, "requeue"), (False, "author"), (False, "landed"),
+])
+def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, confirmed, kind):
     head = commit_mergify_configuration(wt)
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
-    comments = [{"user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
-                 "body": f"@mergifyio queue\n\n<!-- loopzero:mergify-request head={head} queue=main -->"}]
-    if report:
-        comments.append({
-            "id": 43, "user": {"login": "mergify[bot]"},
-            "updated_at": "2026-11-25T19:01:00Z" if report == "current" else "2026-11-25T18:59:00Z",
-            "body": "### ⏳ Waiting for queue conditions\n\n- [ ] `check-success = Queue Preflight`",
-        })
+    admission = kind in MERGIFY_QUEUE_FIXTURE["admission"]
+    comments = [{"id": 42, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
+                 "body": MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)}]
+    if kind != "missing":
+        template = MERGIFY_QUEUE_FIXTURE["admission_report"] if admission else MERGIFY_QUEUE_FIXTURE["report"]
+        body = template.replace("@url@", URL).replace("@sha@", "f" * 7 if kind == "head" else head[:7])
+        comments.append({"id": 43, "user": {"login": "someone-else" if kind == "author" else "mergify[bot]"},
+                         "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind),
+                         "body": body + MERGIFY_QUEUE_FIXTURE["attribution"].get(kind, "")})
+    if kind == "requeue":
+        comments.append({"id": 44, "user": {"login": LOGIN}, "body": "@mergifyio queue"})
     gh.respond(f"api repos/{REPO}/issues/7/comments", comments)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    membership = iter([mergify.Membership()] if confirmed else [])
+    monkeypatch.setattr(mergify, "membership", lambda *_: next(membership, None))
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
     monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("already requested"))
-
-    for args, expected_code in [(("status",), 0), (("merge", "--wait=0"), 3)]:
-        code, out, err = run(capsys, *args)
-        assert (code, err) == (expected_code, "")
-        assert "waiting for admission" in out
-        assert (f"{URL}#issuecomment-43" in out) is (report == "current")
+    if kind == "landed":
+        opened = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
+        gh.append(f"api repos/{REPO}/pulls/7", *([opened] * 3), merge_json(state="MERGED", head=head, sha="e" * 40))
+        gh.respond("api -X", "")
+    if admission:
+        status, summary, error = run(capsys, "status")
+        assert (status, error) == (0, "") and "waiting for admission" in summary
+        assert (f"{URL}#issuecomment-43" in summary) is (kind == "current")
+    code, out, err = run(capsys, "merge", "--wait=0")
+    if kind == "landed":
+        assert (code, err) == (0, "") and not wt.exists() and out.splitlines()[-1] == "e" * 40
+    elif kind in MERGIFY_QUEUE_FIXTURE["expected"]:
+        assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and "'checks'" in err
+        assert all(part in err for part in [*MERGIFY_QUEUE_FIXTURE["requeue_guidance"], *MERGIFY_QUEUE_FIXTURE["expected"][kind]])
+    else:
+        assert code == 3 and wt.exists() and "waiting for admission" in out
+        assert (f"{URL}#issuecomment-43" in out) is (kind == "current")
 
 
 @pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None])
@@ -4257,35 +4329,14 @@ def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, 
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, False))
     monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
-    condition = "check-success = Queue Quality Gate"
-    evaluation = None if result is None else {
-        "match": result != "blocking",
-        "label": "all of",
-        "subconditions": [
-            {"match": False, "label": condition, "subconditions": []}
-            if result == "blocking" else
-            {"match": True, "label": "any of", "subconditions": [
-                {"match": False, "label": "check-success = checks", "subconditions": []},
-                {"match": True, "label": f"check-{result} = checks", "subconditions": []},
-            ]},
-        ],
-    }
-    payload = {
-        "number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 1,
-        "mergeability_check": {
-            "queue_pull_request_number": 42,
-            "checks": [{"name": "checks", "state": result if result in ("neutral", "skipped") else "success"}],
-            "conditions_evaluation": evaluation,
-        },
-    }
-    responses = iter([None, payload])
+    responses = iter([None, MERGIFY_QUEUE_FIXTURE["candidate_responses"][result or "missing"]])
     monkeypatch.setattr(mergify, "api_get", lambda *_: next(responses))
 
     code, out, err = run(capsys, "merge", "--wait=0")
 
     assert (code, err) == (3, "")
     assert f"https://github.com/{REPO}/pull/42" in out
-    assert (condition in out) is (result == "blocking")
+    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) is (result == "blocking")
     assert "failed" not in out and "check-success = checks" not in out
 
 
@@ -4617,18 +4668,27 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert json.loads(writes[0]["--input"])["body"] == prose + suffix
 
 
-def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
+@pytest.mark.parametrize("refresh", ["resync", "automatic"])
+def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys, refresh):
     head = head_of(wt)
-    live = "# PR\n\n## Validation\nManual validation evidence.\n"
+    config = cli._load_config(SimpleNamespace(command="check", config=None), wt, pin_checks=True)
+    live = ("# PR\n\n## Validation\nManual validation evidence.\n\n"
+            "<!-- loopzero:checks:start -->\n"
+            f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0\n"
+            "<!-- loopzero:checks:end -->\n")
     arm_pr_body_patch(gh, head, body=live)
-    cli._save_report(wt, CheckReport(head, False, (CheckResult("echo ok", 0, 0.0, ""),)))
+    stages = tuple(CheckResult(command, 0, 0.0, "") for command in config.checks)
+    cli._save_report(wt, CheckReport(head, False, stages))
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
 
-    assert run(capsys, "pr")[0] == 0
+    if refresh == "resync":
+        assert run(capsys, "pr")[0] == 0
+    else:
+        cli._refresh_pr_checks(wt, config)
     draft = json.loads(gh.calls[-1]["--input"])["body"]
     assert "unverified" in draft and "run `loopzero check`" in draft
     assert "Manual validation evidence." in draft
 
-    git(wt, "push", "-q", "-u", "origin", "lz/t1")
     gh.respond_pr_list([pr_json(headRefOid=head, body=draft)])
     assert run(capsys, "check")[0] == 0
     draft = json.loads(gh.calls[-1]["--input"])["body"]
