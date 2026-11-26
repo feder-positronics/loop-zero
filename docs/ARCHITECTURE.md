@@ -482,7 +482,7 @@ the authoritative `checks.json` receipt. Writers lock the task state directory
 while rechecking HEAD and atomically replacing the receipt from a synced sibling
 temporary file. Successful keyed stages are checkpointed in the same receipt
 for reuse. A successful stage checkpoint preserves a clean pass for the same
-head, settings, and commands. A failed stage replaces a prior pass immediately.
+head, settings, and commands. A failed stage replaces an existing receipt immediately.
 Final worktree validation is required before publishing a pass. Runners cannot
 select stages or mint receipts. Stage admission
 belongs to the runner: the outer `loopzero check`

@@ -376,6 +376,8 @@ def _save_report(wt: Path, report: CheckReport, *, checkpoint_checks: tuple[str,
         if report.head != current_head:
             return current_head
         unfinished = checkpoint_checks is not None and report.results[-1] is sandbox.INCOMPLETE_CHECK
+        if checkpoint_checks is not None and not unfinished and not path.exists():
+            return None
         saved = _load_report(wt) if unfinished else None
         if (saved is not None and saved.ok and not saved.dirty and saved.head == report.head
                 and saved.settings_sha256 == report.settings_sha256
