@@ -80,7 +80,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
                checkpoint: Callable[[CheckReport], None] | None = None,
-               _resolved: bool = False) -> CheckReport:
+               workflow: str | Path = "workflow.toml", _resolved: bool = False) -> CheckReport:
     """Run checks, stopping at the first failure; status emits only stage metadata.
 
     progress receives each command before launch, as before. Optional status receives
@@ -129,7 +129,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         for index, command in enumerate(commands):
             if progress:
                 progress(command)
-            key = _input_key(config, worktree, command, base) if not dirty else None
+            key = _input_key(config, worktree, command, "" if dirty else base,
+                             status=status, workflow=workflow)
             old = previous.get(command)
             if key and old and old.input_key == key:
                 result = old
@@ -253,19 +254,43 @@ def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = N
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _input_key(config: Config, worktree: Path, command: str, base: str) -> str | None:
-    if not base or (command not in config.inputs and "." not in config.inputs.get("*", ())):
-        return None
-    paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
+def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str | None:
     # Empty pathspecs must not accidentally mean the whole tree.
+    if not paths:
+        return ""
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     try:
-        blobs = _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
-                     "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
+        return _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
+                    "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths)
     except OSError as exc:
         if exc.errno == errno.E2BIG:
             return None
         raise
+
+
+def _input_key(config: Config, worktree: Path, command: str, base: str, *,
+               status: Callable[[str], None] | None = None,
+               workflow: str | Path = "workflow.toml") -> str | None:
+    if command not in config.inputs and "." not in config.inputs.get("*", ()):
+        return None
+    if not base and status is None:
+        return None
+    entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
+    try:
+        blobs = _input_blobs(config, worktree, tuple(path for paths in entries.values() for path in paths))
+    except (SandboxUnavailable, _proc.ProcTimeout, OSError, ValueError):
+        if not base:
+            return None
+        raise
+    if blobs == "" and status:
+        status(f"{workflow}: checks.inputs for {command!r} matches no files in HEAD. "
+               f"Correct these entries: {entries!r}. Running the check fresh.")
+    if not blobs or not base:
+        return None
+    return _hash_inputs(config, worktree, command, base, blobs)
+
+
+def _hash_inputs(config: Config, worktree: Path, command: str, base: str, blobs: str) -> str | None:
     contents = []
     root = worktree.resolve()
     try:
