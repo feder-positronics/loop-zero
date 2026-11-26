@@ -9,6 +9,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from loopzero import candidate, config, github, runners
@@ -95,36 +96,52 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     return latest if verdict else None
 
 
-def _clean_base_merges(repo: str, number: int, reviewed: str, head: str, base_branch: str) -> bool:
-    """Prove each intervening first-parent commit is an unmodified merge from the base."""
+def _verified_merge(git: Callable[..., str], merge: str, first: str, second: str,
+                    base: str, *, clean: bool) -> bool:
+    git("merge-base", "--is-ancestor", second, base)
+    merge_bases = git("merge-base", "--all", first, second).splitlines()
+    # A shallow root outside the known merge bases could hide another base.
+    if git("rev-list", "--max-parents=0", first, second, "--not", *merge_bases):
+        return False
+    return not clean or git("merge-tree", "--write-tree", first, second) == git("rev-parse", f"{merge}^{{tree}}")
+
+
+def base_merge_material(
+    repo: str, number: int, reviewed: str, head: str, base_branch: str, *, clean: bool,
+) -> bytes | None:
+    """Return a verified delta patch, or empty bytes for proven clean inheritance."""
     try:
         pr = github.api_get(f"repos/{repo}/pulls/{number}")
         base = pr["base"]["sha"]
         if (pr["head"]["sha"] != head or pr["base"]["ref"] != base_branch
                 or not re.fullmatch(r"[0-9a-f]{40}", base)):
-            return False
+            return None
         with candidate.fetched_git(repo, [reviewed, head, base]) as git:
             history = git("rev-list", "--first-parent", "--parents", f"{reviewed}..{head}")
             cursor = head
+            row_lengths = {3} if clean else {2, 3}
             for row in history.splitlines():
                 commits = row.split()
-                if len(commits) != 3 or commits[0] != cursor:
-                    return False
-                merge, first, second = commits
-                git("merge-base", "--is-ancestor", second, base)
-                merge_bases = git("merge-base", "--all", first, second).splitlines()
-                # A shallow root outside the known merge bases could hide another base.
-                if git("rev-list", "--max-parents=0", first, second, "--not", *merge_bases):
-                    return False
-                tree = git("merge-tree", "--write-tree", first, second)
-                if tree != git("rev-parse", f"{merge}^{{tree}}"):
-                    return False
-                cursor = first
-            return cursor == reviewed
+                if len(commits) not in row_lengths or commits[0] != cursor:
+                    return None
+                cursor = commits[1]
+                if len(commits) == 2:
+                    continue
+                if not _verified_merge(git, *commits, base, clean=clean):
+                    return None
+            if cursor != reviewed:
+                return None
+            if clean:
+                return b""
+            patch = git("log", "--first-parent", "--reverse", "--remerge-diff", "-p", "--format=",
+                        "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                        "--ignore-submodules=none", "--submodule=short",
+                        f"{reviewed}..{head}", preserve_newlines=True)
+            return patch.encode("utf-8", errors="surrogateescape")
     except github.GhUnavailable:
         raise
     except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError):
-        return False
+        return None
 
 
 def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
@@ -158,7 +175,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
                 return None
         elif not (verdict.startswith("approve** (") and state in {"APPROVED", "COMMENTED"}):
             return None
-    if not _clean_base_merges(repo, number, reviewed, head, base_branch):
+    if base_merge_material(repo, number, reviewed, head, base_branch, clean=True) is None:
         return None
     return latest
 
