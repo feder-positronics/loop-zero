@@ -1568,24 +1568,33 @@ class _AdmissionDeadline(Exception):
     """The --wait budget expired before a new merge or queue request."""
 
 
-def _observe_mergify_or_report_blocker(
-    config: Config, pr: github.PR, readiness: github.Readiness, queue: str, deadline: float | None,
-) -> str | None:
-    if deadline is not None and mergify.membership(config.repo, pr.number, queue) is not None:
-        return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), confirmed=True)
-    hint = _merge_check_hint(config, pr, readiness)
-    raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
+def _follow_blocked_mergify(
+    config: Config, pr: github.PR, readiness: github.Readiness | None, deadline: float | None,
+) -> bool:
+    queue = config.mergify_queue
+    if (deadline is None or readiness is None or readiness.ready or config.merge_strategy != "mergify"
+            or queue is None or pr.base_ref != config.base_branch):
+        return False
+    try:
+        return mergify.membership(config.repo, pr.number, queue) is not None
+    except mergify.MergifyError:
+        return False
 
 
 def _merge_with_mergify(
     config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
+    *, follow_confirmed: bool = False,
 ) -> str | None:
     """Request admission after readiness, or follow a confirmed entry without writing."""
+    if not readiness.ready:
+        if follow_confirmed:
+            assert deadline is not None
+            return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), confirmed=True)
+        hint = _merge_check_hint(config, pr, readiness)
+        raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
     queue = config.mergify_queue
     assert queue is not None
-    if not readiness.ready:
-        return _observe_mergify_or_report_blocker(config, pr, readiness, queue, deadline)
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )
@@ -1637,7 +1646,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     deadline = None if args.wait is None else started + args.wait
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
     admit_by = deadline if args.wait else None
-    if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
+    follow_confirmed = _follow_blocked_mergify(config, pr, readiness, deadline)
+    if not follow_confirmed and readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
@@ -1655,7 +1665,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
-            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by)
+            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by,
+                                      follow_confirmed=follow_confirmed)
         except _AdmissionDeadline:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3
