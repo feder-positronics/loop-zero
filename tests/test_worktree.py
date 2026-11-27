@@ -290,8 +290,8 @@ def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
 @pytest.mark.parametrize("partial", [True, False])
 def test_ref_lock_stall_fails_closed_or_reaps_child(tmp_path, monkeypatch, partial):
     ack = "prepare: ok" if partial else "prepare: ok\n"
-    script = ("import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-              f"print({ack!r}, end='', flush=True); time.sleep(0.8); print(flush=True)")
+    script = ("import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+              f"signal.alarm(15); print({ack!r}, end='', flush=True); signal.pause()")
     child = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     communicate = child.communicate
     monkeypatch.setattr(child, "communicate", lambda data, timeout: communicate(data, timeout=0.05))

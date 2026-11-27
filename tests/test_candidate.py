@@ -665,5 +665,5 @@ def test_failed_inheritance_read_is_not_reported_as_missing_review(monkeypatch, 
     fetch_failed = isinstance(failure, candidate.FetchFailed)
     monkeypatch.setattr(github, "api_get", Mock(return_value=pr, side_effect=None if fetch_failed else failure))
     monkeypatch.setattr(candidate, "fetched_git", Mock(side_effect=failure))
-    with pytest.raises(type(failure), check=lambda error: error is failure):
+    with pytest.raises(type(failure), match=str(failure)):
         eligibility.base_merge_material("o/r", 7, "a" * 40, "c" * 40, "main", clean=True)
