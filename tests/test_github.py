@@ -665,7 +665,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     (call,) = gh.calls
     argv = call["argv"]
     assert argv[:2] == ["api", "graphql"]
-    assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
+    assert "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
     assert any(a.startswith("query=") and "author { __typename login }" in a for a in argv)
     assert github.open_blocking_findings(REPO, 7, HEAD, ()) == []
 
@@ -1459,3 +1459,31 @@ def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: 
         (comment,) = payload["comments"]
         assert (comment["path"], comment["line"]) == (anchor, 1)
     assert len(calls_for(gh, detail_key)) == int(severity == "important" and path != "file-3000")
+
+
+@pytest.mark.parametrize("repo", ["acme/123", "acme/true", "acme/@etc-passwd"])
+def test_graphql_string_variables_are_raw_fields(repo: str) -> None:
+    """`gh -F` coerces numbers and booleans and reads `@file`; names and ids must stay strings."""
+    argv = github._pull_query(repo, 7, "query")
+    owner, name = repo.split("/")
+    assert argv[argv.index(f"owner={owner}") - 1] == "-f" and argv[argv.index(f"name={name}") - 1] == "-f"
+    assert argv[argv.index("number=7") - 1] == "-F"
+
+
+def test_app_token_helper_must_not_be_world_writable_or_foreign_owned(tmp_path: Path, monkeypatch) -> None:
+    directory = tmp_path / "config"
+    directory.mkdir(mode=0o700)
+    helper = directory / "app-token"
+    helper.write_text("#!/bin/sh\necho synthetic-app-token\n")
+    helper.chmod(0o700)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    assert github.app_token() == "synthetic-app-token"
+    for target, mode in ((helper, 0o702), (helper, 0o777), (directory, 0o707), (directory, 0o777)):
+        original = target.stat().st_mode & 0o777
+        target.chmod(mode)
+        monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+        assert github.app_token() == "", oct(mode)
+        target.chmod(original)
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    monkeypatch.setattr(github.os, "getuid", lambda: helper.stat().st_uid + 1)
+    assert github.app_token() == ""

@@ -174,7 +174,7 @@ def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every work
 
     if (name := repo.get("name")) is None:
         raise ConfigError("missing required key repo.name (\"owner/name\")")
-    if name.count("/") != 1 or not all(name.split("/")):
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) is None:
         raise ConfigError(f'repo.name must look like "owner/name", got {name!r}')
 
     if not (base := repo.get("base", "main")):
