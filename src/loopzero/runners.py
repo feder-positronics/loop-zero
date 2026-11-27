@@ -706,15 +706,19 @@ def _codex_header(value):
 
 
 def retire_inspection(body):
-    """A published body whose Codex header records inspection the way new evidence does."""
-    header = next((line for line in leading_review_block(body)[0] if line.startswith(CODEX_HEADER)), None)
+    """A published body whose Codex header records inspection the way new evidence does.
+
+    Only a machine block within the published size limit is rewritten."""
+    block, span = leading_review_block(body)
+    if len(block) < 2 or len(span.encode()) > CODEX_HEADER_LIMIT:
+        return body
     try:
-        value = decode_codex_evidence(header)
+        value = decode_codex_evidence(block[1])
     except ValueError:
         return body
     calls = [{key: item for key, item in call.items() if key not in ("head_event", "diff_event")}
              | {"inspection": "unknown"} for call in value["calls"]]
-    return body.replace(header, _codex_header(value | {"calls": calls}), 1)
+    return body.replace(block[1], _codex_header(value | {"calls": calls}), 1)
 
 
 def decode_codex_evidence(header):

@@ -966,6 +966,12 @@ def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettin
             for settings, display in formats]
 
 
+def _comparable_body(body: str) -> str:
+    """Normalize retired Codex inspection fields, reading the machine block as eligibility does."""
+    rest = body.removeprefix(github.BODY_BLOCKERS)
+    return body[:len(body) - len(rest)] + runners.retire_inspection(rest)
+
+
 def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
@@ -984,8 +990,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     payloads = github.review_payloads(config.repo, pr.number, result.head, result, _review_formats(result))
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
     for review in evidence:
-        published = runners.retire_inspection(review.get("body") or "")
-        expected = next((p for p in payloads if p["body"] == published), None)
+        expected = next((p for p in payloads if p["body"] == _comparable_body(review.get("body") or "")), None)
         review_id = review.get("id")
         if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
                 or eligibility.review_login(review) != publisher.casefold()

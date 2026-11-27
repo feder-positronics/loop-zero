@@ -273,11 +273,15 @@ def legacy_inspection(value):
     return value
 
 
-def test_retire_inspection_finds_the_header_after_a_blockers_line(published_native):
+def test_retire_inspection_respects_the_published_block_limit(published_native):
     _, rendered, line = published_native
     legacy = rendered.replace(line, packed(legacy_inspection(runners.decode_codex_evidence(line))))
     assert legacy != rendered and runners.retire_inspection(legacy) == rendered
-    assert runners.retire_inspection(github.BODY_BLOCKERS + legacy) == github.BODY_BLOCKERS + rendered
+    marker = legacy.split("\n", 1)[0]
+    oversized = legacy.replace(marker, marker + " " * (runners.CODEX_HEADER_LIMIT - len(line)), 1)
+    assert len(runners.leading_review_block(oversized)[1].encode()) > runners.CODEX_HEADER_LIMIT
+    assert runners.retire_inspection(oversized) == oversized  # never shortened into validity
+    assert cli._comparable_body(github.BODY_BLOCKERS + legacy) == github.BODY_BLOCKERS + rendered
 
 
 def test_published_verified_inspection_stays_valid(published_native):
