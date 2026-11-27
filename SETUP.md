@@ -21,6 +21,10 @@
 ## Install
 
 Pin to a full commit SHA from `main` and upgrade by re-running with a new SHA.
+An unknown `workflow.toml` key blocks every command and hosted eligibility, so
+order upgrades: before adding a key to the base `workflow.toml`, advance every
+pin that reads it (host CLI and CI); before upgrading past a release that
+removes a key, delete the key from the base with the old CLI.
 The `v0.4.x` tags refer to the retired tool.
 `loopzero --version` prints the revision of a Git-URL install; the verified
 install below prints `unknown revision`, so record its checked-out SHA. Never
@@ -30,12 +34,6 @@ User-wide:
 
 ```sh
 uv tool install "git+https://github.com/feder-positronics/loop-zero@<sha>"
-```
-
-As a dev dependency when your project requires Python 3.14 or newer:
-
-```sh
-uv add --dev "loopzero @ git+https://github.com/feder-positronics/loop-zero@<sha>"
 ```
 
 For a verified CI install, check out the full commit SHA and run these commands
@@ -66,9 +64,10 @@ contract, credential guidance, and supporting references.
 
 Install the skills once per machine, not per repository: link each directory
 under the checkout's `core/skills` into `~/.agents/skills` (Codex) and
-`~/.claude/skills` (Claude Code). Link through one stable path that you repoint
-when you upgrade the CLI. Reconcile the skill links for added or removed
-directories and keep the previous revision for rollback. Never edit the linked checkout. Both harnesses follow a
+`~/.claude/skills` (Claude Code), through one stable path. Rerun the block
+below with the new checkout to upgrade, or the previous one to roll back: it
+repoints the stable path, links added skills and removes links to removed ones.
+Keep the previous revision for rollback. Never edit the linked checkout. Both harnesses follow a
 symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
@@ -86,7 +85,7 @@ directory, move it aside before linking that skill.
 
 ```sh
 CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
-SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
+SRC=~/.local/share/loopzero/source    # stable path; rerun this block to upgrade or roll back
 mkdir -p ~/.local/share/loopzero ~/.agents/skills ~/.claude/skills
 python3 - "$CHECKOUT" "$SRC" <<'PYTHON' &&
 import os
@@ -105,6 +104,12 @@ PYTHON
     n=$(basename "$d")
     ln -sfnT "$SRC/core/skills/$n" ~/.agents/skills/"$n" || exit
     ln -sfnT "$SRC/core/skills/$n" ~/.claude/skills/"$n" || exit
+  done
+  for l in ~/.agents/skills/* ~/.claude/skills/*; do
+    if [ -L "$l" ] && [ "$(readlink "$l")" = "$SRC/core/skills/${l##*/}" ] &&
+      [ ! -d "$l" ]; then
+      rm "$l" || exit
+    fi
   done
 )
 ```
@@ -452,8 +457,8 @@ than one, or to one only when the matching queue rule sets an explicit integer
 `batch_size` greater than one. In-place updates (one parallel check and batch size
 one) rewrite the reviewed source head and are unsupported. Admission checks the
 live serial queue's identity and reads `.mergify.yml` from GitHub's default
-branch, requiring that explicit integer parallelism and batch size and the
-matching queue name. The configuration blob
+branch, requiring explicit `mode: serial`, integer parallelism (and batch size
+when parallelism is one) and the matching queue name. The configuration blob
 must stay unchanged across verification. Local/PR files, `extends`, scopes,
 duplicate YAML keys and ambiguous or missing values do not establish this proof.
 
@@ -471,6 +476,9 @@ below deployed first. Preserve that condition on candidates (omit
 `merge_conditions` to inherit it, or include the same check explicitly). For example:
 
 ```yaml
+merge_queue:
+  mode: serial
+  max_parallel_checks: 2
 queue_rules:
   - name: main
     queue_conditions:
@@ -542,9 +550,14 @@ Only the candidate job uses this environment and credential. The source job runs
 without either. Restricting the environment to the protected default branch limits
 credential access, while commit-status publishers still share a context namespace.
 
-Require `Loop-zero Eligibility` in GitHub branch protection and in
-`[checks].required_ci` on the trusted base. GitHub and Mergify match it by
-context name. A repository
+Publishing the status alone gates nothing. First land the publisher and its
+configuration on the base and confirm the status appears on a PR (a publisher
+added by a PR cannot publish for that PR's own head). Then require
+`Loop-zero Eligibility` and every other `[checks].required_ci` context on the
+base branch in GitHub (branch protection or a ruleset), add it to
+`[checks].required_ci` on the trusted base, and refresh open PRs that lack it.
+[MERGIFY.md](docs/MERGIFY.md#protection-and-credentials) shows loop-zero's own
+rulesets as a worked example. GitHub and Mergify match it by context name. A repository
 writer who can add an Actions workflow can publish the same context with its
 `GITHUB_TOKEN`. Before cutover, either explicitly accept that cooperative writer
 boundary or replace this publisher with a dedicated GitHub App and bind the
