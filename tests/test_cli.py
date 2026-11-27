@@ -1118,7 +1118,12 @@ def test_pr_pushes_and_creates_draft(
     gh.respond_pr_list([], branch=branch)
     gh.respond_pr_create(pr_json(headRefOid=head), branch=branch)
     task = (wt / ".loopzero" / "task.md").read_text()
-    gh.respond_pr_view(pr_json(headRefOid=head, body=task), branch=branch)
+    narrative = task.split("## Validation\n", 1)[0].replace("## Notes\n", "## Notes\nEdited on GitHub.\n")
+    (wt / ".loopzero" / "task.md").write_text(
+        task.replace("(filled by `loopzero check`)", "Browser verified.")
+        .replace("(filled by `loopzero review`)", "Saved review.")
+    )
+    gh.respond_pr_view(pr_json(headRefOid=head, body=narrative), branch=branch)
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     pushes = trace_pushes(fake_tool, tmp_path)
     expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
@@ -1132,14 +1137,14 @@ def test_pr_pushes_and_creates_draft(
         ["api", f"repos/{REPO}/pulls/7"], ["api", f"repos/{REPO}/pulls/7"],
     ]
     payload = json.loads(gh.calls[-3]["--input"])
-    assert "Recorded for" not in payload["body"], "the draft opens without head-specific validation"
+    assert "## Validation" not in payload["body"] and "## Review" not in payload["body"]
     assert payload["draft"] is True and payload["head"] == branch
     heading = (wt / ".loopzero" / "task.md").read_text().splitlines()[0].lstrip("# ")
     assert payload["title"] == heading
     body = json.loads(gh.calls[-1]["--input"])["body"]
     assert "## Context and goal" in body and git(repo, "rev-parse", "origin/main").strip() in body
     assert body.count("## Validation") == 1 and f"Recorded for `{head[:12]}`" in body
-    assert "(filled by `loopzero check`)" not in body, "placeholder replaced in place"
+    assert "Browser verified." in body and "Saved review." in body and "Edited on GitHub." in body
     assert body.index("## Notes") < body.index("## Validation") < body.index("## Review"), "evidence trails the narrative"
     assert "- `echo ok`: exit 0" in body and "- `test -f README.md`: exit 0" in body
 
@@ -1241,6 +1246,11 @@ exec /usr/bin/git "$@"
 
 def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, gh, capsys):
     head = head_of(wt)
+    task = wt / ".loopzero" / "task.md"
+    task.write_text(
+        task.read_text().replace("(filled by `loopzero check`)", "Browser verified.")
+        .replace("(filled by `loopzero review`)", "Saved review.")
+    )
     gh.respond(branch_history_key(), [])
     gh.respond_pr_list([])
     gh.respond_pr_create(pr_json(headRefOid="b" * 40))  # another writer pushed B after the pinned push
@@ -1248,7 +1258,9 @@ def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, g
     _, err = expect_cli(capsys, 1, "pr", stdout="")
     assert "rerun loopzero pr" in err and head not in err
     assert not any("PATCH" in call["argv"] for call in gh.calls)
-    assert "Recorded for" not in json.loads(gh.calls[-2]["--input"])["body"]
+    body = json.loads(gh.calls[-2]["--input"])["body"]
+    assert "## Context and goal" in body
+    assert not any(text in body for text in ("## Validation", "Browser verified.", "## Review", "Saved review."))
 
 
 @pytest.mark.parametrize("live", [dict(headRefOid="b" * 40), dict(baseRefName="release")], ids=["head", "target"])

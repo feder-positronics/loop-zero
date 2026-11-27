@@ -121,7 +121,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    100 pages. An unfinished branch creates or refreshes a draft PR. Publication
    checks that every effective origin push URL targets the configured GitHub
    repository. A leased rewrite also requires the PR head in the task branch's
-   local history. The push source is the captured commit, and the body is patched only while the live PR head is that commit.
+   local history. The push source is the captured commit. A new draft starts with task prose.
+   The body patch, including saved evidence on a new draft, requires an open PR at the
+   captured commit and configured target.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion
    and the PR-wide review budget across head rewrites; truthful all-writer
