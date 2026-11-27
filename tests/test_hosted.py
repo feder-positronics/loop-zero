@@ -68,12 +68,24 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
     gh.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [])
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     return gh
 
 
 def approval(head=HEAD, *, state="APPROVED", verdict="**approve**"):
     return {"state": state, "commit_id": head, "user": {"login": "trusted-publisher"},
             "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n{verdict}"}
+
+
+@pytest.mark.parametrize("newer,states", [(False, ["pending", "failure"]), (True, ["pending"])])
+def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, newer, states):
+    old = {"context": "Loop-zero Eligibility", "state": "failure", "description": "Blocking finding"}
+    pending = {"context": "Loop-zero Eligibility", "state": "pending", "description": "Refreshing"}
+    publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
+                      [old | {"state": "success"}, pending, old] if newer else [pending, old])
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [approval()])
+    publisher.respond_pr_view(pr_json(state="MERGED"))
+    check_source(publisher, states)
 
 
 def check_source(publisher, states, *, exit_code=0, error=None, match=None):

@@ -1578,10 +1578,13 @@ def commit_status(
         raise
 
 
+def latest_statuses(repo: str, head: str, context: str, count: int = 1) -> list[dict]:
+    rows = (r for r in _iter_paged(f"repos/{repo}/commits/{head}/statuses") if r.get("context") == context)
+    return list(islice(rows, count))
+
+
 def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
-    statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
-    latest = next((row for row in statuses if row.get("context") == context), {})
-    return (latest.get("state"), latest.get("description")) == (state, description)
+    return [(r.get("state"), r.get("description")) for r in latest_statuses(repo, head, context)] == [(state, description)]
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:
