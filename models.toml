@@ -2,6 +2,8 @@
 # provider preferences below are owner rules (2026-09-30). Profile names do not rank cost or speed.
 # Read before delegation; check runtime support and pass model/effort explicitly.
 # Effort: avoid max/ultra; xhigh only where it measurably helps.
+# Owner order 2026-11-27 (#2224): builders, finishers, CI fixes and audits run on
+# OpenAI; Anthropic only for UI design and cross-family review. No Anthropic fallback.
 # Values pass through; runtimes resolve aliases. Alternatives are explicit choices,
 # not automatic retries or replacements for an explicitly requested model.
 version = 1
@@ -12,8 +14,8 @@ model = "gpt-6-luna"
 effort = "xhigh"
 
 [[profiles.fast.alternatives]]
-provider = "anthropic"
-model = "claude-sonnet-5-5"
+provider = "openai"
+model = "gpt-6.2-sol"
 effort = "medium"
 
 [profiles.standard]
@@ -22,16 +24,16 @@ model = "gpt-6.2-sol"
 effort = "medium"
 
 [[profiles.standard.alternatives]]
-provider = "anthropic"
-model = "claude-sonnet-5-5"
+provider = "openai"
+model = "gpt-6.2-astra"
 effort = "medium"
-# Sonnet 5.5 reroutes high-risk security prompts to Sonnet 5; use another route.
 
 [profiles.deep]
 provider = "openai"
 model = "gpt-6.2-astra"
 effort = "medium"
 
+# Anthropic here only for a cross-family review or consult, never a builder.
 [[profiles.deep.alternatives]]
 provider = "anthropic"
 model = "claude-fable-5-2"
