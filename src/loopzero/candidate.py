@@ -256,9 +256,10 @@ _FETCH_TRANSPORT = re.compile(
 _FETCH_DENIED = re.compile(r"returned error: 4(?!29)\d\d|rpc failed; http 4(?!29)\d\d", re.IGNORECASE)
 
 
-def _require_time(operation: str, deadline: float) -> None:
+def _require_time(args: tuple[str, ...], deadline: float) -> None:
     if time.monotonic() >= deadline:
-        if operation == "fetch":  # A stalled transfer is transport, not policy.
+        if args[0] == "fetch" and f"--depth={_TREE_DEPTH}" in args:
+            # Deepening can exhaust the shared history budget.
             raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
         raise CandidateError("Git time bound exceeded")
 
@@ -369,7 +370,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                 try:
                     while process.poll() is None:
                         _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
-                        _require_time(args[0], deadline)
+                        _require_time(args, deadline)
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             process.wait(timeout=0.02)
                     report_status = merge_conflict_status and args[0] == "merge-tree" and process.returncode in {0, 1}

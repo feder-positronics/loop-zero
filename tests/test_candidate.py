@@ -351,9 +351,11 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation, di
 
 def test_stalled_fetch_is_transient_but_other_time_bounds_are_not():
     with pytest.raises(github.GhUnavailable, match="temporarily unavailable"):
-        candidate._require_time("fetch", 0)
+        candidate._require_time(("fetch", f"--depth={candidate._TREE_DEPTH}"), 0)
     with pytest.raises(CandidateError, match="time bound"):
-        candidate._require_time("merge-tree", 0)
+        candidate._require_time(("fetch", "--deepen=32"), 0)
+    with pytest.raises(CandidateError, match="time bound"):
+        candidate._require_time(("merge-tree",), 0)
 
 
 def test_tree_mismatch_while_main_lands_is_a_race(tree_candidate, monkeypatch):
@@ -362,7 +364,7 @@ def test_tree_mismatch_while_main_lands_is_a_race(tree_candidate, monkeypatch):
         tree_candidate[0](main_after=tree_candidate[3])
 
 
-@pytest.mark.parametrize("bound", ["_TREE_BYTES", "_TREE_OBJECTS", "_TREE_OUTPUT"])
+@pytest.mark.parametrize("bound", ["_TREE_BYTES", "_TREE_OBJECTS", "_TREE_SECONDS", "_TREE_OUTPUT"])
 def test_vanished_parent_fails_closed_at_resource_bounds(tree_candidate, monkeypatch, bound):
     monkeypatch.setattr(candidate, bound, 1 if bound != "_TREE_SECONDS" else 0)
     with pytest.raises(CandidateError, match=r"Missing Mergify parent batches parent:.*bound"):
