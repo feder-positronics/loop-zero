@@ -254,15 +254,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         cfg = config.load(args.config)
-        if not cfg.review_publishers or args.pr <= 0 or not is_sha(args.head):
-            raise LoopZeroError("configure delivery.review_publishers and specify PR/full source SHA")
+        if not cfg.review_publishers:
+            raise LoopZeroError("configure delivery.review_publishers in the trusted workflow.toml")
+        if args.pr <= 0 or not is_sha(args.head):
+            raise LoopZeroError("specify the PR number and the full 40-character source SHA")
         def publish(state: str, description: str) -> None:
             github.commit_status(cfg.repo, args.head, CONTEXT, state, description[:140])
         if args.publish:
             publish("pending", "Refreshing source review evidence")
         result = evaluate(cfg.repo, args.pr, args.head, cfg.base_branch, cfg.review_publishers)
-        if args.publish:
-            publish("success" if result.ready else "failure", "; ".join(result.reasons) or "Reviewed source head")
+        landed = f"PR #{args.pr} is MERGED, not open" in result.reasons  # A landed head needs no verdict.
+        if args.publish and not landed:
+            state = "success" if result.ready else "pending" if result.reasons == (github.MERGEABILITY_PENDING,) else "failure"
+            publish(state, "; ".join(result.reasons) or "Reviewed source head")
     except (LoopZeroError, OSError) as exc:
         print(" | ".join(line.strip() for line in str(exc).splitlines() if line.strip()), file=sys.stderr)
         return 1

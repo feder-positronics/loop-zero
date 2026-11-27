@@ -348,7 +348,8 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     monkeypatch.setattr("loopzero.candidate._retry_clock", lambda: now[0])
     monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda s: (sleeps.append(s), now.__setitem__(0, now[0] + s)))
     mergeability_sleeps = []
-    monkeypatch.setattr(hosted.eligibility, "sleep", mergeability_sleeps.append)
+    monkeypatch.setattr(hosted.eligibility, "sleep",
+                        lambda s: (mergeability_sleeps.append(s), now.__setitem__(0, now[0] + s)))
     published = []
     def publish(*args):
         published.append(args)
@@ -400,7 +401,8 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     states |= {"settled_mergeability": ["pending", "success"], "pending_mergeability": ["pending"]}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
     if case in {"settled_mergeability", "pending_mergeability"}:
-        assert mergeability_sleeps == ([2] if case == "settled_mergeability" else [2, 4, 8])
+        assert mergeability_sleeps[:3] == ([2] if case == "settled_mergeability" else [2, 4, 8])
+        assert (set(sleeps) == {5}) == (case == "pending_mergeability")  # a persistent outage retries for the 90 s window
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":
         assert rest_calls.count("apps/mergify") == 8 and sleeps == [4] * 7 and len(evaluated) == 16
@@ -474,3 +476,9 @@ def test_source_status_limit(publisher, capsys, prior):
     for states in (expected, [*expected, "pending"]):
         check_source(publisher, states, error=github.GhError, match=message)
     assert capsys.readouterr().out == ""
+
+
+def test_source_status_flattens_reasons_and_keeps_later_ones_visible():
+    result = github.Readiness(False, ("src/a\n::notice title=x::forged" + "z" * 200, "has merge conflicts"))
+    state, message = hosted._source_status(result, SimpleNamespace(mergeable=None))
+    assert state == "failure" and "\n" not in message and message.endswith("; has merge conflicts")

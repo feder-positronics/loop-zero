@@ -75,7 +75,7 @@ def _source_status(result: github.Readiness, current: github.PR) -> tuple[str, s
         if github.MISSING_REVIEW_REASON in reasons:
             return "pending", "Awaiting trusted review of current source head"
         return "pending", github.MERGEABILITY_PENDING
-    return "failure", "; ".join(reasons)
+    return "failure", "; ".join(" ".join(reason.split())[:60] for reason in reasons)
 
 
 def _check_candidate_source(cfg: Config, source_number: int, source: dict) -> None:
@@ -110,13 +110,21 @@ def _run(cfg: Config) -> int:
         if candidate:
             def policy(source_number: int, source: dict) -> None:
                 _check_candidate_source(cfg, source_number, source)
-            candidate_mod.attest_candidate(
-                event, base_branch=cfg.base_branch,
-                github_get=lambda path: github.api_get(path.lstrip("/")),
-                mergify_status=lambda owner, repo, branch: mergify.api_get(
-                    f"{owner}/{repo}", f"/merge-queue/status?branch={quote(branch, safe='')}"),
-                source_policy=policy,
-            )
+            window = candidate_mod._retry_clock() + candidate_mod._BATCH_SECONDS
+            while True:  # A short GitHub or Mergify blip must not leave the candidate pending for good.
+                try:
+                    candidate_mod.attest_candidate(
+                        event, base_branch=cfg.base_branch,
+                        github_get=lambda path: github.api_get(path.lstrip("/")),
+                        mergify_status=lambda owner, repo, branch: mergify.api_get(
+                            f"{owner}/{repo}", f"/merge-queue/status?branch={quote(branch, safe='')}"),
+                        source_policy=policy,
+                    )
+                    break
+                except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable):
+                    if candidate_mod._retry_clock() + 5 >= window:
+                        raise
+                    candidate_mod._retry_sleep(5)
         else:
             snapshot = eligibility.source_snapshot(cfg.repo, number, head, github.pr_from_rest(pr))
             result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers,

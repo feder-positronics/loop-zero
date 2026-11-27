@@ -4536,6 +4536,33 @@ def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head,
     assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err and "Not Found\"}" in err
 
 
+@pytest.mark.parametrize("publishers,pr_head,message", [
+    ("", "a" * 40, "configure delivery.review_publishers"), ('review_publishers = ["x"]', "aaaaaaa", "full 40-character source SHA"),
+])
+def test_eligibility_main_names_each_usage_mistake(wt, capsys, publishers, pr_head, message):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f"\n{publishers}\n")
+    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", pr_head]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and message in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("pr_update,state", [({"mergeable": "UNKNOWN"}, "pending"), ({"state": "MERGED"}, None)])
+def test_manual_refresh_leaves_computing_pending_and_landed_unpainted(wt, gh, head, pr_update, state):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    gh.respond_pr_view(pr_json(headRefOid=head, **pr_update))
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "ci-service"}}})
+    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state="APPROVED", verdict="approve")])
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head, "--publish"])
+    states = [json.loads(c["--input"])["state"] for c in gh.calls if "--input" in c]
+    assert states == ["pending"] + ([state] if state else [])
+
+
 def test_merge_material_lets_read_timeouts_propagate(monkeypatch):
     from loopzero import eligibility
     def timeout(*_args, **_kwargs):
