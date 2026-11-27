@@ -219,6 +219,9 @@ def test_recovery_requires_exact_live_publication(
 def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
     replay_gh, wt, gh, fake_bin, monkeypatch, capsys, change,
 ):
+    if change == "login":
+        support.commit_file(wt, "workflow.toml", support.WORKFLOW_BASE + f'review_publishers = ["{LOGIN}", "other-login"]\n', "publishers")
+        git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5, interrupted=True)
     assert run(capsys, "review")[0] == 130
     path = cli._review_file(wt, head, "delta")
