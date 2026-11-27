@@ -17,8 +17,7 @@ and setup.
 - [../integrations/](../integrations/) — optional vendor integration skills.
 - [REWRITE-SPEC.md](REWRITE-SPEC.md) — contributor module map.
 - [design/2026-09-24-delivery-system-architecture.md](design/2026-09-24-delivery-system-architecture.md) —
-  dated consumer evidence and accepted principles; its gaps and measurements
-  describe September 24, not the current backlog.
+  dated consumer evidence and accepted principles.
 - [design/2026-10-07-deterministic-delivery-design-assumptions.md](design/2026-10-07-deterministic-delivery-design-assumptions.md) —
   design rationale, dated reviewer evidence and native compatibility limits.
 - [DELEGATION.md](DELEGATION.md) — handoffs, team roles, liveness, retros,
@@ -34,8 +33,7 @@ and setup.
 - [T3-UPSTREAM.md](T3-UPSTREAM.md) — periodic T3 Code/Orchestrator reading,
   version-aware source verification, ownership and bounded adoption.
 - [design/2026-10-28-t3-orchestration-workflow-adaptations.md](design/2026-10-28-t3-orchestration-workflow-adaptations.md) —
-  dated video/skill/upstream research, cross-model discussion and ranked proposals;
-  only the upstream-reading documentation is commissioned here.
+  dated video/skill/upstream research and its open proposals R3, R6 and R7.
 - [2026-11-25 loop-zero optimization and hardening roadmap](design/2026-11-25-loop-zero-optimization-hardening-roadmap.md) —
   dated audit and trial findings, the rules agreed then, and the Horizon 2–3
   roadmap.

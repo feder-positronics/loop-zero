@@ -4,7 +4,7 @@ Keep loop-zero's use of T3 current without turning upstream release notes into
 delivery policy. T3 owns execution, workspaces, notifications and interaction;
 loop-zero retains its [delivery contract](../core/CONTRACT.md). The dated
 [workflow exploration](design/2026-10-28-t3-orchestration-workflow-adaptations.md)
-records the initial research and proposed adaptations, not shipped features.
+records the initial research; its open proposals are R3, R6 and R7.
 
 ## Owner and cadence
 
