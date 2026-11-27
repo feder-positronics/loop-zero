@@ -749,6 +749,15 @@ def cache_check(git_repo, receipt_path):
     return cache
 
 
+def test_reuse_skipped_before_stage_that_runs(git_repo, bwrap_log, fetched_base, cache_check):
+    keyed = make_config(checks=("echo one", "echo two"), inputs={"echo one": ("*.md",)})
+    both = replace(keyed, inputs={"echo one": ("*.md",), "echo two": ("*.md",)})
+    cache_check(keyed)
+    assert not any(r.reused_from for r in sandbox.run_checks(keyed, git_repo).results)
+    cache_check(both)
+    assert all(r.reused_from for r in sandbox.run_checks(both, git_repo).results)
+
+
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy', 'grant'])
