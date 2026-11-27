@@ -31,7 +31,7 @@ depends_on = ["loopzero", "loopzero._proc", "loopzero.config", "loopzero.types",
 
 [[modules]]
 path = "loopzero.runners"
-depends_on = ["loopzero._proc", "loopzero.config", "loopzero.sandbox", "loopzero.types"]
+depends_on = ["loopzero._proc", "loopzero.config", "loopzero.sandbox", "loopzero.types", "loopzero.worktree"]
 
 [[modules]]
 path = "loopzero.github"
