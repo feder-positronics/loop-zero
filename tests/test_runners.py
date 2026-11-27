@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shlex
+import stat
 import signal
 import subprocess
 import sys
@@ -365,6 +366,20 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
     proof = codex_evidence(merge_reviews(results))
     assert proof["complete"]
     assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
+
+
+@pytest.mark.parametrize("field, invalid", [
+    (stat.ST_MODE, stat.S_IFDIR), (stat.ST_UID, os.getuid() + 1), (stat.ST_NLINK, 2),
+])
+def test_codex_message_file_must_be_regular_owned_and_unlinked(tmp_path, monkeypatch, field, invalid):
+    path = tmp_path / "final-message"
+    path.write_bytes(b"synthetic reviewer output")
+    info = list(path.stat())
+    info[field] = invalid
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runners.os, "fstat", lambda _fd: os.stat_result(info))
+        assert runners._read_codex_file(path) is None
 
 
 @pytest.mark.parametrize("version,failure", [
@@ -1045,6 +1060,12 @@ def test_unknown_family_and_kind(tmp_path: Path) -> None:
         _review("gemini", tmp_path)
     with pytest.raises(ValueError):
         review_with("claude", cwd=tmp_path, head="h", kind="full", diff="", task_text="")
+
+
+def test_review_rejects_a_verdict_outside_the_schema():
+    payload = APPROVE | {"verdict": "unknown"}
+    with pytest.raises(runners.RunnerMalformedOutput, match="review lacks verdict/findings"):
+        runners.parse_review(payload, family="codex", head="a" * 40, kind="primary", raw="synthetic")
 
 
 @pytest.mark.parametrize("finding", [
