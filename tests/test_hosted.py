@@ -252,6 +252,18 @@ def test_merged_source_refresh_publishes_nothing(publisher):
     assert publisher.argv(0)[-1] == "--include"
 
 
+def test_rerun_on_landed_source_restores_verdict_hidden_by_failed_restore(publisher):
+    ctx = {"context": "Loop-zero Eligibility"}
+    old = ctx | {"id": 1, "state": "failure", "description": "Blocking finding"}
+    marker = ctx | {"id": 11, "state": "pending", "description": "Refreshing live source review evidence"}
+    body = json.dumps({"head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"}, "merged": True})
+    publisher.respond(f"api repos/{REPO}/pulls/7", f"HTTP/2.0 200 OK\r\n\r\n{body}")
+    publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [marker, old])
+    publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 12})
+    posted = check_source(publisher, ["failure"])
+    assert posted[0]["description"] == "Blocking finding"
+
+
 @pytest.mark.parametrize("state,readback", [
     ("success", "match"), ("failure", "match"), ("success", "absent"),
     ("success", "publisher"), ("success", "description"), ("success", "state"),
