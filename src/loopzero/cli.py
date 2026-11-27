@@ -269,15 +269,14 @@ def _select_review_round(config: Config, pr: github.PR, head: str, reviews: list
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False, diagnostics: bool = False,
-    mergify_deadline: float | None = None,
+    mergify_deadline: float | None = None, dates: tuple[str, ...] = (),
 ) -> github.Readiness:
     if problem := github.merge_hold(pr.number, pr.labels) or (
         None if diagnostics else _check_report_problem(_load_report(wt), config, head)
     ):
         return github.Readiness(False, (problem,))
-    dates: list[str] = []
-    reviews = (_pr_reviews(config.repo, pr.number, **({"dates": dates} if workflow_wait else {}))
-               if reviews is None else reviews)
+    # GitHub's Date header, not the host clock, ages the review.
+    reviews = _pr_reviews(config.repo, pr.number, dates=(dates := [])) if reviews is None else reviews
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
@@ -865,9 +864,12 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
         raise
     prefix = _repost_prefix(result) if args.repost else review_marker(head, kind, "model")
     _save_review(wt, result, publication_context)
-    token = _refresh_publisher_token(token, publisher)
     with github.pr_lock(config.repo, pr.number):
-        _require_open_review_round(config, pr, head, kind)
+        try:  # a refused token or a GitHub error here leaves the saved review to --repost
+            token = _refresh_publisher_token(token, publisher)
+            _require_open_review_round(config, pr, head, kind)
+        except (github.GhError, _proc.ProcTimeout) as exc:
+            raise CliError(f"{exc} | review saved at {_review_file(wt, head, kind)}; run `loopzero review --repost`") from exc
         try:
             github.post_review(
                 config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
@@ -2005,14 +2007,14 @@ def cmd_status(args: argparse.Namespace) -> int:
         _print_display("pr:       none (commit changes, then open with `loopzero pr` before a long check)")
         return 0
     _print_display(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
-    reviews = _pr_reviews(config.repo, pr.number)
+    reviews = _pr_reviews(config.repo, pr.number, dates=(dates := []))
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
         _print_display(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         _print_display("review:   none on this PR")
-    readiness = _readiness(wt, config, pr, head, reviews, diagnostics=True)
+    readiness = _readiness(wt, config, pr, head, reviews, diagnostics=True, dates=tuple(dates))
     _print_display(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         _print_display(f"  - {reason}")
