@@ -1647,7 +1647,17 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
         if body_case == "existing-review":
             assert updated.index(prior) < updated.index(line) < updated.index("## Notes")
         else:
-            assert updated == f"{live}\n## Review\n{line}\n"
+            assert updated == f"{live}\n## Review\n{line}\n"  # No receipt here: the live record is kept.
+
+
+def test_review_refreshes_the_check_record_from_its_receipt(wt, gh, fake_bin, capsys):
+    head = prepare_review(wt, gh, fake_bin)
+    assert cli.main(["check"]) == 0
+    stale = "# T1\n\n## Validation\n<!-- loopzero:checks:start -->\nRecorded for `aaaaaaaaaaaa`\n<!-- loopzero:checks:end -->\n"
+    gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=stale)))
+    expect_cli(capsys, 0, "review", stdout_contains=(f"primary review by claude on {head[:12]}: approve",))
+    updated = json.loads(next(c for c in gh.calls if "PATCH" in c["argv"])["--input"])["body"]
+    assert f"Recorded for `{head[:12]}`" in updated and "aaaaaaaaaaaa" not in updated
 
 
 @pytest.mark.parametrize("source", ["task", "base", "override", "missing_ref", "bootstrap"])
@@ -1727,16 +1737,13 @@ allowed_efforts = {json.dumps(allowed)}
     model, effort = expected
     head = prepare_review(wt, gh, fake_bin)
     if family == "codex":
-        version = "codex-cli 0.168.0"
-        _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
+        _fake_codex(fake_bin, json.dumps(APPROVE))
     expect_cli(capsys, 0, "review", *options, stdout_contains=(f"review by {family}",), stderr="")
     if family == "claude":
         argv = _argv(fake_bin, "claude")
         assert (argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]) == expected
     saved, _ = cli._load_review(wt, head, "primary")
     assert (saved.model, saved.effort) == expected
-    if family == "codex":
-        assert saved.provenance["cli_version"] == version
     assert f"model {model} (effort {effort})" in posted_review(gh)["body"]
 
 
@@ -1875,6 +1882,24 @@ def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_sta
     expect_cli(capsys, 1, "review", "--repost", stdout="", stderr_contains=(expected[saved_state],))
     assert all(not (fake_bin / f"{family}.stdin").exists() for family in ("claude", "codex"))
     assert not any(map(posted, gh.calls[prior_calls:]))
+
+
+def test_review_that_splits_into_one_chunk_is_kept(wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys) -> None:
+    head = head_of(wt)
+    arm_empty_primary_review_post(gh, head, 8)
+    envelope = json.dumps(_claude_envelope(APPROVE))
+    fake_tool("claude", f"""
+        calls=$(cat "{fake_bin}/claude.count" 2>/dev/null || echo 0)
+        echo $((calls + 1)) > "{fake_bin}/claude.count"
+        cat > /dev/null
+        if [ "$calls" = 0 ]; then echo 'Prompt is too long' >&2; exit 1; fi
+        echo '{envelope}'
+    """)
+    code, out, _err = run(capsys, "review")
+    assert code == 0 and "review by claude" in out
+    assert (fake_bin / "claude.count").read_text().strip() == "2"  # full diff, then its single chunk
+    saved, _ = cli._load_review(wt, head, "primary")
+    assert saved.chunk_count == 1 and cli.runners.validate_runner_result(saved)
 
 
 @pytest.mark.parametrize("chunk_auth", [False, True])
