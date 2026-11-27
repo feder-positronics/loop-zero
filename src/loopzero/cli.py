@@ -266,21 +266,25 @@ def _select_review_round(config: Config, pr: github.PR, head: str, reviews: list
     return _decide_kind(markers, head)
 
 
+def _publisher_problem(config: Config) -> str | None:
+    if config.review_publishers:
+        return None
+    source = f"origin/{config.base_branch}:workflow.toml" if config.trusted_base_revision else "--config workflow"
+    return f'{source}: delivery.review_publishers must list the intended publisher logins; add `review_publishers = ["<login>"]` under `[delivery]`'
+
+
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False, diagnostics: bool = False,
     mergify_deadline: float | None = None, dates: tuple[str, ...] = (),
 ) -> github.Readiness:
-    if problem := github.merge_hold(pr.number, pr.labels) or (
+    if problem := github.merge_hold(pr.number, pr.labels) or _publisher_problem(config) or (
         None if diagnostics else _check_report_problem(_load_report(wt), config, head)
     ):
         return github.Readiness(False, (problem,))
     # GitHub's Date header, not the host clock, ages the review.
     reviews = _pr_reviews(config.repo, pr.number, dates=(dates := [])) if reviews is None else reviews
     publishers = config.review_publishers
-    if not publishers:
-        source = f"origin/{config.base_branch}:workflow.toml" if config.trusted_base_revision else "--config workflow"
-        return github.Readiness(False, (f'{source}: delivery.review_publishers must list the intended publisher logins; add `review_publishers = ["<login>"]` under `[delivery]`',))
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
     )
