@@ -4393,6 +4393,25 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
 
 
+def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head, capsys):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    gh.fail(f"api repos/{REPO}/pulls/7", "HTTP 404: Not Found\n{\"message\": \"Not Found\"}")
+    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err and "Not Found\"}" in err
+
+
+def test_merge_material_lets_read_timeouts_propagate(monkeypatch):
+    from loopzero import eligibility
+    def timeout(*_args, **_kwargs):
+        raise github.ProcTimeout("read timed out")
+    monkeypatch.setattr(github, "api_get", timeout)
+    with pytest.raises(github.ProcTimeout):
+        eligibility.base_merge_material(REPO, 7, "a" * 40, "b" * 40, "main", clean=True)
+
+
 def test_eligibility_rejects_non_object_review_row(gh, head):
     from loopzero import eligibility
     gh.respond_pr_view(pr_json(headRefOid=head))
