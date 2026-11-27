@@ -220,7 +220,7 @@ def _claude_payload(envelope: dict) -> object:
     return _extract_json_object(str(envelope.get("result", ""))) if payload is None else payload
 
 
-def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:  # noqa: C901 - one check per review JSON field
+def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:
     """Validate a decoded review object against the findings schema."""
     diagnostic = _tail(raw if excerpt is None else excerpt)
     if not isinstance(payload, dict):
@@ -246,8 +246,7 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
         if not isinstance(item["title"], str) or not isinstance(item["body"], str):
             raise RunnerMalformedOutput(f"{family}: finding title/body must be strings", diagnostic)
         findings.append(Finding(**item))
-    if any(f.severity in BLOCKING for f in findings):
-        verdict = "request_changes"
+    verdict = "request_changes" if any(f.severity in BLOCKING for f in findings) else "approve"
     return ReviewResult(family=family, head=head, kind=kind, verdict=verdict,
                         findings=tuple(findings), raw=raw)
 
