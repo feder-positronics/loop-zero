@@ -4674,7 +4674,7 @@ def test_manual_eligibility_refresh_uses_live_pr_and_publisher(
 ])
 def test_eligibility_main_reports_usage_and_github_errors(wt, gh, capsys, publishers, pr_head, message):
     cfg = wt / ".loopzero" / "hosted.toml"
-    cfg.write_text(WORKFLOW + f"\n{publishers}\n")
+    cfg.write_text(WORKFLOW_BASE + f"\n{publishers}\n")
     if message == "HTTP 404":
         gh.fail(f"api repos/{REPO}/pulls/7", 'HTTP 404: Not Found\n{"message": "Not Found"}')
     assert cli.eligibility.main(["--config", str(cfg), "--pr", "7", "--head", pr_head]) == 1
