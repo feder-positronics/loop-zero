@@ -5434,16 +5434,10 @@ def test_ready_rejects_check_interrupted_after_a_failed_stage(wt, head, gh, caps
 @pytest.mark.parametrize("override", [False, True])
 def test_delivery_requires_explicit_review_publishers(wt, gh, capsys, tmp_path, command, publishers, override):
     publish_workflow(wt, WORKFLOW_BASE + publishers)
-    options = ()
+    options, path = (), None
     if override:
         (path := tmp_path / "override.toml").write_text(WORKFLOW_BASE + publishers)
         options = ("--config", str(path))
     code, out, err = run(capsys, *options, command)
     assert code == 1 and not gh.calls and "delivery.review_publishers must list the intended publisher logins" in out + err
-    assert ("--config workflow" if override else "origin/main:workflow.toml") in out + err
-
-
-def test_readiness_blocks_without_review_publishers(wt):
-    config = cli.config_mod.load(wt / "workflow.toml")
-    assert cli._publisher_problem(config) is None
-    assert "--config workflow: delivery.review_publishers must list" in cli._publisher_problem(replace(config, review_publishers=()))
+    assert (str(path) if override else "origin/main:workflow.toml") in out + err

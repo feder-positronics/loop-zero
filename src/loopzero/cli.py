@@ -125,10 +125,13 @@ def _load_config(
     else:
         config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
                                          require_ci=require_ci, read_timeout=github.read_timeout)
-    if require_ci and (problem := _publisher_problem(config)):
-        raise config_mod.ConfigError(problem)
-    if args.command == "check":
-        print(f"checks pinned to origin/{config.base_branch}@{config.trusted_base_revision}")
+        if args.command == "check":
+            print(f"checks pinned to origin/{config.base_branch}@{config.trusted_base_revision}")
+    if require_ci and not config.review_publishers:
+        raise config_mod.ConfigError(
+            f'{args.config or f"origin/{config.base_branch}:workflow.toml"}: delivery.review_publishers must list the '
+            'intended publisher logins; add `review_publishers = ["<login>"]` under `[delivery]`'
+        )
     return config
 
 
@@ -269,19 +272,12 @@ def _select_review_round(config: Config, pr: github.PR, head: str, reviews: list
     return _decide_kind(markers, head)
 
 
-def _publisher_problem(config: Config) -> str | None:
-    if config.review_publishers:
-        return None
-    source = f"origin/{config.base_branch}:workflow.toml" if config.trusted_base_revision else "--config workflow"
-    return f'{source}: delivery.review_publishers must list the intended publisher logins; add `review_publishers = ["<login>"]` under `[delivery]`'
-
-
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False, diagnostics: bool = False,
     mergify_deadline: float | None = None, dates: tuple[str, ...] = (),
 ) -> github.Readiness:
-    if problem := github.merge_hold(pr.number, pr.labels) or _publisher_problem(config) or (
+    if problem := github.merge_hold(pr.number, pr.labels) or (
         None if diagnostics else _check_report_problem(_load_report(wt), config, head)
     ):
         return github.Readiness(False, (problem,))
