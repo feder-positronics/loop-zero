@@ -1129,19 +1129,14 @@ def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, .
             "-f", f"ref={base}", "-f", f"inputs[pr]={number}")
 
 
-def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bool:
+def _eligibility_dispatched(repo: str, base: str, since: str) -> bool:
     query = f"event=workflow_dispatch&branch={quote(base, safe='')}&created={quote('>=' + since, safe='')}&per_page=100"
     data = api_get(f"repos/{repo}/actions/workflows/eligibility.yml/runs?{query}")
     runs = data.get("workflow_runs") if isinstance(data, dict) else None
     complete = isinstance(runs, list) and data.get("total_count") == len(runs)
-    titles = [run.get("display_title") if isinstance(run, dict) else 0 for run in runs] if complete else []
-    # Consumer workflows may not set a run title; a title naming another PR excludes a run.
-    if any((isinstance(t, str) and int((re.findall(r"(?i)\b(?:pr|pull request) #([0-9]+)", t) or [number])[0]) == number) or t is None
-           for t in titles):
-        return True
-    if not complete or not all(t is None or isinstance(t, str) for t in titles):
+    if not complete or not all(isinstance(run, dict) for run in runs):
         raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
-    return False
+    return bool(runs)  # Consumer workflows set no run title; the dispatch window identifies the run.
 
 
 def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...]) -> None:
@@ -1159,7 +1154,7 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
                 pr.number, pr.head_sha, pr.base_ref,
             ):
                 raise GhError(("refresh Loop-zero Eligibility",), "the PR or head changed after resolution") from exc
-            if _eligibility_dispatched(repo, pr.number, base, since):
+            if _eligibility_dispatched(repo, base, since):
                 return
             if open_blocking_findings(repo, pr.number, None, publishers):
                 raise GhError(("refresh Loop-zero Eligibility",), "blocking findings appeared after resolution") from exc

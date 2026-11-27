@@ -4155,19 +4155,17 @@ REPLY_ACCEPTED = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id":
 THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
 
 
-@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "consumer", "other", "numbered", "malformed", "retry", "unknown"])
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "malformed", "retry", "unknown"])
 def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, monkeypatch, outcome) -> None:
     sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
     finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
     listing, backoffs = threads_json({**finding_pr, "path": "src/Łódź.py"}), []
     gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
                listing if outcome == "remaining" else threads_json())
-    transient = outcome in {"applied", "consumer", "other", "numbered", "malformed", "retry", "unknown"}
+    transient = outcome in {"applied", "malformed", "retry", "unknown"}
     gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": "HTTP 503" if transient else "HTTP 403"} if transient or outcome == "denied" else "", "")
     monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
-    titles = {"applied": "Refresh eligibility for PR #7", "consumer": "Eligibility", "numbered": "Eligibility for pull request #7 (run #42)", "malformed": {"x": 1}}
-    runs = [] if outcome in {"retry", "other"} else [{"display_title": titles.get(outcome, "Refresh eligibility for PR #8")}]
-    runs = [{"display_title": "Eligibility for pr #8 (run #7)"}] if outcome == "other" else runs
+    runs = [] if outcome == "retry" else [None] if outcome == "malformed" else [{"display_title": "any title"}]
     monkeypatch.setattr(github.time, "time", lambda: 1795640554)
     endpoint = ELIGIBILITY_DISPATCH.removesuffix("/dispatches")
     gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs) + (outcome == "unknown")})
@@ -4181,7 +4179,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: Fak
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
     dispatches = [c["argv"] for c in gh.calls if ELIGIBILITY_DISPATCH in c["argv"]]
-    assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "retry": 2, "other": 2}.get(outcome, 1)
+    assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "retry": 2}.get(outcome, 1)
     assert backoffs == ([5] if transient else [])
     if outcome in {"denied", "unknown", "malformed"}:
         assert code == 1 and "is resolved." in err and ("HTTP 403" if outcome == "denied" else "identify all recent refresh runs") in err
