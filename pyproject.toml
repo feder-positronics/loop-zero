@@ -18,11 +18,11 @@ build-backend = "hatchling.build"
 packages = ["src/loopzero"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6", "tach>=0.35.3,<0.36"]
+dev = ["pytest>=8", "pytest-xdist>=3", "ruff>=0.6", "tach>=0.35.3,<0.36"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -p no:tach"
+addopts = "-q -p no:tach -n auto"
 
 [tool.ruff]
 line-length = 100
