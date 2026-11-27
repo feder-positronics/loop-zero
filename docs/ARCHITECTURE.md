@@ -229,7 +229,7 @@ commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
 that header, a newline and the Git patch, including carriage returns and the
 final newline. UTF-8 patches are supplied verbatim. For other patches, the
 prompt escapes invalid bytes and literal backslashes so the changes stay
-visible. The native inspection digest always binds the original Git bytes. Git forces
+visible. The evidence diff digest always binds the original Git bytes. Git forces
 text hunks for every file (overriding `-diff`, `binary` and NUL detection) and
 runs no external diff command or text conversion, so changed lines stay visible.
 Chunked review summarizes only files whose Git header reports a deletion.
