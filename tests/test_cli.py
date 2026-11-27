@@ -5421,8 +5421,14 @@ def test_ready_rejects_check_interrupted_after_a_failed_stage(wt, head, gh, caps
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
 @pytest.mark.parametrize("publishers", ["", "review_publishers = []\n"])
-def test_delivery_requires_explicit_review_publishers(wt, gh, capsys, command, publishers):
+@pytest.mark.parametrize("override", [False, True])
+def test_delivery_requires_explicit_review_publishers(wt, gh, capsys, head, tmp_path, command, publishers, override):
     publish_workflow(wt, WORKFLOW_BASE + publishers)
-    code, _out, err = run(capsys, command)
-    assert code == 1 and not gh.calls
-    assert "origin/main:workflow.toml: delivery.review_publishers must list the intended publisher logins" in err
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False)
+    options = ()
+    if override:
+        (path := tmp_path / "override.toml").write_text(WORKFLOW_BASE + publishers)
+        options = ("--config", str(path))
+    code, out, err = run(capsys, *options, command)
+    assert code == 1 and "delivery.review_publishers must list the intended publisher logins" in out + err
+    assert ("--config workflow" if override else "origin/main:workflow.toml") in out + err
