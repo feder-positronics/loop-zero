@@ -402,7 +402,8 @@ def test_claude_approve(
     assert argv[argv.index("--effort") + 1] == "medium"
     assert "--no-session-persistence" in argv
     assert argv[argv.index("--setting-sources") + 1] == ""
-    assert "--strict-mcp-config" in argv
+    assert "--strict-mcp-config" in argv and "--restricted" in argv
+    assert argv[argv.index("--settings") + 1] == '{"includeGitInstructions":false}'
     assert argv[argv.index("--disallowedTools") + 1] == (
         "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch"
     )
