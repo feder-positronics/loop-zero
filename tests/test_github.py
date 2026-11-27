@@ -1531,3 +1531,19 @@ def test_login_is_cached_under_the_credential_that_answered(monkeypatch, tmp_pat
     github._logins.clear()
     github.login(), github.login()
     assert github._logins == {}
+
+
+def test_environment_token_is_cached_but_stored_account_is_not(monkeypatch):
+    sent = []
+    def run(argv, **_):
+        sent.append(argv)
+        if "graphql" in argv:
+            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"a"}}}', "stderr": ""})
+        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    monkeypatch.setenv("GH_TOKEN", "env-a")
+    assert github.login() == github.login() == "a"
+    github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
+    assert len(sent) == 3 and "If-None-Match: \"v1\"" in sent[-1]
+    monkeypatch.setenv("GH_TOKEN", "env-b")  # a different account does not reuse the first one's answers
+    assert github.login() == "a" and len(sent) == 4

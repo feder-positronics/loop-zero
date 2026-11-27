@@ -363,9 +363,15 @@ _ETAG_CACHE_BYTES = 4_000_000
 _etag_cache: dict[tuple[tuple[str, ...], int], tuple[str, str, int]] = {}
 
 
+def _cache_credential(selected: str) -> str:
+    """The credential a cache is filed under: the one passed, else a GH_TOKEN/GITHUB_TOKEN gh will use.
+    Empty for gh's stored account, which can change mid-run and is never cached."""
+    return selected or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+
+
 def _etag_key(args: tuple[str, ...], selected: str, enabled: bool) -> tuple[tuple[str, ...], int] | None:
-    """Only an explicit or app credential is cached: an empty one is whatever gh's ambient account is now."""
-    return (args, hash(selected)) if enabled and selected else None
+    credential = _cache_credential(selected)
+    return (args, hash(credential)) if enabled and credential else None
 
 
 def _with_validator(argv: tuple[str, ...], cached: tuple[str, str, int] | None) -> list[str]:
@@ -600,17 +606,17 @@ _logins: dict[str, str] = {}
 def login(token: str | None = None) -> str:
     """Login of the identity used for GitHub reads and review publishing.
 
-    Read once per explicit or app credential, filed under the credential the answering attempt
+    Read once per explicit, app or environment credential, filed under the credential the answering attempt
     used; an ambient gh account is read every time."""
     selected = _select_token(token, _read_scope.get(), True)
-    if selected and (name := _logins.get(selected)):
+    if name := _logins.get(_cache_credential(selected)):
         return name
     used: list[str] = []
     data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }", token=token, used=used)
     content = data.get("data") if isinstance(data, dict) else None
     if isinstance(content, dict) and isinstance(viewer := content.get("viewer"), dict) and (name := viewer.get("login")):
-        if used and used[0]:  # the credential of the attempt that answered
-            _logins[used[0]] = str(name)
+        if used and (credential := _cache_credential(used[0])):  # of the attempt that answered
+            _logins[credential] = str(name)
         return str(name)
     raise GhError(("gh", "api", "graphql"), "no login in viewer response")
 
