@@ -3650,7 +3650,7 @@ def test_merge_waits_for_pending_checks(wt, gh, capsys, monkeypatch, queue_reque
     assert not wt.exists()
 
 
-def test_merge_wait_polls_read_the_publisher_login_once(wt, gh, capsys, monkeypatch, queue_requests, app_token_helper):
+def test_merge_wait_polls_skip_the_publisher_login_lookup(wt, gh, capsys, monkeypatch, queue_requests, app_token_helper):
     app_token_helper()
     head = head_of(wt)
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
@@ -3662,7 +3662,7 @@ def test_merge_wait_polls_read_the_publisher_login_once(wt, gh, capsys, monkeypa
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
     expect_cli(capsys, 0, "merge", "--wait", stderr="", stdout_endswith="c" * 40 + "\n")
     viewer = [c for c in gh.calls if any("viewer { login }" in arg for arg in c["argv"])]
-    assert len(viewer) == 1  # one per run, not one per poll (was 3)
+    assert not viewer  # publishers come from the trusted workflow, not the active login
 
 
 @pytest.mark.parametrize("command,slow", [("merge", False), ("merge", True), ("ready", True)])
