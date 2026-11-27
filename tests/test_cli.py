@@ -2962,10 +2962,7 @@ def test_ready_wait_verdict(wt, gh, capsys, monkeypatch, head, wait, elapsed, co
 
     (wt / "-retry config.toml").write_bytes((wt / "workflow.toml").read_bytes())
     out, _ = expect_cli(capsys, expected, "--config", "./-retry config.toml", "ready", f"--wait={wait}", stderr="")
-    assert out.endswith({
-        0: f"ready: {URL}\n", 1: f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n",
-        3: f"timed out waiting for required checks on {head[:12]}. Run `loopzero '--config=-retry config.toml' ready --wait` to resume on this head.\n",
-    }[expected])
+    assert out.endswith(ready_wait_tail(head, expected, "loopzero '--config=-retry config.toml'"))
 
 
 def arm_replacement_workflow(gh, head, conclusion):
@@ -2980,12 +2977,12 @@ def arm_replacement_workflow(gh, head, conclusion):
     ]})
 
 
-def ready_wait_tail(head, status):
+def ready_wait_tail(head, status, command="loopzero"):
     if status == 0:
         return f"ready: {URL}\n"
     if status == 1:
         return f"not ready: required check 'checks' is failure{FAILED_CHECK_HINT}\n"
-    return f"timed out waiting for required checks on {head[:12]}. Run `loopzero ready --wait` to resume on this head.\n"
+    return f"timed out waiting for required checks on {head[:12]}. Run `{command} ready --wait` to resume on this head.\n"
 
 
 @pytest.mark.parametrize("replacement,expected", [("success", 0), ("failure", 1), ("pending", 3)])

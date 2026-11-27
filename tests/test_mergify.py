@@ -61,11 +61,17 @@ def request_log(monkeypatch):
     return install
 
 
-@pytest.mark.parametrize("status", [None, 404, 403])
-def test_membership_uses_bearer_and_maps_only_404_to_absent(request_log, status):
-    seen = request_log({"number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 2}, status=status)
-    if status == 403:
-        with pytest.raises(mergify.MergifyError, match="HTTP 403"):
+@pytest.mark.parametrize("status,fields,diagnostic", [
+    (None, {}, None), (404, {}, None), (403, {}, "HTTP 403"),
+    (None, {"number": "7"}, ""), (None, {"position": None}, ""),
+    (None, {"queued_at": None}, ""), (None, {"number": 8}, ""),
+    (None, {"queue_rule_name": "other"}, "PR #7 is in Mergify queue 'other', expected 'main'"),
+])
+def test_membership_validates_response_and_sends_bearer(request_log, status, fields, diagnostic):
+    payload = {"number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 2, **fields}
+    seen = request_log(payload, status=status)
+    if diagnostic is not None:
+        with pytest.raises(mergify.MergifyError, match=diagnostic or None):
             mergify.membership("acme/widgets", 7, "main")
         return
     assert mergify.membership("acme/widgets", 7, "main") == (None if status == 404 else mergify.Membership())
@@ -220,24 +226,7 @@ def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnost
         mergify._credential(key)
 
 
-@pytest.mark.parametrize("field,value", [
-    ("number", "7"), ("position", None), ("queued_at", None), ("number", 8),
-])
-def test_malformed_membership_never_confirms(request_log, field, value):
-    request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "main", field: value})
-    with pytest.raises(mergify.MergifyError):
-        mergify.membership("acme/widgets", 7, "main")
-
-
-def test_membership_names_a_different_queue(request_log):
-    request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "other"})
-    with pytest.raises(mergify.MergifyError, match="PR #7 is in Mergify queue 'other', expected 'main'"):
-        mergify.membership("acme/widgets", 7, "main")
-
-
 def test_redirect_is_refused_before_credentials_can_leave_origin(monkeypatch):
-    with pytest.raises(mergify.MergifyError, match="redirect"):
-        mergify._NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid/")
     for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
         monkeypatch.delenv(name, raising=False)
     followed = []
