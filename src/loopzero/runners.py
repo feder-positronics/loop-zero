@@ -108,18 +108,16 @@ def _review_policy(kind: str, *, split: bool) -> str:
     """Fixed native instructions; only the validated review scope varies."""
     if kind not in ("primary", "delta"):
         raise ValueError(f"unknown review kind {kind!r}; expected 'primary' or 'delta'")
+    scope = {
+        "primary": "This is the primary review of the whole change.",
+        "delta": ("This is a delta review: only review the diff in the material message, which covers "
+                  "the commits since the previous review."),
+    }[kind]
     if split:
         scope = (
             f"This is one chunk of the {kind} review. The fragment field gives its position. "
             "Report defects in this chunk only, and do not judge whether the whole change is "
             "complete or flag work missing from this chunk."
-        )
-    elif kind == "primary":
-        scope = "This is the primary review of the whole change."
-    else:
-        scope = (
-            "This is a delta review: only review the diff in the material message, which covers "
-            "the commits since the previous review."
         )
     return " ".join((
         "You are an independent code reviewer. Read only: do not edit files.",
@@ -159,8 +157,7 @@ def build_prompt(*, kind: str, head: str, task_text: str, diff: str,
                                    "diff_utf8_bytes": len(diff.encode("utf-8"))}
     if chunk is not None:
         material["fragment"] = f"chunk {chunk[0]} of {chunk[1]}"
-    header = json.dumps(material, ensure_ascii=False)
-    return header + "\n" + diff
+    return json.dumps(material, ensure_ascii=False) + "\n" + diff
 
 
 def _tail(text: str) -> str:
@@ -177,10 +174,6 @@ def _auth_failure(family: str, diagnostic: str) -> RunnerAuthFailed:
     return RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(diagnostic)}")
 
 
-def _looks_like_auth_failure(text: str) -> bool:
-    return _AUTH_FAILURE.search(text) is not None
-
-
 def _claude_envelope_auth_failure(envelope: object) -> bool:
     return isinstance(envelope, dict) and (
         envelope.get("api_error_status") in (401, 403)
@@ -188,10 +181,6 @@ def _claude_envelope_auth_failure(envelope: object) -> bool:
             and re.search(r"authenticate|OAuth|expired|401", str(envelope.get("result", "")),
                           re.IGNORECASE) is not None)
     )
-
-
-def _looks_too_long(text: str) -> bool:
-    return _TOO_LONG.search(text) is not None
 
 
 def _subscription_exhausted(text: str, envelope: object = None) -> bool:
@@ -273,23 +262,21 @@ def _run(
         combined = f"{done.stdout}\n{done.stderr}"
         envelope = None
         if family == "claude":
-            with contextlib.suppress(json.JSONDecodeError, ValueError):
+            with contextlib.suppress(ValueError):
                 envelope = _extract_json_object(done.stdout)
         diagnostic = combined if family == "claude" else "\n".join(
             [done.stderr, *(json.dumps(event, ensure_ascii=False) for event in _json_lines(done.stdout)
                             if event.get("type") in ("error", "turn.failed")
                             or (event.get("type") == "item.completed" and isinstance(event.get("item"), dict)
                                 and event["item"].get("type") == "error"))])
-        if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(diagnostic):
+        if _claude_envelope_auth_failure(envelope) or _AUTH_FAILURE.search(diagnostic):
             raise _auth_failure(family, diagnostic)
         if _subscription_exhausted(diagnostic, envelope):
             raise RunnerUsageLimit(f"{family}: usage limit reached", _tail(diagnostic))
-        if _looks_too_long(diagnostic):
+        if _TOO_LONG.search(diagnostic):
             raise RunnerPromptTooLong(f"{family}: prompt is too long", _tail(diagnostic))
         raise RunnerBadOutput(f"{family}: exited {done.exit_code}", _tail(combined))
     return done
-
-
 
 
 def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Config:
@@ -344,10 +331,7 @@ def _require_review_sandbox() -> None:
 
 
 def _sandbox_prefix(
-    family: str,
-    cwd: Path,
-    home: Path,
-    ro_paths: tuple[str, ...],
+    family: str, cwd: Path, home: Path, ro_paths: tuple[str, ...],
     auth_binds: tuple[tuple[Path, Path], ...],
 ) -> tuple[list[str], Config, Path]:
     binary = _review_binary(family)
@@ -617,11 +601,10 @@ def _hex(value, length):
 
 def _valid_codex_evidence(value):  # noqa: C901 - one check per evidence field
     """Strict closed schema, including exact context/order/offset bounds; no coercion."""
-    fields = {
+    if not isinstance(value, dict) or set(value) != {
         "version", "family", "repo", "pr", "head", "kind", "publisher", "receipt",
         "raw_sha256", "raw_bytes", "complete", "chunk_count", "calls",
-    }
-    if not isinstance(value, dict) or set(value) != fields:
+    }:
         return False
     if (
         type(value["version"]) is not int or value["version"] != 1 or value["family"] != "codex"
@@ -888,9 +871,7 @@ def _codex_provenance(
     usage = usage or ({"total_tokens": int(tokens_match.group(1).replace(",", ""))}
                       if tokens_match else None)
     if not session_id or not isinstance(usage, dict):
-        raise RunnerBadOutput(
-            "codex: execution output lacks session/token provenance", _tail(stdout + stderr)
-        )
+        raise RunnerBadOutput("codex: execution output lacks session/token provenance", _tail(stdout + stderr))
     clean_stderr = re.sub(r"\x1b\[[0-9;]*m", "", stderr)
     banners = {"model": _CODEX_REPORTED_MODEL_RE.search(clean_stderr),
                "effort": _CODEX_EFFORT_RE.search(clean_stderr)}
@@ -935,7 +916,7 @@ def _review_claude(
     raw = done.stdout
     try:
         envelope = _extract_json_object(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
+    except ValueError as exc:
         raise RunnerMalformedOutput("claude: stdout is not JSON", _tail(raw)) from exc
     if not isinstance(envelope, dict):
         raise RunnerMalformedOutput("claude: result envelope is not an object", _tail(raw))
@@ -945,14 +926,14 @@ def _review_claude(
         raise RunnerUsageLimit("claude: usage limit reached", _tail(raw))
     if envelope.get("is_error") or envelope.get("subtype", "success") != "success":
         text = str(envelope.get("result", ""))
-        if _looks_like_auth_failure(text):
+        if _AUTH_FAILURE.search(text):
             raise _auth_failure("claude", text)
-        if _looks_too_long(text) or _looks_too_long(raw):
+        if _TOO_LONG.search(text) or _TOO_LONG.search(raw):
             raise RunnerPromptTooLong("claude: prompt is too long", _tail(raw))
         raise RunnerBadOutput(_tail(f"claude: {envelope.get('subtype', 'error')}"), _tail(raw))
     try:
         payload = _claude_payload(envelope)
-    except (json.JSONDecodeError, ValueError) as exc:
+    except ValueError as exc:
         raise RunnerMalformedOutput("claude: result text is not JSON", _tail(str(envelope.get("result", "")))) from exc
     usage = envelope.get("modelUsage")
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
@@ -1055,18 +1036,14 @@ def _review_codex(
     return replace(
         parse_review(payload, family="codex", head=head, kind=kind, raw=raw, excerpt=message),
         model=model or (banner_model.group(1) if banner_model else None), effort=effort,
-        duration_s=done.duration_s,
-        provenance=provenance,
+        duration_s=done.duration_s, provenance=provenance,
     )
 
 
 def review_with(
-    family: str,
-    *, cwd: Path, head: str, kind: str, diff: str, task_text: str,
-    reviewer_ro_paths: tuple[str, ...] = (),
-    timeout: int = 900,
-    model: str | None = None,
-    effort: str | None = None,
+    family: str, *, cwd: Path, head: str, kind: str, diff: str, task_text: str,
+    reviewer_ro_paths: tuple[str, ...] = (), timeout: int = 900,
+    model: str | None = None, effort: str | None = None,
     chunk: tuple[int, int] | None = None,
     review_context: dict | None = None,
 ) -> ReviewResult:
@@ -1113,15 +1090,13 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
         "requested_settings": [call["requested"] for call in settings],
         "configured_settings": [call["configured"] for call in settings],
     }
+    usage_key = "usage" if first.family == "claude" else "token_usage"
+    provenance[usage_key] = [result.provenance[usage_key] for result in results]
     if first.family == "claude":
-        provenance["usage"] = [result.provenance["usage"] for result in results]
         for key in ("total_cost_usd", "duration_api_ms"):
             provenance[key] = sum(float(result.provenance[key]) for result in results)
-    else:
-        provenance["token_usage"] = [result.provenance["token_usage"] for result in results]
     return replace(
-        first, fallback="", verdict=verdict, findings=findings,
-        raw=json.dumps(envelopes, separators=(",", ":")),
+        first, fallback="", verdict=verdict, findings=findings, raw=json.dumps(envelopes, separators=(",", ":")),
         model=", ".join(dict.fromkeys(r.model for r in results if r.model)) or None,
         effort=", ".join(dict.fromkeys(r.effort for r in results if r.effort)) or None,
         duration_s=sum(r.duration_s for r in results if r.duration_s is not None),
