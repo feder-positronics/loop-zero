@@ -1151,13 +1151,16 @@ def _commit(repo: Path, message: str) -> str:
         ("Co-Authored-By: OpenAI Assistant <bot@example.com>", "codex"),
         ("Co-Authored-By: Jane Doe <jane@example.com>", None),
         ("", None),
+        ("Co-Authored-By: Claude <noreply@anthropic.com>\n\nArchitecture-Review: unchanged; x", "claude"),
+        ("Co-Authored-By: Claude <noreply@anthropic.com>\nprose after the writer line", "claude"),
+        ("Co-Authored-By: Claude and Codex <pair@example.com>", "claude,codex"),
     ],
 )
 def test_author_families(git_repo: Path, trailer: str, expected: str | None) -> None:
     base = git(git_repo, "rev-parse", "HEAD").strip()
     head = _commit(git_repo, f"feat: x\n\n{trailer}" if trailer else "feat: x")
     for revision in (head, "HEAD"):
-        assert author_families(git_repo, revision, base) == ({expected} if expected else set())
+        assert author_families(git_repo, revision, base) == (set(expected.split(",")) if expected else set())
 
 
 def test_author_families_bad_ref(git_repo: Path) -> None:
