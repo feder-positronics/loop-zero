@@ -23,7 +23,8 @@ commands = ["uv run --group dev ruff check .", "uv run --group dev pytest -q"]
 scratch = [".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache"]
 
 # Environment variables set inside the sandbox. Entries win over sandbox
-# defaults and host variables; PATH and HOME cannot be overridden.
+# defaults and host variables; PATH and HOME cannot be overridden. Replace
+# every /home/<you>/ example with a path on your delivery host.
 env = { UV_CACHE_DIR = "/home/<you>/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/<you>/.local/share/uv/python" }
 
 # Host paths mounted writable. A shared tool cache must be listed here or the
@@ -39,7 +40,7 @@ required_ci = ["checks"]
 
 # Host paths mounted read-only into the sandbox. The sandbox does not expose
 # /home, so any toolchain under your home directory (uv, cargo, nvm, ...) must
-# be listed. /, /run, /var/run, /proc, /dev, /sys and /root are refused.
+# be listed. /, /home, /run, /var/run, /proc, /dev, /sys and /root are refused.
 ro_paths = ["/home/<you>/.local/bin", "/home/<you>/.local/share/uv"]
 
 # Allow network inside the sandbox. Needed for the first check in a fresh

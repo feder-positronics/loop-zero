@@ -265,6 +265,24 @@ def test_publication_recovery_ignores_markers_quoted_on_other_commits(wt: Path, 
     assert cli._confirm_review(wt, config, pr, result, LOGIN, [other]) is False
 
 
+@pytest.mark.parametrize("changed, publisher", [
+    ({"headRefOid": "b" * 40}, LOGIN),
+    ({"state": "CLOSED"}, LOGIN),
+    ({"baseRefName": "release"}, LOGIN),
+    ({}, "untrusted-publisher"),
+])
+def test_publication_recovery_rechecks_pr_and_publisher(wt, gh, head, changed, publisher):
+    config = replace(cli.config_mod.load(wt / "workflow.toml"), review_publishers=(LOGIN,))
+    result = ReviewResult("claude", head, "primary", "approve", (), "raw", provenance={"session_ids": ["session"]})
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    gh.respond_pr_view(pr_json(**({"headRefOid": head} | changed)))
+    reviews = [] if changed else [rev(head, "primary")]
+    error = "PR changed during publication recovery" if changed else "publication is revoked, pending or untrusted"
+
+    with pytest.raises(cli.CliError, match=error):
+        cli._confirm_review(wt, config, pr, result, publisher, reviews)
+
+
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
         login: str = LOGIN, verdict: str = "approve") -> dict:
     """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""
@@ -343,6 +361,10 @@ def git_calls(monkeypatch):
 
 def assert_one_workflow_read(calls):
     assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in calls) == 1
+
+
+def test_config_help_identifies_explicit_policy_override():
+    assert "explicit workflow.toml override" in cli.build_parser().format_help()
 
 
 def run(capsys, *argv: str) -> tuple[int, str, str]:
@@ -1823,6 +1845,17 @@ def test_interrupted_review_save_preserves_previous_receipt(wt, gh, fake_bin, ca
         assert not saved.exists()
 
 
+def test_repost_refuses_a_saved_review_for_the_wrong_round(wt, gh, capsys, head, monkeypatch):
+    arm_empty_primary_review_history(gh, head)
+    cli._review_file(wt, head, "primary").touch()
+    result = ReviewResult("claude", head, "primary", "approve", (), "")
+    monkeypatch.setattr(cli, "_load_review", lambda *_args: (result, None))
+    monkeypatch.setattr(cli, "_select_review_round", lambda *_args: ("delta", None))
+    monkeypatch.setattr(cli, "_delta_patch", lambda *_args: pytest.fail("processed a mismatched review"))
+
+    expect_cli(capsys, 1, "review", "--repost", stderr_contains=("saved review kind differs",))
+
+
 @pytest.mark.parametrize("saved_state", ["missing", "stale", "hand-written", "retired"])
 def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_state, head):
     saved = cli._review_file(wt, head, "primary")
@@ -2321,7 +2354,7 @@ def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monke
     code, out, err = run(capsys, "review")
     size = len((out + err).encode())
     assert size < 650, size
-    assert code == 4 and "rerun" in err and "wait for the owner" in err
+    assert code == 4 and "Fix the reviewer failures below and rerun." in err
     for family in envelopes:
         assert f"{family}: review has unexpected or missing keys" in err
         assert family * 10 not in err
@@ -4399,6 +4432,25 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert states == ["pending", "success" if expected else "failure"]
     gh.respond_pr_view( pr_json(headRefOid="b" * 40))
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
+
+
+def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head, capsys):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    gh.fail(f"api repos/{REPO}/pulls/7", "HTTP 404: Not Found\n{\"message\": \"Not Found\"}")
+    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err and "Not Found\"}" in err
+
+
+def test_merge_material_lets_read_timeouts_propagate(monkeypatch):
+    from loopzero import eligibility
+    def timeout(*_args, **_kwargs):
+        raise github.ProcTimeout("read timed out")
+    monkeypatch.setattr(github, "api_get", timeout)
+    with pytest.raises(github.ProcTimeout):
+        eligibility.base_merge_material(REPO, 7, "a" * 40, "b" * 40, "main", clean=True)
 
 
 def test_eligibility_rejects_non_object_review_row(gh, head):

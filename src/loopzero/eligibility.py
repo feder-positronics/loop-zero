@@ -152,7 +152,7 @@ def base_merge_material(
                         "--ignore-submodules=none", "--submodule=short",
                         f"{reviewed}..{head}", preserve_newlines=True)
             return patch.encode("utf-8", errors="surrogateescape")
-    except github.GhUnavailable:
+    except (github.GhUnavailable, github.ProcTimeout):
         raise
     except (LoopZeroError, KeyError, OSError, TypeError, ValueError):
         return None
