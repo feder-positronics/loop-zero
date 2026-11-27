@@ -158,7 +158,8 @@ def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
             ("@mergifyio queue dev", False), ("@Mergifyio queue main", True), ("@mergify requeue", True)]:
         comments = [{"body": b, "user": {"login": who}} for who, b in [*rows, ("trusted", later)]]
         monkeypatch.setattr(mergify.github, "paged", lambda *_, c=comments: c)
-        assert mergify.request_status("acme/widgets", 7, head, "main")[:2] == (requeued, not requeued), later
+        attempt = mergify.queue_attempt("acme/widgets", 7, head, "main")
+        assert (attempt.requested, attempt.confirmed) == (requeued, not requeued), later
 
 
 @pytest.mark.parametrize(("writer", "body"), [
@@ -342,3 +343,40 @@ def test_rate_limited_queue_post_does_not_reconcile(monkeypatch, response):
     with pytest.raises(github.GhUnavailable) as exc:
         mergify.request("acme/widgets", 7, "a" * 40, "main")
     assert exc.value.confirmed_rate_limit
+
+
+def test_failed_job_diagnostics_are_bounded_and_keep_links(monkeypatch):
+    repo = "acme/widgets"
+    base = f"https://github.com/{repo}/actions/runs/99/job/"
+    report = "\n".join(f"- ❌ [`{name}`]({base}{job})"
+                       for job, name in enumerate(("gate", "unit", "static", "backend / validation"), 1))
+    report += "\n- ❌ [`foreign`](https://github.com/other/project/actions/runs/99/job/5)"
+    calls = []
+
+    def logs(argv, **options):
+        job = argv[2].split("/")[-2]
+        calls.append(job)
+        assert argv[1:] == ["api", f"repos/{repo}/actions/jobs/{job}/logs",
+                            "--hostname", "github.com", "--allow-escape-sequences"]
+        assert options["tail_chars"] == 256 * 1024 and 0 < options["timeout"] <= 5
+        if job == "1":
+            return SimpleNamespace(exit_code=1, stdout="credential in remote error")
+        if job == "2":
+            return SimpleNamespace(exit_code=0, stdout="ordinary output")
+        return SimpleNamespace(exit_code=0, stdout="\n".join([
+            "\x1b[31m FAIL  frontend.test.ts > suite > test\x1b[0m",
+            "  1) [chromium] \u203a tests/example.spec.ts:2:1 \u203a summary",
+            *(f"2026-11-26T11:47:24.4155165Z ERROR tests/test_example.py::test_failure[{i}] - detail"
+              for i in [0, *range(12)]),
+        ]))
+
+    monkeypatch.setattr(github, "run", logs)
+    result = mergify.Departure("report", (), "isolated", report).jobs(repo)
+    assert calls == ["4", "1", "2"]
+    assert all(f"{base}{job}" in result for job in range(1, 5))
+    assert "foreign" not in result and "credential in remote error" not in result
+    assert "log limit reached" in result and "request failed (exit 1)" in result and "no test failures" in result
+    assert "frontend.test.ts > suite > test" in result and "[chromium] \u203a tests/example.spec.ts" in result
+    assert result.count("test_failure[0]") == 1
+    assert "test_failure[7]" in result and "test_failure[8]" not in result
+    assert "\x1b" not in result
