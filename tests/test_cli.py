@@ -4931,6 +4931,23 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         assert (f"{URL}#issuecomment-43" in out) is (kind == "current")
 
 
+@pytest.mark.parametrize("job,count", [("139880043495", 2), ("139939028086", 10), ("140702396477", 7)])
+def test_candidate_job_log_summary(gh, job, count):
+    log = (Path(__file__).parent / "fixtures" / f"mergify-job-{job}.log").read_text()
+    nodes = list(dict.fromkeys(line.split(" ", 2)[2].removesuffix(" - [assertion omitted]") for line in log.splitlines()))
+    gh.respond(f"api repos/{REPO}/actions/jobs/{job}/logs", log)
+    assert mergify._job_failure(REPO, job) == ", ".join(repr(node) for node in nodes[:count])
+
+
+def test_candidate_job_log_failure_formats(gh):
+    log = ("\x1b[31mFAILED\x1b[0m test_example.py::test_node[two - parts] - assertion\n"
+           "FAIL  suite.test.ts > suite > test\n  1) [chromium] \u203a test.spec.ts:1 \u203a title\n"
+           "\x1b]8;;https://example.com\x07ERROR test_probe.py::test_probe\x1b]8;;\x07")
+    gh.respond(f"api repos/{REPO}/actions/jobs/7/logs", log)
+    assert mergify._job_failure(REPO, "7") == ("'test_example.py::test_node[two - parts]', 'suite.test.ts > suite > test', "
+                                            "'[chromium] \u203a test.spec.ts:1 \u203a title', 'test_probe.py::test_probe'")
+
+
 @pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None, "long", "many", "any_of"])
 def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result):
     arm_mergify_pr(wt, gh)

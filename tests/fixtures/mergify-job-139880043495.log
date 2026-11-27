@@ -1,0 +1,4 @@
+2026-11-26T11:47:24.4155165Z FAILED tests/unit/research_protocol/test_research_protocol_export.py::TestCheckedInArtifact::test_main_check_exit_code_is_zero - [assertion omitted]
+2026-11-26T11:47:24.4158551Z FAILED tests/unit/research_protocol/test_research_protocol_export.py::TestCheckedInArtifact::test_check_passes_on_checked_in_artifact - [assertion omitted]
+2026-11-26T11:47:32.4579732Z FAILED tests/unit/research_protocol/test_research_protocol_export.py::TestCheckedInArtifact::test_main_check_exit_code_is_zero - [assertion omitted]
+2026-11-26T11:47:32.4582726Z FAILED tests/unit/research_protocol/test_research_protocol_export.py::TestCheckedInArtifact::test_check_passes_on_checked_in_artifact - [assertion omitted]
