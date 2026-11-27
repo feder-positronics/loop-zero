@@ -1499,6 +1499,13 @@ def test_app_token_helper_must_not_be_world_writable_or_foreign_owned(tmp_path: 
         assert github.app_token() == "", oct(mode)
         target.chmod(original)
     monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    tmp_path.chmod(0o777)  # a replaceable ancestor without the sticky bit
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    assert github.app_token() == ""
+    tmp_path.chmod(0o777 | 0o1000)
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    assert github.app_token() == "synthetic-app-token"
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
     monkeypatch.setattr(github.os, "getuid", lambda: helper.stat().st_uid + 1)
     assert github.app_token() == ""
 
