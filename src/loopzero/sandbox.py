@@ -84,7 +84,7 @@ def private_directory(prefix: str):
         yield _enter_private_directory(stack, prefix)
 
 
-def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
+def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,  # noqa: C901 - runner, reuse and cleanup paths
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
                checkpoint: Callable[[CheckReport], None] | None = None,
@@ -520,7 +520,7 @@ def _run_bwrap(
         )
 
 
-def bwrap_argv(
+def bwrap_argv(  # noqa: C901 - one bind rule per sandbox mount class
     config: Config,
     worktree: Path,
     home: Path,
