@@ -52,9 +52,11 @@ class WorktreeError(LoopZeroError):
 
 
 class GitError(WorktreeError):
-    def __init__(self, command: tuple[str, ...], tail: str) -> None:
+    def __init__(self, command: tuple[str, ...], tail: str, *, exit_code: int | None = None, stderr: str = "") -> None:
         self.command = command
         self.tail = tail
+        self.exit_code = exit_code
+        self.stderr = stderr
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
@@ -64,7 +66,7 @@ def git(cwd: Path, *args: str, env_allowlist: tuple[str, ...] = GIT_ENV, timeout
     argv = ("git", *args)
     done = (run_git_paths if paths else run)(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout, **kwargs)
     if done.exit_code != 0:
-        raise GitError(argv, done.stderr or done.stdout)
+        raise GitError(argv, done.stderr or done.stdout, exit_code=done.exit_code, stderr=done.stderr)
     return done.stdout if raw or paths or kwargs.get("preserve_newlines") else done.stdout.strip()
 
 
