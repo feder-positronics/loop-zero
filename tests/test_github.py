@@ -1462,9 +1462,13 @@ def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: 
     assert len(calls_for(gh, detail_key)) == int(severity == "important" and path != "file-3000")
 
 
-def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(monkeypatch):
+def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(monkeypatch, app_token_helper):
+    app_token_helper()
     sent = []
-    def run(argv, **_):
+    real_run = github.run
+    def run(argv, **kwargs):
+        if argv[0] != "gh":
+            return real_run(argv, **kwargs)
         sent.append(argv)
         if "graphql" in argv:
             return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"bot"}}}', "stderr": ""})
@@ -1481,3 +1485,15 @@ def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(monkeypat
     assert [any(part.startswith("If-None-Match") for part in argv) for argv in sent[:2]] == [False, True]
     github._gh("api", "repos/acme/widgets/issues/1/comments", "-f", "body=x")
     assert not any(part.startswith("If-None-Match") for part in sent[-1])
+
+
+def test_ambient_credential_is_never_cached(monkeypatch):
+    sent = []
+    def run(argv, **_):
+        sent.append(argv)
+        if "graphql" in argv:
+            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"a"}}}', "stderr": ""})
+        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    github.login(), github.login(), github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
+    assert len(sent) == 4 and not any(part.startswith("If-None-Match") for argv in sent for part in argv)

@@ -359,12 +359,13 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
     return ""
 
 
-_ETAG_CACHE_LIMIT = 256
+_ETAG_CACHE_BYTES = 4_000_000
 _etag_cache: dict[tuple[tuple[str, ...], int], tuple[str, str]] = {}
 
 
 def _etag_key(args: tuple[str, ...], selected: str, enabled: bool) -> tuple[tuple[str, ...], int] | None:
-    return (args, hash(selected)) if enabled else None
+    """Only an explicit or app credential is cached: an empty one is whatever gh's ambient account is now."""
+    return (args, hash(selected)) if enabled and selected else None
 
 
 def _with_validator(argv: tuple[str, ...], cached: tuple[str, str] | None) -> list[str]:
@@ -382,7 +383,7 @@ def _remember_etag(key: tuple[tuple[str, ...], int] | None, headers: dict[str, s
     if key and (etag := headers.get("etag")):
         _etag_cache.pop(key, None)
         _etag_cache[key] = (etag, body)
-        while len(_etag_cache) > _ETAG_CACHE_LIMIT:
+        while sum(len(held[1]) for held in _etag_cache.values()) > _ETAG_CACHE_BYTES:
             del _etag_cache[next(iter(_etag_cache))]
 
 
@@ -588,14 +589,17 @@ _logins: dict[str, str] = {}
 
 
 def login(token: str | None = None) -> str:
-    """Login of the identity used for GitHub reads and review publishing, read once per credential."""
+    """Login of the identity used for GitHub reads and review publishing.
+
+    Read once per explicit or app credential; an ambient gh account is read every time."""
     selected = _select_token(token, _read_scope.get(), True)
-    if name := _logins.get(selected):
+    if selected and (name := _logins.get(selected)):
         return name
-    data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }", token=token)
+    data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }",
+                    token=selected if selected else token)
     content = data.get("data") if isinstance(data, dict) else None
     if isinstance(content, dict) and isinstance(viewer := content.get("viewer"), dict) and (name := viewer.get("login")):
-        return _logins.setdefault(selected, str(name))
+        return _logins.setdefault(selected, str(name)) if selected else str(name)
     raise GhError(("gh", "api", "graphql"), "no login in viewer response")
 
 

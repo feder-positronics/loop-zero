@@ -3649,7 +3649,8 @@ def test_merge_waits_for_pending_checks(wt, gh, capsys, monkeypatch, queue_reque
     assert not wt.exists()
 
 
-def test_merge_wait_polls_read_the_publisher_login_once(wt, gh, capsys, monkeypatch, queue_requests):
+def test_merge_wait_polls_read_the_publisher_login_once(wt, gh, capsys, monkeypatch, queue_requests, app_token_helper):
+    app_token_helper()
     head = head_of(wt)
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     gh.respond("pr merge", "")
