@@ -265,8 +265,7 @@ A structured Codex event reporting that Code Mode cannot spawn its host
 invalidates the attempt even if the process exits zero with a parseable verdict.
 The runner excludes the attempt from chunk merge, publication and saved-result
 replay without consuming review budget. Quoted diagnostics and absence of tool
-calls alone do not invalidate a review. The retired [incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
-remains historical evidence. The leading-block reader still validates archived
+calls alone do not invalidate a review. The leading-block reader still validates archived
 adjudication markers alongside their original evidence.
 New Codex publication derives one canonical `codex-evidence` comment, placed
 right after the review marker, from the complete validated private native
@@ -395,8 +394,8 @@ diff, challenges misplaced ownership and distinguishes shipped behavior from
 proposals and dated observations.
 
 The existing repository coordinator or T3 integration maintainer also follows
-[T3 upstream review](T3-UPSTREAM.md): weekly reading during active use and review
-before relevant upgrades or compatibility repairs. This is maintenance triage,
+[T3 upstream review](T3-UPSTREAM.md): event-triggered reading; its
+[trigger list](T3-UPSTREAM.md#owner-and-triggers) is the only home for when. This is maintenance triage,
 not a new scheduler or permission to adopt upstream policy. Version-specific
 comparisons remain dated evidence; the running tools and instructions must be
 reconciled with matching source before changing the integration.
