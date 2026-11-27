@@ -6,10 +6,13 @@ on:
     branches: [main]
 permissions:
   contents: read
+env:
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 jobs:
-  checks:
+  lint:
     runs-on: ubuntu-24.04
     steps:
+      # Full history: check_architecture_docs.py reads `git log BASE..HEAD` trailers.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
@@ -18,22 +21,43 @@ jobs:
         with:
           version: "0.11.28"
           checksum: e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224
+          enable-cache: true
+      - run: uv sync --python 3.14 --locked --group dev
       - name: Lint
         run: |
-          uv run --python 3.14 --locked --group dev ruff check src tests scripts
-          uv run --python 3.14 --locked --group dev tach check
+          uv run --no-sync ruff check src tests scripts
+          uv run --no-sync tach check
       - name: Architecture docs and size budget
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            uv run --python 3.14 python scripts/check_architecture_docs.py --links-only
+            uv run --no-sync python scripts/check_architecture_docs.py --links-only
           else
-            uv run --python 3.14 python scripts/check_architecture_docs.py "$BASE_SHA"
+            uv run --no-sync python scripts/check_architecture_docs.py "$BASE_SHA"
           fi
           scripts/size_budget.sh "$BASE_SHA"
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.28"
+          checksum: e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224
+          enable-cache: true
+      - run: uv sync --python 3.14 --locked --group dev
+      # Real-bwrap tests skip themselves without bwrap, so install it only when a
+      # pull request touches the sandbox, its runners or this workflow.
       - name: Install bubblewrap for the sandbox test
         run: |
+          # Checkout depth 2 holds the PR merge commit's base parent (HEAD^1).
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && git diff --quiet --no-renames HEAD^1 HEAD -- \
+            src/loopzero/sandbox.py src/loopzero/runners.py tests/test_sandbox.py tests/test_runners.py \
+            .github/workflows/checks.yml; then
+            exit 0
+          fi
           for i in 1 2 3; do
             command -v bwrap >/dev/null && break
             sudo apt-get update -q && sudo apt-get install -y -q bubblewrap || sleep 30
@@ -41,7 +65,7 @@ jobs:
           command -v bwrap >/dev/null
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Tests
-        run: uv run --python 3.14 --locked --group dev pytest
+        run: uv run --no-sync pytest
       - name: Wheel builds and CLI runs
         run: |
           uv build --python 3.14 --build-constraints build-constraints.txt --require-hashes --wheel -q
@@ -51,3 +75,11 @@ jobs:
           uv pip install --python "$smoke_env/bin/python" --require-hashes -r "$smoke_env/runtime.txt"
           uv pip install --python "$smoke_env/bin/python" --no-deps dist/*.whl
           "$smoke_env/bin/loopzero" --help
+  # Keeps the required check name `checks` (main ruleset and workflow.toml) while
+  # the work runs in the parallel jobs above.
+  checks:
+    if: always()
+    needs: [lint, tests]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test "${{ needs.lint.result }}" = success -a "${{ needs.tests.result }}" = success
