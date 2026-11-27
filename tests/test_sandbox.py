@@ -526,7 +526,8 @@ class TestRealSandbox:
         assert sandbox.run_checks(cfg, git_repo).ok
 
     @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
-    def test_real_sandbox_uv_run_offline(self, git_repo, tmp_path):
+    @pytest.mark.parametrize("interrupt", [False, True])
+    def test_real_sandbox_uv_run_offline(self, git_repo, tmp_path, fetched_base, receipt_path, interrupt):
         uv_cache = tmp_path / "uv-cache"
         uv_cache.mkdir()
         uv = shutil.which("uv")
@@ -545,14 +546,26 @@ class TestRealSandbox:
         git(git_repo, "add", "-A")
         git(git_repo, "commit", "-q", "-m", "uv project")
         cfg = make_config(
-            checks=("uv run --group dev python -c 1", ".venv/bin/python -c 1", "test ! -w ."),
+            checks=(".venv/bin/python -B -c 1", "uv run --group dev python -c 1", "test ! -w ."),
+            inputs={"*": (".",)},
             env=tuple(env.items()),
             sandbox_ro=(str(Path(uv).parent), sys.base_prefix),
             writable=(str(uv_cache),),
         )
+        if interrupt:
+            def checkpoint(report):
+                assert report.results[0].exit_code == 0
+                _save_report(git_repo, report)
+                raise KeyboardInterrupt
+
+            with pytest.raises(KeyboardInterrupt):
+                sandbox.run_checks(cfg, git_repo, checkpoint=checkpoint)
+
         report = sandbox.run_checks(cfg, git_repo)
         assert report.ok, report
         assert [r.command for r in report.results] == list(cfg.checks)
+        if interrupt:
+            assert report.results[0].reused_from == report.head
         assert not (git_repo / ".venv/bin").exists()  # venv lived in the scratch dir
 
 

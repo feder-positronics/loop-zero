@@ -14,7 +14,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from os.path import commonpath
@@ -126,6 +126,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         commands = () if missing else (*preparations, *config.checks)
         current = _current_commands(config, worktree, commands, settings_sha256)
         last_run = _scratch_reuse_boundary(config, worktree, commands, base, previous, resuming)
+        scratch_writers: set[str] = set()
         for ordinal, command in enumerate(current, 1):
             if progress:
                 progress(command)
@@ -136,14 +137,22 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 result = old
                 status and status(f"reused {(old.reused_from or head)[:8]}")
             else:
+                track_scratch = (
+                    checkpoint is not None and bool(key) and bool(scratch) and ordinal > len(preparations)
+                )
+                before = _scratch_snapshot(scratch.values()) if track_scratch else None
                 with _stage_status(status, ordinal, len(commands)):
                     result = _run_one(config, worktree, prefix, command, timeout)
                 result = replace(result, input_key=key)
+                if track_scratch and not result.exit_code and (
+                    before is None or before != _scratch_snapshot(scratch.values())
+                ):
+                    scratch_writers.add(command)
             if ordinal > len(preparations) or result.exit_code:
                 results.append(result)
                 _checkpoint_stage(
                     checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
-                    previous, commands[max(ordinal, last_run):], scratch,
+                    previous, commands[max(ordinal, last_run):], scratch_writers,
                 )
             if status:
                 status(f"stage {ordinal}/{len(commands)}: exit {result.exit_code} "
@@ -203,9 +212,26 @@ INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
 INCOMPLETE_CHECK = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
 
 
+def _scratch_snapshot(paths: Iterable[Path]) -> dict[Path, tuple[int, ...]] | None:
+    """Track observable changes without reading files or following symlinks."""
+    pending = list(paths)
+    snapshot = {}
+    try:
+        while pending:
+            path = pending.pop()
+            info = path.lstat()
+            snapshot[path] = (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                              info.st_mtime_ns, info.st_ctime_ns)
+            if stat.S_ISDIR(info.st_mode):
+                pending.extend(path.iterdir())
+    except OSError:
+        return None
+    return snapshot
+
+
 def _checkpoint_stage(checkpoint: Callable[[CheckReport], None] | None,
                       report: CheckReport, previous: dict[str, CheckResult],
-                      reusable_remaining: tuple[str, ...], scratch: dict[str, Path]) -> None:
+                      reusable_remaining: tuple[str, ...], scratch_writers: set[str]) -> None:
     if checkpoint is None:
         return
     stage = report.results[-1]
@@ -214,15 +240,10 @@ def _checkpoint_stage(checkpoint: Callable[[CheckReport], None] | None,
     elif stage.input_key:
         # Even the last stage leaves a nonpassing receipt until final validation.
         unvisited = tuple(previous[command] for command in reusable_remaining if command in previous)
-        results = report.results
-        try:
-            populated = any(next(path.iterdir(), None) is not None for path in scratch.values())
-        except OSError:
-            populated = True
-        if populated:
-            # The next run must rebuild scratch before relying on this prefix.
-            results = tuple(replace(result, input_key=None) for result in results)
-        checkpoint(replace(report, results=(*results, *unvisited, INCOMPLETE_CHECK)))
+        # Scratch writers must run again to rebuild their output on resume.
+        results = tuple(replace(result, input_key=None) if result.command in scratch_writers else result
+                        for result in (*report.results, *unvisited))
+        checkpoint(replace(report, results=(*results, INCOMPLETE_CHECK)))
 
 
 def _previous(config: Config, worktree: Path, settings_sha256: str,
