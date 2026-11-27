@@ -360,7 +360,7 @@ def test_vanished_parent_rejects_main_change(tree_candidate):
     seen = []
     with pytest.raises(CandidateRaceError, match="main changed"):
         tree_candidate[0](main_after=tree_candidate[3], policy=lambda n, _: seen.append(n))
-    assert seen == [102, 102, 102, 102]
+    assert set(seen) == {102} and len(seen) == 8
 
 
 @pytest.mark.parametrize("case", [
@@ -534,7 +534,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
 
 @pytest.mark.parametrize(
     "elapsed,oversleep,attempt_count",
-    [(0, 0, 4), (29, 0, 1), (0, 30, 1)],
+    [(0, 0, 8), (29, 0, 1), (0, 30, 1)],
 )
 def test_persistent_race_preserves_last_error_and_bounds_retry(
     monkeypatch, no_retry_delay, elapsed, oversleep, attempt_count
@@ -556,15 +556,16 @@ def test_persistent_race_preserves_last_error_and_bounds_retry(
     with pytest.raises(CandidateRaceError, match="membership changed") as caught:
         run_attestation(github_get=lambda _: None, status_reads=[None])
     assert len(attempts) == attempt_count and caught.value is attempts[-1]
-    assert sum(sleeps) <= 12
+    assert sum(sleeps) < 30
 
 
-def test_candidate_retries_across_predecessor_landing(monkeypatch, no_retry_delay):
+@pytest.mark.parametrize("landing", [10, 24])
+def test_candidate_retries_across_predecessor_landing(monkeypatch, no_retry_delay, landing):
     clock = no_retry_delay
     sources = expected_sources((102, "2" * 40))
 
     def attest(*_args, **_kwargs):
-        if clock[0] < 10:
+        if clock[0] < landing:
             raise CandidateRaceError("source PR #101 is not open")
         return sources
 

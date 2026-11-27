@@ -969,7 +969,7 @@ def test_check_selects_and_reports_workflow(wt, repo, tmp_path, capsys, policy):
 @pytest.mark.parametrize("command", ["check", "review", "ready", "merge"])
 def test_privileged_commands_resolve_policy_independently_of_task(wt, command):
     (wt / "workflow.toml").write_text(WORKFLOW.replace('base = "main"', 'base = "topic"'))
-    (wt / ".loopzero/task.md").write_text(f"Base: {head_of(wt)}\n")
+    (wt / ".loopzero/task.md").write_text(f"## Base\nmain @ {head_of(wt)}\n")
 
     config = cli._load_config(SimpleNamespace(config=None, command=command), wt, pin_checks=True)
 
@@ -2404,7 +2404,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     def fail(family, **kwargs):
         if family == "claude":
             raise cli.runners.RunnerAuthFailed(
-                "claude: CLI is not authenticated\nfirst detail\nsecond detail\nnot printed"
+                "claude: CLI is not authenticated\nnot printed\nsecond detail\nlast cause"
             )
         raise cli.runners.RunnerMissing("codex: 'codex' not found on PATH")
 
@@ -2415,7 +2415,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     assert ("author family: claude, codex" if mixed_authors else "author family: unknown") in err
     assert "Fix the reviewer failures below and rerun" in err
     assert "delivery.reviewers" not in err and "exception" not in err
-    assert "claude: CLI is not authenticated\nfirst detail\nsecond detail" in err
+    assert "claude: CLI is not authenticated\nsecond detail\nlast cause" in err  # The cause ends the tail.
     assert "not printed" not in err
     assert "Fix: run `claude auth login`." in err
     assert err.count("codex: 'codex' not found on PATH") == 1
@@ -2716,6 +2716,45 @@ def test_pending_required_check_names_the_wait(wt, gh, capsys, head, command):
         assert out == f"not ready: {reason}\nnext: loopzero ready --wait\n" and err == ""
     else:
         assert out == "" and f"{reason}; next: loopzero merge --wait" in err
+
+
+def test_missing_run_grace_does_not_parse_reason_wording(wt, gh, capsys, monkeypatch, head):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_check_runs(gh, head, [])
+    monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
+    monkeypatch.setattr(cli.github, "_missing_check_reason", lambda name, *_: f"no {name} run yet")
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": []})
+    code, _out, err = run(capsys, "ready", "--wait")
+    assert code == 1 and "workflow scheduling, triggers and permissions" in err
+
+
+def test_repeated_required_check_keeps_each_reason(wt, gh, capsys, head):
+    publish_workflow(wt, WORKFLOW.replace('["checks"]', '["checks", "checks"]'))
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_check_runs(gh, head, [])
+    _code, out, _err = run(capsys, "ready")
+    assert out.count(f"not ready: required check 'checks' missing on {head[:12]}") == 2
+
+
+def test_check_state_drives_failure_hints_and_wait_keys(capsys):
+    unknown, capped = "required check 'a' is unknown", "cannot determine required check 'b'"
+    readiness = github.Readiness(False, (unknown, capped), checks={unknown: ("a", "unknown"), capped: ("b", "capped")})
+    hinted, plain = cli._readiness_messages(github.PR(7, URL, "a" * 40, "main", False, "OPEN", "MERGEABLE"), readiness)
+    assert "Inspect" in hinted and plain == capped
+    name = check = github.MERGEABILITY_PENDING  # a required check may share a non-check reason's text
+    check = f"required check '{name}' is pending"
+    both = github.Readiness(False, (check, name), checks={check: (name, "pending")})
+    only_check = github.Readiness(False, (check,), checks=both.checks)
+    cli._print_wait_changes(cli._by_check(both, both.reasons), cli._by_check(only_check, only_check.reasons))
+    assert capsys.readouterr().out == f"cleared: {name}\n"
+
+
+def test_check_wait_does_not_parse_reason_wording(wt, gh, capsys, head, monkeypatch):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_check_runs(gh, head, [])
+    monkeypatch.setattr(cli.github, "_missing_check_reason", lambda name, *_: f"no {name} run yet")
+    out, err = expect_cli(capsys, 3, "ready")  # 3: still waitable despite the new wording
+    assert without_accepted_receipt(out) == "not ready: no checks run yet\nnext: loopzero ready --wait\n" and err == ""
 
 
 @pytest.mark.parametrize("draft", [True, False])

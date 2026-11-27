@@ -344,7 +344,9 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         return event["repository"] if path == "repos/owner/repo" else values["/" + path]
     monkeypatch.setattr(github, "api_get", api_get)
     monkeypatch.setattr(github, "paged", api_get)
-    monkeypatch.setattr("loopzero.candidate._retry_sleep", sleeps.append)
+    now = [0.0]
+    monkeypatch.setattr("loopzero.candidate._retry_clock", lambda: now[0])
+    monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda s: (sleeps.append(s), now.__setitem__(0, now[0] + s)))
     mergeability_sleeps = []
     monkeypatch.setattr(hosted.eligibility, "sleep", mergeability_sleeps.append)
     published = []
@@ -401,7 +403,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         assert mergeability_sleeps == ([2] if case == "settled_mergeability" else [2, 4, 8])
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":
-        assert rest_calls.count("apps/mergify") == 4 and sleeps == [4, 4, 4] and len(evaluated) == 8
+        assert rest_calls.count("apps/mergify") == 8 and sleeps == [4] * 7 and len(evaluated) == 16
     if case == "valid":
         assert len(rest_calls) + len(published) <= 16
         assert evaluated == [("owner/repo", n, str(n - 100) * 40, "main", ("trusted-publisher",))

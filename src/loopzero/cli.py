@@ -1,4 +1,4 @@
-"""Command line: composes the modules into start, check, pr, review, ready, merge, status."""
+"""Command line: composes the modules into start, check, pr, review, ready, merge, resolve, status."""
 
 from __future__ import annotations
 
@@ -328,10 +328,10 @@ def _readiness(
             result = dataclasses.replace(result, reasons=tuple(
                 exhausted if reason == review_reason else reason for reason in result.reasons
             ))
-    report = _load_report(wt)
+    report = _load_report(wt)  # deliberate re-read: a check can land during the GitHub reads
     receipt_problem = _check_report_problem(report, config, head)
     if receipt_problem:
-        return github.Readiness(False, (*result.reasons, receipt_problem))
+        return github.Readiness(False, (*result.reasons, receipt_problem), checks=result.checks)
     if announce_receipt:
         _print_receipt(wt, report, "accepted")
     return result
@@ -1141,7 +1141,8 @@ def _save_review_failure_output(wt: Path, head: str, kind: str, errors: dict[str
 
 def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
     lines = str(exc).splitlines()
-    detail = "\n".join(lines[:1 if isinstance(exc, runners.RunnerMalformedOutput) else 3])
+    # The cause of a failed reviewer is at the end of its output tail.
+    detail = "\n".join(lines[:1] + ([] if isinstance(exc, runners.RunnerMalformedOutput) else lines[1:][-2:]))
     if isinstance(exc, runners.RunnerAuthFailed):
         login = "claude auth login" if family == "claude" else "codex login"
         fix = f"run `{login}`"
@@ -1271,9 +1272,9 @@ def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-k
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (
-        waiting or _pending_checks(config, pr, readiness, allow_skipped=not pr.is_draft)
+        waiting or _pending_checks(readiness, allow_skipped=not pr.is_draft)
     ):
-        if (waited := wait(pr, kicked=kicked, shown=readiness.reasons if kicked else (),
+        if (waited := wait(pr, kicked=kicked, shown=_by_check(readiness, readiness.reasons) if kicked else (),
                            initial=None if kicked else readiness)) is None:
             return 3
         pr, readiness, kicked = waited
@@ -1287,7 +1288,7 @@ def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-k
         print(f"not ready: {reason}")
     if not readiness.ready:
         _print_owner_route(pr, readiness)
-        if args.wait is None and _pending_checks(config, pr, readiness):
+        if args.wait is None and _pending_checks(readiness):
             print(NEXT_WAIT)
             return 3
         return 1
@@ -1300,8 +1301,8 @@ def _print_owner_route(pr: github.PR, readiness: github.Readiness) -> None:
         print(OWNER_ROUTE)
 
 
-def _required_check_reasons(names: tuple[str, ...], *states: str) -> dict[str, str]:
-    return {f"required check '{name}' {state}": name for name in names for state in states}
+def _check_reasons(readiness: github.Readiness, *states: str) -> dict[str, str]:
+    return {reason: name for reason, (name, state) in readiness.checks.items() if state in states}
 
 
 def _draft_checks_waiting(
@@ -1310,32 +1311,27 @@ def _draft_checks_waiting(
     reasons = set(readiness.reasons) - {github.MERGEABILITY_PENDING}
     if not pr.is_draft or not reasons:
         return ()
-    expected = _required_check_reasons(config.required_ci, f"missing on {pr.head_sha[:12]}", "is skipped")
-    if not reasons <= expected.keys():
+    if not reasons <= (expected := _check_reasons(readiness, "missing", "skipped")).keys():
         return ()
     blocked = {expected[reason] for reason in reasons}
     return tuple(name for name in config.required_ci if name in blocked)
 
 
-def _pending_checks(
-    config: Config, pr: github.PR, readiness: github.Readiness, *, allow_skipped: bool = False
-) -> tuple[str, ...]:
+def _pending_checks(readiness: github.Readiness, *, allow_skipped: bool = False) -> tuple[str, ...]:
     """Reasons worth waiting on: mergeability or required checks can still settle.
 
     An explicit ready wait can observe a skipped result left over from draft CI.
     """
-    states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if allow_skipped else [])]
-    waitable = {*_required_check_reasons(config.required_ci, *states),
-                *readiness.waitable_failures, github.MERGEABILITY_PENDING}
+    states = ["missing", "pending", *(["skipped"] if allow_skipped else [])]
+    waitable = {*_check_reasons(readiness, *states), *readiness.waitable_failures, github.MERGEABILITY_PENDING}
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
 
 def _readiness_messages(pr: github.PR, readiness: github.Readiness) -> Iterator[str]:
     for reason in readiness.reasons:
-        check, separator, conclusion = reason.rpartition("' is ")
-        if (separator and check.startswith("required check '") and conclusion not in {"pending", "skipped"}
-                and reason not in readiness.waitable_failures):
+        _, state = readiness.checks.get(reason, ("", "missing"))
+        if state not in {"missing", "capped", "pending", "skipped"} and reason not in readiness.waitable_failures:
             yield (f"{reason}. Inspect {pr.url}/checks. Fix reproducible failures before retrying. "
                    "Rerun the failed job only for a transient failure. Once green, run `loopzero ready --wait`.")
         else:
@@ -1343,7 +1339,7 @@ def _readiness_messages(pr: github.PR, readiness: github.Readiness) -> Iterator[
 
 
 def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness) -> str:
-    if _pending_checks(config, pr, readiness):
+    if _pending_checks(readiness):
         return "; next: loopzero merge --wait"
     if _draft_checks_waiting(config, pr, readiness):
         return "; next: loopzero ready --wait"
@@ -1384,7 +1380,7 @@ def _poll_until(
 
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float, shown: tuple[str, ...] = (), args: argparse.Namespace,
+    started: float, shown: tuple = (), args: argparse.Namespace,
     allow_merged: bool = False, allow_skipped: bool = False, initial: github.Readiness | None = None,
     initial_read_time: float = 0.0,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
@@ -1432,13 +1428,16 @@ def _verify_wait_snapshot(
     raise CliError(f"workflow settings changed while waiting; {retry}")
 
 
-def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> None:
-    def by_check(reasons: tuple[str, ...]) -> dict[str, str]:
-        return {reason.rpartition("' ")[0] or reason: reason for reason in reasons}
-    previous, current = by_check(shown), by_check(pending)
+def _by_check(readiness: github.Readiness, reasons: tuple[str, ...]) -> tuple:
+    """((is a required check, its name or the reason), reason) for each reason."""
+    return tuple(((r in readiness.checks, readiness.checks.get(r, (r,))[0]), r) for r in reasons)
+
+
+def _print_wait_changes(shown: tuple, pending: tuple) -> None:
+    previous, current = dict(shown), dict(pending)
     if changed := [reason for key, reason in current.items() if previous.get(key) != reason]:
         print("waiting: " + "; ".join(changed))
-    if cleared := [key.removeprefix("required check '") for key in previous if key not in current]:
+    if cleared := [key[1] for key in previous if key not in current]:
         print("cleared: " + "; ".join(cleared))
 
 
@@ -1471,7 +1470,7 @@ def _check_wait_poll(
 
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float, args: argparse.Namespace, shown: tuple[str, ...] = (),
+    started: float, args: argparse.Namespace, shown: tuple = (),
     bounded: bool = False, allow_merged: bool = False,
     allow_skipped: bool = False, initial: github.Readiness | None = None,
     initial_read_time: float = 0.0,
@@ -1495,18 +1494,16 @@ def _wait_for_checks(
             _mark_ready(wt, config, pr.number, current.head_sha)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
-                                    shown=readiness.reasons, args=args, bounded=bounded,
+                                    shown=_by_check(readiness, readiness.reasons), args=args, bounded=bounded,
                                     allow_merged=allow_merged)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
-        pending = _pending_checks(
-            config, current, readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft),
-        )
+        pending = _pending_checks(readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft))
         if pending or readiness.ready:
-            _print_wait_changes(shown, pending)
+            _print_wait_changes(shown, _by_check(readiness, pending))
         if not pending:
             return current, readiness, kicked
-        shown = pending
+        shown = _by_check(readiness, pending)
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
             print(
@@ -1517,7 +1514,7 @@ def _wait_for_checks(
         # An active workflow may not have created its check runs yet.
         if (
             elapsed >= MISSING_RUN_GRACE
-            and all(" missing on " in r for r in pending)
+            and all(readiness.checks.get(r, ("", ""))[1] == "missing" for r in pending)
             and not _read_wait_poll(
                 partial(github.has_check_activity, config.repo, pr.head_sha, readiness),
                 started + timeout,
@@ -1767,7 +1764,7 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
     )
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
     admit_by = deadline if args.wait else None
-    if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
+    if readiness is not None and args.wait is not None and _pending_checks(readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,

@@ -1319,6 +1319,16 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining
         [[*branch_head_key("lz/x").split(), "--include"]] + [[*pr_list_key("lz/x").split(), "--include"]] * (1 + len(sleeps)))
 
 
+def test_published_findings_redact_secret_classes(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "gw_FAKE_reviewer_key\n")
+    secret = ("eyJheader.eyJzdWIi.signature rt_FAKE0123456789abcdefghijkl AKIAFAKE0123456789AB "
+              "-----BEGIN RSA PRIVATE KEY-----\nMIIEFAKEKEYBODY\n-----END RSA PRIVATE KEY----- "
+              "postgresql://app:hunter2-FAKE@db/app gw_FAKE_reviewer_key")
+    finding = Finding("important", None, None, secret, secret)
+    assert github._comment_body(finding, HEAD, prefix=secret + "\n").count("[REDACTED]") == 18
+    assert github._review_body(review(findings=(finding,)), [finding]).count("[REDACTED]") >= 6
+
+
 def test_graphql_http_200_rate_limit_preserves_verified_waiter_reset(gh):
     response = (
         "HTTP/2.0 200 OK\r\nX-RateLimit-Resource: graphql\r\nX-RateLimit-Remaining: 0\r\n"
