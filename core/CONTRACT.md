@@ -9,6 +9,8 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    Fill `.loopzero/task.md` from the [handoff template](HANDOFF.md): goal,
    problem, context, acceptance, base SHA. Write the PR, like any issue or
    design doc you write, for the human owner under [Reporting](#reporting).
+   `start` is the default; in a worktree your launcher already made, write
+   `.loopzero/task.md` from the template instead.
 2. Implement, commit, then `loopzero check`: run each `workflow.toml`
    `[checks].commands` entry (a stage) in the sandbox; the result is the
    head's check receipt. A stage running over one hour is stopped with exit

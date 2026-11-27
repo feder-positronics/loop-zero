@@ -199,7 +199,8 @@ network means the sandbox cannot prevent exfiltration of readable data.
 For a Codex executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable and its existing sibling
 `codex-code-mode-host`, read-only. Neighboring history and configuration remain
-hidden; helper aliases into protected state and explicit state mounts fail closed.
+hidden; helper aliases into protected state and explicit state mounts fail closed,
+and explicit runtime paths get no such exception.
 Every command except `start` uses the workflow at one remote-tracking
 delivery revision selected by the workflow at Git's local `origin/HEAD`.
 Missing trusted refs or workflows block these commands. An explicit
@@ -216,10 +217,7 @@ config and mixed global-state exposure. Codex keeps its `auth.json` bind under
 `CODEX_HOME` or `~/.codex`, including when `OPENAI_API_KEY` is forwarded.
 File-backed binds preserve in-place writes, without guaranteeing host replacement
 visibility or shared-lock coordination. This boundary is route-specific, not full
-filesystem privacy. An implicit runtime inside state receives only the selected
-executable's exact read-only file mount, while explicit runtime paths have no
-exception. This preserves standalone CLI startup without exposing neighboring
-state; bundles needing protected siblings require installation outside state.
+filesystem privacy.
 The contract states the agent-facing consequences.
 
 Each reviewer runner separates fixed reviewer policy from supplied material
