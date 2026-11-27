@@ -34,7 +34,6 @@ CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, OSError, ValueError)
-UNEXPECTED = (KeyError, TypeError)
 # --wait: poll interval, and how long a required check may stay
 # missing before GitHub is assumed to have dropped the event for this head.
 # Each poll costs several GitHub API calls from a quota shared by every session.
@@ -584,16 +583,10 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         print(f"warning: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
-_SECTIONS = {
-    "objective", "context and goal", "acceptance", "base", "checks", "validation",
-    "review", "notes",
-}
-
-
 def _pr_title(wt: Path, branch: str) -> str:
-    """First heading of task.md that is not a template section name; else the branch."""
-    headings = [ln.lstrip("#").strip() for ln in worktree.task_text(wt).splitlines() if ln[:1] == "#"]
-    return next((t for t in headings if t and t.lower() not in _SECTIONS), branch)
+    """Use the first nonempty top-level task heading, or the branch."""
+    headings = (line[2:].strip() for line in worktree.task_text(wt).splitlines() if line.startswith("# "))
+    return next(filter(None, headings), branch)
 
 
 def cmd_start(args: argparse.Namespace) -> int:
@@ -889,10 +882,10 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
                 raise CliError(f"{exc} | publication read-back blocked: {recovery}; "
                                f"review saved at {path}; retry `loopzero review --repost` "
                                "after resolving the read-back failure") from recovery
-            raise CliError(
-                f"{exc} | publication unconfirmed; review saved at {path}; "
-                "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
-            ) from exc
+            retry = ("inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
+                     if isinstance(exc, (github.GhUnavailable, _proc.ProcTimeout)) else "GitHub rejected it and "
+                     f"`--repost` resends the same review: fix the cause, or delete {path} and run `loopzero review`")
+            raise CliError(f"{exc} | publication unconfirmed; review saved at {path}; {retry}") from exc
         try:
             live = github.pr_view(config.repo, pr.number)
             body = _append_review(live.body, result)
@@ -909,6 +902,8 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
 
 
 def _require_open_review_round(config: Config, pr: github.PR, head: str, kind: str) -> None:
+    if github.pr_view(config.repo, pr.number).head_sha != head:
+        raise CliError("PR head moved during the review; pull it and rerun `loopzero review`")
     reviews = _pr_reviews(config.repo, pr.number)
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if any(marker.kind == kind and marker.head == head for marker in markers):
@@ -1019,9 +1014,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
     trusted = config.review_publishers or (publisher,)
-    evidence = [r for r in reviews if "loopzero:review" in (r.get("body") or "") and (
-        r.get("commit_id") == result.head
-        or ((marker := eligibility.leading_marker(r["body"])) and marker.group(1) == result.head))]
+    # A publication starts with its marker; a review merely quoting the marker text is not one.
+    evidence = [r for r in reviews if (marker := eligibility.leading_marker(r.get("body") or ""))
+                and result.head in (r.get("commit_id"), marker.group(1))]
     fresh = github.pr_view(config.repo, pr.number)
     if fresh.head_sha != result.head or fresh.state != "OPEN" or fresh.base_ref != pr.base_ref:
         raise CliError("PR changed during publication recovery")
@@ -2054,14 +2049,14 @@ def _run(args: argparse.Namespace) -> int:
     except IndependentReviewerUnavailable as exc:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
         return 4
-    except HANDLED + UNEXPECTED as exc:
+    except Exception as exc:
         if isinstance(exc, sandbox.SandboxUnavailable) and args.command in {"check", "review"}:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
         prefix = ""
-        if isinstance(exc, UNEXPECTED):
+        if not isinstance(exc, HANDLED):
             where = traceback.extract_tb(exc.__traceback__)[-1]
-            prefix = f"unexpected response ({type(exc).__name__} at {Path(where.filename).name}:{where.lineno}): "
+            prefix = f"unexpected error ({type(exc).__name__} at {Path(where.filename).name}:{where.lineno}): "
         print(f"loopzero {args.command}: {prefix}{_one_line(exc)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -17,7 +17,7 @@ from dataclasses import replace
 from itertools import groupby
 from pathlib import Path
 
-from loopzero import _proc, sandbox
+from loopzero import _proc, sandbox, worktree
 from loopzero.config import REVIEWER_FAMILIES
 from loopzero.types import BLOCKING, Config, Finding, LoopZeroError, ReviewResult
 
@@ -302,11 +302,10 @@ def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Conf
 
 
 def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str, paths: bool = False) -> str:
-    run = _proc.run_git_paths if paths else _proc.run
-    done = run(["git", *args], cwd=cwd, env_allowlist=allowlist, timeout=30)
-    if done.exit_code != 0:
-        raise RunnerBadOutput(f"git {label} exited {done.exit_code}", _tail(done.stderr))
-    return done.stdout
+    try:
+        return worktree.git(cwd, *args, env_allowlist=allowlist, timeout=30, paths=paths, raw=True)
+    except worktree.GitError as exc:
+        raise RunnerBadOutput(f"git {label} exited {exc.exit_code}", _tail(exc.stderr)) from None
 
 
 def _git_dirs(cwd: Path, env_allowlist: tuple[str, ...]) -> tuple[Path, Path]:
@@ -920,7 +919,8 @@ def _review_claude(
         *(["--effort", effort] if effort else []),
         "--output-format", "json", "--json-schema", json.dumps(REVIEW_SCHEMA, separators=(",", ":")),
         "--permission-mode", "plan", "--tools", "Read,Grep,Glob",
-        "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
+        "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config", "--restricted",
+        "--settings", '{"includeGitInstructions":false}',  # branch names and subjects are PR-controlled
         "--disallowedTools", "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
     with sandbox.private_directory("loopzero-review-home-") as home:
@@ -1018,7 +1018,7 @@ def _review_codex(
             # Nested bwrap can fail on restricted hosts. The outer bwrap keeps the tree
             # read-only and HOME private.
             "--sandbox", "danger-full-access", "--cd", str(cwd), "--skip-git-repo-check",
-            "-c", "mcp_servers={}",
+            "-c", "mcp_servers={}",  # system config (/etc/codex) is visible in the sandbox
             # The reviewed head controls AGENTS.md and its skills; keep both out of context.
             "-c", "project_doc_max_bytes=0", *skill_overrides,
             "--output-schema", f"{sandbox.SANDBOX_HOME}/schema.json",
@@ -1257,14 +1257,11 @@ def _validated_evidence(result: ReviewResult) -> tuple[bool, dict | None]:
         return False, None
 
 
-def family_from_trailer(value: str) -> str | None:
-    """Map a ``Co-Authored-By`` value to a reviewer family, if recognisable."""
+def families_from_trailer(value: str) -> set[str]:
+    """Every reviewer family a ``Co-Authored-By`` value names."""
     lowered = value.lower()
-    if "claude" in lowered or "anthropic" in lowered:
-        return "claude"
-    if any(word in lowered for word in ("codex", "gpt", "openai")):
-        return "codex"
-    return None
+    words = {"claude": ("claude", "anthropic"), "codex": ("codex", "gpt", "openai")}
+    return {family for family, names in words.items() if any(name in lowered for name in names)}
 
 
 def author_families(cwd: Path, head: str, base: str) -> set[str]:
@@ -1274,6 +1271,7 @@ def author_families(cwd: Path, head: str, base: str) -> set[str]:
     use the PR merge-base, including for delta reviews of a narrower diff.
     """
     revision = f"{base}..{head}"
-    trailers = _review_git(cwd, Config.env_allowlist, f"log {revision}",
-                           "log", "--format=%(trailers:key=Co-Authored-By,valueonly)", revision)
-    return {family for line in trailers.splitlines() if (family := family_from_trailer(line))}
+    # Writer lines count anywhere in a message, not only in Git's final trailer paragraph.
+    messages = _review_git(cwd, Config.env_allowlist, f"log {revision}", "log", "--format=%B", revision)
+    return {family for value in re.findall(r"(?im)^co-authored-by[ \t]*:(.+)$", messages)
+            for family in families_from_trailer(value)}

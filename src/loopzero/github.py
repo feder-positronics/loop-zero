@@ -17,6 +17,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from functools import partial
 from itertools import chain, islice, pairwise
 from pathlib import Path
 from typing import Literal
@@ -552,10 +553,6 @@ def login(token: str | None = None) -> str:
     if isinstance(content, dict) and isinstance(viewer := content.get("viewer"), dict) and (name := viewer.get("login")):
         return str(name)
     raise GhError(("gh", "api", "graphql"), "no login in viewer response")
-
-
-def _not_found(number: int, exc: Exception) -> GhError:
-    return GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})")
 
 
 def _api(endpoint: str, payload: dict, method: str = "POST",
@@ -1142,17 +1139,14 @@ def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, .
             "-f", f"ref={base}", "-f", f"inputs[pr]={number}")
 
 
-def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bool:
+def _eligibility_dispatched(repo: str, base: str, since: str) -> bool:
     query = f"event=workflow_dispatch&branch={quote(base, safe='')}&created={quote('>=' + since, safe='')}&per_page=100"
     data = api_get(f"repos/{repo}/actions/workflows/eligibility.yml/runs?{query}")
     runs = data.get("workflow_runs") if isinstance(data, dict) else None
     complete = isinstance(runs, list) and data.get("total_count") == len(runs)
-    identified = [run.get("display_title") if isinstance(run, dict) else None for run in runs] if complete else []
-    if f"Refresh eligibility for PR #{number}" in identified:
-        return True
-    if not complete or any(not isinstance(name, str) or not re.fullmatch(r"Refresh eligibility for PR #[0-9]+", name) for name in identified):
+    if not complete or not all(isinstance(run, dict) for run in runs):
         raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
-    return False
+    return bool(runs)  # Consumer workflows set no run title; the dispatch window identifies the run.
 
 
 def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...], *,
@@ -1171,7 +1165,7 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
                 pr.number, pr.head_sha, pr.base_ref,
             ):
                 raise GhError(("refresh Loop-zero Eligibility",), "the PR or head changed after resolution") from exc
-            if _eligibility_dispatched(repo, pr.number, base, since):
+            if _eligibility_dispatched(repo, base, since):
                 return True
             if open_blocking_findings(repo, pr.number, None, publishers):
                 raise GhError(("refresh Loop-zero Eligibility",), "blocking findings appeared after resolution") from exc
@@ -1227,7 +1221,7 @@ def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -
                 return found
             cursor = ("-F", f"after={_next_thread_cursor(page, seen)}")
         except (KeyError, TypeError) as exc:
-            raise _not_found(number, exc) from exc
+            raise GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})") from exc
 
 
 _ACTIVE_WORKFLOWS = {"queued", "in_progress", "waiting", "pending", "requested"}
@@ -1541,14 +1535,11 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued{detail}")
 
 
-def _remote_branch_head(endpoint: str) -> str | None:
-    return _branch_sha(endpoint, "object", "missing remote ref SHA")
-
-
 def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     """Return False if the remote ref moved, or True if deleted or absent."""
     endpoint = f"repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
-    current = _remote_branch_head(endpoint)
+    read_head = partial(_branch_sha, endpoint, "object", "missing remote ref SHA")
+    current = read_head()
     if current != expected_head:
         return current is None
     ref = os.fsdecode(f"refs/heads/{branch}".encode("utf-8", "surrogateescape"))
@@ -1563,7 +1554,7 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
             raise GhError(init, done.stderr or done.stdout)
         done = run(argv, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
     if done.exit_code:
-        current = _remote_branch_head(endpoint)
+        current = read_head()
         if current == expected_head:
             raise GhError(argv, done.stderr or done.stdout)
         return current is None
@@ -1590,9 +1581,7 @@ def commit_status(
 def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
     statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
     latest = next((row for row in statuses if row.get("context") == context), {})
-    creator = latest.get("creator")
-    return (isinstance(creator, dict) and creator.get("login") == "github-actions[bot]"
-            and (latest.get("state"), latest.get("description")) == (state, description))
+    return (latest.get("state"), latest.get("description")) == (state, description)
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:

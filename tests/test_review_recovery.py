@@ -288,7 +288,7 @@ def test_interrupted_explicit_repost_recovers_repost_body(replay_gh, wt, gh, fak
             raise github.GhError(("gh", "api", endpoint), "explicit server rejection")
         return original(endpoint, payload, **kwargs)
     monkeypatch.setattr(github, "_api", rejected)
-    assert run(capsys, "review")[0] == 1
+    expect_cli(capsys, 1, "review", stderr_contains=("GitHub rejected it and `--repost` resends the same review",))
     monkeypatch.setattr(github, "_api", original)
     assert run(capsys, "review", "--repost")[0] == 130
     (fake_bin / "claude.stdin").unlink()
@@ -347,7 +347,8 @@ def test_optional_settings_cannot_block_explicit_repost(
     saved["provenance"]["requested_settings"] = optional
     saved["provenance"]["reported_settings"] = "forged"
     path.write_text(json.dumps(saved))
-    gh.respond(reviews_key(), [])
+    quoting = {"commit_id": saved["head"], "state": "COMMENTED", "user": {"login": "some-human"}}  # r7-g4-3
+    gh.respond(reviews_key(), [quoting | {"body": "I do not see the `loopzero:review` marker yet."}])
     monkeypatch.setattr(github, "_api", original)
     expect_cli(capsys, 0, "review", "--repost")
     body = support.posted_review(gh)["body"]

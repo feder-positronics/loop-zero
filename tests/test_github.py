@@ -828,16 +828,25 @@ def arm_check_pages(gh, *pages, statuses=()):
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *(statuses or ([],)))
 
 
-def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
-    filler = [check_run("success", name=f"job{i}") for i in range(99)]
-    statuses = [{"context": "ci/legacy", "state": "failure"}, {"context": "checks", "state": "pending"}]
-    arm_check_pages(gh, {"check_runs": [*filler, check_run("success")]},
-                    {"check_runs": [check_run(None, name="lint", status="in_progress")]}, statuses=(statuses,))
-    runs = github._check_signals(REPO, HEAD)[0]
-    assert {k: v for k, v in runs.items() if not k.startswith("job")} == {
-        "checks": "pending", "lint": "pending", "ci/legacy": "failure"}
-    pages = [c["argv"][-2] for c in gh.calls if "check-runs" in c["argv"][1]]
-    assert pages == ["page=1", "page=2"]
+def test_check_runs_merges_paginated_runs_and_statuses(gh: FakeGh) -> None:
+    names = [f"job{i}" for i in range(99)]
+    runs = [check_run("success", name=name) for name in names]
+    statuses = [{"context": f"legacy/{name}", "state": "failure"} for name in names]
+    statuses.append({"context": "checks", "state": "pending"})
+    second = [{"context": "required-page-two", "state": "success"}, {"context": "checks", "state": "success"}]
+    arm_check_pages(gh, {"check_runs": [*runs, check_run("success")]},
+                    {"check_runs": [check_run(None, name="lint", status="in_progress")]},
+                    statuses=(statuses, second))
+    assert github._check_signals(REPO, HEAD)[0] == {
+        **dict.fromkeys(names, "success"), **dict.fromkeys((row["context"] for row in statuses[:-1]), "failure"),
+        "checks": "pending", "lint": "pending", "required-page-two": "success",
+    }
+    requests = [(call["argv"][1].rsplit("/", 1)[-1], call["argv"][-2]) for call in gh.calls]
+    assert requests == [("check-runs", "page=1"), ("check-runs", "page=2"),
+                        ("statuses", "page=1"), ("statuses", "page=2")]
+    for call in gh.calls:
+        argv = call["argv"]
+        assert "-F" in argv and argv[argv.index("--method") + 1] == "GET"
 
 
 @pytest.mark.parametrize("rows,expected", [
@@ -862,21 +871,6 @@ def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
 
     with pytest.raises(github.GhError, match=endpoint):
         github._check_signals(REPO, HEAD)
-
-
-def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
-    page = [{"context": f"old-{i}", "state": "success"} for i in range(99)]
-    page += [{"context": "duplicate", "state": "failure"}]
-    second = [{"context": "required-page-two", "state": "success"}, {"context": "duplicate", "state": "success"}]
-    arm_check_pages(gh, {"check_runs": []}, statuses=(page, second))
-    runs = github._check_signals(REPO, HEAD)[0]
-    assert runs.keys() == {row["context"] for row in [*page, *second]}
-    assert [c["argv"][1].rsplit("/", 1)[-1] for c in gh.calls] == ["check-runs", "statuses", "statuses"]
-    for call in gh.calls:
-        argv = call["argv"]
-        assert "-F" in argv and argv[argv.index("--method") + 1] == "GET"
-    assert runs["required-page-two"] == "success"
-    assert runs["duplicate"] == "failure", "the first (latest) status wins"
 
 
 @pytest.mark.parametrize("pages,error", [
@@ -1077,13 +1071,6 @@ def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> 
 # --- ready / merge ---------------------------------------------------------------------
 
 
-def test_merge_success_verifies_rest_landing(gh: FakeGh) -> None:
-    gh.respond("pr merge", "")
-    gh.respond(f"api repos/{REPO}/pulls/7", merge_json("MERGED", sha="c" * 40))
-    assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
-    assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
-
-
 def test_merge_command_failure(gh: FakeGh) -> None:
     gh.fail("pr merge", "head commit mismatch")
     gh.respond(f"api repos/{REPO}/pulls/7", merge_json())
@@ -1159,7 +1146,10 @@ def test_merge_reports_queue_admission_or_landing(gh, strategy, queue_state):
         assert github.merge(REPO, 7, strategy, HEAD) is None
     writes = [c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"]]
     assert len(writes) == 1
-    assert ("--squash" in writes[0]) == (strategy == "squash")
+    if strategy == "squash":
+        assert writes[0] == ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
+    else:
+        assert "--squash" not in writes[0]
     assert "--queue" not in writes[0]
 
 

@@ -364,7 +364,7 @@ def assert_one_workflow_read(calls):
 
 
 def test_config_help_identifies_explicit_policy_override():
-    assert "explicit workflow.toml override" in cli.build_parser().format_help()
+    assert "override trusted-base settings" in " ".join(cli.build_parser().format_help().split())
 
 
 def run(capsys, *argv: str) -> tuple[int, str, str]:
@@ -1224,10 +1224,10 @@ def arm_unproven_history(gh, failure):
 
 
 @pytest.mark.parametrize(("heading", "expected"), [("", "lz/t1"), ("\n# Zażółć gęślą jaźń\n", "Zażółć gęślą jaźń")])
-def test_pr_title_prefers_human_heading(wt: Path, monkeypatch, heading, expected) -> None:
+def test_pr_title_uses_only_top_level_heading(wt: Path, monkeypatch, heading, expected) -> None:
     task, read_text = wt / ".loopzero" / "task.md", Path.read_text
     monkeypatch.setattr(Path, "read_text", lambda path, encoding="ascii", **kw: read_text(path, encoding, **kw))
-    task.write_text(f"## Objective\nZażółć gęślą jaźń\n{heading}", encoding="utf-8")
+    task.write_text(f"## Summary\nZażółć gęślą jaźń\n{heading}", encoding="utf-8")
     assert cli._pr_title(wt, "lz/t1") == expected
 
 
@@ -1623,8 +1623,10 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
 
     def change_body_during_review(*args, **kwargs):
         result = run_review(*args, **kwargs)
-        if body_case == "read-fails":
-            gh.respond(detail_key, {}, exit=1, stderr="body read failed")
+        if body_case == "read-fails":  # the pre-post head check reads the PR before the summary does
+            done = sum(call["argv"][:2] == detail_key.split() for call in gh.calls)
+            gh.respond(detail_key, *[rest_pr_json(pr_json(headRefOid=head))] * (done + 1),
+                       {"stdout": "", "stderr": "body read failed", "exit": 1})
         else:
             gh.respond(detail_key, rest_pr_json(pr_json(headRefOid=head, body=live)))
         return result
@@ -2974,7 +2976,7 @@ def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monk
         assert ("merge-authority hold" in out) == bool(labels)
         with monkeypatch.context() as hosted_env:
             hosted_env.chdir(trusted)
-            assert hosted.main() == expected
+            assert hosted.main() == 0
         capsys.readouterr()
         payload = json.loads(gh.calls[-1]["--input"])
         assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{head}"
@@ -4250,10 +4252,10 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
     error_status = 503 if transient else {"denied": 403, "missing": 404, "missing-required": 404}.get(outcome)
     gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": f"HTTP {error_status}"} if error_status else "", "")
     monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
-    runs = [] if outcome == "retry" else [{"display_title": "Refresh eligibility for PR #7" if outcome == "applied" else "unknown"}]
+    runs = [] if outcome == "retry" else [{"display_title": "any title"}]
     monkeypatch.setattr(github.time, "time", lambda: 1795640554)
     endpoint = ELIGIBILITY_DISPATCH.removesuffix("/dispatches")
-    gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs)})
+    gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs) + (outcome == "unknown")})
     title = r"\u0141\xf3d\u017a" if outcome == "refreshed" else "Łódź"
     expect_cli(capsys, 0, "resolve", stderr="", stdout=f"0b9b59e7  important  src/{title}.py:3  {title}\n")
     assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
@@ -4438,14 +4440,14 @@ def test_resolve_groups_arguments_before_loading_context(monkeypatch, capsys, ar
     assert 'resolve [<finding-id> "<reply>"]' in (err if code else out)
 
 
-@pytest.mark.parametrize("failure,code", [(KeyError("headRefOid"), 1), (KeyboardInterrupt, 130)])
+@pytest.mark.parametrize("failure,code", [(KeyError("headRefOid"), 1), (RuntimeError("broken"), 1), (KeyboardInterrupt, 130)])
 def test_unexpected_and_interrupt_exit_codes(wt, capsys, monkeypatch, failure, code):
     def fail(*_):
         raise failure
     monkeypatch.setattr(cli.github, "pr_for_branch", fail)
     _, err = expect_cli(capsys, code, "status")
     if code == 1:  # a programming error names its location
-        assert re.fullmatch(r"loopzero status: unexpected response \(KeyError at test_cli\.py:\d+\): 'headRefOid'\n", err)
+        assert re.fullmatch(rf"loopzero status: unexpected error \({type(failure).__name__} at test_cli\.py:\d+\): {re.escape(str(failure))}\n", err)
 
 
 @pytest.mark.parametrize("detached", [False, True])
@@ -4512,7 +4514,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head,
                              "--publish"]) == (0 if expected else 1)
     states = [json.loads(c["--input"])["state"] for c in gh.calls if "--input" in c]
-    assert states == ["pending", "success" if expected else "failure"]
+    assert states == ["pending", "success" if expected else "pending"]
     gh.respond_pr_view( pr_json(headRefOid="b" * 40))
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
 
@@ -4525,6 +4527,39 @@ def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head,
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
     out, err = capsys.readouterr()
     assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err and "Not Found\"}" in err
+
+
+@pytest.mark.parametrize("publishers,pr_head,message", [
+    ("", "a" * 40, "configure delivery.review_publishers"), ('review_publishers = ["x"]', "aaaaaaa", "full 40-character source SHA"),
+])
+def test_eligibility_main_names_each_usage_mistake(wt, capsys, publishers, pr_head, message):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f"\n{publishers}\n")
+    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", pr_head]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and message in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("pr_update,reviewed,expected", [
+    ({"mergeable": "UNKNOWN"}, True, github.MERGEABILITY_PENDING),
+    ({}, False, "Awaiting trusted review of current source head"),
+    ({"state": "MERGED"}, True, None),
+])
+def test_manual_refresh_publishes_pending_or_skips_landed(wt, gh, head, pr_update, reviewed, expected):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    gh.respond_pr_view(pr_json(headRefOid=head, **pr_update))
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "ci-service"}}})
+    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state="APPROVED", verdict="approve")] if reviewed else [])
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head, "--publish"])
+    statuses = [json.loads(c["--input"]) for c in gh.calls if "--input" in c]
+    assert [s["state"] for s in statuses] == (["pending", "pending"] if expected else [])
+    if expected:
+        assert statuses[-1]["description"] == expected
 
 
 def test_merge_material_lets_read_timeouts_propagate(monkeypatch):
@@ -5234,9 +5269,17 @@ def test_final_review_round_check_distinguishes_heads(wt, gh, head, same_head):
     pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": LOGIN}}})
     gh.respond(reviews_key(), [rev(head if same_head else "a" * 40, "primary")])
+    gh.respond_pr_view(pr_json(headRefOid=head))
     expected = "round is already taken" if same_head else "round changed during publication"
     with pytest.raises(cli.CliError, match=expected):
         cli._require_open_review_round(cfg, pr, head, "primary")
+
+
+def test_review_is_not_posted_after_the_pr_head_moved(wt, gh, head):
+    gh.respond_pr_view(pr_json(headRefOid="b" * 40))
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    with pytest.raises(cli.CliError, match="PR head moved during the review"):
+        cli._require_open_review_round(config.load(wt / "workflow.toml"), pr, head, "primary")
 
 
 def test_late_checkpoint_preserves_completed_pass(wt, gh, capsys, head, monkeypatch):
