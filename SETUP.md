@@ -131,6 +131,7 @@ For TypeSafe work, link [typesafe-ai](integrations/typesafe-ai/SKILL.md) the sam
 way as the core skills, then request it explicitly:
 
 ```sh
+SRC=~/.local/share/loopzero/source
 ln -sfnT "$SRC/integrations/typesafe-ai" ~/.agents/skills/typesafe-ai
 ln -sfnT "$SRC/integrations/typesafe-ai" ~/.claude/skills/typesafe-ai
 ```
