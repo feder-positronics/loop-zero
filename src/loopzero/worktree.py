@@ -22,29 +22,6 @@ GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUT
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
 EXCLUDES = (b".worktrees/", b".loopzero/")
 _BASE_SECTION = re.compile(r"^## Base\n[^\n]+ @ ([0-9a-fA-F]{7,40})[ \t]*$", re.MULTILINE)
-_TASK_TEMPLATE = """# {title}
-
-## Context and goal
-- **Goal:** <one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>
-- **Problem:** <one or two plain sentences before code names: what goes wrong (one problem only), who notices, and evidence/cost; refs in brackets at the end>
-- **Context:** <plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>
-
-Refs #<issue number, or remove this line>
-
-## Acceptance
-- <observable behaviour, e.g. "a new plan opens by restating the ask"; not wording, e.g. "plan/SKILL.md line 12 says X">
-
-## Notes
-
-## Base
-{base_branch} @ {base}
-
-## Validation
-(filled by `loopzero check`)
-
-## Review
-(filled by `loopzero review`)
-"""
 
 
 class WorktreeError(LoopZeroError):
@@ -185,10 +162,8 @@ def write_local_state(
 
 
 def _branch_exists(repo_root: Path, branch: str) -> bool:
-    done = run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-        cwd=repo_root, env_allowlist=GIT_ENV, timeout=30,
-    )
+    done = run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+               cwd=repo_root, env_allowlist=GIT_ENV, timeout=30)
     return done.exit_code == 0
 
 
@@ -270,13 +245,6 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
                 f"origin/{base_branch} at {base}; run loopzero start with a new slug"
             )
     _ensure_excludes(repo_root)
-    _prepare_checkout(repo_root, wt, branch, base, existing=existing, detached=detached)
-    _initialize_task(task, _TASK_TEMPLATE.format(
-        title=title_from_slug(slug), base_branch=base_branch, base=base))
-    return wt
-
-
-def _prepare_checkout(repo_root: Path, wt: Path, branch: str, base: str, *, existing: bool, detached: bool) -> None:
     if not existing:
         wt.parent.mkdir(parents=True, exist_ok=True)
         # Let Git clean up the interrupted checkout before creating the final branch.
@@ -284,6 +252,13 @@ def _prepare_checkout(repo_root: Path, wt: Path, branch: str, base: str, *, exis
     if detached:
         with defer_sigterm():
             git(wt, "switch", "--quiet", "-c", branch, graceful_interrupt=True)
+    template = Path(__file__).with_name("HANDOFF.md")
+    if not template.is_file():  # Source and editable installs use the repository copy.
+        template = template.parents[2] / "core" / template.name
+    text = template.read_text(encoding="utf-8")
+    text = text.replace("<base branch> @ <sha>", f"{base_branch} @ {base}", 1)
+    _initialize_task(task, text.replace("<Title from slug>", title_from_slug(slug), 1))
+    return wt
 
 
 def _resumable_checkout(repo_root: Path, wt: Path, expected_branch: str) -> tuple[str, bool] | None:
