@@ -297,6 +297,7 @@ class Departure:
     checks: tuple[str, ...]
     attribution: str
     failure_report: str | None = None
+    reason: str = ""
 
     def jobs(self, repo: str) -> str:
         if self.failure_report is None:
@@ -304,11 +305,24 @@ class Departure:
         base = f"https://github.com/{repo}/actions/runs/"
         links = re.findall(rf"^- ❌ \[`([^`\n]+)`\]\({re.escape(base)}([0-9]+/job/([0-9]+))\)",
                            self.failure_report, re.M)
+        if not links and (candidates := re.findall(rf"^- ❌ \*\*Checks failed\*\* [^\n]*\(/{re.escape(repo)}/pull/(\d+)\)",
+                                                    self.failure_report, re.M)):
+            try:
+                with github.bounded_reads(time.monotonic() + 10, check_on_exit=False):
+                    sha = github.pr_view(repo, int(candidates[-1])).head_sha
+                    runs = github.paged(f"repos/{repo}/commits/{sha}/check-runs", "check_runs")
+                for run in runs:
+                    url = str(run.get("details_url") or "")
+                    job = re.fullmatch(rf"{re.escape(base)}([0-9]+/job/([0-9]+))", url)
+                    if job and run.get("conclusion") == "failure":
+                        links.append((str(run.get("name") or "Unnamed job"), *job.groups()))
+            except (github.GhError, github.ProcTimeout, github.ToolMissing, OSError, ValueError):
+                return " Candidate jobs unavailable: GitHub could not read the candidate checks."
         jobs = sorted(dict.fromkeys(links), key=lambda job: " / " not in job[0])
         return " " + " ".join(
             f"{name!r} ({base}{path}): " + (_job_failure(repo, job_id) if index < 3 else "log limit reached") + "."
             for index, (name, path, job_id) in enumerate(jobs)
-        ) if jobs else " Candidate jobs unavailable: the Mergify report has no failed job links."
+        ) if jobs else " Candidate jobs unavailable: no failed GitHub Actions jobs found."
 
 
 def _job_failure(repo: str, job_id: str) -> str:
@@ -366,7 +380,7 @@ def _departure(
     if reason.get("code") == "CONFLICT_WITH_BASE_BRANCH" or "> - [ ] `-conflict`" in body:
         attribution = "base_conflict"
     failures = body if reason.get("code") == "CHECKS_FAILED" and attribution in {"isolated", "stacked"} else None
-    return Departure(f"{url}{latest['id']}", names, attribution, failures), {}
+    return Departure(f"{url}{latest['id']}", names, attribution, failures, str(reason.get("label") or "")), {}
 
 
 def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
