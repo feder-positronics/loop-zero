@@ -76,6 +76,9 @@ runs the optional GitHub App token helper `~/.config/loopzero/app-token` (the
 identity that publishes trusted reviews) and reads the Mergify key from
 `~/.config/mergify/api-key`; setup describes the
 [token helper](../SETUP.md#hosted-review-eligibility) and [key](../SETUP.md#mergify).
+The optional token helper assumes a single-user delivery host. Its executable
+and full path, including resolved symlink paths, must be protected from writes
+by other unprivileged local users.
 
 Private agent transcripts and metrics ledgers do not belong in this guide or in
 a new persistent store.
