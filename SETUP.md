@@ -106,8 +106,9 @@ PYTHON
     ln -sfnT "$SRC/core/skills/$n" ~/.claude/skills/"$n" || exit
   done
   for l in ~/.agents/skills/* ~/.claude/skills/*; do
-    if [ -L "$l" ] && [ ! -e "$l" ]; then
-      case $(readlink "$l") in "$SRC"/*) rm "$l" || exit ;; esac
+    if [ -L "$l" ] && [ "$(readlink "$l")" = "$SRC/core/skills/${l##*/}" ] &&
+      [ ! -d "$l" ]; then
+      rm "$l" || exit
     fi
   done
 )
@@ -504,11 +505,6 @@ supported Mergify API credential.
 
 ## Hosted review eligibility
 
-Require `Loop-zero Eligibility` and every `[checks].required_ci` context on the
-base branch in GitHub (branch protection or a ruleset); publishing the status
-alone gates nothing. [MERGIFY.md](docs/MERGIFY.md#protection-and-credentials)
-shows loop-zero's own rulesets as a worked example.
-
 For local GitHub reads, PR body updates, and review comments, an optional executable
 `~/.config/loopzero/app-token` may print a fresh GitHub App installation token.
 Loop-zero caches it for 50 minutes and uses the operator's `gh` login when the
@@ -554,9 +550,14 @@ Only the candidate job uses this environment and credential. The source job runs
 without either. Restricting the environment to the protected default branch limits
 credential access, while commit-status publishers still share a context namespace.
 
-Require `Loop-zero Eligibility` in GitHub branch protection and in
-`[checks].required_ci` on the trusted base. GitHub and Mergify match it by
-context name. A repository
+Publishing the status alone gates nothing. First land the publisher and its
+configuration on the base and confirm the status appears on a PR (a publisher
+added by a PR cannot publish for that PR's own head). Then require
+`Loop-zero Eligibility` and every other `[checks].required_ci` context on the
+base branch in GitHub (branch protection or a ruleset), add it to
+`[checks].required_ci` on the trusted base, and refresh open PRs that lack it.
+[MERGIFY.md](docs/MERGIFY.md#protection-and-credentials) shows loop-zero's own
+rulesets as a worked example. GitHub and Mergify match it by context name. A repository
 writer who can add an Actions workflow can publish the same context with its
 `GITHUB_TOKEN`. Before cutover, either explicitly accept that cooperative writer
 boundary or replace this publisher with a dedicated GitHub App and bind the
