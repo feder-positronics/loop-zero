@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import shlex
+import signal
 import subprocess
 import sys
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 
@@ -281,18 +283,23 @@ def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
+    with pytest.raises(worktree.WorktreeError, match="no such worktree"):
+        worktree.cleanup(wt, worktree.head(repo))
 
 
-def test_cleanup_preserves_untracked_work_with_ignored_artifacts(repo: Path) -> None:
-    (repo / ".git/info/exclude").write_text("local.env\n")
-    wt = worktree.start(repo, "dirty", "main")
-    (wt / "local.env").write_text("ignored")
-    (wt / "scratch.txt").write_text("keep my work")
-    with pytest.raises(worktree.WorktreeError, match="worktree is dirty"):
-        worktree.cleanup(wt, worktree.head(wt))
-    assert (wt / "scratch.txt").read_text() == "keep my work"
-    assert (wt / "local.env").read_text() == "ignored"
-    assert "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
+@pytest.mark.parametrize("partial", [True, False])
+def test_ref_lock_stall_fails_closed_or_reaps_child(tmp_path, monkeypatch, partial):
+    ack = "prepare: ok" if partial else "prepare: ok\n"
+    script = ("import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+              f"print({ack!r}, end='', flush=True); time.sleep(0.8); print(flush=True)")
+    child = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    communicate = child.communicate
+    monkeypatch.setattr(child, "communicate", lambda data, timeout: communicate(data, timeout=0.05))
+    monkeypatch.setattr(worktree.subprocess, "Popen", lambda *args, **kwargs: child)
+    outcome = pytest.raises(worktree.GitError) if partial else nullcontext()
+    with outcome, worktree._lock_verified_ref(tmp_path, "refs/heads/lz/done", "a" * 40):
+        assert not partial, "cleanup proceeded without a complete acknowledgement"
+    assert child.returncode == -signal.SIGKILL
 
 
 @pytest.mark.parametrize("kind", ["same repo", "other repo", "clone"])
@@ -310,11 +317,6 @@ def test_cleanup_preserves_ignored_nested_worktrees(repo: Path, tmp_path: Path, 
         worktree.cleanup(wt, worktree.head(wt))
     assert (nested / ".git").exists()
     assert "lz/parent" in git(repo, "branch", "--list", "lz/parent")
-
-
-def test_cleanup_missing_worktree(repo: Path) -> None:
-    with pytest.raises(worktree.WorktreeError, match="no such worktree"):
-        worktree.cleanup(repo / ".worktrees" / "ghost", worktree.head(repo))
 
 
 @pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])
