@@ -315,12 +315,10 @@ def _departure_payload(body: str, queue: str) -> dict:
     return {}
 
 
-def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
-    """Use the latest bot departure for the current head; a later queue command starts a new attempt."""
-    try:
-        comments = github.paged(f"repos/{repo}/issues/{number}/comments")
-    except github.GhError:
-        return None
+def _departure(
+    comments: list[dict], repo: str, number: int, head: str, queue: str,
+) -> tuple[Departure | None, dict]:
+    """Return the current departure or the later command that superseded it."""
     comments = [item for item in comments if type(item.get("id")) is int and item["id"] > 0]
     command = max(
         (item for item in comments if _queue_command(str(item.get("body") or ""), queue)),
@@ -334,15 +332,15 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
     entered = next((line for line in lines if line.startswith("- ✅ **Entered the queue** ")), "")
     source = re.search(r"^- 🚫 \*\*Left the queue\*\* [^\n]+ · `([0-9a-f]{7,40})`$", body, re.M)
     if not payload or not entered or not source or not head.startswith(source[1]):
-        return None
+        return None, {}
     linked = re.search(rf"\]\({re.escape(url)}(\d+)\)", entered)  # absent when a rule or unlinked command admitted
     admitted = next((item for item in comments if linked and item["id"] == int(linked[1])), {})
     markers = [line for line in str(admitted.get("body") or "").splitlines() if line.startswith(f"<!-- {REQUEST} ")]
     if linked and (not admitted or (markers and _marker(REQUEST, head, queue) not in markers)):
-        return None
+        return None, {}
     # Second-precision timestamps: a command in the departure's second may be a new attempt.
-    if command is not admitted and str(command.get("created_at") or "") >= _updated_at(latest):
-        return None
+    if command and command is not admitted and str(command.get("created_at") or "") >= _updated_at(latest):
+        return None, command
 
     reason = payload["dequeue_reason"] if isinstance(payload.get("dequeue_reason"), dict) else {}
     checks = reason.get("checks")
@@ -353,22 +351,45 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
     ) if any(line.startswith(prefix) for line in lines)), "")
     if reason.get("code") == "CONFLICT_WITH_BASE_BRANCH" or "> - [ ] `-conflict`" in body:
         attribution = "base_conflict"
-    return Departure(f"{url}{latest['id']}", names, attribution)
+    return Departure(f"{url}{latest['id']}", names, attribution), {}
 
 
-def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
+def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
+    try:
+        comments = github.paged(f"repos/{repo}/issues/{number}/comments")
+    except github.GhError:
+        return None
+    return _departure(comments, repo, number, head, queue)[0]
+
+
+@dataclass(frozen=True)
+class QueueAttempt:
+    requested: bool = False
+    confirmed: bool = False
+    departure: Departure | None = None
+    admission: str | None = None
+
+
+def queue_attempt(repo: str, number: int, head: str, queue: str) -> QueueAttempt:
     login, requested, confirmed = github.login(token=""), False, False
     requested_at = ""
     comments = github.paged(f"repos/{repo}/issues/{number}/comments")
+    departure, retry = _departure(comments, repo, number, head, queue)
     for item in _comments_by(comments, login):
         body = str(item.get("body") or "")
         lines, requeue = body.splitlines(), _queue_command(body, queue)
-        if _marker(REQUEST, head, queue) in lines or (requeue and confirmed):
+        marked = any(line.startswith(f"<!-- {REQUEST} ") for line in lines)
+        if _marker(REQUEST, head, queue) in lines or (not marked and requeue and (confirmed or item is retry)):
             requested, requested_at = True, str(item.get("created_at") or "")
         confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)
     report_id = _admission_report(comments, requested_at)
     report = f"https://github.com/{repo}/pull/{number}#issuecomment-{report_id}" if report_id else None
-    return requested, confirmed, report
+    return QueueAttempt(requested, confirmed, departure, report)
+
+
+def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
+    attempt = queue_attempt(repo, number, head, queue)
+    return attempt.requested, attempt.confirmed, attempt.admission
 
 
 def markers(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool]:
