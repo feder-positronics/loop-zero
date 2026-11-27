@@ -24,3 +24,5 @@ the system boundaries; the [contract](../core/CONTRACT.md) owns delivery behavio
 
 [tach.toml](../tach.toml) holds the dependency layers between these modules,
 enforced by `tach check` in CI and `loopzero check`.
+[scripts/size_budget.sh](../scripts/size_budget.sh) holds the source, test and
+Markdown line caps and the per-function complexity ratchet.
