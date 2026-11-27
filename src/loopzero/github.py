@@ -359,8 +359,52 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
     return ""
 
 
+_ETAG_CACHE_BYTES = 4_000_000
+_etag_cache: dict[tuple[tuple[str, ...], int], tuple[str, str, int]] = {}
+
+
+def _cache_credential(selected: str) -> str:
+    """The credential a cache is filed under: the one passed, else a GH_TOKEN/GITHUB_TOKEN gh will use.
+    Empty for gh's stored account, which can change mid-run and is never cached."""
+    return selected or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+
+
+def _etag_key(args: tuple[str, ...], selected: str, enabled: bool) -> tuple[tuple[str, ...], int] | None:
+    credential = _cache_credential(selected)
+    return (args, hash(credential)) if enabled and credential else None
+
+
+def _with_validator(argv: tuple[str, ...], cached: tuple[str, str, int] | None) -> list[str]:
+    return [*argv, *(("-H", f"If-None-Match: {cached[0]}") if cached else ())]
+
+
+def _report_used(used: list[str] | None, selected: str) -> None:
+    if used is not None:
+        used[:] = [selected]
+
+
+def _settled_body(cached: tuple[str, str, int] | None, status: str | None, exit_code: int, body: str) -> str | None:
+    """The response body of a success or of a 304 revalidating `cached`; None for an error."""
+    if cached and status == "304":
+        return cached[1]
+    return body if exit_code == 0 else None
+
+
+def _remember_etag(key: tuple[tuple[str, ...], int] | None, headers: dict[str, str], body: str) -> None:
+    if key and (etag := headers.get("etag")):
+        _etag_cache.pop(key, None)
+        size = len(body.encode())
+        if size > _ETAG_CACHE_BYTES:
+            return
+        _etag_cache[key] = (etag, body, size)
+        while sum(held[2] for held in _etag_cache.values()) > _ETAG_CACHE_BYTES:
+            del _etag_cache[next(iter(_etag_cache))]
+
+
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
-        token: str | None = None, retry_idempotent: bool = False, dates: list[str] | None = None) -> str:
+        token: str | None = None, retry_idempotent: bool = False, dates: list[str] | None = None,
+        conditional: bool = False, used: list[str] | None = None) -> str:
+    """Run gh; `conditional` revalidates a repeated REST GET by ETag, since a 304 is free of the core quota."""
     dates = [] if dates is None else dates
     api = args[:1] == ("api",)
     diagnostic_api = api and _api_error_diagnostics.get()
@@ -375,8 +419,10 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     delays = (RETRY_DELAY, None) if retryable and (not scope or scope[2]) else (None,)
     for delay in delays:
         selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
+        key = _etag_key(args, selected, conditional and rest_api and read_only)
+        cached = _etag_cache.get(key)
         try:
-            done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
+            done = run(_with_validator(argv, cached), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
                        timeout=read_timeout(timeout, scoped=read_only), encoding="utf-8")
         except ToolMissing as exc:
@@ -393,9 +439,11 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         response = _included_response(done.stdout) if api else (None, {}, done.stdout)
         status, headers, body = response
         tail = "\n".join(part for part in (done.stderr, body) if part)
-        if done.exit_code == 0:
+        if (settled := _settled_body(cached, status, done.exit_code, body)) is not None:
             dates[:] = [headers.get("date", "")]
-            return body
+            _report_used(used, selected)
+            _remember_etag(key, headers, settled)
+            return settled
         rate_limited = _rate_limited(status, headers, tail)
         transient = rate_limited or _transient_error(tail, status)
         pause = _rate_limit_delay(headers, delay) if rate_limited else delay
@@ -511,7 +559,7 @@ def _iter_paged(endpoint: str, key: str | None = None, **kwargs) -> Iterator[dic
     seen: set[bytes] = set()
     for page in range(1, 101):
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
-                         "-F", f"page={page}", **kwargs)
+                         "-F", f"page={page}", conditional=True, **kwargs)
         if key is not None:
             chunk = chunk.get(key) if isinstance(chunk, dict) else None
         if (not isinstance(chunk, list) or len(chunk) > PAGE
@@ -531,7 +579,7 @@ def paged(endpoint: str, key: str | None = None, **kwargs) -> list[dict]:
 
 def api_get(endpoint: str, **kwargs) -> object:
     """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
-    return _gh_json("api", endpoint, **kwargs)
+    return _gh_json("api", endpoint, conditional=True, **kwargs)
 
 
 def job_log(repo: str, job_id: str) -> Completed:
@@ -552,11 +600,23 @@ def auth_token() -> str:
     return _gh("auth", "token", "--hostname", "github.com").strip()
 
 
+_logins: dict[str, str] = {}
+
+
 def login(token: str | None = None) -> str:
-    """Login of the identity used for GitHub reads and review publishing."""
-    data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }", token=token)
+    """Login of the identity used for GitHub reads and review publishing.
+
+    Read once per explicit, app or environment credential, filed under the credential the answering attempt
+    used; an ambient gh account is read every time."""
+    selected = _select_token(token, _read_scope.get(), True)
+    if name := _logins.get(_cache_credential(selected)):
+        return name
+    used: list[str] = []
+    data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }", token=token, used=used)
     content = data.get("data") if isinstance(data, dict) else None
     if isinstance(content, dict) and isinstance(viewer := content.get("viewer"), dict) and (name := viewer.get("login")):
+        if used and (credential := _cache_credential(used[0])):  # of the attempt that answered
+            _logins[credential] = str(name)
         return str(name)
     raise GhError(("gh", "api", "graphql"), "no login in viewer response")
 
