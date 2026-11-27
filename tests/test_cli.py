@@ -615,9 +615,9 @@ def test_initial_pr_keeps_human_validation(wt: Path, gh: FakeGh, capsys) -> None
     ))
     gh.respond_pr_list([])
     gh.respond_pr_create(pr_json(headRefOid=head_of(wt)))
+    arm_draft_validation(gh, wt, head_of(wt))
     assert run(capsys, "pr")[0] == 0
-    body = next(json.loads(c["--input"])["body"] for c in gh.calls
-                if c["argv"][:2] == ["api", f"repos/{REPO}/pulls"])
+    body = next(json.loads(c["--input"])["body"] for c in gh.calls if "PATCH" in c["argv"])
     assert "- Regression failed before the fix." in body
     assert "- Browser verified." in body
     assert "(no `loopzero check` run recorded)" in body
@@ -1117,24 +1117,34 @@ def test_pr_pushes_and_creates_draft(
     head = head_of(wt)
     gh.respond_pr_list([], branch=branch)
     gh.respond_pr_create(pr_json(headRefOid=head), branch=branch)
+    task = (wt / ".loopzero" / "task.md").read_text()
+    narrative = task.split("## Validation\n", 1)[0].replace("## Notes\n", "## Notes\nEdited on GitHub.\n")
+    (wt / ".loopzero" / "task.md").write_text(
+        task.replace("(filled by `loopzero check`)", "Browser verified.")
+        .replace("(filled by `loopzero review`)", "Saved review.")
+    )
+    gh.respond_pr_view(pr_json(headRefOid=head, body=narrative), branch=branch)
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     pushes = trace_pushes(fake_tool, tmp_path)
     expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
-    assert pushes.read_text() == f"push -u origin {branch}\n"
+    assert pushes.read_text() == f"push origin {head}:refs/heads/{branch}\n"
+    assert git(wt, "rev-parse", "--abbrev-ref", "@{upstream}").rstrip("\n") == f"origin/{branch}"
     origin = repo.parent / "origin.git"
     assert git(origin, "rev-parse", branch).strip() == head
     assert [c["argv"][:2] for c in gh.calls] == [
         branch_head_key(branch).split(), history_key.split(),
         branch_head_key(branch).split(), pr_list_key(branch).split(), ["api", f"repos/{REPO}/pulls"],
+        ["api", f"repos/{REPO}/pulls/7"], ["api", f"repos/{REPO}/pulls/7"],
     ]
-    create = gh.calls[-1]
-    payload = json.loads(create["--input"])
+    payload = json.loads(gh.calls[-3]["--input"])
+    assert "## Validation" not in payload["body"] and "## Review" not in payload["body"]
     assert payload["draft"] is True and payload["head"] == branch
     heading = (wt / ".loopzero" / "task.md").read_text().splitlines()[0].lstrip("# ")
     assert payload["title"] == heading
-    body = payload["body"]
+    body = json.loads(gh.calls[-1]["--input"])["body"]
     assert "## Context and goal" in body and git(repo, "rev-parse", "origin/main").strip() in body
     assert body.count("## Validation") == 1 and f"Recorded for `{head[:12]}`" in body
-    assert "(filled by `loopzero check`)" not in body, "placeholder replaced in place"
+    assert "Browser verified." in body and "Saved review." in body and "Edited on GitHub." in body
     assert body.index("## Notes") < body.index("## Validation") < body.index("## Review"), "evidence trails the narrative"
     assert "- `echo ok`: exit 0" in body and "- `test -f README.md`: exit 0" in body
 
@@ -1166,6 +1176,7 @@ def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, 
         gh.respond(branch_history_key(), [])
         gh.respond_pr_list([])
         gh.respond_pr_create(pr_json(headRefOid=head))
+        arm_draft_validation(gh, wt, head)
         assert run(capsys, "--config", str(private), "pr")[0] == 0
 
     body = json.loads(gh.calls[-1]["--input"])["body"]
@@ -1190,6 +1201,7 @@ def test_pr_requires_proven_branch_history(wt, gh, fake_tool, tmp_path, capsys, 
         closed = pr_json(state="CLOSED", headRefOid=head)
         gh.respond(branch_history_key(), [closed_history_row(closed)])
         gh.respond_pr_list([closed])
+        arm_draft_validation(gh, wt, head)
         expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
         return
     completed = failure in {"merged", "CLOSED", "OPEN"}
@@ -1213,6 +1225,80 @@ def test_pr_requires_proven_branch_history(wt, gh, fake_tool, tmp_path, capsys, 
     assert all(fragment in err for fragment in expected)
     assert not pushes.exists(), "branch was pushed"
     assert not any(map(wrote, gh.calls)), "GitHub was written"
+
+
+def test_pr_pushes_the_captured_commit_not_the_moved_branch(wt, gh, fake_tool, tmp_path, capsys):
+    head = head_of(wt)
+    gh.respond(branch_history_key(), [])
+    gh.respond_pr_list([])
+    gh.respond_pr_create(pr_json(headRefOid=head))
+    arm_draft_validation(gh, wt, head)
+    git(wt, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")  # single-branch clone
+    pushes = tmp_path / "pushes"  # another writer moves the branch name just before the push
+    fake_tool("git", f'''if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; /usr/bin/git commit -q --allow-empty -m moved; fi
+exec /usr/bin/git "$@"
+''')
+    expect_cli(capsys, 0, "pr", stdout=URL + "\n")
+    assert pushes.read_text() == f"push origin {head}:refs/heads/lz/t1\n"
+    assert git(wt.parent.parent.parent / "origin.git", "rev-parse", "lz/t1").strip() == head
+    assert git(wt, "config", "branch.lz/t1.merge").strip() == "refs/heads/lz/t1"
+
+
+def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, gh, capsys):
+    head = head_of(wt)
+    task = wt / ".loopzero" / "task.md"
+    task.write_text(
+        task.read_text().replace("(filled by `loopzero check`)", "Browser verified.")
+        .replace("(filled by `loopzero review`)", "Saved review.")
+    )
+    gh.respond(branch_history_key(), [])
+    gh.respond_pr_list([])
+    gh.respond_pr_create(pr_json(headRefOid="b" * 40))  # another writer pushed B after the pinned push
+    gh.respond_pr_view(pr_json(headRefOid="b" * 40))
+    _, err = expect_cli(capsys, 1, "pr", stdout="")
+    assert "rerun loopzero pr" in err and head not in err
+    assert not any("PATCH" in call["argv"] for call in gh.calls)
+    body = json.loads(gh.calls[-2]["--input"])["body"]
+    assert "## Context and goal" in body
+    assert not any(text in body for text in ("## Validation", "Browser verified.", "## Review", "Saved review."))
+
+    # The branch is back at the evaluated head, but the draft still has only prose.
+    arm_pr_body_patch(gh, head, body=body)
+    expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
+    patch = gh.calls[-1]
+    assert "PATCH" in patch["argv"]
+    body = json.loads(patch["--input"])["body"]
+    assert "Browser verified." in body and "Saved review." in body
+
+
+@pytest.mark.parametrize("live", [dict(headRefOid="b" * 40), dict(baseRefName="release")], ids=["head", "target"])
+def test_pr_does_not_patch_a_body_for_a_head_or_target_the_pr_moved_from(wt, gh, capsys, live):
+    arm_pr_body_patch(gh, head_of(wt))
+    gh.respond_pr_view(pr_json(**{"headRefOid": head_of(wt), **live}))
+    _, err = expect_cli(capsys, 1, "pr", stdout="")
+    assert "rerun loopzero pr" in err and not any(map(wrote, gh.calls))
+
+
+def test_check_refresh_does_not_patch_a_retargeted_pr(wt, gh):
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    head = head_of(wt)
+    arm_pr_body_patch(gh, head)
+    gh.respond_pr_view(pr_json(headRefOid=head, baseRefName="release"))
+    cli._refresh_pr_checks(wt, config.load(wt / "workflow.toml"))
+    assert not any(map(wrote, gh.calls))
+
+
+def test_review_summary_is_not_patched_into_a_closed_pr(wt, gh, fake_bin, capsys, monkeypatch):
+    head = prepare_review(wt, gh, fake_bin)
+    post = github.post_review
+
+    def publish(*args, **kwargs):
+        post(*args, **kwargs)
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, state="CLOSED")))
+
+    monkeypatch.setattr(github, "post_review", publish)
+    expect_cli(capsys, 0, "review", stderr="")
+    assert posted_review(gh) and not any("PATCH" in call["argv"] for call in gh.calls)
 
 
 def arm_unproven_history(gh, failure):
@@ -1358,6 +1444,7 @@ def test_pr_uses_lease_for_rewritten_open_pr(wt, repo, gh, fake_tool, tmp_path, 
     if moved is None:
         pushes = trace_pushes(fake_tool, tmp_path)
         gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+        gh.respond_pr_view(pr_json(headRefOid=head))
     code, out, err = run(capsys, "pr")
     if moved:
         diagnostic = "absent from this task branch's history" if case == "shared-object" else "remote moved"
@@ -1374,7 +1461,7 @@ def test_pr_uses_lease_for_rewritten_open_pr(wt, repo, gh, fake_tool, tmp_path, 
         assert "remote moved" not in err and all("PATCH" not in call["argv"] for call in gh.calls)
     else:
         assert (code, out, err) == (0, URL + "\n", "")
-    assert pushes.read_text().strip() == f"push -u origin --porcelain --force-with-lease=lz/t1:{old} lz/t1"
+    assert pushes.read_text().strip() == f"push origin --porcelain --force-with-lease=lz/t1:{old} {head}:refs/heads/lz/t1"
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == (old if case == "hook-fails" else head)
 
 
@@ -1390,6 +1477,7 @@ def test_legacy_locale_status_reflog_push_and_cleanup(wt, repo, gh, monkeypatch,
     gh.respond(branch_history_key(branch=branch), [])
     arm_pr_body_patch(gh, rewritten_branch, branch=branch)
     gh.respond(reviews_key(), [])
+    gh.respond_pr_view(pr_json(headRefOid=rewritten_branch), pr_json(headRefOid=head), branch=branch)
     program = """
 from pathlib import Path
 from loopzero import cli, worktree
@@ -1446,6 +1534,13 @@ def test_merge_cancel_and_wait_conflict_is_a_usage_error(capsys):
 
 
 # --- review ---------------------------------------------------------------------------
+
+
+def arm_draft_validation(gh: FakeGh, wt: Path, head: str) -> None:
+    """The created draft is reread, then receives its validation by PATCH."""
+    gh.respond(f"api repos/{REPO}/pulls/7",
+               rest_pr_json(pr_json(headRefOid=head, body=(wt / ".loopzero" / "task.md").read_text())))
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
 
 
 def arm_pr_body_patch(gh: FakeGh, head: str, *, branch: str = "lz/t1", **fields) -> None:
@@ -1633,9 +1728,9 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
 
     def change_body_during_review(*args, **kwargs):
         result = run_review(*args, **kwargs)
-        if body_case == "read-fails":  # the pre-post head check reads the PR before the summary does
+        if body_case == "read-fails":  # the pre-post checks read the PR twice before the summary does
             done = sum(call["argv"][:2] == detail_key.split() for call in gh.calls)
-            gh.respond(detail_key, *[rest_pr_json(pr_json(headRefOid=head))] * (done + 1),
+            gh.respond(detail_key, *[rest_pr_json(pr_json(headRefOid=head))] * (done + 2),
                        {"stdout": "", "stderr": "body read failed", "exit": 1})
         else:
             gh.respond(detail_key, rest_pr_json(pr_json(headRefOid=head, body=live)))
@@ -3334,6 +3429,16 @@ def test_ready_points_to_owner_route_when_receipt_changes_before_undraft(wt, gh,
     monkeypatch.setattr(cli, "_pr_readiness", snapshot)
     monkeypatch.setattr(github, "mark_ready", lambda *_: pytest.fail("undrafted without a receipt"))
     expect_cli(capsys, 1, "ready", stderr_contains=("run loopzero check at this head", cli.OWNER_ROUTE))
+
+
+@pytest.mark.parametrize("change", [dict(headRefOid="b" * 40), dict(labels=[{"name": "hold"}]),
+                                    dict(baseRefName="release")], ids=["head", "hold", "target"])
+def test_ready_rechecks_the_live_pr_before_the_first_activation(wt, gh, capsys, head, change):
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=True)
+    gh.respond("pr ready", "")
+    gh.respond_pr_view(pr_json(**{"headRefOid": head, "isDraft": True, **change}))
+    expect_cli(capsys, 1, "ready", stderr_contains=("rerun loopzero ready",))
+    assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
@@ -5195,6 +5300,7 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         gh.respond(branch_history_key(), [])
         gh.respond_pr_list([])
         gh.respond_pr_create(pr_json(headRefOid=head))
+        arm_draft_validation(gh, wt, head)
         _, err = expect_cli(capsys, int(bool(extra)), "pr")
         if extra:
             assert not git(wt, "ls-remote", "origin", "refs/heads/lz/t1").strip()
@@ -5209,8 +5315,8 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert not writes
     else:
         assert err == ""
-        assert len(writes) == 1
-        assert json.loads(writes[0]["--input"])["body"] == prose + suffix
+        assert len(writes) == 1 + create  # the draft, then its validation
+        assert json.loads(writes[-1]["--input"])["body"] == prose + suffix
 
 
 def merge_wait(monkeypatch, capsys, wait, fake):
@@ -5385,6 +5491,14 @@ def test_review_is_not_posted_after_the_pr_head_moved(wt, gh, head):
     gh.respond_pr_view(pr_json(headRefOid="b" * 40))
     pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
     with pytest.raises(cli.CliError, match="PR head moved during the review"):
+        cli._require_open_review_round(config.load(wt / "workflow.toml"), pr, head, "primary")
+
+
+@pytest.mark.parametrize("live", [dict(state="CLOSED"), dict(baseRefName="release")], ids=["closed", "retargeted"])
+def test_review_is_not_posted_after_the_pr_closed_or_retargeted(wt, gh, head, live):
+    gh.respond_pr_view(pr_json(headRefOid=head, **live))
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    with pytest.raises(cli.CliError, match="not open against main"):
         cli._require_open_review_round(config.load(wt / "workflow.toml"), pr, head, "primary")
 
 
