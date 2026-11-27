@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import git
+from tests.conftest import git, git_environment
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/check_architecture_docs.py"
 
@@ -25,7 +25,7 @@ def base(git_repo):
 
 
 def run(repo, base, *args):
-    return subprocess.run([sys.executable, str(SCRIPT), base, *args], cwd=repo,
+    return subprocess.run([sys.executable, str(SCRIPT), base, *args], cwd=repo, env=git_environment(),
                           text=True, capture_output=True, check=False)
 
 

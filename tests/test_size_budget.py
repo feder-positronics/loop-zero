@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import git
+from tests.conftest import git, git_environment
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/size_budget.sh"
 
@@ -24,7 +24,7 @@ def test_executable_scripts_keep_lf_in_autocrlf_checkout(git_repo, tmp_path):
     checkout = tmp_path / "Windows checkout"
     git(tmp_path, "clone", "-c", "core.autocrlf=true", str(git_repo), str(checkout))
 
-    done = subprocess.run(["scripts/size_budget.sh"], cwd=checkout,
+    done = subprocess.run(["scripts/size_budget.sh"], cwd=checkout, env=git_environment(),
                           capture_output=True, text=True, check=False)
     assert done.returncode == 0, done.stderr
     eol = git(checkout, "ls-files", "--eol", "--", *paths).splitlines()
@@ -51,7 +51,7 @@ def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_to
 
 
 def run_budget(repo, base):
-    return subprocess.run(["bash", str(SCRIPT), base], cwd=repo,
+    return subprocess.run(["bash", str(SCRIPT), base], cwd=repo, env=git_environment(),
                           capture_output=True, text=True, check=False)
 
 

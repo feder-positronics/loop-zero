@@ -369,7 +369,7 @@ def test_not_a_git_repo(tmp_path, bwrap_log):
 
 
 def test_unborn_branch_names_its_cause(tmp_path, bwrap_log):
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    git(tmp_path, "init", "-q")
     with pytest.raises(sandbox.SandboxUnavailable, match="no commit yet; make the first commit"):
         sandbox.run_checks(make_config(), tmp_path)
 
@@ -521,8 +521,8 @@ class TestRealSandbox:
         toolchain = tmp_path / "toolchain"
         toolchain.mkdir()
         (toolchain / "sentinel").write_text("visible\n")
-        cfg = make_config(checks=(f'test "$(cat {toolchain}/sentinel)" = visible',),
-                          sandbox_ro=(str(toolchain),))
+        command = f'test "$(cat {shlex.quote(str(toolchain / "sentinel"))})" = visible'
+        cfg = make_config(checks=(command,), sandbox_ro=(str(toolchain),))
         assert sandbox.run_checks(cfg, git_repo).ok
 
     @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
@@ -1013,11 +1013,9 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
 
 def test_input_blobs_keep_git_output_byte_for_byte(git_repo):
     # Input keys hash diff-tree output; stripping would invalidate saved receipts.
-    def git(*args):
-        return subprocess.run(["git", *args], cwd=git_repo, capture_output=True, text=True, check=True).stdout
-    empty = git("hash-object", "-t", "tree", "/dev/null").strip()
-    raw = git("-c", "core.quotePath=true", "diff-tree", "--no-commit-id", "--raw", "-r", "--no-abbrev",
-              empty, "HEAD", "--", "README.md")
+    empty = git(git_repo, "hash-object", "-t", "tree", "/dev/null").strip()
+    raw = git(git_repo, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
+              "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", "README.md")
     assert raw.endswith("\n") and sandbox._input_blobs(make_config(), git_repo, ("README.md",)) == raw
 
 
