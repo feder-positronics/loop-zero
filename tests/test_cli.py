@@ -5275,6 +5275,32 @@ def test_final_review_round_check_distinguishes_heads(wt, gh, head, same_head):
         cli._require_open_review_round(cfg, pr, head, "primary")
 
 
+def test_plain_readiness_measures_review_age_with_github_date(wt, gh, head, monkeypatch):
+    review = rev(head, "primary") | {"submitted_at": "2026-09-23T12:00:00Z"}
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": LOGIN}}})
+    gh.respond(reviews_key(), f"HTTP/2 200 OK\nDate: Wed, 23 Sep 2026 12:00:10 GMT\n\n{json.dumps([review])}")
+    monkeypatch.setattr(cli.time, "time", lambda: 1790164800 + 1200)  # host clock 20 minutes ahead
+    seen = {}
+    monkeypatch.setattr(cli.github, "readiness", lambda *a, **k: seen.update(k) or github.Readiness(False, ("x",)))
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    cli._readiness(wt, config.load(wt / "workflow.toml"), pr, head, diagnostics=True)
+    assert seen["review_grace"] is True  # 10 s by GitHub's Date header, not 20 minutes by the host
+    seen.clear()  # status reads the reviews itself and passes their Date header along
+    cli._readiness(wt, config.load(wt / "workflow.toml"), pr, head, [review], diagnostics=True,
+                   dates=("Wed, 23 Sep 2026 12:00:10 GMT",))
+    assert seen["review_grace"] is True
+
+
+@pytest.mark.parametrize("step", ["_refresh_publisher_token", "_require_open_review_round"])
+def test_rejected_token_before_posting_names_the_saved_review(wt, gh, fake_bin, capsys, monkeypatch, step):
+    head = prepare_review(wt, gh, fake_bin)
+    def reject(*_args):
+        raise github.GhAuth(("gh", "api", "reviews"), "gh: Bad credentials (HTTP 401)")
+    monkeypatch.setattr(cli, step, reject)
+    expect_cli(capsys, 1, "review", stderr_contains=("Bad credentials", "run `loopzero review --repost`"))
+    assert cli._review_file(wt, head, "primary").exists()
+
+
 def test_review_is_not_posted_after_the_pr_head_moved(wt, gh, head):
     gh.respond_pr_view(pr_json(headRefOid="b" * 40))
     pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
