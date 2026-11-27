@@ -665,7 +665,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     (call,) = gh.calls
     argv = call["argv"]
     assert argv[:2] == ["api", "graphql"]
-    assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
+    assert "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
     assert any(a.startswith("query=") and "author { __typename login }" in a for a in argv)
     assert github.open_blocking_findings(REPO, 7, HEAD, ()) == []
 
@@ -803,6 +803,7 @@ def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
     found = github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
     assert [f.title for f in found] == ["A", "B"]
     assert "after=C1" not in gh.argv(0) and "after=C1" in gh.argv(1)
+    assert gh.argv(1)[gh.argv(1).index("after=C1") - 1] == "-f"
 
 
 @pytest.mark.parametrize("cursors", [(None,), ("C1", "C2", "C1")])
@@ -819,7 +820,8 @@ def test_thread_reply_read_rejects_repeated_cursor(gh: FakeGh) -> None:
     node = {"id": "T1", "comments": {"pageInfo": page}}
     with pytest.raises(github.GhError, match="missing or repeated review thread cursor"):
         github._has_thread_reply(node, "reply")
-    assert len(gh.calls) == 1 and "after=C1" in gh.argv(0)
+    argv = gh.argv(0)
+    assert len(gh.calls) == 1 and argv[argv.index("after=C1") - 1] == argv[argv.index("thread=T1") - 1] == "-f"
 
 
 # --- checks --------------------------------------------------------------------------------
@@ -1459,3 +1461,24 @@ def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: 
         (comment,) = payload["comments"]
         assert (comment["path"], comment["line"]) == (anchor, 1)
     assert len(calls_for(gh, detail_key)) == int(severity == "important" and path != "file-3000")
+
+
+@pytest.mark.parametrize("repo", ["acme/123", "acme/true", "acme/@etc-passwd"])
+def test_graphql_string_variables_are_raw_fields(repo: str) -> None:
+    """`gh -F` coerces numbers and booleans and reads `@file`; names and ids must stay strings."""
+    argv = github._pull_query(repo, 7, "query")
+    owner, name = repo.split("/")
+    assert argv[argv.index(f"owner={owner}") - 1] == "-f" and argv[argv.index(f"name={name}") - 1] == "-f"
+    assert argv[argv.index("number=7") - 1] == "-F"
+
+
+def test_resolve_finding_sends_thread_id_as_raw_field(gh: FakeGh) -> None:
+    node = {**thread(f"{marker('important')}\nA"), "id": "T1"}
+    node["comments"]["pageInfo"] = {"hasNextPage": False, "endCursor": None}
+    gh.respond("api graphql", threads_json(node),
+               {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}},
+               {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}})
+    github.resolve_finding(REPO, 7, "0b9b59e7", "Fixed.", PUBLISHERS)
+    for call in (1, 2):
+        argv = gh.argv(call)
+        assert argv[argv.index("thread=T1") - 1] == "-f"
