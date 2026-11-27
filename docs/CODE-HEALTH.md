@@ -65,8 +65,8 @@ action with its owner. Add no gate, ledger, scheduler or skill for this.
 
 Each repository names its collector command, scope, exclusions, cadence,
 baseline location and owner in its own `AGENTS.md` or the docs it links.
-loop-zero ships no collector, schedule or baseline store. loop-zero's own
-collector is `loopzero check`. See [IntelFlo's audit runbook](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/audit-health.md#standing-nightly-audit)
+loop-zero ships no recurring code-health collector, schedule or baseline store;
+`loopzero check` runs the repository's blocking checks. See [IntelFlo's audit runbook](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/audit-health.md#standing-nightly-audit)
 for a consumer example.
 
 ### Anti-slop checks and Rule of Two
@@ -79,8 +79,9 @@ repository instead of adding prompt prose—respecting the
 copying raw PR findings into files or backlogs. Prefer one maintained, pinned
 tool per job inside `[checks].commands`: for Python, Ruff
 (`UP/B/SIM/PIE/PERF/RUF/RET/ERA/ARG/PGH003/PGH004/C901`, `ARG` off in tests,
-existing complexity offenders marked `# noqa: C901` with a reason), `tach` for declared module boundaries, and one
-type checker (`ty` or `basedpyright`); for TypeScript, `tsc --noEmit` and Oxlint
+existing complexity offenders marked `# noqa: C901` with a reason), `tach` for declared module boundaries, and, where the
+repository adopts one, a type checker (`ty` or `basedpyright`; loop-zero itself
+runs none yet); for TypeScript, `tsc --noEmit` and Oxlint
 with `@cloudflare/oxlint-config` (plus restricted-import rules or
 `dependency-cruiser` when a consumer needs graph-wide layer rules). Entry-point
 graph checks (`knip` for dead files, exports and dependencies; `deptry` for
@@ -101,14 +102,17 @@ Delivery coverage reports reuse the consumer's existing audit outputs; they are
 reporting conventions, not delivery requirements. Show executed coverage and
 complete passing coverage separately, each with suite, location, exact tree,
 scope, environment and evidence link. Skipped or disabled jobs and zero-test
-fixtures prove no execution. The consumer's runbook owns its metrics, targets and
-samples.
+fixtures prove no execution. loop-zero's own measurement is
+[scripts/retro_metrics.py](../scripts/retro_metrics.py) (delivery windows from
+GitHub REST and terminal `loopzero check` receipts), which the
+[retro skill](../core/skills/retro/SKILL.md) runs. A consumer's runbook owns its
+own metrics, targets and samples.
 
 ### Replayable partial digest
 
 The consumer coordinator owns its audit reducer, invocation, paths and retention,
-documented in the consumer's runbook; loop-zero ships no collector, command, state
-store or delivery gate. A digest freezes its input manifest (source versions, byte
+documented in the consumer's runbook; loop-zero adds no collector, state store or
+delivery gate for it. A digest freezes its input manifest (source versions, byte
 counts, hashes, time windows), and an offline replay from those inputs must give
 byte-identical JSON and Markdown; the report records both output hashes and the
 verdict. On partial collection or quota exhaustion, publish a partial diagnostic
