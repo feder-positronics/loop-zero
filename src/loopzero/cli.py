@@ -861,7 +861,11 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
             ) from exc
         try:
             live = github.pr_view(config.repo, pr.number)
-            github.update_body(config.repo, pr.number, _append_review(live.body, result))
+            try:
+                refreshed = _pr_body(wt, head, config, live.body)  # The record must name the reviewed head.
+            except (LoopZeroError, OSError, ValueError):
+                refreshed = live.body
+            github.update_body(config.repo, pr.number, _append_review(refreshed, result))
         except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
             print(f"warning: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
