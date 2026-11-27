@@ -1699,6 +1699,8 @@ def _mergify_departure(
     detail, requeue = MERGIFY_DEQUEUE_HINT, MERGIFY_REQUEUE
     if report is not None:
         detail = f"Mergify report: {report.url}."
+        if report.reason and report.failure_report is None:
+            detail += f" Departure reason: {report.reason!r}."
         if report.attribution == "base_conflict":
             detail = (f"The PR conflicts with {pr.base_ref}. Run `git fetch origin {pr.base_ref}` and resolve the base "
                       f"integration according to the PR's review state. {detail}")

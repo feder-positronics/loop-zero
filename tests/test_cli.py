@@ -4833,6 +4833,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     *((confirmed, kind, "wait") for confirmed, kind in [
         (False, "current"), (False, "stale"), (False, "missing"),
         (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"), (True, "conflict"),
+        (False, "isolated"),
         (False, "head"), (False, "requeue"), (False, "author"), (False, "landed"),
         (False, "rule"), (False, "rule_requeue"), (True, "batch"), (True, "dequeued"),
         (False, "rule_same"), (False, "rule_unrequested"), (False, "rule_blocked"), (False, "linked_already"),
@@ -4859,7 +4860,18 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
                     "::TestCheckedInArtifact::test_main_check_exit_code_is_zero" if kind == "isolated"
                     else "tests/unit/infrastructure/test_final_qa_capabilities.py"
                          "::test_role_and_catalog_capability_failures_are_advisory[CREATE ROLE isolated NOLOGIN]")
-            body += f"\n- ❌ [`Backend static checks and unit lane / Backend validation`]({job_url})"
+            if confirmed and kind == "stacked":
+                body += f"\n- ❌ [`Backend static checks and unit lane / Backend validation`]({job_url})"
+            else:
+                body += f"\n- ❌ **Checks failed** 19:23 · draft [#15011](/{REPO}/pull/15011)"
+                candidate_sha = "d" * 40
+                if confirmed or kind == "stacked":
+                    gh.respond(f"api repos/{REPO}/pulls/15011", open_pr_snapshot(candidate_sha) | {"number": 15011})
+                    gh.respond(f"api repos/{REPO}/commits/{candidate_sha}/check-runs", {"check_runs": [
+                        {"name": "Backend validation", "conclusion": "failure" if confirmed else "timed_out", "details_url": job_url},
+                        {"name": "Successful sibling", "conclusion": "success", "details_url": job_url},
+                        {"name": "Foreign check", "conclusion": "failure", "details_url": "https://example.com/check"},
+                    ]})
             log = f"2026-11-26T11:47:24.4155165Z FAILED {node} - detail from the test\n"
             gh.respond(f"api repos/{REPO}/actions/jobs/{job}/logs", log)
         comments.append({"id": 43, "user": {"login": "someone-else" if kind == "author" else "mergify[bot]"},
@@ -4906,7 +4918,11 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and ("'checks'" in err) == (kind not in {"conflict", "dequeued"})
         assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["expected"][kind])
         if kind in {"isolated", "stacked"}:
-            assert job_url in err and node in err and "detail from the test" not in err
+            if confirmed or kind == "stacked":
+                assert job_url in err and "Backend validation" in err and node in err and "detail from the test" not in err
+                assert "Successful sibling" not in err and "Foreign check" not in err
+            else:
+                assert "GitHub could not read the candidate checks" in err
         else:
             assert not any("--allow-escape-sequences" in call["argv"] for call in gh.calls)
         assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["requeue_guidance"]) is (kind not in {"conflict", "dequeued"})
