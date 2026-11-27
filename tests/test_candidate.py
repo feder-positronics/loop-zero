@@ -349,7 +349,20 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation, di
         attest(**kwargs)
 
 
-@pytest.mark.parametrize("bound", ["_TREE_BYTES", "_TREE_OBJECTS", "_TREE_SECONDS", "_TREE_OUTPUT"])
+def test_stalled_fetch_is_transient_but_other_time_bounds_are_not():
+    with pytest.raises(github.GhUnavailable, match="temporarily unavailable"):
+        candidate._require_time("fetch", 0)
+    with pytest.raises(CandidateError, match="time bound"):
+        candidate._require_time("merge-tree", 0)
+
+
+def test_tree_mismatch_while_main_lands_is_a_race(tree_candidate, monkeypatch):
+    monkeypatch.setattr(candidate, "_verify_tree", Mock(side_effect=CandidateError("candidate tree mismatch")))
+    with pytest.raises(CandidateRaceError, match="main changed"):
+        tree_candidate[0](main_after=tree_candidate[3])
+
+
+@pytest.mark.parametrize("bound", ["_TREE_BYTES", "_TREE_OBJECTS", "_TREE_OUTPUT"])
 def test_vanished_parent_fails_closed_at_resource_bounds(tree_candidate, monkeypatch, bound):
     monkeypatch.setattr(candidate, bound, 1 if bound != "_TREE_SECONDS" else 0)
     with pytest.raises(CandidateError, match=r"Missing Mergify parent batches parent:.*bound"):
@@ -603,8 +616,8 @@ def test_rebuild_wait(monkeypatch, no_retry_delay, matches, second, stop):
         assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
 
 
-@pytest.mark.parametrize("outcome", ["normal", "bound", "fetch"])
-def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome):
+@pytest.mark.parametrize("outcome,message", [("normal", ""), ("bound", ""), ("fetch", "returned error: 503"), ("fetch", "Could not resolve host: github.com"), ("fetch", "fatal: early EOF"), ("fetch", "GnuTLS recv error (-110)")])
+def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome, message):
     waits, killed = [], []
     class Child:
         pid = 123
@@ -612,7 +625,7 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome)
             self.root, self.running = cwd, "test-command" in argv
             self.returncode = 128 if outcome == "fetch" and "fetch" in argv else 0
             if self.returncode:
-                kwargs["stderr"].write(b"fatal: The requested URL returned error: 503")
+                kwargs["stderr"].write(f"fatal: {message}".encode())
 
         def poll(self):
             return None if self.running else self.returncode

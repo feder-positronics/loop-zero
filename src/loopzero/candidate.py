@@ -244,13 +244,26 @@ class _MissingMergeHistory(CandidateError):
     """Merge evidence is missing or incomplete in the current Git store."""
 
 
+_FETCH_TRANSPORT = re.compile(
+    r"returned error: (?:429|5\d\d)|could not resolve host|failed to connect|connection (?:refused|timed out)|"
+    r"early eof|unexpected disconnect|rpc failed|ssl|tls|gnutls|transfer closed|proxy|network is unreachable",
+    re.IGNORECASE)
+
+
+def _require_time(operation: str, deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        if operation == "fetch":  # A stalled transfer is transport, not policy.
+            raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
+        raise CandidateError("Git time bound exceeded")
+
+
 def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None:
     if operation == "merge-base" and returncode == 1:
         raise _MissingMergeHistory("Git history does not prove the requested merge base or ancestry")
     if operation == "fetch" and returncode:
         output.seek(0)
         diagnostic = output.read(_TREE_OUTPUT).decode(errors="replace")
-        if github._transient_error(diagnostic, False) or re.search(r"returned error: (?:429|5\d\d)", diagnostic):
+        if github._transient_error(diagnostic, False) or _FETCH_TRANSPORT.search(diagnostic):
             raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
     _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
              "resource bound hit, or integration conflict")
@@ -345,7 +358,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                 try:
                     while process.poll() is None:
                         _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
-                        _require(time.monotonic() < deadline, "Git time bound exceeded")
+                        _require_time(args[0], deadline)
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             process.wait(timeout=0.02)
                     report_status = merge_conflict_status and args[0] == "merge-tree" and process.returncode in {0, 1}
@@ -537,6 +550,8 @@ def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcom
         except CandidateRaceError:
             raise
         except (CandidateError, OSError, ValueError) as exc:
+            _require(github_get(base_path) == base_before, f"{base_branch} changed during attestation",
+                     CandidateRaceError)  # A mismatch while main is landing is a race, not a verdict.
             raise CandidateError(
                 f"Missing Mergify parent batches {', '.join(first_lineage[2])}: {exc}"
             ) from None
