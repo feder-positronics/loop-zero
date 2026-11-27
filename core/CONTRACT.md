@@ -53,7 +53,7 @@ Merge is authorized by default under [merge authority](#merge-authority).
 
 On start/resume, use `loopzero status` in an existing worktree to read Git, GitHub
 and the receipt. Rerun the last `--wait` if pending. After ejection, read the
-reason and follow [Mergify recovery](../SETUP.md#mergify). If cleanup removed the
+reason and follow [Mergify recovery](../SETUP.md#requeue-after-cancellation-or-ejection). If cleanup removed the
 worktree, verify the merge in GitHub. Never yield (end the turn while
 something is pending) waiting for a notice that
 may already have fired. Notifications never replace the waiter.
