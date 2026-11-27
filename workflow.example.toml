@@ -61,7 +61,7 @@ merge = "squash"
 # Reviewer preference, in order. `loopzero review` picks the first family
 # that is installed and absent from the author lineage. If no independent
 # configured reviewer can run, it discloses a same-family fallback.
-# Hosted eligibility requires explicit GitHub publisher logins from trusted base config.
+# Local ready/merge and hosted eligibility require explicit GitHub publisher logins from trusted base config.
 # review_publishers = ["your-github-login"]
 reviewers = ["claude", "codex"]
 # Optional absolute paths for reviewer binaries and runtimes, pinned from the

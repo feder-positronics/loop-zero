@@ -67,7 +67,7 @@ HISTORY_CALLS = [BRANCH_READ, branch_history_key().split()]
 LOGIN = "lz-bot"
 TASK_BRANCHES = ("lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task")
 
-WORKFLOW = f"""
+WORKFLOW_BASE = f"""
 [repo]
 name = "{REPO}"
 base = "main"
@@ -80,6 +80,7 @@ required_ci = ["checks"]
 merge = "squash"
 reviewers = ["claude", "codex"]
 """
+WORKFLOW = WORKFLOW_BASE + f'review_publishers = ["{LOGIN}"]\n'
 
 
 @pytest.fixture(scope="session")
@@ -2242,7 +2243,7 @@ def test_review_refuses_when_budget_exhausted(wt: Path, gh: FakeGh, fake_bin, ca
 
 
 def configure_review_publisher(wt, publisher):
-    commit_file(wt, "workflow.toml", WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n', "configure publisher")
+    commit_file(wt, "workflow.toml", WORKFLOW_BASE + f'\nreview_publishers = ["{publisher}"]\n', "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
 
 
@@ -2303,7 +2304,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys)
 
 @pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])
 def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher) -> None:
-    commit_file(wt, "workflow.toml", WORKFLOW + '\nreview_publishers = ["lz-bot", "other"]\n', "configure trusted publishers")
+    commit_file(wt, "workflow.toml", WORKFLOW_BASE + '\nreview_publishers = ["lz-bot", "other"]\n', "configure trusted publishers")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     head = head_of(wt)
     arm_pr(gh, head)
@@ -2972,7 +2973,7 @@ def test_hold_blocks_ready_and_merge(wt, gh, capsys, monkeypatch, queue_requests
 def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monkeypatch, capsys):
     trusted = tmp_path / "trusted"
     trusted.mkdir()
-    (trusted / "workflow.toml").write_text(WORKFLOW + f'review_publishers = ["{LOGIN}"]\n')
+    (trusted / "workflow.toml").write_text(WORKFLOW_BASE + f'review_publishers = ["{LOGIN}"]\n')
     event = trusted / "event.json"
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
@@ -3506,7 +3507,7 @@ def test_ready_respects_latest_review_state(wt, gh, capsys, state, head):
     assert without_accepted_receipt(out) == (f"ready: {URL}\n" if ready else
                                              "not ready: no review recorded for the current head\n")
     if state == "forged":
-        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
+        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
 
 
 def open_pr_snapshot(head):
@@ -4402,7 +4403,7 @@ def test_resolve_refuses_a_pr_targeting_another_base(wt: Path, gh: FakeGh, capsy
 
 
 def test_resolve_and_ready_ignore_findings_from_non_publishers(wt: Path, gh: FakeGh, capsys, head) -> None:
-    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["outsider"]\n')
+    (wt / "workflow.toml").write_text(WORKFLOW_BASE + '\nreview_publishers = ["outsider"]\n')
     planted, genuine = _finding_thread("0b9b59e7", head), _finding_thread("1c2d3e4f", head)
     planted["comments"]["nodes"][0]["author"] = {"__typename": "User", "login": "outsider"}
     arm_approved_pr_with_check_result(gh, head, wt, "success", readiness={"threads": (planted,)}, isDraft=False)
@@ -4561,7 +4562,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state=state, verdict=verdict)])
     gh.respond("api graphql", threads_json())
     cfg = wt / ".loopzero" / "hosted.toml"
-    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    cfg.write_text(WORKFLOW_BASE + f'\nreview_publishers = ["{LOGIN}"]\n')
     gh.respond(f"api repos/{REPO}/statuses/{head}", {})
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head,
                              "--publish"]) == (0 if expected else 1)
@@ -4574,7 +4575,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
 def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head, capsys):
     from loopzero import eligibility
     cfg = wt / ".loopzero" / "hosted.toml"
-    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    cfg.write_text(WORKFLOW_BASE + f'\nreview_publishers = ["{LOGIN}"]\n')
     gh.fail(f"api repos/{REPO}/pulls/7", "HTTP 404: Not Found\n{\"message\": \"Not Found\"}")
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
     out, err = capsys.readouterr()
@@ -4587,7 +4588,7 @@ def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head,
 def test_eligibility_main_names_each_usage_mistake(wt, capsys, publishers, pr_head, message):
     from loopzero import eligibility
     cfg = wt / ".loopzero" / "hosted.toml"
-    cfg.write_text(WORKFLOW + f"\n{publishers}\n")
+    cfg.write_text(WORKFLOW_BASE + f"\n{publishers}\n")
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", pr_head]) == 1
     out, err = capsys.readouterr()
     assert out == "" and message in err and "Traceback" not in err
@@ -4601,7 +4602,7 @@ def test_eligibility_main_names_each_usage_mistake(wt, capsys, publishers, pr_he
 def test_manual_refresh_publishes_pending_or_skips_landed(wt, gh, head, pr_update, reviewed, expected):
     from loopzero import eligibility
     cfg = wt / ".loopzero" / "hosted.toml"
-    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    cfg.write_text(WORKFLOW_BASE + f'\nreview_publishers = ["{LOGIN}"]\n')
     gh.respond_pr_view(pr_json(headRefOid=head, **pr_update))
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "ci-service"}}})
     gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state="APPROVED", verdict="approve")] if reviewed else [])
@@ -4616,7 +4617,7 @@ def test_manual_refresh_publishes_pending_or_skips_landed(wt, gh, head, pr_updat
 
 @pytest.mark.parametrize("publisher", ["stranger", "lz-bot"])
 def test_ready_pins_review_publishers_to_base(wt, repo, gh, capsys, monkeypatch, publisher, head):
-    policy = WORKFLOW.replace('required_ci = ["checks"]', 'required_ci = ["checks", "Loop-zero Eligibility"]')
+    policy = WORKFLOW_BASE.replace('required_ci = ["checks"]', 'required_ci = ["checks", "Loop-zero Eligibility"]')
     publish_workflow(wt, policy + '\nreview_publishers = ["stranger"]\n')
     commit_file(repo, "workflow.toml", policy + f'\nreview_publishers = ["{LOGIN}"]\n', "rotate publisher")
     git(repo, "push", str(repo.parent / "origin.git"), "main")  # preserve the retired local publisher
@@ -4807,7 +4808,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
         assert clock.sleeps == ([30, 60, 120, 36, 4] if jitter == 1 else [27, 54, 108, 56, 5])
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
-        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
+        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert queue_requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
     assert all(deadline == (wait or None) for deadline in configurations)
     if outcome in {"closed_then_merged", "still_closed"}:
@@ -5426,3 +5427,29 @@ def test_ready_rejects_check_interrupted_after_a_failed_stage(wt, head, gh, caps
     )
     assert cli.main([*args, "ready"]) == 1
     assert "check receipt records a failed stage" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["ready", "merge"])
+@pytest.mark.parametrize("publishers", ["", "review_publishers = []\n"])
+@pytest.mark.parametrize("override", [False, True])
+def test_delivery_requires_explicit_review_publishers(wt, gh, capsys, tmp_path, command, publishers, override):
+    publish_workflow(wt, WORKFLOW_BASE + publishers)
+    options, path = (), None
+    if override:
+        (path := tmp_path / "override.toml").write_text(WORKFLOW_BASE + publishers)
+        options = ("--config", str(path))
+    code, out, err = run(capsys, *options, command)
+    assert code == 1 and not gh.calls and "delivery.review_publishers must list the intended publisher logins" in out + err
+    assert (str(path) if override else "origin/main:workflow.toml") in out + err
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_status_reports_missing_review_publishers(wt, gh, capsys, tmp_path, override):
+    publish_workflow(wt, WORKFLOW_BASE)
+    options, path = (), None
+    if override:
+        (path := tmp_path / "override.toml").write_text(WORKFLOW_BASE)
+        options = ("--config", str(path))
+    code, out, _ = run(capsys, *options, "status")
+    assert code == 0 and "ready:    no" in out and "delivery.review_publishers must list" in out
+    assert (str(path) if override else "origin/main:workflow.toml") in out and not gh.calls
