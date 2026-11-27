@@ -382,6 +382,8 @@ def _settled_body(cached: tuple[str, str] | None, status: str | None, exit_code:
 def _remember_etag(key: tuple[tuple[str, ...], int] | None, headers: dict[str, str], body: str) -> None:
     if key and (etag := headers.get("etag")):
         _etag_cache.pop(key, None)
+        if len(body) > _ETAG_CACHE_BYTES:
+            return
         _etag_cache[key] = (etag, body)
         while sum(len(held[1]) for held in _etag_cache.values()) > _ETAG_CACHE_BYTES:
             del _etag_cache[next(iter(_etag_cache))]

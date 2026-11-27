@@ -1497,3 +1497,18 @@ def test_ambient_credential_is_never_cached(monkeypatch):
     monkeypatch.setattr(github, "run", run)
     github.login(), github.login(), github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
     assert len(sent) == 4 and not any(part.startswith("If-None-Match") for argv in sent for part in argv)
+
+
+def test_oversized_response_does_not_evict_other_reads(monkeypatch, app_token_helper):
+    app_token_helper()
+    monkeypatch.setattr(github, "_ETAG_CACHE_BYTES", 100)
+    real_run = github.run
+    def run(argv, **kwargs):
+        if argv[0] != "gh":
+            return real_run(argv, **kwargs)
+        body = "x" * (500 if argv[2].endswith("big") else 10)
+        return type("Done", (), {"exit_code": 0, "stdout": f'HTTP/2.0 200 OK\r\nEtag: "e"\r\n\r\n{body}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    github._gh("api", "repos/a/b/small", conditional=True)
+    github._gh("api", "repos/a/b/big", conditional=True)
+    assert [key[0][1] for key in github._etag_cache] == ["repos/a/b/small"]
