@@ -127,8 +127,14 @@ or later) both read `AGENTS.md` directly. Do not add a `CLAUDE.md`, `.claude/CLA
 such as Bedrock, with telemetry or the `agents-md` plugin disabled, or in the
 first session after an install or upgrade; there, use a local, untracked
 `CLAUDE.md` containing `@AGENTS.md`. `/memory` lists the loaded files.
-For TypeSafe work, explicitly request [typesafe-ai](integrations/typesafe-ai/SKILL.md)
-from the optional integrations.
+For TypeSafe work, link [typesafe-ai](integrations/typesafe-ai/SKILL.md) the same
+way as the core skills, then request it explicitly:
+
+```sh
+SRC=~/.local/share/loopzero/source
+ln -sfnT "$SRC/integrations/typesafe-ai" ~/.agents/skills/typesafe-ai
+ln -sfnT "$SRC/integrations/typesafe-ai" ~/.claude/skills/typesafe-ai
+```
 
 For model routing, copy [models.toml](models.toml) into the consuming repository,
 adjust its models and efforts to the available runtimes, and point repository
@@ -260,87 +266,19 @@ Lock the vault and remove `BW_SESSION` before starting the agent.
 
 ### Several subscription accounts (optional)
 
-`scripts/ai-accounts/` rotates Claude and Codex subscription accounts behind the plain
-`claude`, `codex` and `loopzero` commands. Install the monitor and its three shims
-from the [pinned source checkout](#connect-your-agent):
+The optional [host-config helper](https://github.com/eowca/host-config/blob/main/bin/ai-accounts)
+rotates Claude and Codex subscription accounts behind the `claude`, `codex` and
+`loopzero` commands. Host-config maintains the helper, monitor units and account
+setup. See the [host bootstrap guide](https://github.com/eowca/host-config/blob/main/BOOTSTRAP.md)
+and [account admission guide](https://github.com/eowca/host-config/blob/main/docs/account-admission.md).
 
-```sh
-ACCOUNTS=~/.local/share/loopzero/source/scripts/ai-accounts
-install -m 755 "$ACCOUNTS/ai-accounts" ~/.local/bin/
-mkdir -p ~/.local/lib/ai-accounts/bin
-for n in claude codex loopzero; do ln -sf ~/.local/bin/ai-accounts ~/.local/lib/ai-accounts/bin/$n; done
-```
-
-Put the shims first on PATH by making this the last line of `~/.profile` and
-`~/.bashrc`, after anything that prepends `~/.local/bin`:
-`export PATH="$HOME/.local/lib/ai-accounts/bin:$PATH"`. Point an agent host's binary
-path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Copy
-`"$ACCOUNTS/ai-accounts.service"` and `"$ACCOUNTS/ai-accounts.timer"` to
-`~/.config/systemd/user/`, then run
-`systemctl --user enable --now ai-accounts.timer`.
-
-To review with a pinned CLI and managed credentials, set `PINNED_BIN` to the
-directory containing the pinned `loopzero` executable:
+With the host-config shims installed, set `PINNED_BIN` to the directory
+containing your pinned `loopzero` executable and put the shims first on PATH
+when launching a review with managed credentials:
 
 ```sh
 PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
 ```
-
-- Claude accounts are long-lived tokens: run `claude setup-token` per account and
-  pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
-  `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
-  then log in as it prints; the monitor refreshes standby Codex logins before they expire.
-- The monitor checks accounts every five minutes. Claude prefers Fable and Opus,
-  then Opus only. Codex keeps the current usable account until it is spent at 95%
-  of any limit by default, then prefers an account with every model available.
-  Claude reads the OAuth usage API at most every 30 minutes and uses one-token
-  header probes between reads. `ai-accounts status` shows accounts, tiers and
-  per-window utilization and resets. `weekly_used_percent` is the overall 7d
-  usage, null when unknown.
-- Only `exec` (including `--identity`) refuses non-owner Claude launches with exit 3
-  at 85% utilization in any reported window, including the Fable weekly
-  window, or when that account's cached
-  status is missing, unreadable or older than 20 minutes. The last 15 weekly points
-  are reserved for required reviews and essential decisions; use
-  `AI_ACCOUNTS_CLAUDE_OWNER=1` for that work to bypass the guard. No hysteresis is
-  stored. Direct T3 launches, `run` and CLI shims remain outside this guard;
-  this is not fleet-wide enforcement. Admission does not probe accounts.
-- Each shim starts the real CLI on the selected account and keeps the shims first on
-  its PATH. Verified helper-managed credentials inherited by a later command can
-  rebind; explicit OAuth tokens, API keys and `CODEX_HOME` values remain caller-owned.
-  The helper uses opaque account-binding markers to distinguish these cases.
-  Codex bindings retain account identity across routine OAuth token refreshes.
-  `loopzero` commands are never replayed by the shim. Existing processes keep their
-  credentials until their harness safely replaces them; changing the active file
-  does not change a running session. Never pin a token in `settings.json` `env`.
-  The loopzero shim prefers executable Codex in `~/.local/lib/codex-reviewer`
-  when present; keep `codex` and its matching `codex-code-mode-host` side by side
-  there with executable permissions so sandboxed reviews can launch the helper.
-- Harness integrations can call `ai-accounts launch <provider> --model <model>` for
-  a nonsecret JSON identity, then `ai-accounts exec <provider> --identity <identity>
-  -- /absolute/real/executable ...` to pin that exact managed revision. Pass the
-  real executable, not another shim. Preparing the current account does not claim
-  model eligibility; its native CLI validates ordinary startup. Choosing a replacement
-  requires positive model evidence. `ai-accounts exhausted <provider> --identity
-  <failed-identity> --model <model>` selects for the unchanged requested model under
-  the selection lock. Concurrent stale failures reuse a recent eligible selection.
-  Failed model/revision pairs have a five-minute cooldown; unknown availability is
-  not treated as usable. These commands report unsupported or unmanaged routes
-  without inventing account credentials. The authentication provider determines
-  the account pool, even when a harness can use several model providers.
-- `ai-accounts run <provider> --model <model> -- ...` can select a replacement after
-  a quota failure without repeating the command. Add `--retry-safe` only for a
-  caller-proven repeatable command: it permits one retry after the effective
-  credential revision changes. Do not use it for interactive streams, unknown
-  tool outcomes or publication. `status` marks quota evidence over ten minutes old
-  as stale; `status --json` exposes the same flag.
-- After host recovery, verify the account timer has a future next run. Switching
-  the active account does not update an existing provider process: resume through
-  the managed launcher on the selected credential. After failover, reconcile parked
-  or failed unfinished jobs; a resent message alone does not prove a new process or
-  a completed tool call.
-- Token sessions lack claude.ai connectors. Changing an agent host's binary path
-  may restart its provider and interrupt running sessions.
 
 ## First run
 
@@ -544,12 +482,15 @@ uv run --no-project --with "git+https://github.com/feder-positronics/loop-zero@<
 Give that process pull-request read and commit-status write access.
 It posts `Loop-zero Eligibility` as pending before reading live reviews/threads,
 then success or failure on the specified source SHA. An API failure leaves pending.
+GitHub keeps at most 1,000 statuses per SHA and context; past that limit a newer
+verdict cannot be written and an older success can outlive it, so push a fresh head.
 The hosted Actions entry point succeeds with a pending status when its sole blocker
 is missing trusted current-head review. The manual command above retains a failure
 status and nonzero exit for that blocker; both paths keep merging blocked.
 Do not check out or execute candidate code with this credential. Serialize all
-refreshes for a PR, including manual refreshes; use trusted base configuration, never
-PR configuration. A source push needs a status on its new SHA; base-only movement
+refreshes for a PR, including manual refreshes; use trusted configuration, never
+PR configuration. Hosted refreshes read the default branch's `workflow.toml`, so keep
+`[repo] base` on the default branch when this publisher is used. A source push needs a status on its new SHA; base-only movement
 does not invalidate an unchanged source review. This status does not replace
 integration CI or a local `loopzero check` receipt.
 
@@ -583,8 +524,9 @@ The evaluator preserves COMMENT model reviews with resolved blocking findings.
 See [Blockers](core/CONTRACT.md#blockers) for the outdated-thread rule. Suggestions
 do not block. Dismissing the latest review cannot restore an earlier approval.
 
-Before queue adoption, wire source pushes, review submissions/edits/dismissal,
-review-comment edits/deletions and an explicit refresh to this publisher.
+Before queue adoption, wire this publisher to every trigger in the `on:` blocks of
+[eligibility.yml](.github/workflows/eligibility.yml) and the
+[review event workflow](.github/workflows/review-event.yml) it chains from.
 Actions has no review-thread resolution/reopening trigger. Until an App webhook
 receiver exists, queue users must withdraw an item before altering findings or
 resolving/reopening threads, refresh eligibility, then explicitly request delivery

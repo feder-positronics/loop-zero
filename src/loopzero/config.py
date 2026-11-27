@@ -263,7 +263,7 @@ def _check_table(label: str, table: Any, schema: dict[str, type], *,
         if key in table:
             nonempty = nonempty_strings and kind is str
             if not isinstance(table[key], kind) or (nonempty and not table[key]):
-                expected = {dict: "a table", int: "an integer", list: "an array", str: "a string", bool: "a boolean"}
+                expected = {dict: "a table", list: "an array", str: "a string", bool: "a boolean"}
                 raise ConfigError(f"{label}.{key} must be {'a non-empty string' if nonempty else expected[kind]}")
     return table
 
@@ -284,6 +284,8 @@ def _host_paths(label: str, value: list[Any]) -> tuple[str, ...]:
     for raw in paths:
         if not raw.startswith("/"):
             raise ConfigError(f"{label} entries must be absolute, got {raw!r}")
+        if any(re.fullmatch(r"<[^/<>]+>", part) for part in Path(raw).parts):
+            raise ConfigError(f"{label} entry {raw!r} is an unreplaced example placeholder")
         path = Path(raw).resolve()
         if str(path) in ("/", "/home") or any(
             path.is_relative_to(tree) for tree in FORBIDDEN_RO_TREES

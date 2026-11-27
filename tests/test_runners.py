@@ -378,31 +378,6 @@ def test_codex_message_file_must_be_regular_owned_and_unlinked(tmp_path, monkeyp
         assert runners._read_codex_file(path) is None
 
 
-@pytest.mark.parametrize("version,failure", [
-    *((version, None) for version in ("codex-cli 0.168.0", "codex-cli 1.0.0-beta.1", "custom build", "")),
-    *(("codex-cli 0.161.0", failure) for failure in ("nonzero", "missing", "timeout")),
-])
-def test_codex_version_probe(fake_bin, tmp_path, monkeypatch, version, failure):
-    from loopzero import _proc
-
-    _fake_codex(fake_bin, json.dumps(APPROVE), version=version, version_exit=int(failure == "nonzero"))
-    if failure in ("missing", "timeout"):
-        original = _proc.run
-
-        def probe(argv, **kwargs):
-            if argv[-1] == "--version":
-                raise (_proc.ToolMissing("gone") if failure == "missing" else _proc.ProcTimeout("late"))
-            return original(argv, **kwargs)
-
-        monkeypatch.setattr(_proc, "run", probe)
-    result = _review("codex", tmp_path)
-    assert result.verdict == "approve"
-    assert result.provenance["cli_version"] == (None if failure else version)
-    if failure is None:
-        assert json.loads(result.raw)["cli_version"] == version
-    assert (fake_bin / "codex.stdin").exists()
-
-
 @pytest.mark.parametrize("runtime", [False, True], ids=["default", "explicit"])
 def test_claude_approve(
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, runtime: bool,
@@ -608,6 +583,17 @@ def test_linked_worktree_and_git_directory_are_read_only(
     assert _review("claude", linked).verdict == "approve"
     binds = _pairs(captured, "--ro-bind")
     assert all((str(path),) * 2 in binds for path in (linked.resolve(), common))
+
+
+@pytest.mark.parametrize("severities,verdict", [
+    ((), "approve"), (("suggestion",), "approve"), (("suggestion", "important"), "request_changes"),
+])
+def test_only_blocking_findings_request_changes(severities, verdict):
+    findings = [{"severity": s, "path": None, "line": None, "title": "t", "body": "b"} for s in severities]
+    # The model's own verdict no longer decides; exit 5 must mean something to resolve.
+    result = runners.parse_review({"verdict": "request_changes", "findings": findings},
+                                  family="claude", head="a" * 40, kind="primary", raw="{}")
+    assert result.verdict == verdict
 
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
@@ -1093,6 +1079,12 @@ def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap,
     assert reason.startswith("claude: timed out after ") and detail.endswith("waiting for proxy")
     assert "partial reviewer output" not in info.value.tail and "waiting for proxy" not in fallback
     assert len(detail.encode()) < 450 and ("…" in detail) == bool(size)
+
+
+def test_deleted_file_summary_counts_lines_that_start_with_dashes() -> None:
+    block = ("diff --git a/x.sql b/x.sql\ndeleted file mode 100644\nindex 1234567..0000000\n"
+             "--- a/x.sql\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-select 1;\n--- a comment\n-select 2;\n")
+    assert runners._summarize_deleted(block) == "diff --git a/x.sql b/x.sql\nx.sql: deleted, 3 lines\n"
 
 
 @pytest.mark.parametrize("name,budget", [

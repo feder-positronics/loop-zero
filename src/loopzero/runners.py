@@ -220,7 +220,7 @@ def _claude_payload(envelope: dict) -> object:
     return _extract_json_object(str(envelope.get("result", ""))) if payload is None else payload
 
 
-def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:  # noqa: C901 - one check per review JSON field
+def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:
     """Validate a decoded review object against the findings schema."""
     diagnostic = _tail(raw if excerpt is None else excerpt)
     if not isinstance(payload, dict):
@@ -246,8 +246,7 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
         if not isinstance(item["title"], str) or not isinstance(item["body"], str):
             raise RunnerMalformedOutput(f"{family}: finding title/body must be strings", diagnostic)
         findings.append(Finding(**item))
-    if any(f.severity in BLOCKING for f in findings):
-        verdict = "request_changes"
+    verdict = "request_changes" if any(f.severity in BLOCKING for f in findings) else "approve"
     return ReviewResult(family=family, head=head, kind=kind, verdict=verdict,
                         findings=tuple(findings), raw=raw)
 
@@ -431,14 +430,6 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
             continue
         binds.append((source, sandbox_home / destination))
     return tuple(binds)
-
-
-def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str | None:
-    try:
-        done = _proc.run([str(binary), "--version"], cwd=cwd, env_allowlist=env_allowlist, timeout=30)
-    except (_proc.ToolMissing, _proc.ProcTimeout, OSError):
-        return None
-    return None if done.exit_code else done.stdout.rstrip("\n")
 
 
 # Linux rejects one argv element over 128 KiB (MAX_ARG_STRLEN) before the reviewer starts.
@@ -1018,7 +1009,6 @@ def _review_codex(
         auth_binds = _auth_binds("codex", home)
         prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
         skill_overrides = _codex_repository_skill_overrides(cwd)  # before Codex runs at all
-        cli_version = _observe_codex_version(binary, cwd, config.env_allowlist)
         argv = [
             *prefix, str(binary), "exec",
             "-c", "developer_instructions=" + json.dumps(policy, ensure_ascii=False),
@@ -1057,7 +1047,6 @@ def _review_codex(
         raise RunnerMalformedOutput("codex: final message is not JSON", _tail(message)) from exc
     envelope = _evidence_json(raw)
     envelope["configured_settings"] = configured
-    envelope["cli_version"] = provenance["cli_version"] = cli_version
     if review_context is not None:
         envelope["review_context"] = review_context
     raw = json.dumps(envelope, separators=(",", ":"))
@@ -1130,7 +1119,6 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
             provenance[key] = sum(float(result.provenance[key]) for result in results)
     else:
         provenance["token_usage"] = [result.provenance["token_usage"] for result in results]
-        provenance["cli_versions"] = [result.provenance.get("cli_version") for result in results]
     return replace(
         first, fallback="", verdict=verdict, findings=findings,
         raw=json.dumps(envelopes, separators=(",", ":")),
@@ -1171,7 +1159,7 @@ def _summarize_deleted(block: str) -> str:
     path = match[2] if match else "(unknown file)"
     if match and match[1]:
         path = codecs.escape_decode(path.encode())[0].decode(errors="replace")
-    deleted = sum(line.startswith("-") and not line.startswith("---") for line in block.splitlines())
+    deleted = sum(line.startswith("-") for line in block.partition("\n@@")[2].splitlines())  # hunks only
     return f"{header}\n{path}: deleted, {deleted} lines\n"
 
 

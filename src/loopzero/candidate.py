@@ -240,8 +240,28 @@ def _attest_source(
     return source_sha
 
 
+class FetchFailed(CandidateError):
+    """The Git object fetch itself failed, as opposed to the history lacking evidence."""
+
+
 class _MissingMergeHistory(CandidateError):
     """Merge evidence is missing or incomplete in the current Git store."""
+
+
+_FETCH_TRANSPORT = re.compile(
+    r"returned error: (?:429|5\d\d)|could not resolve (?:host|proxy)|failed to connect to|connection (?:refused|timed out)|"
+    r"early eof|unexpected disconnect|empty reply from server|rpc failed; (?:curl (?:18|28|52|55|56|92)|http (?:5\d\d|429))|"
+    r"gnutls_handshake|gnutls recv error|ssl_(?:read|connect)|openssl ssl_|ssl connection|tls handshake|"
+    r"transfer closed|received http code 5\d\d from proxy|network is unreachable", re.IGNORECASE)
+_FETCH_DENIED = re.compile(r"returned error: 4(?!29)\d\d|rpc failed; http 4(?!29)\d\d", re.IGNORECASE)
+
+
+def _require_time(args: tuple[str, ...], deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        if args[0] == "fetch" and f"--depth={_TREE_DEPTH}" in args:
+            # Deepening can exhaust the shared history budget.
+            raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
+        raise CandidateError("Git time bound exceeded")
 
 
 def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None:
@@ -250,10 +270,15 @@ def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None
     if operation == "fetch" and returncode:
         output.seek(0)
         diagnostic = output.read(_TREE_OUTPUT).decode(errors="replace")
-        if github._transient_error(diagnostic, False) or re.search(r"returned error: (?:429|5\d\d)", diagnostic):
+        diagnostic = re.sub(r"https?://\S+", "<url>", diagnostic)
+        if not _FETCH_DENIED.search(diagnostic) and (
+            github._transient_error(diagnostic) or _FETCH_TRANSPORT.search(diagnostic)
+        ):
             raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
-    _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
-             "resource bound hit, or integration conflict")
+    cause = ("objects unavailable or a resource bound was hit" if operation == "fetch"
+             else "objects unavailable, resource bound hit, or integration conflict")
+    _require(returncode == 0, f"git {operation} exited {returncode}: {cause}",
+             FetchFailed if operation == "fetch" else CandidateError)
 
 
 def _fetch_token() -> str:
@@ -345,7 +370,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                 try:
                     while process.poll() is None:
                         _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
-                        _require(time.monotonic() < deadline, "Git time bound exceeded")
+                        _require_time(args, deadline)
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             process.wait(timeout=0.02)
                     report_status = merge_conflict_status and args[0] == "merge-tree" and process.returncode in {0, 1}
@@ -537,6 +562,8 @@ def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcom
         except CandidateRaceError:
             raise
         except (CandidateError, OSError, ValueError) as exc:
+            _require(github_get(base_path) == base_before, f"{base_branch} changed during attestation",
+                     CandidateRaceError)  # A mismatch while main is landing is a race, not a verdict.
             raise CandidateError(
                 f"Missing Mergify parent batches {', '.join(first_lineage[2])}: {exc}"
             ) from None

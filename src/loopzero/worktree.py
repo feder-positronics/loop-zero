@@ -9,8 +9,7 @@ import re
 import stat
 import subprocess
 import time
-from collections.abc import Iterator
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from select import select
@@ -124,7 +123,7 @@ def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False
 
 
 def lock_local_state(wt: Path):
-    """Serialize check execution, receipt publication and PR-body updates for this worktree."""
+    """Serialize check execution, receipt publication and Mergify admission for this worktree."""
     return _local_state_directory(wt, create=True, lock=True)
 
 

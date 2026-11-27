@@ -349,6 +349,21 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation, di
         attest(**kwargs)
 
 
+def test_stalled_fetch_is_transient_but_other_time_bounds_are_not():
+    with pytest.raises(github.GhUnavailable, match="temporarily unavailable"):
+        candidate._require_time(("fetch", f"--depth={candidate._TREE_DEPTH}"), 0)
+    with pytest.raises(CandidateError, match="time bound"):
+        candidate._require_time(("fetch", "--deepen=32"), 0)
+    with pytest.raises(CandidateError, match="time bound"):
+        candidate._require_time(("merge-tree",), 0)
+
+
+def test_tree_mismatch_while_main_lands_is_a_race(tree_candidate, monkeypatch):
+    monkeypatch.setattr(candidate, "_verify_tree", Mock(side_effect=CandidateError("candidate tree mismatch")))
+    with pytest.raises(CandidateRaceError, match="main changed"):
+        tree_candidate[0](main_after=tree_candidate[3])
+
+
 @pytest.mark.parametrize("bound", ["_TREE_BYTES", "_TREE_OBJECTS", "_TREE_SECONDS", "_TREE_OUTPUT"])
 def test_vanished_parent_fails_closed_at_resource_bounds(tree_candidate, monkeypatch, bound):
     monkeypatch.setattr(candidate, bound, 1 if bound != "_TREE_SECONDS" else 0)
@@ -603,16 +618,16 @@ def test_rebuild_wait(monkeypatch, no_retry_delay, matches, second, stop):
         assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
 
 
-@pytest.mark.parametrize("outcome", ["normal", "bound", "fetch"])
-def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome):
+@pytest.mark.parametrize("outcome,message", [("normal", ""), ("bound", ""), ("fetch", "returned error: 503"), ("fetch", "Could not resolve host: github.com"), ("fetch", "fatal: early EOF"), ("fetch", "GnuTLS recv error (-110)"), ("fetch", "unable to access 'https://github.com/o/r.git': Empty reply from server"), ("denied", "unable to access 'https://github.com/acme/proxy-ssl.git': The requested URL returned error: 403"), ("fetch", "Could not resolve proxy: proxy.example"), ("fetch", "RPC failed; curl 92 HTTP/2 stream 3 was not closed cleanly"), ("fetch", "RPC failed; HTTP 429 curl 22"), ("denied", "RPC failed; HTTP 403 curl 22"), ("denied", "repository 'https://github.com/acme/ssl_connect.git/' not found")])
+def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome, message):
     waits, killed = [], []
     class Child:
         pid = 123
         def __init__(self, argv, cwd, **kwargs):
             self.root, self.running = cwd, "test-command" in argv
-            self.returncode = 128 if outcome == "fetch" and "fetch" in argv else 0
+            self.returncode = 128 if outcome in {"fetch", "denied"} and "fetch" in argv else 0
             if self.returncode:
-                kwargs["stderr"].write(b"fatal: The requested URL returned error: 503")
+                kwargs["stderr"].write(f"fatal: {message}".encode())
 
         def poll(self):
             return None if self.running else self.returncode
@@ -632,11 +647,22 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome)
     monkeypatch.setattr(candidate.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     monkeypatch.setattr(candidate.time, "sleep", lambda _: pytest.fail("used a fixed delay"))
 
-    error = pytest.raises(github.GhUnavailable, match="temporarily unavailable") if outcome == "fetch" else nullcontext()
+    error = {"fetch": pytest.raises(github.GhUnavailable, match="temporarily unavailable"),
+             "denied": pytest.raises(CandidateError, match="objects unavailable")}.get(outcome, nullcontext())
     with error, candidate.fetched_git("owner/repo", []) as git:
         bound = pytest.raises(CandidateError, match="Git object/size bound exceeded")
         with bound if outcome == "bound" else nullcontext():
             assert git("test-command") == ""
 
-    assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": []}[outcome]
+    assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": [], "denied": []}[outcome]
     assert killed == ([(123, candidate.signal.SIGKILL)] if outcome == "bound" else [])
+
+
+def test_failed_fetch_is_not_reported_as_missing_review(monkeypatch):
+    from loopzero import eligibility
+    monkeypatch.setattr(eligibility.github, "api_get", lambda _: {"base": {"sha": "b" * 40, "ref": "main"}, "head": {"sha": "c" * 40}})
+    def fail(*_a):
+        raise candidate.FetchFailed("git fetch exited 128: objects unavailable")
+    monkeypatch.setattr(eligibility.candidate, "fetched_git", fail)
+    with pytest.raises(candidate.FetchFailed):
+        eligibility.base_merge_material("o/r", 7, "a" * 40, "c" * 40, "main", clean=True)

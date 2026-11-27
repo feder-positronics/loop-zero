@@ -1,5 +1,3 @@
-# TypeSafe Building Reference
-
 Adapted from [typesafe-ai/skills](https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai).
 See [LICENSE](LICENSE) for the upstream MIT license.
 

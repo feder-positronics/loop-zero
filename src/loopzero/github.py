@@ -316,10 +316,8 @@ def _select_token(token: str | None, scope: tuple[float, str | None, bool] | Non
     return selected if selected is not None else (app_token() if read_only else "")
 
 
-def _transient_error(tail: str, retry_idempotent: bool, status: str | None = None) -> bool:
-    return (status or "").startswith("5") or bool(TRANSIENT_RE.search(tail)) or (
-        retry_idempotent and "something went wrong while executing your query" in tail.lower()
-    )
+def _transient_error(tail: str, status: str | None = None) -> bool:
+    return (status or "").startswith("5") or bool(TRANSIENT_RE.search(tail))
 
 
 def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> bool:
@@ -398,7 +396,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             dates[:] = [headers.get("date", "")]
             return body
         rate_limited = _rate_limited(status, headers, tail)
-        transient = rate_limited or _transient_error(tail, retry_idempotent, status)
+        transient = rate_limited or _transient_error(tail, status)
         pause = _rate_limit_delay(headers, delay) if rate_limited else delay
         if not transient or not _retry_pause(pause, timeout, scoped=read_only):
             break
@@ -979,9 +977,9 @@ def post_review(
 ) -> None:
     """Post `result` as a PR review on `head_sha`, one inline comment per finding.
 
-    `body_prefix`, when given, becomes the first line of the review body. When the
-    token user authored the PR (`pr` is fetched if not given) the review is posted
-    as a COMMENT, since GitHub rejects self-approval and self-request-changes.
+    `body_prefix`, when given, becomes the first line of the review body. An App
+    token, or a token whose user authored the PR (`pr` is fetched if not given),
+    posts a COMMENT; only the operator identity approves or requests changes.
 
     Findings whose location is missing or outside the diff are anchored on the first
     changed file with a hunk. Without an anchor, blockers go in the review body.
@@ -1165,7 +1163,7 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
         try:
             _gh(*args)
         except (GhUnavailable, ProcTimeout) as exc:
-            if isinstance(exc, GhUnavailable) and not _transient_error(exc.tail, False):
+            if isinstance(exc, GhUnavailable) and not _transient_error(exc.tail):
                 raise
             _retry_sleep(RETRY_DELAY)
             current = pr_for_branch(repo, branch, open_only=True)
@@ -1355,10 +1353,10 @@ def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_
     return False
 
 
-def _check_run_order(run: dict) -> tuple[int, bool, ReadinessTimestamp | None]:
+def _check_run_order(run: dict) -> int:
+    """GitHub check-run ids are unique and increase, so the highest id is the latest run."""
     run_id = run.get("id")
-    started_at = readiness_timestamp(run.get("started_at"))
-    return run_id if isinstance(run_id, int) else -1, started_at is not None, started_at
+    return run_id if isinstance(run_id, int) else -1
 
 
 def _aggregate_signal(states: list[str]) -> str:

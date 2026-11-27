@@ -208,8 +208,10 @@ pinned interpreter rather than altering code for an older version.
 - Blocking marker, as the first line of a thread a review publisher opened:
   `<!-- loopzero:finding v=1 severity=critical head=<sha> id=<8-hex> -->`
   (or `important`). Other threads never block.
-- `critical`: wrong or unsafe; must fix. `important`: ships a bug or breaks
-  acceptance; must fix. `suggestion`: never counted or blocking.
+- `critical`: wrong or unsafe; must fix. `important`: ships a bug, breaks
+  acceptance, or adds structural erosion (a workaround that leaves the defect,
+  duplicated decision logic, an unneeded shim) with ongoing defect or divergence
+  risk; must fix. `suggestion`: never counted or blocking.
 - Missing diff or required evidence: return one `critical` finding; never
   approve blind.
 
@@ -253,7 +255,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   runner-produced reviews count. If no independent reviewer can run, try the
   preferred configured family in a fresh session and publish a visible same-family
   fallback line. When no configured reviewer can run (exit 4), the PR owner
-  restores a configured reviewer and retries.
+  restores a configured reviewer and retries; if it cannot, it reports the
+  blocker to whoever commissioned the PR.
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.

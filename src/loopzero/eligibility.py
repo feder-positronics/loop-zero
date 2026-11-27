@@ -29,11 +29,9 @@ def leading_marker(body: str) -> re.Match[str] | None:
 
 
 def review_envelopes(body: str) -> tuple[str, list[dict]]:
-    """Decode only the publisher's raw-output block, not quoted findings/prose."""
-    if not isinstance(body, str):
-        return "", []
-    match = re.search(r"<details><summary>Raw reviewer output</summary>\s*```\s*\n(.*?)\n```", body, re.DOTALL)
-    if not match:
+    """Decode only the publisher's raw-output block, which ends the body; quotes in findings come earlier."""
+    if not (match := re.search(r"<details><summary>Raw reviewer output</summary>\s*```\s*\n((?:(?!\n```).)*)"
+                                r"\n```\s*</details>\s*\Z", body, re.DOTALL)):
         return "", []
     raw = match[1].strip()
     try:
@@ -152,8 +150,8 @@ def base_merge_material(
                         "--ignore-submodules=none", "--submodule=short",
                         f"{reviewed}..{head}", preserve_newlines=True)
             return patch.encode("utf-8", errors="surrogateescape")
-    except (github.GhUnavailable, github.ProcTimeout):
-        raise
+    except (github.GhUnavailable, github.ProcTimeout, candidate.FetchFailed):
+        raise  # A failed fetch is not "no review recorded".
     except (LoopZeroError, KeyError, OSError, TypeError, ValueError):
         return None
 
@@ -189,7 +187,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
         return eligible_review(marked, head, publishers, repo=repo, number=number)
     latest = marked[-1]
     marker = leading_marker(latest["body"])
-    if not marker or marker[2] not in {"primary", "delta"}:
+    if not marker:
         return None
     reviewed = marker[1]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
