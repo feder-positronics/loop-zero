@@ -489,6 +489,43 @@ def test_non_object_publisher_is_ignored_not_a_crash():
     assert cli._pr_markers([review], review["commit_id"], ("bot",), repo="acme/widgets", number=7) == []
 
 
+@pytest.mark.parametrize("rendered, publication, diagnostic", [
+    (cli.review_marker(SYNTHETIC_NATIVE.head, "primary"), ("acme/widgets", 8), "publication context mismatch"),
+    (cli.review_marker(SYNTHETIC_NATIVE.head, "delta"), ("acme/widgets", 7), "invalid/oversized leading machine block"),
+    (cli.review_marker("b" * 40, "primary"), ("acme/widgets", 7), "invalid/oversized leading machine block"),
+])
+def test_codex_publication_rejects_inconsistent_context(rendered, publication, diagnostic):
+    with pytest.raises(runners.RunnerBadOutput, match=diagnostic):
+        github._review_body(SYNTHETIC_NATIVE, [], rendered, publication=publication)
+
+
+@pytest.mark.parametrize("header, diagnostic", [
+    ("é", "invalid evidence header"),
+    ("not a review marker", "invalid evidence encoding"),
+    (packed_json('{"version":1,"version":2}'), "duplicate JSON key"),
+])
+def test_codex_evidence_rejects_invalid_transport(header, diagnostic):
+    with pytest.raises(ValueError, match=diagnostic):
+        runners.decode_codex_evidence(header)
+
+
+def test_codex_evidence_encoder_rejects_wrong_schema():
+    with pytest.raises(runners.RunnerBadOutput, match="invalid native evidence projection"):
+        runners.encode_codex_evidence({"version": 2})
+
+
+def test_chunk_merge_requires_the_same_review_identity():
+    another_head = dataclasses.replace(SYNTHETIC_NATIVE, head="b" * 40)
+    with pytest.raises(ValueError, match="chunk reviews do not describe the same review"):
+        runners.merge_reviews([SYNTHETIC_NATIVE, another_head])
+
+
+def test_native_evidence_projection_requires_schema_validation(monkeypatch):
+    monkeypatch.setattr(runners, "valid_codex_evidence", lambda _evidence: False)
+    with pytest.raises(runners.RunnerBadOutput, match="invalid full native evidence"):
+        runners._codex_evidence(SYNTHETIC_NATIVE)
+
+
 def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
     raw = json.loads(SYNTHETIC_NATIVE.raw)
     raw.pop("review_context")
