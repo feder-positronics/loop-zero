@@ -1174,7 +1174,8 @@ def _independence_message(
     detail = ("\n\nFailures:\n" + "\n\n".join(failures)) if failures else ""
     return (
         f"no configured reviewer can run (author family: {identity}; excluded families: "
-        f"{excluded_text}). Fix the reviewer failures below and rerun. "
+        f"{excluded_text}). Fix the reviewer failures below and rerun. If you cannot, "
+        f"report the blocker to whoever commissioned this PR. "
         f"Do not remove truthful Co-authored-by attribution.{detail}"
     )
 

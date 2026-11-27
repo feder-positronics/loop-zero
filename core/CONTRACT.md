@@ -253,7 +253,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   runner-produced reviews count. If no independent reviewer can run, try the
   preferred configured family in a fresh session and publish a visible same-family
   fallback line. When no configured reviewer can run (exit 4), the PR owner
-  restores a configured reviewer and retries.
+  restores a configured reviewer and retries; if it cannot, it reports the
+  blocker to whoever commissioned the PR.
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.
