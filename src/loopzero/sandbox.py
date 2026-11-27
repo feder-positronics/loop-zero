@@ -142,9 +142,10 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 with _stage_status(status, ordinal, len(commands)):
                     result = _run_one(config, worktree, prefix, command, timeout)
                 result = replace(result, input_key=key)
-                if track_scratch and not result.exit_code:
-                    if before is None or before != _scratch_snapshot(scratch.values()):
-                        scratch_writers.add(command)
+                if track_scratch and not result.exit_code and (
+                    before is None or before != _scratch_snapshot(scratch.values())
+                ):
+                    scratch_writers.add(command)
             if is_check or result.exit_code:
                 results.append(result)
                 if checkpoint is not None and (result.exit_code or result.input_key):
