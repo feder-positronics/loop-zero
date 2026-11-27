@@ -264,7 +264,7 @@ shortages, "in the queue", the change class from the PR file list. A stale draft
 ownership. Record one entry: the outcome and its current condition, the
 obstacle, the next step with its predicted effect and check time, and at that
 check the actual result. Judge these wakes by changed next actions and shortened
-blockages; a recurring check keeps or reverts each adjustment against its
+blockages; the weekly retro keeps or reverts each adjustment against its
 numbers.
 
 **Retrospectives.** The outcome owner records a retro, in loop-zero and in
@@ -298,8 +298,9 @@ result and check date, or why none remains. Workflow health still governs
 any change.
 
 Close the loop on a schedule that host policy sets: the weekly
-[retro skill](../core/skills/retro/SKILL.md) rules on every action whose check
-date has arrived. It also pushes the owner of any trigger event still missing
+[retro skill](../core/skills/retro/SKILL.md) rules on every retro action whose
+check date has arrived or passed, collected from the owning issues and PRs,
+including actions that never shipped. It also pushes the owner of any trigger event still missing
 its retro. An action more than a day overdue counts as an occurrence under
 trigger 6.
 

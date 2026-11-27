@@ -196,9 +196,9 @@ sandbox environment settings over a private file descriptor, keeping
 forwarded values out of process arguments. [Reviewer runners](../src/loopzero/runners.py)
 bound source access while allowing the network required by model CLIs; that
 network means the sandbox cannot prevent exfiltration of readable data.
-For a Codex executable installed inside protected native state, the implicit
-runtime mount exposes only the resolved executable and its existing sibling
-`codex-code-mode-host`, read-only. Neighboring history and configuration remain
+For a reviewer executable installed inside protected native state, the implicit
+runtime mount exposes only the resolved executable, read-only; for Codex it also
+exposes the existing sibling `codex-code-mode-host`, read-only. Neighboring history and configuration remain
 hidden; helper aliases into protected state and explicit state mounts fail closed,
 and explicit runtime paths get no such exception.
 Every command except `start` uses the workflow at one remote-tracking
