@@ -19,7 +19,7 @@ from tests.conftest import git
 from tests.test_candidate import event as candidate_event
 from tests.test_candidate import payloads as candidate_payloads
 from tests.test_candidate import status as candidate_status
-from tests.test_github import HEAD, REPO, FakeGh, pr_json, threads_json
+from tests.test_github import HEAD, REPO, gh as gh, pr_json, threads_json
 
 
 @pytest.mark.parametrize("module,args", [
@@ -61,10 +61,8 @@ def prepare_event(tmp_path, monkeypatch, repo, event, *, base="main"):
 
 
 @pytest.fixture
-def publisher(tmp_path, fake_bin, monkeypatch):
+def publisher(tmp_path, gh, monkeypatch):
     prepare_event(tmp_path, monkeypatch, REPO, {"pull_request": {"number": 7}})
-    gh = FakeGh(fake_bin, tmp_path)
-    gh.replay_in_process(monkeypatch)
     gh.respond_pr_view(pr_json(), branch="lz/task")
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 11})
@@ -358,7 +356,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     ("stale", hosted.LoopZeroError, "head is no longer current"),
     ("untrusted", CandidateError, "head event was not sent"),
 ])
-def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatch, capsys, case, error, message):
+def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatch, capsys, request, case, error, message):
     event = candidate_event()
     event["action"], event["sender"]["id"] = (
         "edited" if case == "metadata" else event["action"], 1 if case == "untrusted" else event["sender"]["id"])
@@ -366,9 +364,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     values = candidate_payloads(event)
     polling = case in {"settled_mergeability", "pending_mergeability", "poll_drift"}
     if polling or case in {"valid", "trunk", "hold"}:
-        gh = FakeGh(fake_bin, tmp_path)
-        gh.replay_in_process(monkeypatch)
-        gh.respond("api graphql", threads_json())
+        request.getfixturevalue("gh").respond("api graphql", threads_json())
     for number, sha in [(101, "1" * 40), (102, "2" * 40), (900, "c" * 40)]:
         path = f"/repos/owner/repo/pulls/{number}"
         values[path] = fixtures.rest_pr_json(pr_json(

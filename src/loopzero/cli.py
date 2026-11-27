@@ -63,9 +63,6 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
     return f"<!-- loopzero:review v=1 head={head} kind={kind} source={source} -->"
 
 
-# --------------------------------------------------------------------------- git / context
-
-
 _git = partial(worktree.git, timeout=GIT_TIMEOUT)
 
 
@@ -120,14 +117,13 @@ def _publisher_problem(args: argparse.Namespace, config: Config) -> str | None:
 
 
 def _load_config(
-    args: argparse.Namespace, root: Path, *, pin_checks: bool = False, previous: Config | None = None,
+    args: argparse.Namespace, root: Path, *, previous: Config | None = None,
     refresh: bool = False,
 ) -> Config:
-    require_ci = pin_checks and args.command in {"ready", "merge"} and not getattr(args, "cancel", False)
-    if not pin_checks or args.config:
-        if pin_checks:
-            print("checks are unpinned because --config was provided")
-        config = config_mod.load(args.config or root / "workflow.toml", require_ci=require_ci)
+    require_ci = args.command in {"ready", "merge"} and not getattr(args, "cancel", False)
+    if args.config:
+        print("checks are unpinned because --config was provided")
+        config = config_mod.load(args.config, require_ci=require_ci)
     else:
         config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
                                          require_ci=require_ci, read_timeout=github.read_timeout)
@@ -140,7 +136,7 @@ def _load_config(
 
 def _context(args: argparse.Namespace) -> tuple[Path, Config]:
     wt = _toplevel()
-    return wt, _load_config(args, wt, pin_checks=True, refresh=args.command in {"ready", "merge"})
+    return wt, _load_config(args, wt, refresh=args.command in {"ready", "merge"})
 
 
 def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
@@ -187,9 +183,6 @@ def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, head
 def _require_pushed(pr: github.PR, head: str) -> None:
     if pr.head_sha != head:
         raise CliError(f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; push or pull first")
-
-
-# --------------------------------------------------------------------------- review markers
 
 
 def _pr_reviews(repo: str, number: int, **kwargs) -> list[dict]:
@@ -367,9 +360,6 @@ def _waitable_eligibility_refresh(
     return readiness
 
 
-# --------------------------------------------------------------------------- checks report
-
-
 def _check_report_problem(
     report: CheckReport | None, config: Config, head: str, *, require_pass: bool = True,
 ) -> str | None:
@@ -381,10 +371,11 @@ def _check_report_problem(
         return ("check receipt was recorded in a dirty worktree. Run `git status --short`, "
                 "settle the changes, then run `loopzero check`.")
     commands = tuple(result.command for result in report.results)
-    if (require_pass and not report.ok) or commands != config.checks:
+    failed = require_pass and not report.ok
+    if failed or commands != config.checks:
         if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
             return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
-        if require_pass and not report.ok:
+        if failed:
             return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
                     "Retry unchanged only if the failure was transient.")
         return ("check receipt's plan differs from the trusted workflow. "
@@ -606,7 +597,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         raise CliError(f"primary checkout {root} is on task branch {branch}; switch it to another branch first")
     if branch.startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
         raise CliError(f"already inside task worktree {root}; run start from {primary}")
-    config = _load_config(args, root)
+    config = config_mod.load(args.config or root / "workflow.toml")
     print(worktree.start(primary, args.slug, config.base_branch))
     return 0
 
@@ -857,20 +848,20 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
         _save_review(wt, result)
         raise
     prefix = _repost_prefix(result) if args.repost else review_marker(head, kind, "model")
+    path = _review_file(wt, head, kind)
     _save_review(wt, result, publication_context)
     with github.pr_lock(config.repo, pr.number):
         try:  # a refused token or a GitHub error here leaves the saved review to --repost
             token = _refresh_publisher_token(token, publisher)
             _require_open_review_round(config, pr, head, kind)
         except (github.GhError, _proc.ProcTimeout, CliError) as exc:
-            raise CliError(f"{exc} | review saved at {_review_file(wt, head, kind)}; run `loopzero review --repost`") from exc
+            raise CliError(f"{exc} | review saved at {path}; run `loopzero review --repost`") from exc
         try:
             github.post_review(
                 config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
                 publisher=publisher, base=config.base_branch,
             )
         except (github.GhError, _proc.ProcTimeout) as exc:
-            path = _review_file(wt, head, kind)
             try:
                 if _recover_review(wt, config, pr, result, publisher, token)[0]:
                     return _review_verdict(result)
@@ -1478,7 +1469,7 @@ def _verify_wait_snapshot(
 ) -> Config:
     if current_head != head:
         raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}; sync the branch and run loopzero ready")
-    latest = _load_config(args, wt, pin_checks=True, previous=previous, refresh=True)
+    latest = _load_config(args, wt, previous=previous, refresh=True)
     if latest == config:
         return latest
     retry = "retry with the current settings" if _current_check_report(wt, latest, head) else "run loopzero check and retry"
@@ -1594,14 +1585,19 @@ def _queue_wait(deadline: float, poll: Callable[[float], str | None], *, bounded
             raise
 
 
-def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str | None:
+def _landed(
+    config: Config, pr: github.PR, closed: list[github.GhError], *, confirm_closed: bool = False,
+) -> str | None:
     """Merge SHA if landed; a closed-unmerged read is held as not final (GitHub lags a
     queue merge) until the next poll or the deadline."""
     try:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
     except github.ClosedUnmerged as exc:
         github.read_timeout(0)  # A late observation is a timeout, not evidence.
+        confirmed = confirm_closed and bool(closed)
         closed[:] = [exc]
+        if confirmed:
+            raise
         return None
     closed.clear()  # Even a late read contradicts earlier lagging closed evidence.
     github.read_timeout(0)
@@ -1615,11 +1611,8 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
     with suppress(github.ReadDeadline):
         for _ in _poll_until(started, timeout, bounded=True):
-            was_closed = bool(closed)
-            if sha := _landed(config, pr, closed):
+            if sha := _landed(config, pr, closed, confirm_closed=True):
                 return sha
-            if closed and was_closed:
-                raise closed[0]
             if not closed and not github.merge_pending(config.repo, pr.number, pr.head_sha):
                 if sha := _landed(config, pr, closed):
                     return sha
@@ -1711,10 +1704,7 @@ def _mergify_departure(
 def _mergify_wait_poll(
     config: Config, pr: github.PR, queue: str, deadline: float | None, closed: list[github.GhError], confirmed: bool,
 ) -> tuple[str | None, mergify.Membership | None, bool]:
-    was_closed = bool(closed)
-    sha = _landed(config, pr, closed)
-    if closed and was_closed:
-        raise closed[0]
+    sha = _landed(config, pr, closed, confirm_closed=True)
     if sha or closed:
         return sha, None, False
     if not mergify.configured(config.repo, config.base_branch, queue, deadline):
@@ -1971,7 +1961,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     wt = _toplevel()
-    config = _load_config(args, wt, pin_checks=True)
+    config = _load_config(args, wt)
     branch, head = worktree.branch(wt), worktree.head(wt)
     _print_display(f"worktree: {wt}\nbranch:   {branch}\nhead:     {head}\nbase:     {config.base_branch}")
     _print_display(f"dirty:    {'yes' if worktree.is_dirty(wt) else 'no'}")

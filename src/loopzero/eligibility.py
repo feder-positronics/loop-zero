@@ -6,7 +6,6 @@ Hosted callers must serialize refreshes per PR and invalidate before review edit
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from collections.abc import Callable
@@ -35,10 +34,9 @@ def review_envelopes(body: str) -> tuple[str, list[dict]]:
         return "", []
     raw = match[1].strip()
     try:
-        value = json.loads(raw)
+        envelopes = runners._read_envelopes(raw)
     except (ValueError, TypeError):
         return raw, []
-    envelopes = value if isinstance(value, list) else [value]
     return raw, envelopes if all(isinstance(item, dict) for item in envelopes) else []
 
 
