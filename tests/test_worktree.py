@@ -196,7 +196,7 @@ def test_start_refuses_an_existing_task_destination(repo: Path, collision: str) 
     assert path.exists() == (collision == "directory")
 
 
-@pytest.mark.parametrize("slug", ["../escape", "bad..name", "trail.lock", ""])
+@pytest.mark.parametrize("slug", ["a/b", "bad..name", "trail.lock", ""])
 def test_start_rejects_bad_slug(repo: Path, slug: str) -> None:
     with pytest.raises(worktree.WorktreeError, match="invalid slug"):
         worktree.start(repo, slug, "main")

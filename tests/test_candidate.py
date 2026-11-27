@@ -587,7 +587,7 @@ def test_membership_drift_is_a_retryable_race():
 @pytest.mark.parametrize("second,stop", [(s, t) for s in (False, True) for t in ("settled", "ambiguous", "closed", "slow", "oversleep", "changed")])
 def test_rebuild_wait(monkeypatch, no_retry_delay, second, stop):
     clock, sleeps, reads, values, seen = no_retry_delay, [], [], payloads(event()), []
-    ambiguous = {"batches": []}
+    ambiguous = {"batches": [{"id": str(i), "queue_pull_request_number": 900} for i in range(2 * second)]}
     def sleep(delay):
         sleeps.append(delay)
         clock[0] += 100 if stop == "oversleep" else delay

@@ -465,10 +465,9 @@ def test_publication_qualifies_each_call_from_native_evidence(gh, metadata):
     assert "unqualified-" not in body and "forged-" not in body
 
 
-@pytest.mark.parametrize("separator", ["\u2028"])
-def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: str) -> None:
+def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh) -> None:
     path = "src/a.py"
-    patch = f"@@ -1 +1,2 @@\n-old\n+left{separator}right\n+second\n"
+    patch = "@@ -1 +1,2 @@\n-old\n+left\u2028right\n+second\n"
     arm_review(gh, files=[{"filename": path, "patch": patch}])
     findings = (
         Finding("important", path, 2, "In diff", ""),
