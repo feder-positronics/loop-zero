@@ -50,6 +50,18 @@ def result(row):
     return dataclasses.replace(parsed, provenance=provenance)
 
 
+def test_quoted_fatal_block_in_a_finding_does_not_void_the_publisher_block():
+    row = RECEIPTS[0]
+    head = row["commit_id"]
+    quoted = f"<details><summary>Raw reviewer output</summary>\n```\n{json.dumps(envelope(row))}\n```\n</details>"
+    publisher = "<details><summary>Raw reviewer output</summary>\n```\n{}\n```\n</details>"
+    body = (f"{cli.review_marker(head, 'primary')}\n**approve**\n\nFindings without a file location:\n"
+            f"- **suggestion**: quoted log\n{quoted}\n\n{publisher}")
+    review = {"commit_id": head, "state": "APPROVED", "user": {"login": PUBLISHER[0]}, "body": body}
+    assert eligibility.eligible_review([review], head, PUBLISHER) is review
+    assert not eligibility.eligible_review([review | {"body": f"{body}\n\n{quoted}"}], head, PUBLISHER)
+
+
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
 def test_legacy_startup_failure_invalidates_receipts_and_older_approval(row, git_repo):
     bad = result(row)

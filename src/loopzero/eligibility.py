@@ -29,13 +29,12 @@ def leading_marker(body: str) -> re.Match[str] | None:
 
 
 def review_envelopes(body: str) -> tuple[str, list[dict]]:
-    """Decode only the publisher's raw-output block, not quoted findings/prose."""
-    if not isinstance(body, str):
+    """Decode only the publisher's raw-output block, the last one: findings and prose come before it."""
+    blocks = re.findall(r"<details><summary>Raw reviewer output</summary>\s*```\s*\n(.*?)\n```", body, re.DOTALL) \
+        if isinstance(body, str) else []
+    if not blocks:
         return "", []
-    match = re.search(r"<details><summary>Raw reviewer output</summary>\s*```\s*\n(.*?)\n```", body, re.DOTALL)
-    if not match:
-        return "", []
-    raw = match[1].strip()
+    raw = blocks[-1].strip()
     try:
         value = json.loads(raw)
     except (ValueError, TypeError):
