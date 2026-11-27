@@ -29,11 +29,9 @@ def leading_marker(body: str) -> re.Match[str] | None:
 
 
 def review_envelopes(body: str) -> tuple[str, list[dict]]:
-    """Decode only the publisher's raw-output block, not quoted findings/prose."""
-    if not isinstance(body, str):
-        return "", []
-    match = re.search(r"<details><summary>Raw reviewer output</summary>\s*```\s*\n(.*?)\n```", body, re.DOTALL)
-    if not match:
+    """Decode only the publisher's raw-output block, which ends the body; quotes in findings come earlier."""
+    if not (match := re.search(r"<details><summary>Raw reviewer output</summary>\s*```\s*\n((?:(?!\n```).)*)"
+                                r"\n```\s*</details>\s*\Z", body, re.DOTALL)):
         return "", []
     raw = match[1].strip()
     try:
