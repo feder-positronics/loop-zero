@@ -98,7 +98,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config)
-    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and not dirty else {}
+    previous, resuming = (_previous(config, worktree, settings_sha256, head)
+                          if config.inputs and base and not dirty else ({}, False))
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -124,8 +125,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
         current = _current_commands(config, worktree, commands, settings_sha256)
-        last_run = max((i for i, c in enumerate(commands, 1) if config.scratch and previous
-                        and not _input_key(config, worktree, c, "" if dirty else base)), default=0)
+        last_run = _scratch_reuse_boundary(config, worktree, commands, base, previous, resuming)
         for ordinal, command in enumerate(current, 1):
             if progress:
                 progress(command)
@@ -159,6 +159,23 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         )))
         dirty = True
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
+
+
+def _scratch_reuse_boundary(config: Config, worktree: Path, commands: tuple[str, ...],
+                            base: str, previous: dict[str, CheckResult], resuming: bool) -> int:
+    if config.scratch and previous:
+        for ordinal in range(len(commands), 0, -1):
+            command = commands[ordinal - 1]
+            try:
+                key = _input_key(config, worktree, command, base)
+            except (SandboxUnavailable, _proc.ProcTimeout, OSError, ValueError):
+                # Retry the lookup in stage order so earlier failures win.
+                return ordinal
+            old = previous.get(command)
+            # A checkpoint can contain unvisited keyed stages with stale or missing results.
+            if not key or (not resuming and (old is None or old.input_key != key)):
+                return ordinal
+    return 0
 
 
 def _current_commands(config: Config, worktree: Path, commands: tuple[str, ...],
@@ -200,24 +217,28 @@ def _checkpoint_stage(checkpoint: Callable[[CheckReport], None] | None,
         checkpoint(replace(report, results=(*report.results, *unvisited, INCOMPLETE_CHECK)))
 
 
-def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
+def _previous(config: Config, worktree: Path, settings_sha256: str,
+              head: str) -> tuple[dict[str, CheckResult], bool]:
     try:
         data = json.loads(read_local_state(worktree, "checks.json"))
         if (data["dirty"] is not False or not isinstance(data["head"], str)
                 or data.get("settings_sha256") != settings_sha256):
-            return {}
+            return {}, False
         previous = {}
+        resuming = False
         for result in data["results"]:
             command, key = result.get("command"), result.get("input_key")
             code, tail = result.get("exit_code"), result.get("tail", "")
+            if command == INCOMPLETE_CHECK_COMMAND and code == 1:
+                resuming = data["head"] == head
             if (isinstance(command, str) and isinstance(key, str) and key
                     and is_check_exit_code(code) and code == 0 and isinstance(tail, str)):
                 source = result.get("reused_from")
                 reused_from = source if isinstance(source, str) else data["head"]
                 previous[command] = CheckResult(command, 0, 0.0, _check_tail(tail, config), key, reused_from)
-        return previous
+        return previous, resuming
     except (OSError, WorktreeError, ValueError, KeyError, TypeError, AttributeError):
-        return {}
+        return {}, False
 
 
 def _check_base(config: Config, worktree: Path) -> str:

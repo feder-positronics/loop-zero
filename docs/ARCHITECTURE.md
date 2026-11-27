@@ -475,7 +475,10 @@ when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them
 Consumers own complete input declarations.
 Reuse only successful keyed stages from this worktree's clean receipt or
 checkpoint. Dirty trees run fresh. A tracked receipt is never eligible for reuse.
-With scratch mounts, a stage before an unkeyed stage always runs, since scratch starts empty.
+With scratch mounts, a stage runs fresh if a later stage lacks a matching saved
+result. When resuming a checkpoint at the same head, a later stage with an
+input key preserves earlier reuse even if its saved result is missing or stale.
+Lookup errors prevent earlier reuse and surface in stage order.
 Receipts that use saved stage results bind the current head and check settings.
 
 A worker running the entire check is itself the coordinator and writes a
