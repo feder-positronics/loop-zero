@@ -106,7 +106,8 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
     else:
         posted = check_source(publisher, states)
         if len(posted) == 2:  # The restored row is the verdict users see, not the marker.
-            assert posted[1]["description"] == next(r["description"] for r in history if r is not history[0] and "Refreshing live source review evidence" != r["description"] and r["description"] != "Refreshing source review evidence")
+            markers = {"Refreshing live source review evidence", "Refreshing source review evidence"}
+            assert posted[1]["description"] == next(r["description"] for r in history if r["description"] not in markers)
 
 
 def check_source(publisher, states, *, exit_code=0, error=None, match=None):
