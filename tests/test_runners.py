@@ -1057,22 +1057,19 @@ def test_unknown_family_and_kind(tmp_path: Path) -> None:
         review_with("claude", cwd=tmp_path, head="h", kind="full", diff="", task_text="")
 
 
-def test_review_rejects_a_verdict_outside_the_schema():
-    payload = APPROVE | {"verdict": "unknown"}
-    with pytest.raises(runners.RunnerMalformedOutput, match="review lacks verdict/findings"):
-        runners.parse_review(payload, family="codex", head="a" * 40, kind="primary", raw="synthetic")
-
-
 @pytest.mark.parametrize("finding", [
+    None,  # Invalid verdict instead of an invalid finding.
     {"severity": "critical"},
     {"severity": "critical", "path": None, "line": None, "title": 4, "body": "x"},
     {"severity": "critical", "path": None, "line": None, "title": "x", "body": []},
     {"severity": "critical", "path": None, "line": None, "title": "x", "body": "y", "extra": 1},
 ])
-def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) -> None:
-    message = json.dumps({"verdict": "request_changes", "findings": [finding]})
+def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict | None) -> None:
+    message = json.dumps(APPROVE | {"verdict": "unknown"} if finding is None
+                         else {"verdict": "request_changes", "findings": [finding]})
     _fake_codex(fake_bin, message)
-    with pytest.raises(runners.RunnerMalformedOutput) as error:
+    diagnostic = "review lacks verdict/findings" if finding is None else None
+    with pytest.raises(runners.RunnerMalformedOutput, match=diagnostic) as error:
         _review("codex", tmp_path)
     assert error.value.tail == message + "\n"
 
