@@ -13,7 +13,7 @@ and setup.
   local storage, rotation, and CI/production boundaries.
 - [../core/HANDOFF.md](../core/HANDOFF.md) — task file and PR body template.
 - [../core/skills/](../core/skills) — core skills; the [index](../core/skills/README.md#skill-routing) names the
-  four entry skills.
+  entry skills.
 - [../integrations/](../integrations/) — optional vendor integration skills.
 - [REWRITE-SPEC.md](REWRITE-SPEC.md) — contributor module map.
 - [design/2026-09-24-delivery-system-architecture.md](design/2026-09-24-delivery-system-architecture.md) —
