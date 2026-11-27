@@ -265,6 +265,24 @@ def test_publication_recovery_ignores_markers_quoted_on_other_commits(wt: Path, 
     assert cli._confirm_review(wt, config, pr, result, LOGIN, [other]) is False
 
 
+@pytest.mark.parametrize("changed, publisher", [
+    ({"headRefOid": "b" * 40}, LOGIN),
+    ({"state": "CLOSED"}, LOGIN),
+    ({"baseRefName": "release"}, LOGIN),
+    ({}, "untrusted-publisher"),
+])
+def test_publication_recovery_rechecks_pr_and_publisher(wt, gh, head, changed, publisher):
+    config = replace(cli.config_mod.load(wt / "workflow.toml"), review_publishers=(LOGIN,))
+    result = ReviewResult("claude", head, "primary", "approve", (), "raw", provenance={"session_ids": ["session"]})
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    gh.respond_pr_view(pr_json(**({"headRefOid": head} | changed)))
+    reviews = [] if changed else [rev(head, "primary")]
+    error = "PR changed during publication recovery" if changed else "publication is revoked, pending or untrusted"
+
+    with pytest.raises(cli.CliError, match=error):
+        cli._confirm_review(wt, config, pr, result, publisher, reviews)
+
+
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
         login: str = LOGIN, verdict: str = "approve") -> dict:
     """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""
@@ -1821,6 +1839,17 @@ def test_interrupted_review_save_preserves_previous_receipt(wt, gh, fake_bin, ca
         assert not (fake_bin / "claude.stdin").exists()
     else:
         assert not saved.exists()
+
+
+def test_repost_refuses_a_saved_review_for_the_wrong_round(wt, gh, capsys, head, monkeypatch):
+    arm_empty_primary_review_history(gh, head)
+    cli._review_file(wt, head, "primary").touch()
+    result = ReviewResult("claude", head, "primary", "approve", (), "")
+    monkeypatch.setattr(cli, "_load_review", lambda *_args: (result, None))
+    monkeypatch.setattr(cli, "_select_review_round", lambda *_args: ("delta", None))
+    monkeypatch.setattr(cli, "_delta_patch", lambda *_args: pytest.fail("processed a mismatched review"))
+
+    expect_cli(capsys, 1, "review", "--repost", stderr_contains=("saved review kind differs",))
 
 
 @pytest.mark.parametrize("saved_state", ["missing", "stale", "hand-written", "retired"])
