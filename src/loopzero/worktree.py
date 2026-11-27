@@ -23,7 +23,6 @@ GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUT
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
 EXCLUDES = (b".worktrees/", b".loopzero/")
 _BASE_SECTION = re.compile(r"^## Base\n[^\n]+ @ ([0-9a-fA-F]{7,40})[ \t]*$", re.MULTILINE)
-_BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
 _TASK_TEMPLATE = """# {title}
 
 ## Context and goal
@@ -349,10 +348,8 @@ def task_text(wt: Path) -> str:
 
 
 def base_sha(wt: Path) -> str:
-    text = task_text(wt)
-    match = _BASE_LINE.search(text) or _BASE_SECTION.search(text)
-    if not match:
-        raise WorktreeError(f"no commit in the Base section or 'Base: <sha>' line in {task_file(wt)}")
+    if not (match := _BASE_SECTION.search(task_text(wt))):
+        raise WorktreeError(f"no '<branch> @ <sha>' line in the Base section of {task_file(wt)}")
     return match.group(1)
 
 
