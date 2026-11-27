@@ -2,12 +2,14 @@
 
 import json
 import os
+from collections.abc import Mapping
 
 
 def replay(
-    argv: list[str], calls: str, scenario: str, cwd: str, token: str | None,
+    argv: list[str], calls: str, scenario: str, cwd: str, env: Mapping[str, str],
 ) -> tuple[int, str, str]:
-    record = dict(argv=argv, token=token, config=[os.getenv(k) for k in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME")])
+    record = dict(argv=argv, token=env.get("GH_TOKEN"),
+                  config=[env.get(k) for k in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME")])
     input_files = {}
     for flag in ("--input", "--body-file"):
         if flag in argv:
