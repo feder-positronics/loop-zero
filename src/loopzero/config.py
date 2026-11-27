@@ -60,8 +60,11 @@ def _parse_workflow(raw: bytes, source: Path | str, hint: str = "", *,
     try:
         data = tomllib.loads(raw.decode("utf-8"))
         policy = _build(data)
-        if require_ci and (branch is None or policy.base_branch == branch):
-            _require_ci(data.get("checks", {}))
+        if (require_ci and (branch is None or policy.base_branch == branch)
+                and "required_ci" not in data.get("checks", {})):
+            raise ConfigError(
+                "checks.required_ci must list the required contexts or explicitly set required_ci = [] if none are required"
+            )
         return policy
     except UnicodeDecodeError as exc:
         raise ConfigError(f"{source}: {exc}") from exc
@@ -159,13 +162,6 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
             return replace(policy, trusted_base_revision=revision)
         branch = policy.base_branch
     raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
-
-
-def _require_ci(checks: dict[str, Any]) -> None:
-    if "required_ci" not in checks:
-        raise ConfigError(
-            "checks.required_ci must list the required contexts or explicitly set required_ci = [] if none are required"
-        )
 
 
 def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every workflow.toml section in one pass

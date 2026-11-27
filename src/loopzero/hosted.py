@@ -116,20 +116,17 @@ def _run(cfg: Config) -> int:
         return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
     github.commit_status(cfg.repo, head, eligibility.CONTEXT, "pending",
                          "Refreshing live source review evidence")
-    snapshot = None
     try:
         if candidate:
-            current = retry(lambda: (_attest(cfg, event), _publication_snapshot(cfg.repo, number, head, None))[1])
+            retry(lambda: (_attest(cfg, event), _publication_snapshot(cfg.repo, number, head, None))[1])
+            state, message = "success", "All attested candidate sources are reviewed"
         else:
             snapshot = eligibility.source_snapshot(cfg.repo, number, head, github.pr_from_rest(pr))
             result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers,
                                           snapshot=snapshot)
             current = _publication_snapshot(cfg.repo, number, head, snapshot)
-        if current is None:
-            return 0
-        if candidate:
-            state, message = "success", "All attested candidate sources are reviewed"
-        else:
+            if current is None:
+                return 0
             blocker = github.mergeability_blocker(current) if result.ready else None
             state, message = eligibility.source_status(github.Readiness(False, (blocker,)) if blocker else result)
     except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable) as exc:
