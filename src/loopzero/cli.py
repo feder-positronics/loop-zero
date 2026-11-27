@@ -1,4 +1,4 @@
-"""Command line: composes the modules into start, check, pr, review, ready, merge, status."""
+"""Command line: composes the modules into start, check, pr, review, ready, merge, resolve, status."""
 
 from __future__ import annotations
 
