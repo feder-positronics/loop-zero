@@ -196,8 +196,8 @@ The [sandbox](../src/loopzero/sandbox.py) bounds check writes, credentials,
 network access and resources. Checks and their Bubblewrap probes pass
 sandbox environment settings over a private file descriptor, keeping
 forwarded values out of process arguments. [Reviewer runners](../src/loopzero/runners.py)
-bound source access while allowing the network required by model CLIs; that
-network means the sandbox cannot prevent exfiltration of readable data.
+bound source access while allowing the network required by model CLIs (the
+contract states what that network allows).
 For a reviewer executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable, read-only; for Codex it also
 exposes the existing sibling `codex-code-mode-host`, read-only. Neighboring history and configuration remain
@@ -229,7 +229,7 @@ commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
 that header, a newline and the Git patch, including carriage returns and the
 final newline. UTF-8 patches are supplied verbatim. For other patches, the
 prompt escapes invalid bytes and literal backslashes so the changes stay
-visible. The native inspection digest always binds the original Git bytes. Git forces
+visible. The evidence diff digest always binds the original Git bytes. Git forces
 text hunks for every file (overriding `-diff`, `binary` and NUL detection) and
 runs no external diff command or text conversion, so changed lines stay visible.
 Chunked review summarizes only files whose Git header reports a deletion.

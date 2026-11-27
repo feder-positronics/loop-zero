@@ -1,8 +1,9 @@
 # Model selection and delegation
 
 Delegate independent, bounded work whose result can be checked. Prefer the
-least expensive reliable model; keep small or tightly coupled work inline
-when briefing and integration cost more. No delegation quota, line threshold
+least expensive reliable model; a worker keeps small or tightly coupled work
+inline when briefing and integration cost more (owners commission build work,
+see [Liveness](#team-practices)). No delegation quota, line threshold
 or exception record is required.
 
 ## Coordinator rollover
@@ -200,7 +201,7 @@ grants, owners act and record the decision on the issue/PR or their own log:
 
 - Re-own a stalled delegate under its existing brief and grant.
 - Integrate base changes under the [review budget](../core/CONTRACT.md#review-budget)
-  and [local check receipt rules](../core/CONTRACT.md#check-reuse-and-delivery-priority).
+  and [receipt reuse rules](../core/CONTRACT.md#check-reuse-and-delivery-priority).
   Product conflicts or new migrations go to the decisions owner.
 - Close non-QA work whose full acceptance is proved; preserve separate QA,
   umbrella and hold conditions.
@@ -224,7 +225,7 @@ allowed, no suite-wide skip or hidden xfail.
 a worker and never builds in a turn that answers a message. Measure progress by
 work output on the commissioned deliverable (a commit, push, PR or checks
 started on a new head), never by turns. Acknowledgements, unrelated commits,
-[unnecessary check reruns](../core/CONTRACT.md#check-reuse-and-delivery-priority) and uncommitted changes older than 60 minutes are
+check reruns the [receipt reuse rules](../core/CONTRACT.md#check-reuse-and-delivery-priority) do not require, and uncommitted changes older than 60 minutes are
 not output; workers commit at every green step and push at least hourly. A
 stream holding addressable work is stalled after 60 minutes without output or
 after three acknowledgement-only or empty turns in a row: push it once with an
@@ -531,7 +532,7 @@ deletes its branch. After retargeting, take producer updates by merging main. Af
 the producer lands, confirm the consumer is open against main, return to the
 canonical configuration, and use the supported CI trigger. Verify that all
 required checks pass on the current head against main before readiness.
-Follow the [local check receipt rules](../core/CONTRACT.md#check-reuse-and-delivery-priority)
+Follow the [receipt reuse rules](../core/CONTRACT.md#check-reuse-and-delivery-priority)
 and [review budget](../core/CONTRACT.md#review-budget).
 
 ### Integration and acceptance
@@ -543,9 +544,9 @@ The parent owns integration and acceptance, and may name an integration executor
 in the brief: inspect returned diffs and evidence; worker success claims are not
 proof. Route returned heads to that executor. Run decisive tests unavailable to
 the delegate before review, and required broad verification and `loopzero check`
-under the [receipt reuse rule](../core/CONTRACT.md#check-reuse-and-delivery-priority). If declared checks do not isolate host tools, run a
-focused restricted-PATH probe and report the limitation. Only sandboxed
-`loopzero check` counts as delivery evidence; continue under the
+under the [receipt reuse rules](../core/CONTRACT.md#check-reuse-and-delivery-priority). If declared checks do not isolate host tools, run a
+focused restricted-PATH probe and report the limitation. Only a sandboxed
+`loopzero check` receipt satisfies `loopzero ready`; continue under the
 [contract](../core/CONTRACT.md).
 
 ## Configuration and upgrades
