@@ -118,11 +118,12 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    100 pages. An unfinished branch creates or refreshes a draft PR. Publication
    checks that every effective origin push URL targets the configured GitHub
    repository. A leased rewrite also requires the PR head in the task branch's
-   local history.
+   local history. The push source is the captured commit, and the body is patched only while the live PR head is that commit.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion
    and the PR-wide review budget across head rewrites; truthful all-writer
    trailers decide the reviewer family.
+   Immediately before posting, the live PR must be open at the reviewed head against the configured base; otherwise the saved review stays.
    The delta requires the reviewed commit on the current head's first-parent
    history and verifies merged parents against the live configured base. The
    runner receives topic patches in first-parent order and the difference
@@ -165,6 +166,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    Readiness keeps the latest run ID for each GitHub App and check name, then
    combines the current verdicts for each required name. A positive `ready --wait`
    budget covers the first readiness read and revalidation after taking a PR out of draft.
+   Before the first draft activation it rereads the PR and refuses a moved head, changed target, closed state or hold.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in
    [cli.py](../src/loopzero/cli.py)), the check blocks readiness throughout,
