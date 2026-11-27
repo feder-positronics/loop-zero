@@ -534,6 +534,12 @@ def api_get(endpoint: str, **kwargs) -> object:
     return _gh_json("api", endpoint, **kwargs)
 
 
+def job_log(repo: str, job_id: str):
+    return run(["gh", "api", "--hostname", "github.com", "--allow-escape-sequences",
+                f"repos/{repo}/actions/jobs/{job_id}/logs"], cwd=Path.cwd(), env_allowlist=GH_ENV,
+               timeout=read_timeout(5), encoding="utf-8", merge_output=True, tail_chars=256 * 1024)
+
+
 def response_date(value: str) -> datetime | None:
     if _HTTP_DATE.fullmatch(value):
         with suppress(OverflowError, ValueError):

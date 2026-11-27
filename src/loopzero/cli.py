@@ -1324,9 +1324,7 @@ def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-k
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
-    if args.wait is not None and (
-        waiting or _pending_checks(readiness, allow_skipped=not pr.is_draft)
-    ):
+    if args.wait is not None and (kicked or _pending_checks(readiness, allow_skipped=not pr.is_draft)):
         if (waited := wait(pr, kicked=kicked, shown=_by_check(readiness, readiness.reasons) if kicked else (),
                            initial=None if kicked else readiness)) is None:
             return 3
@@ -1814,8 +1812,7 @@ def _merge_with_mergify(
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
         # A repository rule may have queued and ejected the PR before any loopzero request.
         if not confirmed and (attempt.confirmed or attempt.departure):
-            closed: list[github.GhError] = []
-            if sha := _mergify_departure(config, pr, queue, closed, attempt.confirmed, attempt.departure):
+            if sha := _mergify_departure(config, pr, queue, closed := [], attempt.confirmed, attempt.departure):
                 return sha
             raise closed[0]
         if not confirmed and not attempt.requested:
@@ -2007,8 +2004,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readiness) -> None:
-    queue = config.mergify_queue
-    assert queue is not None
+    queue = config.mergify_queue or ""
     attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
     state = mergify.membership(config.repo, pr.number, queue)
     label = "not admitted"

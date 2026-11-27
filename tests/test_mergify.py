@@ -370,7 +370,7 @@ def test_failed_job_diagnostics_are_bounded_and_keep_links(monkeypatch):
               for i in [0, *range(12)]),
         ]))
 
-    monkeypatch.setattr(mergify, "run", logs)
+    monkeypatch.setattr(github, "run", logs)
     result = mergify.Departure("report", (), "isolated", report).jobs(repo)
     assert calls == ["4", "1", "2"]
     assert all(f"{base}{job}" in result for job in range(1, 5))

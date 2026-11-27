@@ -19,7 +19,6 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import github
-from ._proc import ProcTimeout, ToolMissing, run
 from .types import LoopZeroError, is_sha
 
 API = "https://api.mergify.com/v1"
@@ -317,13 +316,10 @@ class Departure:
 
 def _job_failure(repo: str, job_id: str) -> str:
     try:
-        result = run(["gh", "api", "--hostname", "github.com", "--allow-escape-sequences",
-                      f"repos/{repo}/actions/jobs/{job_id}/logs"],
-                     cwd=Path.cwd(), env_allowlist=github.GH_ENV, timeout=github.read_timeout(5),
-                     encoding="utf-8", merge_output=True, tail_chars=256 * 1024)
+        result = github.job_log(repo, job_id)
         if result.exit_code:
             return f"GitHub log request failed (exit {result.exit_code})"
-    except (ProcTimeout, ToolMissing, OSError, github.ReadDeadline) as exc:
+    except (github.ProcTimeout, github.ToolMissing, OSError, github.ReadDeadline) as exc:
         return f"log unavailable ({type(exc).__name__})"
     log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.stdout)
     headers = re.findall(r"^(?:\d{4}-\d\d-\d\dT\S+Z )? *(?:(FAILED |ERROR )(?=\S+(?:::|\.py\b))|(FAIL +|\d+\) +(?=[^\r\n]*\u203a)))([^\r\n]+)", log, re.M)
