@@ -257,8 +257,9 @@ The audit of `origin/main@b980669971d372f3ff1e31160ab10772379a7cd5` proposed fou
 slices, all since merged:
 
 - R1 [#281](https://github.com/feder-positronics/loop-zero/pull/281) pins reviewer
-  runtime authority and protects native state mounts, so a reviewer cannot read or
-  alter host CLI state it does not need.
+  runtime configuration and refuses unintended mounts of protected native state,
+  with an explicit exception for authentication binds (whose exposure is described
+  below).
 - R4 [#282](https://github.com/feder-positronics/loop-zero/pull/282) separates
   requested from CLI-reported reviewer settings, so publication never claims an
   unobserved model or effort.
