@@ -1578,7 +1578,7 @@ def commit_status(
         raise
 
 
-def latest_statuses(repo: str, head: str, context: str, count: int = 1) -> list[dict]:
+def latest_statuses(repo: str, head: str, context: str, count: int | None = 1) -> list[dict]:
     return list(islice((r for r in _iter_paged(f"repos/{repo}/commits/{head}/statuses") if r.get("context") == context), count))
 
 

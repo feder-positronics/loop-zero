@@ -137,9 +137,9 @@ def _run(cfg: Config) -> int:
 
 
 def _restore_landed(repo: str, head: str, marker: int | None) -> int:
-    rows = github.latest_statuses(repo, head, eligibility.CONTEXT, 20)
-    if marker and rows and rows[0].get("id") == marker and (
-            prior := next((r for r in rows[1:] if not r["description"].startswith("Refreshing live")), None)):
+    rows = github.latest_statuses(repo, head, eligibility.CONTEXT, None)
+    if marker and rows and rows[0].get("id") == marker and (prior := next(
+            (r for r in rows if (r["state"], r.get("description")) != (rows[0]["state"], rows[0].get("description"))), None)):
         _publish_verdict(repo, head, prior["state"], prior["description"])
     return 0
 

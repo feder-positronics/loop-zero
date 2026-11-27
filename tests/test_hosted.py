@@ -80,6 +80,7 @@ def approval(head=HEAD, *, state="APPROVED", verdict="**approve**"):
 @pytest.mark.parametrize("case,states", [
     ("restore", ["pending", "failure"]), ("newer success", ["pending"]), ("newer pending", ["pending"]),
     ("stale marker", ["pending", "failure"]), ("write lost", ["pending", "failure"]),
+    ("many markers", ["pending", "failure"]), ("verdict worded like marker", ["pending", "failure"]),
 ])
 def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, states):
     ctx = {"context": "Loop-zero Eligibility"}
@@ -88,7 +89,9 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
     history = {"restore": [marker, old], "stale marker": [marker, marker | {"id": 10}, old],
                "newer success": [old | {"id": 12, "state": "success"}, marker, old],
                "newer pending": [marker | {"id": 12, "description": "Awaiting trusted review"}, marker, old],
-               "write lost": [marker, old]}[case]
+               "write lost": [marker, old],
+               "many markers": [marker] + [marker | {"id": i + 2} for i in range(25)] + [old],
+               "verdict worded like marker": [marker, old | {"description": "Refreshing live source (verdict)"}]}[case]
     publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", history)
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [approval()])
     publisher.respond_pr_view(pr_json(state="MERGED"))
