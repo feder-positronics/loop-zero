@@ -1512,3 +1512,22 @@ def test_oversized_response_does_not_evict_other_reads(monkeypatch, app_token_he
     github._gh("api", "repos/a/b/small", conditional=True)
     github._gh("api", "repos/a/b/big", conditional=True)
     assert [key[0][1] for key in github._etag_cache] == ["repos/a/b/small"]
+
+
+def test_login_is_cached_under_the_credential_that_answered(monkeypatch, tmp_path, fake_tool):
+    helper = fake_tool("app-token", "echo app-a\n")
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    real_run = github.run
+    tokens = []
+    def run(argv, **kwargs):
+        if argv[0] != "gh":
+            return real_run(argv, **kwargs)
+        tokens.append((kwargs.get("extra_env") or {}).get("GH_TOKEN", ""))
+        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"bot"}}}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    assert github.login() == "bot" and tokens == ["app-a"]
+    assert github._logins == {"app-a": "bot"}
+    monkeypatch.setattr(github, "_select_token", lambda *_: "")  # ambient: nothing to key a cached login on
+    github._logins.clear()
+    github.login(), github.login()
+    assert github._logins == {}

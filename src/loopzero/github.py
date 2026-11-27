@@ -372,6 +372,11 @@ def _with_validator(argv: tuple[str, ...], cached: tuple[str, str, int] | None) 
     return [*argv, *(("-H", f"If-None-Match: {cached[0]}") if cached else ())]
 
 
+def _report_used(used: list[str] | None, selected: str) -> None:
+    if used is not None:
+        used[:] = [selected]
+
+
 def _settled_body(cached: tuple[str, str, int] | None, status: str | None, exit_code: int, body: str) -> str | None:
     """The response body of a success or of a 304 revalidating `cached`; None for an error."""
     if cached and status == "304":
@@ -392,7 +397,7 @@ def _remember_etag(key: tuple[tuple[str, ...], int] | None, headers: dict[str, s
 
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None, retry_idempotent: bool = False, dates: list[str] | None = None,
-        conditional: bool = False) -> str:
+        conditional: bool = False, used: list[str] | None = None) -> str:
     """Run gh; `conditional` revalidates a repeated REST GET by ETag, since a 304 is free of the core quota."""
     dates = [] if dates is None else dates
     api = args[:1] == ("api",)
@@ -430,6 +435,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         tail = "\n".join(part for part in (done.stderr, body) if part)
         if (settled := _settled_body(cached, status, done.exit_code, body)) is not None:
             dates[:] = [headers.get("date", "")]
+            _report_used(used, selected)
             _remember_etag(key, headers, settled)
             return settled
         rate_limited = _rate_limited(status, headers, tail)
@@ -594,16 +600,17 @@ _logins: dict[str, str] = {}
 def login(token: str | None = None) -> str:
     """Login of the identity used for GitHub reads and review publishing.
 
-    Read once per explicit or app credential, filed under it only when the same credential
-    was selected before and after the query; an ambient gh account is read every time."""
+    Read once per explicit or app credential, filed under the credential the answering attempt
+    used; an ambient gh account is read every time."""
     selected = _select_token(token, _read_scope.get(), True)
     if selected and (name := _logins.get(selected)):
         return name
-    data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }", token=token)
+    used: list[str] = []
+    data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }", token=token, used=used)
     content = data.get("data") if isinstance(data, dict) else None
     if isinstance(content, dict) and isinstance(viewer := content.get("viewer"), dict) and (name := viewer.get("login")):
-        if selected and _select_token(token, _read_scope.get(), True) == selected:
-            _logins[selected] = str(name)
+        if used and used[0]:  # the credential of the attempt that answered
+            _logins[used[0]] = str(name)
         return str(name)
     raise GhError(("gh", "api", "graphql"), "no login in viewer response")
 
