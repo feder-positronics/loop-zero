@@ -158,7 +158,7 @@ def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
             ("@mergifyio queue dev", False), ("@Mergifyio queue main", True), ("@mergify requeue", True)]:
         comments = [{"body": b, "user": {"login": who}} for who, b in [*rows, ("trusted", later)]]
         monkeypatch.setattr(mergify.github, "paged", lambda *_, c=comments: c)
-        assert mergify.markers("acme/widgets", 7, head, "main") == (requeued, not requeued), later
+        assert mergify.request_status("acme/widgets", 7, head, "main")[:2] == (requeued, not requeued), later
 
 
 @pytest.mark.parametrize(("writer", "body"), [
@@ -338,7 +338,7 @@ def test_rate_limited_queue_post_does_not_reconcile(monkeypatch, response):
     monkeypatch.setattr(github, "run", lambda *_a, **_k: SimpleNamespace(
         exit_code=1, stdout=response, stderr="",
     ))
-    monkeypatch.setattr(mergify, "markers", lambda *_: pytest.fail("read markers after rate-limited POST"))
+    monkeypatch.setattr(mergify, "queue_attempt", lambda *_: pytest.fail("read queue attempt after rate-limited POST"))
     with pytest.raises(github.GhUnavailable) as exc:
         mergify.request("acme/widgets", 7, "a" * 40, "main")
     assert exc.value.confirmed_rate_limit

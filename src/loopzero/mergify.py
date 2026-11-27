@@ -392,17 +392,12 @@ def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool,
     return attempt.requested, attempt.confirmed, attempt.admission
 
 
-def markers(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool]:
-    requested, confirmed, _ = request_status(repo, number, head, queue)
-    return requested, confirmed
-
-
 def request(repo: str, number: int, head: str, queue: str) -> None:
     body = f"@mergifyio queue\n\n{_marker(REQUEST, head, queue)}"  # Mergify deprecates naming the queue
     try:
         github._api(f"repos/{repo}/issues/{number}/comments", {"body": body})
     except (github.GhError, github.ProcTimeout, OSError) as exc:
-        if getattr(exc, "confirmed_rate_limit", False) or not markers(repo, number, head, queue)[0]:
+        if getattr(exc, "confirmed_rate_limit", False) or not queue_attempt(repo, number, head, queue).requested:
             raise
 
 
