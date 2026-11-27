@@ -14,8 +14,10 @@ from urllib.parse import quote
 import pytest
 
 from loopzero import eligibility, github
+from loopzero._proc import Completed, build_env
 from loopzero.types import Finding, ReviewResult
 from tests.conftest import write_fake_tool
+from tests.fake_gh import replay
 
 REPO = "acme/widgets"
 HEAD = "a" * 40
@@ -51,11 +53,27 @@ class FakeGh:
             f"#!{sys.executable}\n{replay_source}\n"
             "import sys\n"
             f"code, stdout, stderr = replay(sys.argv[1:], {str(self.calls_file)!r}, "
-            f"{str(self.scenario_file)!r}, os.getcwd(), os.environ.get('GH_TOKEN'))\n"
+            f"{str(self.scenario_file)!r}, os.getcwd(), os.environ)\n"
             "sys.stdout.write(stdout)\n"
             "sys.stderr.write(stderr)\n"
             "sys.exit(code)\n"
         )
+
+    def replay_in_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Replay fake gh requests without starting an interpreter for each call."""
+        run_process = github.run
+
+        def run(argv, *, cwd, env_allowlist, extra_env=None, **kwargs):
+            if argv[0] != "gh":
+                return run_process(argv, cwd=cwd, env_allowlist=env_allowlist,
+                                   extra_env=extra_env, **kwargs)
+            env = build_env(env_allowlist, extra_env)
+            code, stdout, stderr = replay(
+                argv[1:], str(self.calls_file), str(self.scenario_file), str(cwd), env,
+            )
+            return Completed(code, stdout, stderr, 0)
+
+        monkeypatch.setattr(github, "run", run)
 
     def respond(self, key: str, *responses: object, exit: int = 0, stderr: str = "") -> None:
         self._set_responses(key, [self._response(r, exit=exit, stderr=stderr) for r in responses])
@@ -1431,7 +1449,8 @@ def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, stat
     (100, True, True, "failure"),
     (100, True, False, None),
 ])
-def test_readiness_at_check_suite_limit(gh: FakeGh, unrelated, legacy_success, check_failure, reason):
+def test_readiness_at_check_suite_limit(gh: FakeGh, monkeypatch, unrelated, legacy_success, check_failure, reason):
+    gh.replay_in_process(monkeypatch)
     arm_readiness(gh)
     if legacy_success:
         gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
@@ -1460,8 +1479,9 @@ def test_readiness_at_check_suite_limit(gh: FakeGh, unrelated, legacy_success, c
     (3001, "file-3001", "suggestion", HEAD, None),
     (3000, "outside-diff", "important", "b" * 40, None),
 ])
-def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: str,
+def test_review_file_limit(gh: FakeGh, monkeypatch, changed_files: int, path: str, severity: str,
                            live_head: str, anchor: str | None) -> None:
+    gh.replay_in_process(monkeypatch)
     files = [{"filename": f"file-{i:04d}", "patch": "@@ -1 +1 @@\n-before\n+after"}
              for i in range(1, changed_files + 1)][:3000]
     gh.respond(FILES_KEY, *(files[i:i + 100] for i in range(0, 3001, 100)))

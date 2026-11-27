@@ -27,10 +27,9 @@ from urllib.parse import quote
 import pytest
 
 from loopzero import cli, config, github, hosted, mergify
-from loopzero._proc import Completed, build_env
+from loopzero._proc import Completed
 from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
 from tests.conftest import commit_file, git, init_git_repo
-from tests.fake_gh import replay
 from tests.test_github import (
     FakeGh,
     branch_head_key,
@@ -176,18 +175,7 @@ def test_start_reports_handoff_publication_failure(repo, monkeypatch, capsys, li
 
 @pytest.fixture
 def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replay GitHub CLI requests in-process while keeping real Git commands."""
-    run_process = github.run
-
-    def run(argv, *, cwd, env_allowlist, extra_env=None, **kwargs):
-        if argv[0] != "gh":
-            return run_process(argv, cwd=cwd, env_allowlist=env_allowlist,
-                               extra_env=extra_env, **kwargs)
-        token = build_env(env_allowlist, extra_env).get("GH_TOKEN")
-        code, stdout, stderr = replay(argv[1:], str(gh.calls_file), str(gh.scenario_file), str(cwd), token)
-        return Completed(code, stdout, stderr, 0)
-
-    monkeypatch.setattr(github, "run", run)
+    gh.replay_in_process(monkeypatch)
 
 
 @pytest.fixture
@@ -439,7 +427,7 @@ def expect_cli(
 
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
-def test_wait_reports_only_check_changes(wt, gh, head, capsys, monkeypatch, command):
+def test_wait_reports_only_check_changes(wt, gh, head, capsys, monkeypatch, replay_gh, command):
     names = ["checks"] + [f"verify deployment / integration shard {n:02d}" for n in range(23)]
     cfg = cli.dataclasses.replace(config.load(wt / "workflow.toml"), required_ci=tuple(names))
     monkeypatch.setattr(cli, "_context", lambda *a, **k: (wt, cfg))
@@ -2247,7 +2235,7 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
 @pytest.mark.parametrize("case", [
     "conflict", "repost", "own commit", "rewritten", "unverified", "blocking", "rejected", "clean", "edited clean",
 ])
-def test_review_extra_delta_after_base_conflict(wt, repo, gh, fake_bin, capsys, isolated_git, case):
+def test_review_extra_delta_after_base_conflict(wt, repo, gh, fake_bin, capsys, isolated_git, replay_gh, case):
     if case in {"clean", "edited clean"}:
         reviewed = head_of(wt)
         commit_file(repo, "base.py", "upstream = 1\n", "landed on main")
@@ -4652,7 +4640,11 @@ def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys, head) -> None:
     (None, "", {}, "pending"),
     ("APPROVED", "approve", {"state": "MERGED"}, None),
 ])
-def test_manual_eligibility_refresh_uses_live_pr_and_publisher(wt, gh, head, state, verdict, pr_update, expected):
+def test_manual_eligibility_refresh_uses_live_pr_and_publisher(
+    wt, gh, head, monkeypatch, state, verdict, pr_update, expected,
+):
+    delays = []
+    monkeypatch.setattr(cli.eligibility, "sleep", delays.append)
     cfg = wt / ".loopzero" / "hosted.toml"
     cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
     gh.respond_pr_view(pr_json(headRefOid=head, **pr_update))
@@ -4663,6 +4655,7 @@ def test_manual_eligibility_refresh_uses_live_pr_and_publisher(wt, gh, head, sta
     code = cli.eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head, "--publish"])
     statuses = [json.loads(c["--input"]) for c in gh.calls if "--input" in c]
     assert [s["state"] for s in statuses] == (["pending", expected] if expected else [])
+    assert delays == ([2, 4, 8] if pr_update.get("mergeable") == "UNKNOWN" else [])
     if expected:
         assert code == int(expected == "pending")
     if not state or pr_update.get("mergeable") == "UNKNOWN":
