@@ -544,6 +544,8 @@ uv run --no-project --with "git+https://github.com/feder-positronics/loop-zero@<
 Give that process pull-request read and commit-status write access.
 It posts `Loop-zero Eligibility` as pending before reading live reviews/threads,
 then success or failure on the specified source SHA. An API failure leaves pending.
+GitHub keeps at most 1,000 statuses per SHA and context; past that limit a newer
+verdict cannot be written and an older success can outlive it, so push a fresh head.
 The hosted Actions entry point succeeds with a pending status when its sole blocker
 is missing trusted current-head review. The manual command above retains a failure
 status and nonzero exit for that blocker; both paths keep merging blocked.
