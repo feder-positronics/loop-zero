@@ -451,7 +451,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     return "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None) + guidance
 
 
-def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:
+def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:  # noqa: C901 - best-effort parse of each rate-limit evidence source
     """Best-effort reset evidence for a primary GraphQL limit, never a preflight."""
     if re.search(r"secondary|HTTP 429", tail, re.IGNORECASE):
         return ""
