@@ -17,6 +17,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/loopzero"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"core/HANDOFF.md" = "src/loopzero/HANDOFF.md"
+
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "tach>=0.35.3,<0.36"]
 
