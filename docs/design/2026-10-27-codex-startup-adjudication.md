@@ -5,8 +5,6 @@ Status: retired; no runtime targets or receipt pins remain in trusted eligibilit
 out of the delivery contract on 2026-10-30. The [architecture guide](../ARCHITECTURE.md#codex-review-runner-evidence)
 describes current startup handling.
 
-Recovery pins were retired by [#364](https://github.com/feder-positronics/loop-zero/pull/364),
-the adjudication registries by [#555](https://github.com/feder-positronics/loop-zero/pull/555),
-and the historical review fixtures were replaced with synthetic evidence by
-[#612](https://github.com/feder-positronics/loop-zero/pull/612). Git history keeps the
-retired policy text.
+- [#364](https://github.com/feder-positronics/loop-zero/pull/364) retired the last recovery pin.
+- [#555](https://github.com/feder-positronics/loop-zero/pull/555) retired the adjudication registries.
+- [#612](https://github.com/feder-positronics/loop-zero/pull/612) replaced the historical review fixtures with synthetic evidence.

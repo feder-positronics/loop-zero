@@ -3,23 +3,23 @@
 **Status:** Dated synthesis record (`2026-11-25`). Its rules bind only where
 `core/CONTRACT.md` or `docs/DELEGATION.md` carries them.
 **Tracking issue:** `feder-positronics/loop-zero#552` (closed 2026-11-25)
-**Scope:** Multi-horizon hardening, latency reduction, and cross-repo operating rules for `loop-zero` and its primary consumer (`feder-positronics/intelflo` + `eowca/host-config`).
+**Scope:** Multi-horizon hardening, latency reduction, and cross-repo operating rules for `loop-zero` and its primary consumer repository and host.
 
 ## Summary
 
-Between `2026-11-10` and `2026-11-25`, a full activity, check-catch, and deletion-gate audit showed that `loop-zero`'s primary losses were not inside the CLI itself, but in host resource contention, unbatched inner-loop PR churn, high-noise local checks, and prose-as-database overhead. Horizon 1 hardening is largely complete (`#550`, `#551`, `#558`, `#559`, plus consumer and host work). Horizons 2–3 address the host contention it exposed between self-hosted CI runners and local check slots, mechanical telemetry, and local-state workflow delivery (`#573`).
+Between `2026-11-10` and `2026-11-25`, a full activity, check-catch, and deletion-gate audit found that `loop-zero`'s primary losses were not inside the CLI itself, but in host resource contention, unbatched inner-loop PR churn, high-noise local checks, and prose-as-database overhead. On 2026-11-25 the record proposed addressing the host contention between self-hosted CI runners and local check slots, mechanical telemetry, and local-state workflow delivery (`#573`).
 
 ---
 
 ## 1. Dated Evidence Baseline (`2026-11-10` → `2026-11-25`)
 
 ### 1.1 14-Day Pipeline & Host Audit (`2026-11-10` → `2026-11-24`)
-- **Full-pipeline volume (`feder-positronics/intelflo`):** `985` merged source PRs (`~70.4/day`), median open-to-merge **`176.6 min`** (`7,720.3` cumulative PR-hours).
+- **Full-pipeline volume (primary consumer):** `985` merged source PRs (`~70.4/day`), median open-to-merge **`176.6 min`** (`7,720.3` cumulative PR-hours).
 - **Repeat-cycle tax:** `344` PRs (`34.9%`) were repeat PRs on an already-touched issue; **`264` (`26.8%`)** merged within 24 hours of a prior merge on the same issue — peaking in **Goal 3b Hosted Analysis (`46.4%`, `13/28`)**, **Goal 3a Local Research (`39.7%`, `31/78`)**, and **Goal 3c Shared Research/Analysis (`33.8%`, `23/68`)**.
 - **Local host contention (`heavy-slot-jobs.jsonl`, `n = 16,859` jobs excl. `jit-runner`):** `5,259.0` total host-hours, with **more time waiting in FIFO queues (`2,766.6h`) than running (`2,492.4h`)**. `loopzero-check` fired `2,520` times (`2.56` runs per merged PR; `1,940.3h`, only `52.9%` OK); Playwright `browser` jobs spent `78.6%` (`1,289.9h / 1,641.0h`) queued.
 - **Pre-PR check catch & deletion-gate audit:**
-  - `0` verified heavy-DB-only pre-first-push catches across all `8` traced integration-failure artifacts (`3` post-draft product regressions, `4` harness/flake failures, `1` already-pushed rerun). Survivorship bias remains open because overwritten `checks.json`, removed worktrees, and generic journal exits prevent a full pre-push census (`intelflo#14236`).
-  - `native_pair.py` / `--sol-astra-pair`: **`0` observed uses** across `4,421` submitted PR reviews (`4,308` IntelFlo + `113` `loop-zero`) and `1,586` archived receipts.
+  - `0` verified heavy-DB-only pre-first-push catches across all `8` traced integration-failure artifacts (`3` post-draft product regressions, `4` harness/flake failures, `1` already-pushed rerun). Survivorship bias remains open because overwritten `checks.json`, removed worktrees, and generic journal exits prevent a full pre-push census.
+  - `native_pair.py` / `--sol-astra-pair`: **`0` observed uses** across `4,421` submitted PR reviews (`4,308` consumer + `113` `loop-zero`) and `1,586` archived receipts.
   - `receipt_archive.py`: **`0` external readers** (`1,586` files, `69.5 MB` allocated); `eligibility.evaluate()` reads no local receipts, while archive failures during merge cleanup leaked task clones on disk.
 
 ---
@@ -48,14 +48,14 @@ These rules record the Owner + cross-model (Neon + Fable) consensus of 2026-11-2
 
 ---
 
-## 3. Horizon 2–3 Execution Roadmap
+## 3. Horizon 3 proposals
 
 ### Horizon 3 (Post-`2026-12-01` — Portability & Local-First Delivery)
 
 | Item | Tracking | Purpose |
 |---|---|---|
 | **Local-state workflow delivery experiment** | `loop-zero#573` | Deliver one feature through a T3 Workflow run keeping iteration state local, publishing to GitHub only when ready. |
-| **Repo portability cleanup** | `loop-zero#524` | Finish moving remaining IntelFlo specifics out of `loop-zero` and universal mechanisms into it. |
+| **Repo portability cleanup** | `loop-zero#524` | Finish moving remaining consumer specifics out of `loop-zero` and universal mechanisms into it. |
 | **Self-improvement retro lean-out** | `loop-zero#537` | Align retro cadence and artifacts with the 3-speed control loop and versioned-doc / GitHub-issue model (`#551`). |
 | **Strictness freeze** | `core/CONTRACT.md` | Add no new eligibility rules or round caps unless removing a verified failure mode or reducing end-to-end cycle time. |
 
@@ -65,6 +65,6 @@ These rules record the Owner + cross-model (Neon + Fable) consensus of 2026-11-2
 
 - **Cut:** fixed `80/20` product/infra quota and subjective LLM ROI scoring.
 - **Cut:** `loopzero gc` or CLI inner-loop orchestration commands (`loop-zero` stays a shipping airlock).
-- **Cut:** per-PR stall alerts, context/token tripwires (hooks already exist), schedule-count alerts (fixed once in `#146`), and real-time KPI percentage alerts.
+- **Cut:** per-PR stall alerts, context/token tripwires (hooks already exist), schedule-count alerts (fixed once on the host), and real-time KPI percentage alerts.
 - **Cut:** skipping cross-family AI review on reverts (keep exact-SHA review; trivial verification via regenerating `git revert --no-commit <culprit>`).
 - **Cut:** destructive deletion of historical `~/.local/state/loopzero/receipts/` files (`~69.5 MB` left untouched on disk).
