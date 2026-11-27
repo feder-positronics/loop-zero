@@ -214,9 +214,6 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
             return super().construct_mapping(node, deep=deep)
 
     repo_path = f"repos/{repo}"
-    metadata = github.api_get(repo_path)
-    if not isinstance(metadata, dict) or metadata.get("default_branch") != branch:
-        return False
     path = f"{repo_path}/contents/.mergify.yml?ref={quote('refs/heads/' + branch, safe='')}"
     blob = github.api_get(path)
     try:

@@ -33,7 +33,7 @@ is not a finding.
 
 Secret exposure or a reachable exploit is
 `critical`; a missing control on a real boundary is `important`; hardening is
-a `suggestion`. Both blocking severities require `request_changes`.
+a `suggestion`.
 
 Finish after assessing each changed boundary and plausible attacker-controlled
 path. Uncertainty that prevents a verdict is a missing-evidence `critical` finding.

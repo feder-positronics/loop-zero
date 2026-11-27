@@ -47,7 +47,7 @@ Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 Keep review suggestions within scope. Finish planned test, documentation and
 generated-file edits before primary review.
 Before the check and draft push for primary review, rebase your own commits onto `origin/<base>` using
-`[repo].base` (default `main`); open the draft before a long check. For a stack, follow
+`[repo].base` (default `main`). For a stack, follow
 [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
 Leave base merges out of a branch awaiting its delta unless it needs a conflict refresh;
 then merge the base before checking and reviewing the resolved head.
