@@ -1817,11 +1817,12 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
                 "merge --cancel is only available with delivery.merge = 'mergify'. "
                 "For a GitHub queue entry, use Remove from queue on the pull request."
             )
-        try:
-            pr = _require_pr(config, branch)
-        except CliError as exc:
-            raise CliError(f"Cannot cancel from this branch. Run `loopzero merge --cancel` "
-                           f"from the worktree for the queued PR. {exc}") from exc
+        pr = github.pr_for_branch(config.repo, branch)
+        if pr is None:
+            raise CliError(f"No PR for branch {branch!r}. "
+                           "Run `loopzero merge --cancel` from the queued PR's worktree.")
+        if pr.state != "OPEN":
+            raise CliError(f"PR #{pr.number} is {pr.state}: {pr.url}. There is no queue entry to cancel.")
         try:
             mergify.dequeue(config.repo, pr.number)
         except mergify.MergifyError as exc:

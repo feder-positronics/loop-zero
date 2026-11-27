@@ -3737,14 +3737,11 @@ def test_mergify_uses_one_deadline_for_checks_admission_and_landing(
     stub_mergify_admission(monkeypatch)
     budgets = []
     clock = poll_clock(monkeypatch, start=1000.0, patch_sleep=False)
-
     def spend_admission_time(*_args):
         clock.now += 2
-
     def finish_checks(_wt, _config, pr, *_args, **_kwargs):
         clock.now += 9 if admission_expires else 4
         return pr, github.Readiness(ready=True, reasons=()), False
-
     if admission_expires:
         monkeypatch.setattr(mergify, "membership", spend_admission_time)
         monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("queued after the deadline"))
@@ -3752,7 +3749,6 @@ def test_mergify_uses_one_deadline_for_checks_admission_and_landing(
         monkeypatch.setattr(mergify, "request", spend_admission_time)
         monkeypatch.setattr(cli, "_wait_for_mergify", lambda _c, _p, timeout, _f: budgets.append(timeout))
     monkeypatch.setattr(cli, "_wait_for_checks", finish_checks)
-
     out, err = expect_cli(capsys, 3, "merge", "--wait=10")
     if admission_expires:
         assert err == "" and out.endswith("timed out before requesting Mergify for PR #7\nRun `loopzero merge --wait` to resume on this head.\n")
@@ -4878,14 +4874,18 @@ def test_mergify_ready_draft_requires_safe_queue_before_ci_activation(
         assert "configuration" in out + err
 
 
-def test_mergify_cancel_does_not_require_healthy_queue_or_review(wt, gh, capsys, monkeypatch):
+@pytest.mark.parametrize("state,guidance", [
+    ("OPEN", ""), (None, "from the queued PR's worktree"),
+    ("CLOSED", "There is no queue entry to cancel."), ("MERGED", "There is no queue entry to cancel."),
+])
+def test_mergify_cancel_does_not_require_healthy_queue_or_review(wt, gh, capsys, monkeypatch, state, guidance):
     commit_mergify_configuration(wt)
-    arm_pr(gh, "a" * 40)
+    gh.respond_pr_list([] if state is None else [pr_json(headRefOid="a" * 40, state=state)])
     monkeypatch.setattr(mergify, "configured", lambda *_: pytest.fail("cancel must remain available"))
     removals = []
     monkeypatch.setattr(mergify, "dequeue", lambda *args: removals.append(args))
-    expect_cli(capsys, 0, "merge", "--cancel", stderr="")
-    assert removals == [(REPO, 7)] and wt.exists()
+    _, err = expect_cli(capsys, int(bool(guidance)), "merge", "--cancel", stderr="" if state == "OPEN" else None, stderr_contains=(guidance,))
+    assert ("run `loopzero pr`" not in err) and removals == ([] if guidance else [(REPO, 7)]) and wt.exists()
 
 
 @pytest.mark.parametrize("lineage", ["two-head-trailers", "earlier-child", "delta", "mixed-case-trailers"])
