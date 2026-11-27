@@ -189,7 +189,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
         return eligible_review(marked, head, publishers, repo=repo, number=number)
     latest = marked[-1]
     marker = leading_marker(latest["body"])
-    if not marker or marker[2] not in {"primary", "delta"}:
+    if not marker:
         return None
     reviewed = marker[1]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
