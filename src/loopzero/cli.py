@@ -1031,15 +1031,19 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
                 "parents. If the history is correct, GitHub objects may be unavailable or exceed verification "
                 "limits. Open a new PR from the current base for a fresh review if verification still fails."
             )
-    if not patch and number is not None and github.open_blocking_findings(
-        config.repo, number, None, config.review_publishers or (github.login(),),
-    ):
-        raise CliError("empty delta leaves blocking findings open. Run `loopzero resolve` "
-                       "to list them, then address them before readiness.")
-    if not patch and merged and number is not None and eligibility.base_merge_material(
-        config.repo, number, since, head, config.base_branch, clean=True,
-    ) is not None:
-        raise CliError(f"nothing to review since {since[:12]}; run `loopzero ready` or push the fixes first")
+    if not patch and number is not None:
+        publishers = config.review_publishers or (github.login(),)
+        if github.open_blocking_findings(config.repo, number, None, publishers):
+            raise CliError("empty delta leaves blocking findings open. Run `loopzero resolve` "
+                           "to list them, then address them before readiness.")
+        prior = eligibility.eligible_review(_pr_reviews(config.repo, number), since, publishers,
+                                            repo=config.repo, number=number)
+        if eligibility.body_blocker(prior):
+            raise CliError("empty delta leaves blocking findings in the review body. Push fixes before another review.")
+        if merged and eligibility.base_merge_material(
+            config.repo, number, since, head, config.base_branch, clean=True,
+        ) is not None:
+            raise CliError(f"nothing to review since {since[:12]}; run `loopzero ready` or push the fixes first")
     return patch
 
 

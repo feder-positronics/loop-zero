@@ -2044,7 +2044,9 @@ def conflict_merge(wt, repo):
     return reviewed
 
 
-@pytest.mark.parametrize("case", ["verified", "unverified", "second parent", "rewritten", "missing", "empty", "empty commit"])
+@pytest.mark.parametrize("case", [
+    "verified", "unverified", "second parent", "rewritten", "missing", "empty", "empty commit", "empty with blocker",
+])
 def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isolated_git, case):
     if case == "second parent":
         reviewed = head_of(wt)
@@ -2057,7 +2059,7 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
     elif case == "rewritten":
         base = reviewed = head_of(wt)
         git(wt, "commit", "--amend", "-qm", "rewritten feature")
-    elif case == "empty commit":
+    elif case in {"empty commit", "empty with blocker"}:
         gh.respond("api graphql", threads_json())
         reviewed, base = head_of(wt), head_of(repo)
         git(wt, "commit", "--allow-empty", "-qm", "empty topic commit")
@@ -2074,7 +2076,10 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
         git(wt, "update-index", "--add", "--cacheinfo", f"160000,{reviewed},dep")
         commit_file(wt, "topic.py", "topic = 2\n", "topic repair")
         base = git(repo, "rev-parse", "main" if case == "verified" else "main^").strip()
-    history = [rev(reviewed, "primary", state="CHANGES_REQUESTED" if case == "second parent" else "APPROVED")]
+    blocker = case in {"second parent", "empty with blocker"}
+    history = [rev(reviewed, "primary", state="CHANGES_REQUESTED" if blocker else "APPROVED")]
+    if case == "empty with blocker":
+        history[0]["body"] = github.BODY_BLOCKERS + history[0]["body"]
     head = prepare_review(wt, gh, fake_bin, history=history)
     arm_pr_base(gh, head, base)
     code, _, err = run(capsys, "review")
@@ -2090,6 +2095,8 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
             assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
             assert "git reflog" in err and "open a new PR" in err
             assert "run `loopzero pr`, then `loopzero review` before merging main" in err
+        elif case == "empty with blocker":
+            assert "empty delta leaves blocking findings in the review body" in err
         elif case == "empty":
             assert f"nothing to review since {reviewed[:12]}" in err and "`loopzero ready`" in err
         else:
