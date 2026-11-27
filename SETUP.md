@@ -260,87 +260,19 @@ Lock the vault and remove `BW_SESSION` before starting the agent.
 
 ### Several subscription accounts (optional)
 
-`scripts/ai-accounts/` rotates Claude and Codex subscription accounts behind the plain
-`claude`, `codex` and `loopzero` commands. Install the monitor and its three shims
-from the [pinned source checkout](#connect-your-agent):
+The optional [host-config helper](https://github.com/eowca/host-config/blob/main/bin/ai-accounts)
+rotates Claude and Codex subscription accounts behind the `claude`, `codex` and
+`loopzero` commands. Host-config maintains the helper, monitor units and account
+setup. See the [host bootstrap guide](https://github.com/eowca/host-config/blob/main/BOOTSTRAP.md)
+and [account admission guide](https://github.com/eowca/host-config/blob/main/docs/account-admission.md).
 
-```sh
-ACCOUNTS=~/.local/share/loopzero/source/scripts/ai-accounts
-install -m 755 "$ACCOUNTS/ai-accounts" ~/.local/bin/
-mkdir -p ~/.local/lib/ai-accounts/bin
-for n in claude codex loopzero; do ln -sf ~/.local/bin/ai-accounts ~/.local/lib/ai-accounts/bin/$n; done
-```
-
-Put the shims first on PATH by making this the last line of `~/.profile` and
-`~/.bashrc`, after anything that prepends `~/.local/bin`:
-`export PATH="$HOME/.local/lib/ai-accounts/bin:$PATH"`. Point an agent host's binary
-path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Copy
-`"$ACCOUNTS/ai-accounts.service"` and `"$ACCOUNTS/ai-accounts.timer"` to
-`~/.config/systemd/user/`, then run
-`systemctl --user enable --now ai-accounts.timer`.
-
-To review with a pinned CLI and managed credentials, set `PINNED_BIN` to the
-directory containing the pinned `loopzero` executable:
+With the host-config shims installed, set `PINNED_BIN` to the directory
+containing your pinned `loopzero` executable and put the shims first on PATH
+when launching a review with managed credentials:
 
 ```sh
 PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
 ```
-
-- Claude accounts are long-lived tokens: run `claude setup-token` per account and
-  pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
-  `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
-  then log in as it prints; the monitor refreshes standby Codex logins before they expire.
-- The monitor checks accounts every five minutes. Claude prefers Fable and Opus,
-  then Opus only. Codex keeps the current usable account until it is spent at 95%
-  of any limit by default, then prefers an account with every model available.
-  Claude reads the OAuth usage API at most every 30 minutes and uses one-token
-  header probes between reads. `ai-accounts status` shows accounts, tiers and
-  per-window utilization and resets. `weekly_used_percent` is the overall 7d
-  usage, null when unknown.
-- Only `exec` (including `--identity`) refuses non-owner Claude launches with exit 3
-  at 85% utilization in any reported window, including the Fable weekly
-  window, or when that account's cached
-  status is missing, unreadable or older than 20 minutes. The last 15 weekly points
-  are reserved for required reviews and essential decisions; use
-  `AI_ACCOUNTS_CLAUDE_OWNER=1` for that work to bypass the guard. No hysteresis is
-  stored. Direct T3 launches, `run` and CLI shims remain outside this guard;
-  this is not fleet-wide enforcement. Admission does not probe accounts.
-- Each shim starts the real CLI on the selected account and keeps the shims first on
-  its PATH. Verified helper-managed credentials inherited by a later command can
-  rebind; explicit OAuth tokens, API keys and `CODEX_HOME` values remain caller-owned.
-  The helper uses opaque account-binding markers to distinguish these cases.
-  Codex bindings retain account identity across routine OAuth token refreshes.
-  `loopzero` commands are never replayed by the shim. Existing processes keep their
-  credentials until their harness safely replaces them; changing the active file
-  does not change a running session. Never pin a token in `settings.json` `env`.
-  The loopzero shim prefers executable Codex in `~/.local/lib/codex-reviewer`
-  when present; keep `codex` and its matching `codex-code-mode-host` side by side
-  there with executable permissions so sandboxed reviews can launch the helper.
-- Harness integrations can call `ai-accounts launch <provider> --model <model>` for
-  a nonsecret JSON identity, then `ai-accounts exec <provider> --identity <identity>
-  -- /absolute/real/executable ...` to pin that exact managed revision. Pass the
-  real executable, not another shim. Preparing the current account does not claim
-  model eligibility; its native CLI validates ordinary startup. Choosing a replacement
-  requires positive model evidence. `ai-accounts exhausted <provider> --identity
-  <failed-identity> --model <model>` selects for the unchanged requested model under
-  the selection lock. Concurrent stale failures reuse a recent eligible selection.
-  Failed model/revision pairs have a five-minute cooldown; unknown availability is
-  not treated as usable. These commands report unsupported or unmanaged routes
-  without inventing account credentials. The authentication provider determines
-  the account pool, even when a harness can use several model providers.
-- `ai-accounts run <provider> --model <model> -- ...` can select a replacement after
-  a quota failure without repeating the command. Add `--retry-safe` only for a
-  caller-proven repeatable command: it permits one retry after the effective
-  credential revision changes. Do not use it for interactive streams, unknown
-  tool outcomes or publication. `status` marks quota evidence over ten minutes old
-  as stale; `status --json` exposes the same flag.
-- After host recovery, verify the account timer has a future next run. Switching
-  the active account does not update an existing provider process: resume through
-  the managed launcher on the selected credential. After failover, reconcile parked
-  or failed unfinished jobs; a resent message alone does not prove a new process or
-  a completed tool call.
-- Token sessions lack claude.ai connectors. Changing an agent host's binary path
-  may restart its provider and interrupt running sessions.
 
 ## First run
 
