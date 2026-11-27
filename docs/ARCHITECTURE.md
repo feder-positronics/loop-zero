@@ -16,8 +16,8 @@ copying their tables here.
 
 The [deterministic delivery design assumptions](design/2026-10-07-deterministic-delivery-design-assumptions.md)
 record the rationale, dated reviewer evidence and version-specific native
-compatibility investigation. Their proposed changes retain their recorded status;
-this guide and the delivery contract describe current behavior.
+compatibility investigation. Its delivered changes are in code; this guide and the
+delivery contract describe current behavior.
 
 ## Philosophy and authority
 
@@ -362,9 +362,7 @@ and never replays `loopzero` commands.
 ## Direction and historical evidence
 
 The [September 24 architecture note](design/2026-09-24-delivery-system-architecture.md)
-is dated consumer evidence and its accepted principles. Its measurements, gap
-table and owners describe that window, not the current backlog; verify a gap
-against its owning code and consumer before calling it open or closed.
+is dated consumer evidence and its accepted principles.
 
 The October 5 direction keeps this guide as the current entry point, preserves
 the small delivery toolkit, and makes architecture upkeep part of contribution
@@ -378,7 +376,7 @@ deployment status when adopting or updating an external executor.
 
 The [October 5 T3 verification snapshot](design/2026-10-07-deterministic-delivery-design-assumptions.md#t3-verification-snapshot--october-5-2026)
 records the runtime evidence behind this boundary: at-least-once notifications,
-watcher limits and consumer migration constraints. A new daemon, scheduler,
+and watcher limits. A new daemon, scheduler,
 reminder issue or metrics ledger would add state without improving the current
 authority boundary and is outside this direction.
 
