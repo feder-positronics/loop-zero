@@ -66,7 +66,7 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     gh = FakeGh(fake_bin, tmp_path)
     gh.respond_pr_view(pr_json(), branch="lz/task")
     gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
+    gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 11})
     gh.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [])
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     return gh
@@ -77,15 +77,27 @@ def approval(head=HEAD, *, state="APPROVED", verdict="**approve**"):
             "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n{verdict}"}
 
 
-@pytest.mark.parametrize("newer,states", [(False, ["pending", "failure"]), (True, ["pending"])])
-def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, newer, states):
-    old = {"context": "Loop-zero Eligibility", "state": "failure", "description": "Blocking finding"}
-    pending = {"context": "Loop-zero Eligibility", "state": "pending", "description": "Refreshing"}
-    publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
-                      [old | {"state": "success"}, pending, old] if newer else [pending, old])
+@pytest.mark.parametrize("case,states", [
+    ("restore", ["pending", "failure"]), ("newer success", ["pending"]), ("newer pending", ["pending"]),
+    ("stale marker", ["pending", "failure"]), ("write lost", ["pending", "failure"]),
+])
+def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, states):
+    ctx = {"context": "Loop-zero Eligibility"}
+    old = ctx | {"id": 1, "state": "failure", "description": "Blocking finding"}
+    marker = ctx | {"id": 11, "state": "pending", "description": "Refreshing live source review evidence"}
+    history = {"restore": [marker, old], "stale marker": [marker, marker | {"id": 10}, old],
+               "newer success": [old | {"id": 12, "state": "success"}, marker, old],
+               "newer pending": [marker | {"id": 12, "description": "Awaiting trusted review"}, marker, old],
+               "write lost": [marker, old]}[case]
+    publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", history)
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [approval()])
     publisher.respond_pr_view(pr_json(state="MERGED"))
-    check_source(publisher, states)
+    if case == "write lost":
+        publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 11},
+                          {"stdout": "", "exit": 1, "stderr": "HTTP 422"})
+        check_source(publisher, states, error=hosted.LoopZeroError)
+    else:
+        check_source(publisher, states)
 
 
 def check_source(publisher, states, *, exit_code=0, error=None, match=None):

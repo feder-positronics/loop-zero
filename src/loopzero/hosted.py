@@ -16,7 +16,6 @@ from loopzero import config, eligibility, github, mergify
 from loopzero._proc import Terminated, unwind_on_sigterm
 from loopzero.types import Config, LoopZeroError
 
-
 class _SourcePolicyRejection(candidate_mod.CandidateError):
     """An expected hosted policy rejection, eligible for the landing-race check."""
 
@@ -108,8 +107,8 @@ def _run(cfg: Config) -> int:
                  or pr["user"]["login"] == candidate_mod.MERGIFY_BOT_LOGIN)
     if not (_candidate_event(event, head) if candidate else pr.get("merged") is not True):
         return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
-    github.commit_status(cfg.repo, head, eligibility.CONTEXT, "pending",
-                         "Refreshing live source review evidence")
+    marker = github.commit_status(cfg.repo, head, eligibility.CONTEXT, "pending",
+                                  "Refreshing live source review evidence")
     try:
         if candidate:
             retry(lambda: (_attest(cfg, event), _publication_snapshot(cfg.repo, number, head, None))[1])
@@ -119,13 +118,9 @@ def _run(cfg: Config) -> int:
             result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers,
                                           snapshot=snapshot)
             current = _publication_snapshot(cfg.repo, number, head, snapshot)
-            if current is None:  # Landed mid-refresh: settle this run's pending status.
-                rows = github.latest_statuses(cfg.repo, head, eligibility.CONTEXT, 2)
-                if len(rows) == 2 and rows[0].get("state") == "pending":
-                    _publish_verdict(cfg.repo, head, rows[1]["state"], rows[1]["description"])
-                return 0
-            blocker = github.mergeability_blocker(current) if result.ready else None
-            state, message = eligibility.source_status(github.Readiness(False, (blocker,)) if blocker else result)
+            blocker = github.mergeability_blocker(current) if current and result.ready else None
+            state, message = ((None, "") if current is None else
+                              eligibility.source_status(github.Readiness(False, (blocker,)) if blocker else result))
     except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable) as exc:
         print(f"Eligibility pending: evidence unavailable ({exc}); rerun this workflow", file=sys.stderr)
         return 1
@@ -134,9 +129,19 @@ def _run(cfg: Config) -> int:
     except (Exception, Terminated) as exc:
         _mark_refresh_failed(cfg.repo, head, exc)
         raise
+    if state is None:  # Landed mid-refresh: restore the verdict this run's pending status hid.
+        return _restore_landed(cfg.repo, head, marker)
     _publish_verdict(cfg.repo, head, state, message[:140])
     print(message)
     return 0  # A published "not eligible" verdict is the result, not a workflow failure.
+
+
+def _restore_landed(repo: str, head: str, marker: int | None) -> int:
+    rows = github.latest_statuses(repo, head, eligibility.CONTEXT, 20)
+    if marker and rows and rows[0].get("id") == marker and (
+            prior := next((r for r in rows[1:] if not r["description"].startswith("Refreshing live")), None)):
+        _publish_verdict(repo, head, prior["state"], prior["description"])
+    return 0
 
 
 def _publication_snapshot(
@@ -161,7 +166,7 @@ def _publish_verdict(repo: str, head: str, state: str, description: str) -> None
         raise
     except (github.GhError, github.ProcTimeout, OSError) as exc:
         with suppress(github.GhError, github.ProcTimeout, OSError):
-            if github.status_matches(repo, head, context, state, description):
+            if [(r["state"], r["description"]) for r in github.latest_statuses(repo, head, context)] == [(state, description)]:
                 return
         raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
 
