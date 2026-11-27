@@ -152,8 +152,8 @@ def base_merge_material(
                         "--ignore-submodules=none", "--submodule=short",
                         f"{reviewed}..{head}", preserve_newlines=True)
             return patch.encode("utf-8", errors="surrogateescape")
-    except (github.GhUnavailable, github.ProcTimeout):
-        raise
+    except (github.GhUnavailable, github.ProcTimeout, candidate.FetchFailed):
+        raise  # A failed fetch is not "no review recorded".
     except (LoopZeroError, KeyError, OSError, TypeError, ValueError):
         return None
 

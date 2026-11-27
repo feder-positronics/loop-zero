@@ -640,3 +640,13 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome)
 
     assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": []}[outcome]
     assert killed == ([(123, candidate.signal.SIGKILL)] if outcome == "bound" else [])
+
+
+def test_failed_fetch_is_not_reported_as_missing_review(monkeypatch):
+    from loopzero import eligibility
+    monkeypatch.setattr(eligibility.github, "api_get", lambda _: {"base": {"sha": "b" * 40, "ref": "main"}, "head": {"sha": "c" * 40}})
+    def fail(*_a):
+        raise candidate.FetchFailed("git fetch exited 128: objects unavailable")
+    monkeypatch.setattr(eligibility.candidate, "fetched_git", fail)
+    with pytest.raises(candidate.FetchFailed):
+        eligibility.base_merge_material("o/r", 7, "a" * 40, "c" * 40, "main", clean=True)
