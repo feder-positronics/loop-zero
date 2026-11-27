@@ -2404,7 +2404,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     def fail(family, **kwargs):
         if family == "claude":
             raise cli.runners.RunnerAuthFailed(
-                "claude: CLI is not authenticated\nfirst detail\nsecond detail\nnot printed"
+                "claude: CLI is not authenticated\nnot printed\nsecond detail\nlast cause"
             )
         raise cli.runners.RunnerMissing("codex: 'codex' not found on PATH")
 
@@ -2415,7 +2415,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     assert ("author family: claude, codex" if mixed_authors else "author family: unknown") in err
     assert "Fix the reviewer failures below and rerun" in err
     assert "delivery.reviewers" not in err and "exception" not in err
-    assert "claude: CLI is not authenticated\nfirst detail\nsecond detail" in err
+    assert "claude: CLI is not authenticated\nsecond detail\nlast cause" in err  # The cause ends the tail.
     assert "not printed" not in err
     assert "Fix: run `claude auth login`." in err
     assert err.count("codex: 'codex' not found on PATH") == 1

@@ -165,16 +165,16 @@ def build_prompt(*, kind: str, head: str, task_text: str, diff: str,
 
 
 def _tail(text: str) -> str:
-    return text[-TAIL_CHARS:]
+    return _redact_keys(None, text)[-TAIL_CHARS:]
+
+
+def _redact_keys(family: str | None, text: str) -> str:
+    names = {"claude": CLAUDE_AUTH_ENV, "codex": CODEX_AUTH_ENV}
+    env = _proc.build_env(names.get(family, (*CLAUDE_AUTH_ENV, *CODEX_AUTH_ENV)))
+    return _proc.redact(text, _proc.secret_forms(env.values()), *_proc.SECRET_PATTERNS)
 
 
 def _auth_failure(family: str, diagnostic: str) -> RunnerAuthFailed:
-    names = CLAUDE_AUTH_ENV if family == "claude" else CODEX_AUTH_ENV
-    env = _proc.build_env(names)
-    values = {variant for value in env.values() if value for variant in (value, json.dumps(value)[1:-1])}
-    patterns = [*map(re.escape, sorted(values, key=len, reverse=True)), r"\bsk-[A-Za-z0-9_-]{8,}",
-                r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"]
-    diagnostic = re.sub("|".join(patterns), "[REDACTED]", diagnostic)
     return RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(diagnostic)}")
 
 
@@ -270,7 +270,8 @@ def _run(
         diagnostic = last_line.encode()
         tail = "…" + diagnostic[-320:].decode(errors="ignore") if len(diagnostic) > 320 else last_line
         raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", tail) from exc
-    if done.exit_code != 0:
+    if done.exit_code != 0:  # Hide forwarded keys from every failure class, not only auth.
+        done = replace(done, stdout=_redact_keys(family, done.stdout), stderr=_redact_keys(family, done.stderr))
         combined = f"{done.stdout}\n{done.stderr}"
         envelope = None
         if family == "claude":
@@ -1037,7 +1038,7 @@ def _review_claude(
             raise _auth_failure("claude", text)
         if _looks_too_long(text) or _looks_too_long(raw):
             raise RunnerPromptTooLong("claude: prompt is too long", _tail(raw))
-        raise RunnerBadOutput(f"claude: {envelope.get('subtype', 'error')}", _tail(raw))
+        raise RunnerBadOutput(_tail(f"claude: {envelope.get('subtype', 'error')}"), _tail(raw))
     try:
         payload = _claude_payload(envelope)
     except (json.JSONDecodeError, ValueError) as exc:

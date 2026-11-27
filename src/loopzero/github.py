@@ -22,7 +22,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from loopzero import runners
-from loopzero._proc import ProcTimeout, ToolMissing, run
+from loopzero._proc import SECRET_PATTERNS, ProcTimeout, ToolMissing, build_env, redact, run, secret_forms
 from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, LoopZeroError, ReviewResult, is_sha
 
@@ -139,9 +139,7 @@ _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
 _READINESS_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.([0-9]+))?"
                                   r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
 _HTTP_DATE = re.compile(r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT")
-_CREDENTIAL_TOKEN_RE = re.compile(
-    r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})"
-)
+_CREDENTIAL_TOKEN_RE = re.compile("|".join(SECRET_PATTERNS))
 
 
 @contextmanager
@@ -789,8 +787,14 @@ def finding_marker(severity: str, head_sha: str, finding: Finding) -> str:
     return f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
 
 
+def _redact_published(text: str) -> str:
+    """Reviewers can read login files and saved output; hide reviewer keys and credential shapes."""
+    keys = build_env((*runners.CLAUDE_AUTH_ENV, *runners.CODEX_AUTH_ENV)).values()
+    return redact(text, secret_forms(keys), *SECRET_PATTERNS)
+
+
 def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
-    text = prefix + _CREDENTIAL_TOKEN_RE.sub("[REDACTED]", f"**{f.severity}: {f.title}**\n\n{f.body}").rstrip()
+    text = _redact_published(f"{prefix}**{f.severity}: {f.title}**\n\n{f.body}").rstrip()
     if f.severity in BLOCKING:
         return f"{finding_marker(f.severity, head_sha, f)}\n{text}"
     return text
@@ -843,7 +847,7 @@ def _unplaced_findings(unplaced: list[Finding]) -> tuple[str, list[str]]:
     for finding in unplaced:
         where = f" ({finding.path}:{finding.line})" if finding.path and finding.severity in BLOCKING else ""
         line = f"- **{finding.severity}**: {finding.title}{where} — {finding.body}".rstrip(" —")
-        lines.append(_CREDENTIAL_TOKEN_RE.sub("[REDACTED]", line))
+        lines.append(_redact_published(line))
     return (BODY_BLOCKERS if blocked else ""), lines
 
 
