@@ -33,8 +33,8 @@ recommendations on their owning issue/design.
 
 For count requests, state the consumer repository's counting rule and reconcile
 every open issue into counted work (unlabelled included, shown separately),
-ongoing duty or unclassified; show held
-work and classification gaps explicitly. Use consumer AGENTS.md conventions
+ongoing duty or unclassified (conflicting issue-kind labels). Show held work
+and classification gaps explicitly. Use consumer AGENTS.md conventions
 rather than inventing labels or another state store.
 
 For delivery coverage reports, follow [CODE-HEALTH](../../../docs/CODE-HEALTH.md#delivery-retrospectives);

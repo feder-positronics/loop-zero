@@ -442,7 +442,9 @@ Mergify queue-rule name. `loopzero merge` posts the unnamed `@mergifyio queue`
 command (Mergify deprecates naming a queue and picks the first whose conditions
 match) once for the current source head, then confirms membership in the
 configured queue through `https://api.mergify.com/v1`. A command comment is only a
-request; a behind branch is treated as queued only after that API confirms it.
+request; a behind branch is treated as queued only after that API confirms it. A
+repository queue rule may admit the PR instead; Mergify's "already queued" reply
+to the command is then harmless.
 
 Set `merge_queue.mode: serial`. For draft-PR integration checks, set
 `merge_queue.max_parallel_checks` greater
@@ -483,7 +485,7 @@ error refuses further delivery and cleanup; it cannot revoke an asynchronous
 command atomically. A newly pushed head must lack eligibility until its own
 review passes. Never deploy the adapter with only product-CI queue conditions.
 Before pushing to a requested or queued PR, withdraw it, confirm removal, then
-push, review the new head and explicitly admit it again. Do not interpret a CLI
+push, review the new head and admit it again. Do not interpret a CLI
 failure as proof that Mergify has removed an outstanding request.
 
 Provide an admin-scope Mergify application key in `MERGIFY_API_KEY`, or store it
@@ -565,8 +567,8 @@ validation or enable unattended landing without accepting this boundary.
 
 ### Requeue after cancellation or ejection
 
-After cancellation or ejection, repair the cause and explicitly requeue with
-`@mergifyio queue` as the whole PR comment, then
-resume `loopzero merge --wait`.
+After cancellation or ejection, repair the cause and requeue: an unchanged head
+needs `@mergifyio queue` as the whole PR comment; `loopzero merge` requests a new
+head, or a repository queue rule readmits it. Then resume `loopzero merge --wait`.
 The CLI never retries a failed admission automatically. Resume request markers
 are scoped to the publishing GitHub login; use the same account across sessions.
