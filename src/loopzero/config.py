@@ -263,7 +263,7 @@ def _check_table(label: str, table: Any, schema: dict[str, type], *,
         if key in table:
             nonempty = nonempty_strings and kind is str
             if not isinstance(table[key], kind) or (nonempty and not table[key]):
-                expected = {dict: "a table", int: "an integer", list: "an array", str: "a string", bool: "a boolean"}
+                expected = {dict: "a table", list: "an array", str: "a string", bool: "a boolean"}
                 raise ConfigError(f"{label}.{key} must be {'a non-empty string' if nonempty else expected[kind]}")
     return table
 

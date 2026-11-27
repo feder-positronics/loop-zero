@@ -34,7 +34,7 @@ GIT_TIMEOUT = 60.0
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, OSError, ValueError)
 UNEXPECTED = (KeyError, TypeError)
-# --wait: poll interval, default timeout, and how long a required check may stay
+# --wait: poll interval, and how long a required check may stay
 # missing before GitHub is assumed to have dropped the event for this head.
 # Each poll costs several GitHub API calls from a quota shared by every session.
 WAIT_INTERVAL, MISSING_RUN_GRACE = 30.0, 120.0
@@ -264,8 +264,6 @@ def _select_review_round(config: Config, pr: github.PR, head: str, reviews: list
     if reviewed := _conflict_delta_base(config, pr, head, reviews, markers, publishers):
         return "delta", reviewed
     return _decide_kind(markers, head)
-
-
 
 
 def _readiness(
