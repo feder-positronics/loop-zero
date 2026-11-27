@@ -104,7 +104,9 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
                           {"stdout": "", "exit": 1, "stderr": "HTTP 422"})
         check_source(publisher, states, error=hosted.LoopZeroError)
     else:
-        check_source(publisher, states)
+        posted = check_source(publisher, states)
+        if len(posted) == 2:  # The restored row is the verdict users see, not the marker.
+            assert posted[1]["description"] == next(r["description"] for r in history if r is not history[0] and "Refreshing live source review evidence" != r["description"] and r["description"] != "Refreshing source review evidence")
 
 
 def check_source(publisher, states, *, exit_code=0, error=None, match=None):
