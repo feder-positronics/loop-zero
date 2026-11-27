@@ -1193,6 +1193,30 @@ def test_merge_reports_queue_admission_or_landing(gh, strategy, queue_state):
     assert "--queue" not in writes[0]
 
 
+def test_merge_refuses_queue_membership_of_another_head(gh):
+    queue = _queue_json(True)
+    queue["data"]["repository"]["pullRequest"]["headRefOid"] = "b" * 40
+    gh.respond("api graphql", queue)
+
+    with pytest.raises(github.MergeFailed, match="head changed or unavailable"):
+        github.merge(REPO, 7, "queue", HEAD)
+    assert [call["argv"][:2] for call in gh.calls] == [["api", "graphql"]]
+
+
+def test_eligibility_dispatch_retry_refuses_changed_head(monkeypatch):
+    pr = github.PR(7, "https://example.invalid/7", HEAD, "main", False, "OPEN", "MERGEABLE")
+    def lost_reply(*_args):
+        raise github.ProcTimeout("lost reply", "")
+
+    monkeypatch.setattr(github, "_gh", lost_reply)
+    monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
+    monkeypatch.setattr(github, "pr_for_branch", lambda *_args, **_kwargs: replace(pr, head_sha="b" * 40))
+    monkeypatch.setattr(github, "_eligibility_dispatched", lambda *_args: True)
+
+    with pytest.raises(github.GhError, match="the PR or head changed after resolution"):
+        github.refresh_eligibility(REPO, pr, "lz/task", "main", PUBLISHERS)
+
+
 def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
     with pytest.raises(github.MergeFailed):
         github.merge(REPO, 7, "fast-forward", HEAD)
