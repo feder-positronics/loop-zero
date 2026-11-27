@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import pytest
 
-from loopzero import github
+from loopzero import eligibility, github
 from loopzero.types import Finding, ReviewResult
 
 REPO = "acme/widgets"
@@ -485,16 +485,30 @@ def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh, separator: s
     ([{"filename": "img.png"}, {"filename": "src/d.py", "patch": "@@ -3,0 +4,2 @@\n+p\n+q"}],
      "important", ("src/d.py", 4)),
     ([{"filename": "img.png"}], "critical", None),
-], ids=["skip-image", "no-hunks"])
-def test_post_review_requires_diff_hunk(gh: FakeGh, files, severity, anchor):
+    ([{"filename": "removed.py", "patch": "@@ -1 +0,0 @@\n-old"}], "critical", None),
+], ids=["skip-image", "no-hunks", "deletion-only"])
+def test_post_review_preserves_blocking_findings_without_an_anchor(gh: FakeGh, monkeypatch, files, severity, anchor):
     arm_review(gh, files=files)
     result = review(findings=(Finding(severity, None, None, "G", ""),))
+    marker = f"<!-- loopzero:review v=1 head={HEAD} kind=primary source=model -->"
+    github.post_review(REPO, 7, HEAD, result, marker)
     if anchor is None:
-        with pytest.raises(github.GhError, match="no diff hunks"):
-            github.post_review(REPO, 7, HEAD, result)
-        assert calls_for(gh, REVIEWS_KEY) == []
+        payload, = review_payloads(gh)
+        assert payload["comments"] == [] and payload["body"].startswith(github.BODY_BLOCKERS)
+        assert "**critical**: G" in payload["body"]
+        published = dict(body=payload["body"], user={"login": "publisher"}, state="COMMENTED", commit_id=HEAD)
+        monkeypatch.setattr(github, "open_blocking_findings", lambda *_: [])
+        clean_merge, changed = "b" * 40, "c" * 40
+        monkeypatch.setattr(eligibility, "base_merge_material", lambda *a, **k: b"" if a[3] == clean_merge else None)
+        assert eligibility.readiness_review([published], changed, ("publisher",), repo=REPO, number=7,
+                                            base_branch="main") is None
+        for head in (HEAD, clean_merge):
+            evidence = eligibility.readiness_review([published], head, ("publisher",), repo=REPO, number=7, base_branch="main")
+            pr = github.PR(7, f"https://github.com/{REPO}/pull/7", head, "main", False, "OPEN", "MERGEABLE")
+            blocker = eligibility.body_blocker(evidence)
+            assert blocker and github.readiness(REPO, pr, "main", (), head, publishers=("publisher",),
+                                                review_blocker=blocker).reasons == (blocker,)
     else:
-        github.post_review(REPO, 7, HEAD, result)
         (comment,) = comments_posted(gh)
         assert (comment["path"], comment["line"]) == anchor
         assert "subject_type" not in comment
@@ -1089,7 +1103,7 @@ def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
 
 
 @pytest.mark.parametrize(("metadata", "reason"), [
-    ({"mergeStateStatus": "BEHIND"}, "PR #7 is behind main. Finish any pending delta review, then run `git fetch origin main`, `git merge origin/main`, `loopzero check` and `loopzero pr` before retrying readiness."),
+    ({"mergeStateStatus": "BEHIND"}, "PR #7 is behind main. Run `git fetch origin main`, `git merge origin/main`, `loopzero check` and `loopzero pr` before retrying readiness."),
     ({"mergeable": "CONFLICTING"}, "PR #7 has merge conflicts with main"),
     ({"state": "MERGED"}, "PR #7 is MERGED, not open"),
 ], ids=["behind-base", "merge-conflict", "merged-pr"])
@@ -1191,6 +1205,30 @@ def test_merge_reports_queue_admission_or_landing(gh, strategy, queue_state):
     assert len(writes) == 1
     assert ("--squash" in writes[0]) == (strategy == "squash")
     assert "--queue" not in writes[0]
+
+
+def test_merge_refuses_queue_membership_of_another_head(gh):
+    queue = _queue_json(True)
+    queue["data"]["repository"]["pullRequest"]["headRefOid"] = "b" * 40
+    gh.respond("api graphql", queue)
+
+    with pytest.raises(github.MergeFailed, match="head changed or unavailable"):
+        github.merge(REPO, 7, "queue", HEAD)
+    assert [call["argv"][:2] for call in gh.calls] == [["api", "graphql"]]
+
+
+def test_eligibility_dispatch_retry_refuses_changed_head(monkeypatch):
+    pr = github.PR(7, "https://example.invalid/7", HEAD, "main", False, "OPEN", "MERGEABLE")
+    def lost_reply(*_args):
+        raise github.ProcTimeout("lost reply", "")
+
+    monkeypatch.setattr(github, "_gh", lost_reply)
+    monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
+    monkeypatch.setattr(github, "pr_for_branch", lambda *_args, **_kwargs: replace(pr, head_sha="b" * 40))
+    monkeypatch.setattr(github, "_eligibility_dispatched", lambda *_args: True)
+
+    with pytest.raises(github.GhError, match="the PR or head changed after resolution"):
+        github.refresh_eligibility(REPO, pr, "lz/task", "main", PUBLISHERS)
 
 
 def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:

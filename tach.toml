@@ -19,7 +19,7 @@ depends_on = ["loopzero.types"]
 
 [[modules]]
 path = "loopzero.worktree"
-depends_on = ["loopzero._proc"]
+depends_on = ["loopzero._proc", "loopzero.types"]
 
 [[modules]]
 path = "loopzero.config"
@@ -43,7 +43,7 @@ depends_on = ["loopzero.github", "loopzero.types"]
 
 [[modules]]
 path = "loopzero.candidate"
-depends_on = ["loopzero.github"]
+depends_on = ["loopzero.github", "loopzero.types"]
 
 [[modules]]
 path = "loopzero.eligibility"

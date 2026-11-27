@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shlex
+import stat
 import signal
 import subprocess
 import sys
@@ -137,7 +138,6 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0, capture_e
 
 def _codex_probes(version, version_exit=0):
     return f'''if [ "$1" = --version ]; then printf '%s\\n' {shlex.quote(version)}; exit {version_exit}; fi
-if [ "$1" = exec ] && [ "$2" = --help ]; then echo --ignore-user-config; exit 0; fi
 '''
 
 
@@ -365,6 +365,20 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
     proof = codex_evidence(merge_reviews(results))
     assert proof["complete"]
     assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
+
+
+@pytest.mark.parametrize("field, invalid", [
+    (stat.ST_MODE, stat.S_IFDIR), (stat.ST_UID, os.getuid() + 1), (stat.ST_NLINK, 2),
+])
+def test_codex_message_file_must_be_regular_owned_and_unlinked(tmp_path, monkeypatch, field, invalid):
+    path = tmp_path / "final-message"
+    path.write_bytes(b"synthetic reviewer output")
+    info = list(path.stat())
+    info[field] = invalid
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runners.os, "fstat", lambda _fd: os.stat_result(info))
+        assert runners._read_codex_file(path) is None
 
 
 @pytest.mark.parametrize("version,failure", [
@@ -1022,7 +1036,7 @@ def test_codex_approve(repo, fake_bin, tmp_path, fake_bwrap, monkeypatch):
     assert "model_reasoning_effort=high" in argv
     # Codex's inner bwrap cannot nest inside loop-zero's; the outer sandbox bounds it.
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
-    assert "--ignore-user-config" in argv
+    assert "--ignore-user-config" not in argv
     assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" not in argv
     assert "mcp_servers={}" in argv
     assert "project_doc_max_bytes=0" in argv and not any(a.startswith("skills.") for a in argv)
@@ -1045,6 +1059,12 @@ def test_unknown_family_and_kind(tmp_path: Path) -> None:
         _review("gemini", tmp_path)
     with pytest.raises(ValueError):
         review_with("claude", cwd=tmp_path, head="h", kind="full", diff="", task_text="")
+
+
+def test_review_rejects_a_verdict_outside_the_schema():
+    payload = APPROVE | {"verdict": "unknown"}
+    with pytest.raises(runners.RunnerMalformedOutput, match="review lacks verdict/findings"):
+        runners.parse_review(payload, family="codex", head="a" * 40, kind="primary", raw="synthetic")
 
 
 @pytest.mark.parametrize("finding", [
@@ -1252,7 +1272,6 @@ runners._sandbox_prefix = lambda family, cwd, home, *args: (
     ["env", f"HOME={home}"], runners._review_config(family, Path(binary), ()), Path(binary)
 )
 runners._observe_codex_version = lambda *args: None
-runners._codex_supports_ignore_user_config = lambda *args: False
 runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
                     diff="diff", task_text="task")
 """
