@@ -240,6 +240,10 @@ def _attest_source(
     return source_sha
 
 
+class FetchFailed(CandidateError):
+    """The Git object fetch itself failed, as opposed to the history lacking evidence."""
+
+
 class _MissingMergeHistory(CandidateError):
     """Merge evidence is missing or incomplete in the current Git store."""
 
@@ -253,7 +257,7 @@ def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None
         if github._transient_error(diagnostic, False) or re.search(r"returned error: (?:429|5\d\d)", diagnostic):
             raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
     _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
-             "resource bound hit, or integration conflict")
+             "resource bound hit, or integration conflict", FetchFailed if operation == "fetch" else CandidateError)
 
 
 def _fetch_token() -> str:

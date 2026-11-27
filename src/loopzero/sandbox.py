@@ -112,7 +112,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         for exposed in (*config.sandbox_ro, *config.writable):
             if private_parent.is_relative_to(Path(exposed).resolve()):
                 raise SandboxUnavailable(
-                    f"sandbox path {exposed!r} would expose private check directories"
+                    f"sandbox path {exposed!r} would expose private check directories; set TMPDIR outside it"
                 )
         scratch = {entry: scratch_root / entry for entry in config.scratch}
         for entry, source in scratch.items():
@@ -478,7 +478,8 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
     except _proc.ToolMissing as exc:
         raise SandboxUnavailable(
             f"bwrap binary missing while starting the namespace probe: {exc}\n"
-            "sudo apt install bubblewrap"
+            + ("sudo apt install bubblewrap" if "PATH" in config.env_allowlist
+               else "PATH is not in checks.env_allowlist, so the sandbox cannot find an installed bwrap")
         ) from exc
     except _proc.ProcTimeout:
         raise SandboxUnavailable(f"bwrap namespace creation timed out after {GIT_TIMEOUT:g}s") from None
@@ -577,7 +578,11 @@ def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str
     try:
         return git(worktree, *args, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT, paths=paths, raw=True)
     except GitError as exc:
-        raise SandboxUnavailable(f"{' '.join(exc.command)} failed in {worktree}: {_proc.tail(exc.tail, 1)}") from None
+        raise SandboxUnavailable(f"{' '.join(exc.command)} failed in {worktree}: {_git_reason(exc.tail)}") from None
+
+
+def _git_reason(tail: str) -> str:
+    return next((line for line in tail.splitlines() if line.startswith("fatal:")), _proc.tail(tail, 1))
 
 
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
