@@ -1038,6 +1038,7 @@ def post_review(
     token: str | None = None,
     *,
     publisher: str | None = None,
+    base: str | None = None,
 ) -> None:
     """Post `result` as a PR review on `head_sha`, one inline comment per finding.
 
@@ -1048,6 +1049,7 @@ def post_review(
     Findings whose location is missing or outside the diff are anchored on the first
     changed file with a hunk. Without an anchor, blockers go in the review body.
     A supplied publisher is the login already checked for the supplied token.
+    A supplied base makes every POST first reread the live PR, which must be open at `head_sha` on that base.
     """
     author = (pr or pr_view(repo, number)).author
     token = app_token() if token is None else token  # "" means the operator identity
@@ -1057,12 +1059,17 @@ def post_review(
         event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"
     payload = {**review_payload(repo, number, head_sha, result, body_prefix), "event": event}
     endpoint = f"repos/{repo}/pulls/{number}/reviews"
+    def post(body: dict) -> None:
+        if base and (live := pr_view(repo, number)) and (live.head_sha, live.state, live.base_ref) != (head_sha, "OPEN", base):
+            raise GhError(("gh", "api", endpoint), f"PR is {live.state.lower()} at {live.head_sha[:12]} on {live.base_ref}")
+        _api(endpoint, body, token=token)
+
     try:
-        _api(endpoint, payload, token=token)
+        post(payload)
     except GhError as exc:
         if event == "COMMENT" or not _SELF_REVIEW.search(exc.tail):
             raise
-        _api(endpoint, {**payload, "event": "COMMENT"}, token=token)
+        post({**payload, "event": "COMMENT"})
 
 
 def _title_of(text: str) -> str:

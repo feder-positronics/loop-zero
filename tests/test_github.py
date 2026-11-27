@@ -14,8 +14,10 @@ from urllib.parse import quote
 import pytest
 
 from loopzero import eligibility, github
+from loopzero._proc import Completed, build_env
 from loopzero.types import Finding, ReviewResult
 from tests.conftest import write_fake_tool
+from tests.fake_gh import replay
 
 REPO = "acme/widgets"
 HEAD = "a" * 40
@@ -51,11 +53,27 @@ class FakeGh:
             f"#!{sys.executable}\n{replay_source}\n"
             "import sys\n"
             f"code, stdout, stderr = replay(sys.argv[1:], {str(self.calls_file)!r}, "
-            f"{str(self.scenario_file)!r}, os.getcwd(), os.environ.get('GH_TOKEN'))\n"
+            f"{str(self.scenario_file)!r}, os.getcwd(), os.environ)\n"
             "sys.stdout.write(stdout)\n"
             "sys.stderr.write(stderr)\n"
             "sys.exit(code)\n"
         )
+
+    def replay_in_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Replay fake gh requests without starting an interpreter for each call."""
+        run_process = github.run
+
+        def run(argv, *, cwd, env_allowlist, extra_env=None, **kwargs):
+            if argv[0] != "gh":
+                return run_process(argv, cwd=cwd, env_allowlist=env_allowlist,
+                                   extra_env=extra_env, **kwargs)
+            env = build_env(env_allowlist, extra_env)
+            code, stdout, stderr = replay(
+                argv[1:], str(self.calls_file), str(self.scenario_file), str(cwd), env,
+            )
+            return Completed(code, stdout, stderr, 0)
+
+        monkeypatch.setattr(github, "run", run)
 
     def respond(self, key: str, *responses: object, exit: int = 0, stderr: str = "") -> None:
         self._set_responses(key, [self._response(r, exit=exit, stderr=stderr) for r in responses])
@@ -627,6 +645,26 @@ def test_post_review_submits_comment(gh: FakeGh, app_token_helper, verdict: str,
             assert calls_for(gh, REVIEWS_KEY)[0]["token"] == "synthetic-app-token" and payloads[0]["comments"]
         else:
             assert gh.argv(int(looked_up))[:2] == ["api", "graphql"]
+
+
+@pytest.mark.parametrize("live,first_post_fails", [
+    (dict(state="CLOSED"), False), (dict(baseRefName="release"), False),
+    (dict(baseRefName="release"), True), (dict(headRefOid="b" * 40), False),
+], ids=["closed", "retargeted", "retargeted-before-fallback", "moved"])
+def test_post_review_rereads_the_live_pr_before_each_post(gh: FakeGh, live: dict, first_post_fails: bool) -> None:
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
+    gh.respond(FILES_KEY, PR_FILES)
+    open_pr = pr_json(headRefOid=HEAD)
+    if first_post_fails:
+        rejection = {"message": "Unprocessable Entity", "errors": [{"message": "Can not approve your own pull request"}]}
+        gh.respond(REVIEWS_KEY, {"stdout": json.dumps(rejection), "stderr": "gh: Unprocessable Entity (HTTP 422)\n", "exit": 1})
+        gh.respond_pr_view(open_pr, pr_json(**{"headRefOid": HEAD, **live}))
+    else:
+        gh.respond_pr_view(pr_json(**{"headRefOid": HEAD, **live}))
+    pr = github.PR(7, "url", HEAD, "main", False, "OPEN", "UNKNOWN", author="someone-else")
+    with pytest.raises(github.GhError, match="PR is"):
+        github.post_review(REPO, 7, HEAD, review(verdict="approve"), pr=pr, token="", publisher="bot-user", base="main")
+    assert len(calls_for(gh, REVIEWS_KEY)) == int(first_post_fails)
 
 
 def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
@@ -1411,7 +1449,8 @@ def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, stat
     (100, True, True, "failure"),
     (100, True, False, None),
 ])
-def test_readiness_at_check_suite_limit(gh: FakeGh, unrelated, legacy_success, check_failure, reason):
+def test_readiness_at_check_suite_limit(gh: FakeGh, monkeypatch, unrelated, legacy_success, check_failure, reason):
+    gh.replay_in_process(monkeypatch)
     arm_readiness(gh)
     if legacy_success:
         gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
@@ -1440,8 +1479,9 @@ def test_readiness_at_check_suite_limit(gh: FakeGh, unrelated, legacy_success, c
     (3001, "file-3001", "suggestion", HEAD, None),
     (3000, "outside-diff", "important", "b" * 40, None),
 ])
-def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: str,
+def test_review_file_limit(gh: FakeGh, monkeypatch, changed_files: int, path: str, severity: str,
                            live_head: str, anchor: str | None) -> None:
+    gh.replay_in_process(monkeypatch)
     files = [{"filename": f"file-{i:04d}", "patch": "@@ -1 +1 @@\n-before\n+after"}
              for i in range(1, changed_files + 1)][:3000]
     gh.respond(FILES_KEY, *(files[i:i + 100] for i in range(0, 3001, 100)))
@@ -1488,18 +1528,6 @@ def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(monkeypat
     assert not any(part.startswith("If-None-Match") for part in sent[-1])
 
 
-def test_ambient_credential_is_never_cached(monkeypatch):
-    sent = []
-    def run(argv, **_):
-        sent.append(argv)
-        if "graphql" in argv:
-            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"a"}}}', "stderr": ""})
-        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{}', "stderr": ""})
-    monkeypatch.setattr(github, "run", run)
-    github.login(), github.login(), github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
-    assert len(sent) == 4 and not any(part.startswith("If-None-Match") for argv in sent for part in argv)
-
-
 def test_oversized_response_does_not_evict_other_reads(monkeypatch, app_token_helper):
     app_token_helper()
     monkeypatch.setattr(github, "_ETAG_CACHE_BYTES", 100)
@@ -1515,7 +1543,7 @@ def test_oversized_response_does_not_evict_other_reads(monkeypatch, app_token_he
     assert [key[0][1] for key in github._etag_cache] == ["repos/a/b/small"]
 
 
-def test_login_is_cached_under_the_credential_that_answered(monkeypatch, tmp_path, fake_tool):
+def test_login_is_cached_under_the_credential_that_answered(monkeypatch, fake_tool):
     helper = fake_tool("app-token", "echo app-a\n")
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     real_run = github.run
@@ -1528,13 +1556,10 @@ def test_login_is_cached_under_the_credential_that_answered(monkeypatch, tmp_pat
     monkeypatch.setattr(github, "run", run)
     assert github.login() == "bot" and tokens == ["app-a"]
     assert github._logins == {"app-a": "bot"}
-    monkeypatch.setattr(github, "_select_token", lambda *_: "")  # ambient: nothing to key a cached login on
-    github._logins.clear()
-    github.login(), github.login()
-    assert github._logins == {}
 
 
-def test_environment_token_is_cached_but_stored_account_is_not(monkeypatch):
+@pytest.mark.parametrize("token", [None, "env-a"], ids=["stored-account", "environment-token"])
+def test_login_and_etag_cache_depend_on_token(monkeypatch, token):
     sent = []
     def run(argv, **_):
         sent.append(argv)
@@ -1542,12 +1567,17 @@ def test_environment_token_is_cached_but_stored_account_is_not(monkeypatch):
             return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"a"}}}', "stderr": ""})
         return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{}', "stderr": ""})
     monkeypatch.setattr(github, "run", run)
-    monkeypatch.setenv("GH_TOKEN", "env-a")
+    if token:
+        monkeypatch.setenv("GH_TOKEN", token)
     assert github.login() == github.login() == "a"
     github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
-    assert len(sent) == 3 and "If-None-Match: \"v1\"" in sent[-1]
-    monkeypatch.setenv("GH_TOKEN", "env-b")  # a different account does not reuse the first one's answers
-    assert github.login() == "a" and len(sent) == 4
+    conditional = [arg for argv in sent for arg in argv if arg.startswith("If-None-Match")]
+    assert (len(sent), conditional) == ((3, ['If-None-Match: "v1"']) if token else (4, []))
+    assert github._logins == ({token: "a"} if token else {})
+    if token:
+        monkeypatch.setenv("GH_TOKEN", "env-b")
+        assert github.login() == "a" and len(sent) == 4
+
 
 @pytest.mark.parametrize("repo", ["acme/123", "acme/true", "acme/@etc-passwd"])
 def test_graphql_string_variables_are_raw_fields(repo: str) -> None:
