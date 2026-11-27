@@ -394,6 +394,18 @@ worker can omit the fingerprint. Explicit check settings must match. GitHub requ
 CI supplies separate evidence. The [owner queue route](core/CONTRACT.md#blockers)
 applies only under its documented conditions.
 
+### Shared test hosts
+
+A consumer that runs checks on shared SSH test hosts reads their connection,
+capability and capacity from its own config. Jobs use disposable checkouts with
+no production checkout access and follow the
+[credential rules for test hosts](core/CREDENTIALS.md#resolve-only-when-needed).
+Dependency setup comes from the checked-out repository (its preparation script,
+otherwise its lock files). Hosts run jobs under the repository-pinned interpreter,
+never the system Python, and take no jobs while their toolchain differs from the
+pin; install that interpreter with umask 022, because a group- or world-writable
+install fails interpreter checks.
+
 ## Removing an abandoned task worktree
 
 For a merged PR, retry cleanup from a durable directory with
