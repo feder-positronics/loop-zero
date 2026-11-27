@@ -12,8 +12,7 @@ and setup.
 - [../core/CREDENTIALS.md](../core/CREDENTIALS.md) — default API-key lookup,
   local storage, rotation, and CI/production boundaries.
 - [../core/HANDOFF.md](../core/HANDOFF.md) — task file and PR body template.
-- [../core/skills/](../core/skills) — core skills; start with `plan`,
-  `implement`, `work-issue`, or `write-design-doc`.
+- [../core/skills/](../core/skills) — core skills and their entry points.
 - [../integrations/](../integrations/) — optional vendor integration skills.
 - [REWRITE-SPEC.md](REWRITE-SPEC.md) — contributor module map.
 - [design/2026-09-24-delivery-system-architecture.md](design/2026-09-24-delivery-system-architecture.md) —
@@ -32,8 +31,6 @@ and setup.
   new-finding comparison, confidence tiers and commissioned cleanup.
 - [T3-UPSTREAM.md](T3-UPSTREAM.md) — periodic T3 Code/Orchestrator reading,
   version-aware source verification, ownership and bounded adoption.
-- [design/2026-10-28-t3-orchestration-workflow-adaptations.md](design/2026-10-28-t3-orchestration-workflow-adaptations.md) —
-  dated video/skill/upstream research and its open proposals R3, R6 and R7.
 - [2026-11-25 loop-zero optimization and hardening roadmap](design/2026-11-25-loop-zero-optimization-hardening-roadmap.md) —
   dated audit and trial findings, the rules agreed then, and the Horizon 3
   proposals.

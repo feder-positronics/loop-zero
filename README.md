@@ -18,7 +18,7 @@ blocking findings and green required CI to merge. The full rules fit in
 The [architecture guide](docs/ARCHITECTURE.md) explains current boundaries,
 ownership and the contributor routine that keeps documentation current.
 
-## The six commands
+## The delivery commands
 
 | Command | What it does |
 | --- | --- |
@@ -28,6 +28,8 @@ ownership and the contributor routine that keeps documentation current.
 | `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. Exits 0 on approval, 5 on changes requested. |
 | `loopzero ready [--wait[=SECONDS]]` | Verify head, findings and CI; optionally wait for required checks on that head. |
 | `loopzero merge [--wait[=SECONDS]]` | Recheck readiness and merge; optionally wait for required checks and landing before cleanup. |
+| `loopzero status` | Show task, PR, check and readiness state (details below). |
+| `loopzero resolve [<id> "<what changed>"]` | List open blocking findings, or reply to one and resolve its thread. |
 
 For a picture of the whole flow, see the [workflow diagrams](docs/WORKFLOW.md).
 
@@ -37,8 +39,6 @@ line; it can exit 0 with `ready: no`. Queueing directly in GitHub with a red
 local check receipt is covered only by the contract's
 [owner queue route](core/CONTRACT.md#blockers).
 It requires authenticated GitHub access even before a PR exists.
-`loopzero resolve` lists the open blocking findings with their ids;
-`loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
 
 For agent delegation, follow [model selection](docs/DELEGATION.md) using the
 task repository's [models.toml](models.toml).
@@ -55,20 +55,9 @@ them in `.loopzero/review-<head12>-<kind>.json`. `loopzero review --repost` uses
 the saved review without a model call and rejects `--model` and `--effort`.
 
 Waits observe immediately, then use 30/60/120-second intervals with up to 10%
-earlier jitter, bounded by the timeout. Each readiness observation rechecks
-reviews and findings. Mergify waits use REST for source-head guards, merge
-observation, queue comments, PR lookup/detail and draft creation; native GitHub
-queue membership and review threads use GraphQL. When a required Actions check
-is missing, failed or cancelled, waiters can look for an active workflow on
-that head. Fine-grained tokens need Actions read permission.
-
-Quota handling follows the contract's [failure rules](core/CONTRACT.md#failure).
-Reads can honor a short `Retry-After`, and active waiters can resume after a
-verified reset within their deadline. REST and GraphQL have
-separate primary budgets, shared by all sessions of one user. For an explicit
-primary GraphQL limit, loopzero may make one bounded diagnostic query for a
-verified reset time; it does not preflight requests or infer GraphQL capacity
-from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api).
+earlier jitter, bounded by the timeout. Fine-grained tokens need Actions read
+permission. Wait, REST/GraphQL and quota rules live in the contract's
+[failure rules](core/CONTRACT.md#failure).
 
 ## Adopt it in six steps
 
@@ -83,9 +72,8 @@ from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.
    See [SETUP.md](SETUP.md).
 4. Install the [core/skills](core/skills) once per machine from a source
    checkout at the same pinned revision as the CLI
-   ([agent setup](SETUP.md#connect-your-agent)). Entry skills are `plan`,
-   `implement`, `work-issue` and `write-design-doc`; use the catalog's other
-   methods as needed. Repositories keep no skill copies and customise through
+   ([agent setup](SETUP.md#connect-your-agent)); the
+   [skills index](core/skills/README.md) names the entry skills. Repositories keep no skill copies and customise through
    `AGENTS.md` and the docs it links. Optional TypeSafe guidance lives in
    [integrations/typesafe-ai](integrations/typesafe-ai).
 5. For integrations that need API keys, follow
@@ -110,7 +98,7 @@ Settings and semantics the example does not spell out:
 | `checks.required_ci` | Names may be check runs or commit statuses; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
 | `checks.writable` | The forbidden-path rules from `checks.ro_paths` apply. |
 | `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers. |
-| `checks.env_allowlist` | Host variables allowed for checks. An explicit list replaces the configured default (`PATH HOME LANG LC_ALL TERM`). The sandbox forwards `PATH LANG LC_ALL TERM` by default and sets `HOME` to `/tmp/home`. To forward another launcher variable, append its name to `[checks].env_allowlist` in the base branch’s `workflow.toml`. |
+| `checks.env_allowlist` | Host variables allowed for checks; an explicit list replaces the default. The default and sandbox forwarding are in the [contract](core/CONTRACT.md#sandbox-rules-for-checks). To forward another launcher variable, append its name to `[checks].env_allowlist` in the base branch’s `workflow.toml`. |
 
 ## What it deliberately does not do
 
