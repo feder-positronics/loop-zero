@@ -616,14 +616,14 @@ def test_rebuild_wait(monkeypatch, no_retry_delay, matches, second, stop):
         assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
 
 
-@pytest.mark.parametrize("outcome,message", [("normal", ""), ("bound", ""), ("fetch", "returned error: 503"), ("fetch", "Could not resolve host: github.com"), ("fetch", "fatal: early EOF"), ("fetch", "GnuTLS recv error (-110)")])
+@pytest.mark.parametrize("outcome,message", [("normal", ""), ("bound", ""), ("fetch", "returned error: 503"), ("fetch", "Could not resolve host: github.com"), ("fetch", "fatal: early EOF"), ("fetch", "GnuTLS recv error (-110)"), ("fetch", "unable to access 'https://github.com/o/r.git': Empty reply from server"), ("denied", "unable to access 'https://github.com/acme/proxy-ssl.git': The requested URL returned error: 403"), ("denied", "RPC failed; HTTP 403 curl 22")])
 def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome, message):
     waits, killed = [], []
     class Child:
         pid = 123
         def __init__(self, argv, cwd, **kwargs):
             self.root, self.running = cwd, "test-command" in argv
-            self.returncode = 128 if outcome == "fetch" and "fetch" in argv else 0
+            self.returncode = 128 if outcome in {"fetch", "denied"} and "fetch" in argv else 0
             if self.returncode:
                 kwargs["stderr"].write(f"fatal: {message}".encode())
 
@@ -645,11 +645,12 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome,
     monkeypatch.setattr(candidate.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     monkeypatch.setattr(candidate.time, "sleep", lambda _: pytest.fail("used a fixed delay"))
 
-    error = pytest.raises(github.GhUnavailable, match="temporarily unavailable") if outcome == "fetch" else nullcontext()
+    error = {"fetch": pytest.raises(github.GhUnavailable, match="temporarily unavailable"),
+             "denied": pytest.raises(CandidateError, match="objects unavailable")}.get(outcome, nullcontext())
     with error, candidate.fetched_git("owner/repo", []) as git:
         bound = pytest.raises(CandidateError, match="Git object/size bound exceeded")
         with bound if outcome == "bound" else nullcontext():
             assert git("test-command") == ""
 
-    assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": []}[outcome]
+    assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": [], "denied": []}[outcome]
     assert killed == ([(123, candidate.signal.SIGKILL)] if outcome == "bound" else [])

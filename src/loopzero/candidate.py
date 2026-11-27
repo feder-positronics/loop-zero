@@ -245,9 +245,11 @@ class _MissingMergeHistory(CandidateError):
 
 
 _FETCH_TRANSPORT = re.compile(
-    r"returned error: (?:429|5\d\d)|could not resolve host|failed to connect|connection (?:refused|timed out)|"
-    r"early eof|unexpected disconnect|rpc failed|ssl|tls|gnutls|transfer closed|proxy|network is unreachable",
-    re.IGNORECASE)
+    r"returned error: (?:429|5\d\d)|could not resolve host|failed to connect to|connection (?:refused|timed out)|"
+    r"early eof|unexpected disconnect|empty reply from server|rpc failed; (?:curl (?:18|28|52|55|56)|http 5)|"
+    r"gnutls_handshake|gnutls recv error|ssl_(?:read|connect)|openssl ssl_|ssl connection|tls handshake|"
+    r"transfer closed|received http code 5\d\d from proxy|network is unreachable", re.IGNORECASE)
+_FETCH_DENIED = re.compile(r"returned error: 4(?!29)\d\d|rpc failed; http 4(?!29)\d\d", re.IGNORECASE)
 
 
 def _require_time(operation: str, deadline: float) -> None:
@@ -263,7 +265,7 @@ def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None
     if operation == "fetch" and returncode:
         output.seek(0)
         diagnostic = output.read(_TREE_OUTPUT).decode(errors="replace")
-        if github._transient_error(diagnostic, False) or _FETCH_TRANSPORT.search(diagnostic):
+        if github._transient_error(diagnostic, False) or (_FETCH_TRANSPORT.search(diagnostic) and not _FETCH_DENIED.search(diagnostic)):
             raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
     _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
              "resource bound hit, or integration conflict")
