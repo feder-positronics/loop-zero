@@ -1088,7 +1088,7 @@ def _has_thread_reply(node: dict, reply: str) -> bool:
     while page.get("hasNextPage"):
         cursor = _next_thread_cursor(page, seen)
         data = _gh_json("api", "graphql", "-f", f"query={_THREAD_REPLIES_QUERY}",
-                        "-F", f"thread={node['id']}", "-f", f"after={cursor}", token="")
+                        "-f", f"thread={node['id']}", "-f", f"after={cursor}", token="")
         try:
             comments = data["data"]["node"]["comments"]
             page = comments["pageInfo"]
@@ -1119,14 +1119,14 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
             # Two calls on purpose: fields of one mutation are not transactional, and a
             # thread must never be resolved unless its reply was confirmed.
             posted = _gh_json("api", "graphql", "-f", f"query={_REPLY_MUTATION}",
-                              "-F", f"thread={thread_id}", "-f", f"body={reply}")
+                              "-f", f"thread={thread_id}", "-f", f"body={reply}")
             try:
                 posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
             except (KeyError, TypeError) as exc:
                 raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
         try:
             response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
-                           "-F", f"thread={thread_id}", retry_idempotent=True)
+                           "-f", f"thread={thread_id}", retry_idempotent=True)
             thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
             if thread["isResolved"] is not True:
                 raise ValueError("GitHub did not return isResolved=true")
@@ -1208,8 +1208,8 @@ def open_blocking_findings(
 
 def _pull_query(repo: str, number: int, query: str) -> tuple[str, ...]:
     owner, name = repo.split("/", 1)
-    return ("api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}",
-            "-F", f"name={name}", "-F", f"number={number}")
+    return ("api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}",
+            "-f", f"name={name}", "-F", f"number={number}")
 
 
 def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -> list[dict]:
@@ -1225,7 +1225,7 @@ def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -
             found.extend(node for node in threads["nodes"] if include_resolved or not node.get("isResolved"))
             if not page["hasNextPage"]:
                 return found
-            cursor = ("-F", f"after={_next_thread_cursor(page, seen)}")
+            cursor = ("-f", f"after={_next_thread_cursor(page, seen)}")
         except (KeyError, TypeError) as exc:
             raise GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})") from exc
 
