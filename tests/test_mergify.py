@@ -101,16 +101,17 @@ def queue_api(monkeypatch):
             {"batches": [], "mode": mode} if suffix.startswith("/merge-queue/status")
             else {"configuration": rows}
         ))
-        reads = 0
+        calls = []
+
         def get(path):
-            nonlocal reads
+            calls.append(path)
             if path == "repos/acme/widgets":
                 return {"default_branch": default}
             assert path == "repos/acme/widgets/contents/.mergify.yml?ref=refs%2Fheads%2Fmain"
-            reads += 1
-            return {"type": "file", "encoding": "base64", "sha": str(reads if changed else 1)*40,
+            return {"type": "file", "encoding": "base64", "sha": str(len(calls) if changed else 1)*40,
                     "content": base64.b64encode(text.encode()).decode(), **(file_overrides or {})}
         monkeypatch.setattr(mergify.github, "api_get", get)
+        return calls
     return github_config
 
 
@@ -147,6 +148,13 @@ UNSAFE_CONFIGS = [
 def test_configured_validates_canonical_github_config(queue_api, text, options, accepted):
     queue_api(text, **options)
     assert mergify.configured("acme/widgets", "main", "main") == accepted
+
+
+def test_queue_proof_checks_default_branch_once_after_checking_file_identity(queue_api):
+    calls = queue_api(SAFE_CONFIG)
+    assert mergify.configured("acme/widgets", "main", "main")
+    config = "repos/acme/widgets/contents/.mergify.yml?ref=refs%2Fheads%2Fmain"
+    assert calls == [config, config, "repos/acme/widgets"]
 
 
 def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):

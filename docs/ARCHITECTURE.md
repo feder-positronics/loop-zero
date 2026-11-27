@@ -331,8 +331,9 @@ attempt resolves identity, lineage and source policy again; no evidence or
 approval survives a failed attempt, other failures (including source-head drift)
 stop at once, and success requires one complete attestation. Policy evidence is
 not atomic across reads. Source PRs skip these attestation retries but keep
-their mergeability polling; a merged source PR publishes nothing, so a late
-refresh cannot turn its landed head red.
+their mergeability polling; a source that lands mid-refresh gets its preceding
+evaluated verdict back, only while this run's own pending status (by id) is still
+newest, outside the failure handler; a late refresh cannot leave it pending or red.
 After GitHub acknowledges a pending status, SIGTERM during evaluation triggers a
 bounded failure write for that SHA. Once the final write starts, publication
 recovery owns its verdict.

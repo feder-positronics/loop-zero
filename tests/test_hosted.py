@@ -66,14 +66,48 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     gh = FakeGh(fake_bin, tmp_path)
     gh.respond_pr_view(pr_json(), branch="lz/task")
     gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
+    gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 11})
     gh.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [])
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     return gh
 
 
 def approval(head=HEAD, *, state="APPROVED", verdict="**approve**"):
     return {"state": state, "commit_id": head, "user": {"login": "trusted-publisher"},
             "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n{verdict}"}
+
+
+@pytest.mark.parametrize("case,states", [
+    ("restore", ["pending", "failure"]), ("newer success", ["pending"]), ("newer pending", ["pending"]),
+    ("stale marker", ["pending", "failure"]), ("write lost", ["pending", "failure"]),
+    ("many markers", ["pending", "failure"]), ("other publisher marker", ["pending", "failure"]),
+    ("case-insensitive newer", ["pending"]), ("pending verdict like marker", ["pending", "pending"]), ("verdict worded like marker", ["pending", "failure"]),
+])
+def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, states):
+    ctx = {"context": "Loop-zero Eligibility"}
+    old = ctx | {"id": 1, "state": "failure", "description": "Blocking finding"}
+    marker = ctx | {"id": 11, "state": "pending", "description": "Refreshing live source review evidence"}
+    history = {"restore": [marker, old], "stale marker": [marker, marker | {"id": 10}, old],
+               "newer success": [old | {"id": 12, "state": "success"}, marker, old],
+               "newer pending": [marker | {"id": 12, "description": "Awaiting trusted review"}, marker, old],
+               "write lost": [marker, old],
+               "other publisher marker": [marker, marker | {"id": 9, "description": "Refreshing source review evidence"}, old],
+               "pending verdict like marker": [marker, marker | {"id": 9, "description": "Refreshing sources"}, old],
+               "case-insensitive newer": [old | {"id": 12, "state": "success", "context": "loop-zero eligibility"}, marker, old],
+               "many markers": [marker] + [marker | {"id": i + 2} for i in range(25)] + [old],
+               "verdict worded like marker": [marker, old | {"description": "Refreshing live source (verdict)"}]}[case]
+    publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", history)
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [approval()])
+    publisher.respond_pr_view(pr_json(state="MERGED"))
+    if case == "write lost":
+        publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 11},
+                          {"stdout": "", "exit": 1, "stderr": "HTTP 422"})
+        check_source(publisher, states, error=hosted.LoopZeroError)
+    else:
+        posted = check_source(publisher, states)
+        if len(posted) == 2:  # The restored row is the verdict users see, not the marker.
+            markers = {"Refreshing live source review evidence", "Refreshing source review evidence"}
+            assert posted[1]["description"] == next(r["description"] for r in history if r["description"] not in markers)
 
 
 def check_source(publisher, states, *, exit_code=0, error=None, match=None):
