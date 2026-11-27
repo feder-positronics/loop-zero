@@ -2247,7 +2247,7 @@ def test_review_publisher_check_uses_app_identity(
     if not allowed:
         assert "GitHub login 'app[bot]' is not a configured review publisher" in err
         assert f"Configured publishers: {publisher}" in err
-        assert ("App token helper" in err) is (publisher == "other[bot]")
+        assert ("Restore the App token helper" in err) is (publisher == "other[bot]") and "rerun `loopzero review`" in err
 
 
 @pytest.mark.parametrize("after_review", ["app[bot]", "other[bot]", "helper fails"])
@@ -3176,6 +3176,11 @@ def test_ready_wait_review_failure_freshness(
     replay_gh,
 ) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
+    refresh = name == "Loop-zero Eligibility" and new_failure == "server-old-review"
+    if refresh:
+        expected, waited = 0, True
+        endpoint = ELIGIBILITY_DISPATCH.replace("/dispatches", "/runs?event=workflow_dispatch&branch=main&per_page=100")
+        gh.respond(f"api {endpoint}", {"workflow_runs": [{"display_title": "Refresh eligibility for PR #7", "status": "queued"}]})
     current, earlier = "12:00:00Z", "11:59:59Z"
     review_time, failure_time = {
         True: (current, "12:00:10Z"), "tie": (current, current), "missing": (current, None),
@@ -3209,26 +3214,21 @@ def test_ready_wait_review_failure_freshness(
     arm_check_runs(gh, head, runs)
     status_key = f"api repos/{REPO}/commits/{head}/statuses"
     gh.respond(status_key, statuses)
-
     def advance():
         if expected == 0 and (age != 300 or len(clock.sleeps) > 1):
             arm_check_runs(gh, head, [{"name": name, "conclusion": "success"}])
             gh.respond(status_key, [{"context": name, "state": "success"}])
-
     clock = poll_clock(monkeypatch, after_sleep=advance)
     monkeypatch.setattr(cli.time, "time", lambda: start + clock.now)
     wait_flag = "--wait=10" if server_timeline else "--wait=60" if age < 0 else "--wait"
     out, _ = expect_cli(capsys, expected, "--config", "workflow.toml", "ready",
                         *([wait_flag] if wait else []), stderr="")
     assert bool(clock.sleeps) is waited
-    if server_timeline and waited:
-        assert clock.sleeps == [9.0]
+    assert not (server_timeline and waited) or clock.sleeps == [9.0]
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         f"not ready: required check '{name}' is failure{FAILED_CHECK_HINT}\n")
     assert (f"waiting: required check '{name}' is failure" in out) == waited
-    assert out.count("predates the review; awaiting refresh") == int(
-        waited and (age < 0 or age >= 120) and not pending
-    )
+    assert out.count("predates the review; awaiting refresh") == int(waited and (age < 0 or age >= 120) and not pending and not refresh)
 
 
 def test_ready_wait_stops_if_pr_head_moves(wt, gh, capsys, monkeypatch, head):
@@ -3622,7 +3622,7 @@ def test_source_wait_times_out_on_pending_checks(wt, gh, capsys, monkeypatch, he
         monkeypatch.setattr(github, "run", slow_check)
     out, _ = expect_cli(capsys, 3, command, "--wait=16" if slow else "--wait=0", stderr="")
     assert budgets == (pytest.approx([4.0]) if slow else [])
-    assert f"timed out waiting for required checks on {head[:12]}. Run `loopzero {command} --wait` to resume on this head." in out
+    assert f"timed out waiting for required checks on {head[:12]}. Run `loopzero {command} --wait` to resume on this head." in " ".join(out.splitlines())
     assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
@@ -3756,7 +3756,7 @@ def test_mergify_uses_one_deadline_for_checks_admission_and_landing(
 
     out, err = expect_cli(capsys, 3, "merge", "--wait=10")
     if admission_expires:
-        assert err == "" and "timed out before requesting Mergify for PR #7" in out
+        assert err == "" and out.endswith("timed out before requesting Mergify for PR #7\nRun `loopzero merge --wait` to resume on this head.\n")
     else:
         assert budgets == [4.0]
 
@@ -4278,7 +4278,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
     else:
         assert (code, err) == (0, "")
         status = {"remaining": [], "missing": ["Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete."]}
-        assert out.splitlines()[1:] == status.get(outcome, ["refreshed Loop-zero Eligibility for PR #7"])
+        assert out.splitlines()[1:] == status.get(outcome, ["Requested a Loop-zero Eligibility refresh for PR #7. Run `loopzero ready --wait` to follow the verdict."])
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
