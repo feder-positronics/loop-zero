@@ -32,6 +32,7 @@ APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 PR_LOCK_DIR = Path.home() / ".cache/loopzero/pr-locks"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
+BODY_BLOCKERS = "<!-- loopzero:body-blockers -->\n"
 MERGEABILITY_PENDING = "GitHub is computing mergeability"
 MARKER_RE = re.compile(
     r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
@@ -829,10 +830,20 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     if result.chunk_count > 1:
         lines.append(f"\nReviewed in {result.chunk_count} chunks with the same model family.")
     lines.extend(_review_settings_lines(result, include_configured=settings_layout == "current"))
-    if unplaced:
-        lines.append("\nFindings without a file location:\n")
-        lines += [_CREDENTIAL_TOKEN_RE.sub("[REDACTED]", f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —")) for f in unplaced]
-    return "\n".join(lines) + _review_transcript(result, legacy_display)
+    blocker_prefix, findings = _unplaced_findings(unplaced)
+    return blocker_prefix + "\n".join(lines + findings) + _review_transcript(result, legacy_display)
+
+
+def _unplaced_findings(unplaced: list[Finding]) -> tuple[str, list[str]]:
+    if not unplaced:
+        return "", []
+    blocked = any(f.severity in BLOCKING for f in unplaced)
+    lines = ["\nFindings without a commentable line:\n" if blocked else "\nFindings without a file location:\n"]
+    for finding in unplaced:
+        where = f" ({finding.path}:{finding.line})" if finding.path and finding.severity in BLOCKING else ""
+        line = f"- **{finding.severity}**: {finding.title}{where} — {finding.body}".rstrip(" —")
+        lines.append(_CREDENTIAL_TOKEN_RE.sub("[REDACTED]", line))
+    return (BODY_BLOCKERS if blocked else ""), lines
 
 
 def _review_settings_lines(result: ReviewResult, *, include_configured: bool) -> list[str]:
@@ -935,11 +946,8 @@ def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
         if f.path and f.line and f.line in commentable.get(f.path, ()):
             comments.append({"path": f.path, "line": f.line, "side": "RIGHT",
                              "body": _comment_body(f, head_sha)})
-        elif f.severity not in BLOCKING:
+        elif f.severity not in BLOCKING or anchor is None:
             loose.append(f)
-        elif anchor is None:
-            raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}/files"),
-                          f"cannot anchor '{f.title}': PR has no diff hunks")
         else:
             note = _MOVED_NOTE.format(where=f"{f.path}:{f.line}") if f.path else _ANCHOR_NOTE
             comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
@@ -969,7 +977,7 @@ def post_review(
     as a COMMENT, since GitHub rejects self-approval and self-request-changes.
 
     Findings whose location is missing or outside the diff are anchored on the first
-    changed file with a hunk, so every blocking finding creates a review thread.
+    changed file with a hunk. Without an anchor, blockers go in the review body.
     A supplied publisher is the login already checked for the supplied token.
     """
     author = (pr or pr_view(repo, number)).author
@@ -1142,7 +1150,8 @@ def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bo
     return False
 
 
-def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...]) -> None:
+def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...], *,
+                        required: bool) -> bool:
     args = eligibility_dispatch_args(repo, pr.number, base)
     since = datetime.fromtimestamp(time.time(), UTC).isoformat(timespec="seconds")
     try:
@@ -1158,15 +1167,23 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
             ):
                 raise GhError(("refresh Loop-zero Eligibility",), "the PR or head changed after resolution") from exc
             if _eligibility_dispatched(repo, pr.number, base, since):
-                return
+                return True
             if open_blocking_findings(repo, pr.number, None, publishers):
                 raise GhError(("refresh Loop-zero Eligibility",), "blocking findings appeared after resolution") from exc
             _gh(*args)
     except (GhError, ProcTimeout, OSError) as exc:
+        if (isinstance(exc, GhError) and exc.command[:len(args) + 1] == ("gh", *args)
+                and re.search(r"\bHTTP 404\b", exc.tail)):
+            if not required:
+                return False
+            raise GhError(("refresh Loop-zero Eligibility",),
+                          f"Finding on PR #{pr.number} is resolved. Check that eligibility.yml exists on "
+                          f"{base} and your GitHub login can dispatch it.") from exc
         retry = shlex.join(("gh", *args))
         raise GhError(("refresh Loop-zero Eligibility",),
                       f"Finding on PR #{pr.number} is resolved. {exc}\n"
                       f"Verify the PR head, remaining findings and recent runs before retrying: {retry}") from exc
+    return True
 
 
 def open_blocking_findings(
@@ -1345,7 +1362,7 @@ def _aggregate_signal(states: list[str]) -> str:
 
 def behind_reason(pr: PR) -> str:
     return (
-        f"PR #{pr.number} is behind {pr.base_ref}. Finish any pending delta review, then run "
+        f"PR #{pr.number} is behind {pr.base_ref}. Run "
         f"`git fetch origin {shlex.quote(pr.base_ref)}`, "
         f"`git merge {shlex.quote(f'origin/{pr.base_ref}')}`, `loopzero check` and `loopzero pr` before retrying readiness."
     )
@@ -1369,7 +1386,7 @@ def readiness(
     review_at: ReadinessTimestamp | None = None,
     review_grace: bool = False,
     workflow_wait: bool = False,
-    stale_verdict_grace: bool = False,
+    stale_verdict_grace: bool = False, review_blocker: str | None = None,
     publishers: tuple[str, ...],
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
@@ -1382,8 +1399,8 @@ def readiness(
         reasons.append(blocker)
     if pr.merge_state == "BEHIND" and not allow_behind:
         reasons.append(behind_reason(pr))
-    if not reviewed_head:
-        reasons.append(MISSING_REVIEW_REASON)
+    if review_blocker or not reviewed_head:
+        reasons.append(review_blocker or MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
     for f in open_blocking_findings(repo, pr.number, None if ancestor_review or not reviewed_head else pr.head_sha,
