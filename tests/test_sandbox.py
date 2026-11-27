@@ -28,7 +28,7 @@ from tests.conftest import bwrap_argv
 from loopzero.cli import _current_check_report, _save_report
 from loopzero.types import Config, ResourceLimits
 
-from .conftest import git
+from .conftest import commit_file, git
 
 FAKE_BWRAP = '''#!/usr/bin/python3
 import os
@@ -393,6 +393,29 @@ def _real_bwrap_works() -> bool:
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
 class TestRealSandbox:
+    @pytest.mark.parametrize("interrupt", [False, True])
+    def test_changed_consumer_input_refreshes_scratch(self, git_repo, fetched_base, cache_check, interrupt):
+        commit_file(git_repo, "consumer.txt", "old\n", "Add consumer input")
+        producer = "echo generated > .venv/generated"
+        consumer = "test -s .venv/generated && cat consumer.txt"
+        config = make_config(checks=(producer, consumer), scratch=(".venv",),
+                             inputs={producer: ("README.md",), consumer: ("consumer.txt",)})
+        cache_check(config, clean=True, verify_reuse=True)
+        commit_file(git_repo, "consumer.txt", "new\n", "Update consumer input")
+
+        if interrupt:
+            def checkpoint(report):
+                _save_report(git_repo, report)
+                raise KeyboardInterrupt
+
+            with pytest.raises(KeyboardInterrupt):
+                sandbox.run_checks(config, git_repo, checkpoint=checkpoint)
+
+        report = sandbox.run_checks(config, git_repo)
+        assert report.ok
+        assert report.results[0].reused_from is None
+        assert report.results[1].tail.strip() == "new"
+
     @pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode"))
     def test_real_sandbox_rejects_hidden_git_alternates_before_checks(self, git_repo, tmp_path, layout):
         shared = tmp_path / "shared"
@@ -503,7 +526,8 @@ class TestRealSandbox:
         assert sandbox.run_checks(cfg, git_repo).ok
 
     @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
-    def test_real_sandbox_uv_run_offline(self, git_repo, tmp_path):
+    @pytest.mark.parametrize("interrupt", [False, True])
+    def test_real_sandbox_uv_run_offline(self, git_repo, tmp_path, fetched_base, receipt_path, interrupt):
         uv_cache = tmp_path / "uv-cache"
         uv_cache.mkdir()
         uv = shutil.which("uv")
@@ -522,14 +546,26 @@ class TestRealSandbox:
         git(git_repo, "add", "-A")
         git(git_repo, "commit", "-q", "-m", "uv project")
         cfg = make_config(
-            checks=("uv run --group dev python -c 1", ".venv/bin/python -c 1", "test ! -w ."),
+            checks=(".venv/bin/python -B -c 1", "uv run --group dev python -c 1", "test ! -w ."),
+            inputs={"*": (".",)},
             env=tuple(env.items()),
             sandbox_ro=(str(Path(uv).parent), sys.base_prefix),
             writable=(str(uv_cache),),
         )
+        if interrupt:
+            def checkpoint(report):
+                assert report.results[0].exit_code == 0
+                _save_report(git_repo, report)
+                raise KeyboardInterrupt
+
+            with pytest.raises(KeyboardInterrupt):
+                sandbox.run_checks(cfg, git_repo, checkpoint=checkpoint)
+
         report = sandbox.run_checks(cfg, git_repo)
         assert report.ok, report
         assert [r.command for r in report.results] == list(cfg.checks)
+        if interrupt:
+            assert report.results[0].reused_from == report.head
         assert not (git_repo / ".venv/bin").exists()  # venv lived in the scratch dir
 
 
@@ -758,6 +794,29 @@ def test_reuse_skipped_before_unkeyed_stage(git_repo, bwrap_log, fetched_base, c
     cache_check(cfg)
     reused = [bool(r.reused_from) for r in sandbox.run_checks(cfg, git_repo).results]
     assert reused == ([False, False, True] if scratch else [True, False, True])
+
+
+def test_earlier_stage_failure_precedes_later_input_error(
+    git_repo, bwrap_log, fetched_base, cache_check, monkeypatch,
+):
+    first = "grep -qx ready README.md || { echo 'earlier failure'; exit 7; }"
+    later = "echo later"
+    commit_file(git_repo, "README.md", "ready\n", "Set up passing check")
+    commit_file(git_repo, "later.txt", "later\n", "Add later input")
+    config = make_config(checks=(first, later), scratch=(".venv",),
+                         inputs={first: ("README.md",), later: ("later.txt",)})
+    cache_check(config, clean=True, verify_reuse=True)
+    commit_file(git_repo, "README.md", "broken\n", "Make earlier check fail")
+    input_blobs = sandbox._input_blobs
+
+    def lookup(config, worktree, paths):
+        if paths == ("later.txt",):
+            raise OSError("later lookup failed")
+        return input_blobs(config, worktree, paths)
+
+    monkeypatch.setattr(sandbox, "_input_blobs", lookup)
+    [result] = sandbox.run_checks(config, git_repo).results
+    assert (result.exit_code, result.tail.strip()) == (7, "earlier failure")
 
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
