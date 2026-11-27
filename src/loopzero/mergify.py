@@ -331,10 +331,10 @@ def _job_failure(repo: str, job_id: str) -> str:
             return f"GitHub log request failed (exit {result.exit_code})"
     except (github.ProcTimeout, github.ToolMissing, OSError, github.ReadDeadline) as exc:
         return f"log unavailable ({type(exc).__name__})"
-    log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.stdout)
-    headers = re.findall(r"^(?:\d{4}-\d\d-\d\dT\S+Z )? *(?:(FAILED |ERROR )(?=\S+(?:::|\.py\b))|(FAIL +|\d+\) +(?=[^\r\n]*\u203a)))([^\r\n]+)", log, re.M)
-    names = (github._redact_tokens(line.partition(" - ")[0] if pytest_header else line)[:500]
-             for pytest_header, _, line in headers)
+    log = re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))", "", result.stdout)
+    headers = re.findall(r"^(?:\d{4}-\d\d-\d\dT\S+Z )? *(?:(?:FAILED|ERROR) ((?=[^\s\[]*(?:::|\.py\b))[^\s\[]++(?:\[[^\r\n]*?\])?)(?= - |\r?$)"
+                         r"|(?:FAIL +|\d+\) +(?=[^\r\n]*\u203a))([^\r\n]+))", log, re.M)
+    names = (github._redact_tokens(node or header)[:500] for node, header in headers)
     return ", ".join(repr(name) for name in tuple(dict.fromkeys(names))[:10]) or "no test failures in log tail"
 
 
