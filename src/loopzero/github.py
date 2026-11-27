@@ -1578,8 +1578,8 @@ def commit_status(
         raise
 
 
-def latest_statuses(repo: str, head: str, context: str, count: int | None = 1) -> list[dict]:
-    return list(islice((r for r in _iter_paged(f"repos/{repo}/commits/{head}/statuses") if r.get("context") == context), count))
+def context_statuses(repo: str, head: str, context: str) -> Iterator[dict]:
+    return (r for r in _iter_paged(f"repos/{repo}/commits/{head}/statuses") if str(r.get("context", "")).casefold() == context.casefold())
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:

@@ -137,9 +137,9 @@ def _run(cfg: Config) -> int:
 
 
 def _restore_landed(repo: str, head: str, marker: int | None) -> int:
-    rows = github.latest_statuses(repo, head, eligibility.CONTEXT, None)
-    if marker and rows and rows[0].get("id") == marker and (prior := next(
-            (r for r in rows if (r["state"], r.get("description")) != (rows[0]["state"], rows[0].get("description"))), None)):
+    rows = github.context_statuses(repo, head, eligibility.CONTEXT)
+    if marker and next(rows, {}).get("id") == marker and (prior := next(
+            (r for r in rows if r["state"] != "pending" or not (r.get("description") or "").startswith("Refreshing")), None)):
         _publish_verdict(repo, head, prior["state"], prior["description"])
     return 0
 
@@ -166,7 +166,7 @@ def _publish_verdict(repo: str, head: str, state: str, description: str) -> None
         raise
     except (github.GhError, github.ProcTimeout, OSError) as exc:
         with suppress(github.GhError, github.ProcTimeout, OSError):
-            if [(r["state"], r["description"]) for r in github.latest_statuses(repo, head, context)] == [(state, description)]:
+            if ((r := next(github.context_statuses(repo, head, context), {})).get("state"), r.get("description")) == (state, description):
                 return
         raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
 
