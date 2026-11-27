@@ -1095,6 +1095,12 @@ def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap,
     assert len(detail.encode()) < 450 and ("…" in detail) == bool(size)
 
 
+def test_deleted_file_summary_counts_lines_that_start_with_dashes() -> None:
+    block = ("diff --git a/x.sql b/x.sql\ndeleted file mode 100644\nindex 1234567..0000000\n"
+             "--- a/x.sql\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-select 1;\n--- a comment\n-select 2;\n")
+    assert runners._summarize_deleted(block) == "diff --git a/x.sql b/x.sql\nx.sql: deleted, 3 lines\n"
+
+
 @pytest.mark.parametrize("name,budget", [
     ("zażółć gęślą.txt", 4096), ("gone with spaces.txt", 4096), ("gone.txt", 4096), ("gone.py", 100),
 ])

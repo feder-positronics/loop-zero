@@ -123,7 +123,7 @@ def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False
 
 
 def lock_local_state(wt: Path):
-    """Serialize check execution, receipt publication and PR-body updates for this worktree."""
+    """Serialize check execution, receipt publication and Mergify admission for this worktree."""
     return _local_state_directory(wt, create=True, lock=True)
 
 

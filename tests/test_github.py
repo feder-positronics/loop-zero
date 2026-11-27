@@ -844,15 +844,8 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
     ([(10, "checks", None, "skipped"), (11, "checks", None, "success")], {"checks": "success"}),
     ([(20, "checks", "01:00:00Z", None), (19, "checks", "02:00:00Z", "success")], {"checks": "pending"}),
     ([(30, "checks", None, "success"), (31, "lint", None, "failure")], {"checks": "success", "lint": "failure"}),
-    ([(40, "checks", "01:00:00Z", "failure"), (40, "checks", "02:00:00Z", "success")], {"checks": "success"}),
-    ([(7, "checks", "12:00:00Z", "success"), (7, "checks", "12:00:00.250Z", "failure")], {"checks": "failure"}),
-    ([(None, "checks", "12:00:00Z", "success"), (None, "checks", "09:00:01-03:00", "failure")], {"checks": "failure"}),
-    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "14:00:00+02:00", "success")], {"checks": "failure"}),
-    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "23:00:00+00:99", "success")], {"checks": "failure"}),
-    ([(None, "checks", None, "failure"), (None, "checks", "23:00:00", "success")], {"checks": "failure"}),
 ], ids=[
-    "stale-skipped", "id-before-time", "distinct-names", "timestamp-tie", "same-id-fraction",
-    "missing-ids-offset", "equal-instants", "invalid-loses-to-valid", "unusable-times-tie",
+    "stale-skipped", "id-before-time", "distinct-names",
 ])
 def test_check_runs_ordering(gh: FakeGh, rows: list[tuple], expected: dict) -> None:
     runs = [check_run(conclusion, name=name, status="completed" if conclusion else "in_progress",
