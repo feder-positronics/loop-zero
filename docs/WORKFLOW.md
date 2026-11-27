@@ -18,11 +18,10 @@ flowchart TD
     G --> C
     F -->|changes requested after the delta| R["Reject findings with reasons,<br/>or fix in a replacement PR"]
     R -->|findings rejected| H
-    F -->|approved| H["Check it is ready: no open findings,<br/>required CI green on the same version<br/><sub>loopzero ready --wait</sub>"]
+    F -->|approved| H["Check it is ready: no blocking findings,<br/>required CI green on the same version<br/><sub>loopzero ready --wait</sub>"]
     H -->|review coverage lost and budget allows another review| F
     H -->|ready| I["Merge<br/><sub>loopzero merge --wait</sub>"]
-    I --> J["Mergify queue lands it<br/>where one is configured"]
-    J --> K["Clean up: delete branch and worktree"]
+    I -->|direct merge or queue landing| K["Verify landing and clean up branch and worktree"]
 ```
 
 Summarizes [The six steps](../core/CONTRACT.md#the-six-steps),

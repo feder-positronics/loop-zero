@@ -149,21 +149,19 @@ Point it at the GitHub repository you set in `[repo] name`. Use
 `git remote add origin <url>` to add it or `git remote rename <name> origin`
 if you already configured it under a different name.
 
-Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
-repository root, set `[repo] name`, and commit your initial `[checks]` commands
-to the base branch before starting your first task. If the base has a
-`workflow.toml`, `loopzero check` uses its checks configuration even when
-`[checks]` is absent. To try task-side changes explicitly, run
-`loopzero --config workflow.toml check` from the task worktree. Then:
+Copy [workflow.example.toml](workflow.example.toml) to the repository root as
+`workflow.toml`. Set `repo.name` and commit the workflow to the base before the
+first task. To try task-side changes, run `loopzero --config workflow.toml check`.
 
 - Before pushing the base, set `checks.commands` to checks your project can run.
   For a shell-only first check, use `commands = ["test -f greeting.txt"]` under
   `[checks]` and commit `greeting.txt` in your first task. Replace or omit the
   example's uv-specific `scratch`, `env`, `writable`, and `ro_paths` entries
   to match your tools. With just shell checks, you can omit all four.
-- Configure hosted check names, mounts, scratch and environment in the
-  [commented workflow example](workflow.example.toml). See the contract's
-  [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
+- Ready and merge require an explicit `checks.required_ci` list (`[]` if there
+  are no required checks) and nonempty
+  [review publishers](#hosted-review-eligibility). See the contract's
+  [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for mounts and environment.
 - Host paths in the trusted workflow must work on every delivery machine. Use a
   machine-specific workflow with `--config` on check, ready and merge when paths differ.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
@@ -318,19 +316,19 @@ To repair the original clone, run `git repack -a -d`, remove
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"
-loopzero pr      # open the draft before a long check
-loopzero check
-# After reviewing the PR, keep this PATH for delivery.
-loopzero ready --wait
-loopzero merge --wait
+loopzero pr && loopzero check   # open the draft before a long check
 ```
 
-A whole-job remote worker writes its own receipt. Ready can use it only if it
-passes the existing checks for a clean, passing receipt at the exact head,
-with the current ordered commands and matching settings fingerprint. An older
-worker can omit the fingerprint. Explicit check settings must match. GitHub required
-CI supplies separate evidence. The [owner queue route](core/CONTRACT.md#blockers)
-applies only under its documented conditions.
+After review, keep the same `PATH` and run from outside the task worktree.
+
+```sh
+(cd "/absolute/path/to/task-worktree" && loopzero ready --wait && loopzero merge --wait)
+```
+
+A whole-job remote worker writes its own receipt. Ready requires a clean,
+passing receipt at the exact head with the current ordered commands and a
+matching settings fingerprint. GitHub required CI supplies separate evidence.
+See the contract's [owner queue route](core/CONTRACT.md#blockers).
 
 ### Shared test hosts
 
@@ -382,15 +380,11 @@ local and published branches.
 
 ## Merging under a merge queue
 
-When the base branch uses a GitHub merge queue, `loopzero merge` enqueues the
-PR. With `--wait` it follows the queue to the landed commit; without it, it
-exits after printing that it is queued, and a later `loopzero merge` verifies the
-merge commit, deletes the remote branch and removes the worktree. The
-repository must allow auto-merge (Settings, General, "Allow auto-merge"),
-otherwise `gh pr merge` fails with "Auto merge is not allowed". Set
-`delivery.merge = "queue"` so the queue owns the merge method. On an already
-merged PR, rerunning `merge` attempts remote branch and worktree cleanup again;
-cleanup failures print warnings.
+Set `delivery.merge = "queue"` for GitHub's native queue and enable "Allow
+auto-merge" in the repository settings. GitHub may accept an auto-merge request
+before queue entry. Use `loopzero merge --wait` to verify landing and clean up, or
+rerun `loopzero merge` after landing to retry cleanup. See the
+[merge step](core/CONTRACT.md#the-six-steps) for exit and output details.
 
 ### Mergify
 
