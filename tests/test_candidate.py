@@ -658,11 +658,12 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome,
     assert killed == ([(123, candidate.signal.SIGKILL)] if outcome == "bound" else [])
 
 
-def test_failed_fetch_is_not_reported_as_missing_review(monkeypatch):
-    from loopzero import eligibility
-    monkeypatch.setattr(eligibility.github, "api_get", lambda _: {"base": {"sha": "b" * 40, "ref": "main"}, "head": {"sha": "c" * 40}})
-    def fail(*_a):
-        raise candidate.FetchFailed("git fetch exited 128: objects unavailable")
-    monkeypatch.setattr(eligibility.candidate, "fetched_git", fail)
-    with pytest.raises(candidate.FetchFailed):
+@pytest.mark.parametrize("failure", [candidate.FetchFailed("git fetch exited 128"), github.ProcTimeout("read timed out"),
+                                     github.GhError(("gh",), "HTTP 403"), github.GhError(("gh",), "HTTP 404")])
+def test_failed_inheritance_read_is_not_reported_as_missing_review(monkeypatch, failure):
+    pr = {"base": {"sha": "b" * 40, "ref": "main"}, "head": {"sha": "c" * 40}}
+    fetch_failed = isinstance(failure, candidate.FetchFailed)
+    monkeypatch.setattr(github, "api_get", Mock(return_value=pr, side_effect=None if fetch_failed else failure))
+    monkeypatch.setattr(candidate, "fetched_git", Mock(side_effect=failure))
+    with pytest.raises(type(failure), match=str(failure)):
         eligibility.base_merge_material("o/r", 7, "a" * 40, "c" * 40, "main", clean=True)
