@@ -16,7 +16,7 @@ from loopzero._proc import Terminated, unwind_on_sigterm
 from loopzero.types import Config, LoopZeroError
 
 
-class _SourcePolicyRejection(candidate_mod.CandidateError, LoopZeroError):
+class _SourcePolicyRejection(candidate_mod.CandidateError):
     """An expected hosted policy rejection, eligible for the landing-race check."""
 
 

@@ -9,6 +9,10 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    Fill `.loopzero/task.md` from the [handoff template](HANDOFF.md): goal,
    problem, context, acceptance, base SHA. Write the PR, like any issue or
    design doc you write, for the human owner under [Reporting](#reporting).
+   `start` is the default. In a worktree your launcher already made, first make
+   sure it is on a task branch (not a detached HEAD) and that `.loopzero/` is in
+   the repository's local Git excludes (`info/exclude`), as `start` would do;
+   then write `.loopzero/task.md` from the template.
 2. Implement, commit, then `loopzero check`: run each `workflow.toml`
    `[checks].commands` entry (a stage) in the sandbox; the result is the
    head's check receipt. A stage running over one hour is stopped with exit
@@ -22,7 +26,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    block. Drafts need no approving review.
 4. `loopzero review` runs a reviewer model's own CLI (a native review), by
    default from a family independent of the writers, on the exact head and posts
-   one GitHub review with inline findings. Approval exits 0, changes requested 5.
+   one GitHub review with inline findings. If there is no commentable line,
+   blocking findings go in the review body and need a reviewed fix. Approval
+   exits 0, changes requested 5.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
    passes. A PR whose only blockers are missing or skipped required checks
    (with or without pending mergeability) also leaves draft but is not ready
@@ -144,7 +150,9 @@ of draft and queues it directly in GitHub:
 - The head moved only by a clean base merge and the old head was green.
 
 This is the documented owner route; a red receipt still blocks `loopzero ready`
-and `loopzero merge`.
+and `loopzero merge`. Where a repository rule queues ready PRs, taking a PR out of
+draft is the queue request, whatever tool does it: after a receipt refusal, post
+the one reason first, or fix the cause and rerun `loopzero check`.
 
 An attributed main regression is repaired or reverted by the PR owner of the change
 that caused it; for a shared critical
@@ -155,16 +163,18 @@ required proof still blocks the affected operation. These failure policies
 preserve exact-SHA review, receipt requirements, the owner queue route and
 merge-authority holds.
 
-## Gate execution and delivery priority
+<a id="gate-execution-and-delivery-priority"></a>
+
+## Check reuse and delivery priority
 
 **Expensive suites run where the change is.** Browser and slow integration
 suites run on a PR or queue candidate only when the change touches their area.
 Their full run happens on main after merge; a red main from it follows the
 main-regression rule above. Never make a path-filtered job a required check.
 
-**Delivery fixes go first.** Fixes to the delivery system itself (CI, queue and
-runner reliability or speed) go to the front of the merge queue, ahead of feature
-work, through the repository's queue priority if it has one.
+**Delivery fixes and critical reverts go first.** Critical reverts and fixes to
+CI, queue and runner reliability or speed go ahead of feature work. Use the
+repository's queue priority where available.
 
 Finish planned base updates before starting checks. Reuse an identical check
 already queued or running at the same head and settings fingerprint. A second local
@@ -235,8 +245,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   configured family and reports reasons/nonzero if all fail. Only
   runner-produced reviews count. If no independent reviewer can run, try the
   preferred configured family in a fresh session and publish a visible same-family
-  fallback line. When no configured reviewer can run (exit 4), wait for the PR
-  owner.
+  fallback line. When no configured reviewer can run (exit 4), the PR owner
+  restores a configured reviewer and retries.
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.

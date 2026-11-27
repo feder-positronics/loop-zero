@@ -59,6 +59,9 @@ by one 30-second transport deadline. Recovery regenerates
 the exact review body and finding locations, checks the complete review/comment
 pages and unchanged head, and rereads review evidence before returning the saved
 verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
+When no diff line can anchor a blocker, the review body carries it behind a
+leading marker older readers reject. It blocks readiness until an eligible
+review covers the fixes.
 `review --repost` reconciles before enforcing the remaining publication budget;
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
@@ -160,8 +163,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    Ancestor coverage includes outdated unresolved blocking threads. A primary
    that requested changes also requires resolved findings at the reviewed head.
    For check runs with the same name, the latest run (by run ID, then start
-   time) decides; a retry supersedes a failure only when it starts after that
-   failure completed. After its own write taking the PR out of draft, `ready --wait`
+   time) decides. After its own write taking the PR out of draft, `ready --wait`
    revalidates through the same waiter, policy refresh and original deadline.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in
@@ -196,10 +198,11 @@ sandbox environment settings over a private file descriptor, keeping
 forwarded values out of process arguments. [Reviewer runners](../src/loopzero/runners.py)
 bound source access while allowing the network required by model CLIs; that
 network means the sandbox cannot prevent exfiltration of readable data.
-For a Codex executable installed inside protected native state, the implicit
-runtime mount exposes only the resolved executable and its existing sibling
-`codex-code-mode-host`, read-only. Neighboring history and configuration remain
-hidden; helper aliases into protected state and explicit state mounts fail closed.
+For a reviewer executable installed inside protected native state, the implicit
+runtime mount exposes only the resolved executable, read-only; for Codex it also
+exposes the existing sibling `codex-code-mode-host`, read-only. Neighboring history and configuration remain
+hidden; helper aliases into protected state and explicit state mounts fail closed,
+and explicit runtime paths get no such exception.
 Every command except `start` uses the workflow at one remote-tracking
 delivery revision selected by the workflow at Git's local `origin/HEAD`.
 Missing trusted refs or workflows block these commands. An explicit
@@ -216,10 +219,7 @@ config and mixed global-state exposure. Codex keeps its `auth.json` bind under
 `CODEX_HOME` or `~/.codex`, including when `OPENAI_API_KEY` is forwarded.
 File-backed binds preserve in-place writes, without guaranteeing host replacement
 visibility or shared-lock coordination. This boundary is route-specific, not full
-filesystem privacy. An implicit runtime inside state receives only the selected
-executable's exact read-only file mount, while explicit runtime paths have no
-exception. This preserves standalone CLI startup without exposing neighboring
-state; bundles needing protected siblings require installation outside state.
+filesystem privacy.
 The contract states the agent-facing consequences.
 
 Each reviewer runner separates fixed reviewer policy from supplied material
