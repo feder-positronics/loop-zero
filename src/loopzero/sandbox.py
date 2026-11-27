@@ -1,4 +1,4 @@
-"""Run checks in bwrap, which gives no CPU/memory quotas; ulimit is best-effort."""
+"""Run checks in bwrap, with best-effort resource limits from prlimit."""
 
 from __future__ import annotations
 

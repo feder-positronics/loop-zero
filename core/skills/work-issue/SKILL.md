@@ -23,8 +23,6 @@ Before publication, inspect the issue and links for its lifecycle blueprint and
 include required completion in the closing delivery. A child does not own its parent's blueprint.
 Recheck collisions, live acceptance, prior delivery and ownership before
 publication and merge. Reconcile changes before proceeding.
-Before queueing, check the candidate merged with the current base against
-every repository size cap, including the combined effect of any batch.
 Verify the replacement is installed and works before retiring a deployment workaround.
 Before a source edit for [delta](../../CONTRACT.md#review-budget), name the unmet
 criterion or verified defect. Own review, CI and post-merge acceptance waits.

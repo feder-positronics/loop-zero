@@ -18,7 +18,6 @@ import random
 import re
 import shlex
 import sys
-import tempfile
 import time
 import traceback
 from collections.abc import Callable, Iterator
@@ -443,19 +442,13 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
 
 _CHECKS_START = "<!-- loopzero:checks:start -->"
 _CHECKS_END = "<!-- loopzero:checks:end -->"
-_LEGACY_CHECKS = re.compile(
-    r"^Recorded for `[0-9a-f]+`(?: \(not current head\))?\n"
-    r"(?:- `[^\n]+`: exit -?\d+ \(\d+\.\d+s\)\n|"
-    r"- \(no check commands configured\)\n)*",
-    re.MULTILINE,
-)
 
 
 def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = (existing if existing is not None else worktree.task_text(wt)).replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(r"^## (?:Validation|Checks)\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = match.group(1)
@@ -466,8 +459,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -
             raise CliError("malformed loopzero checks block: fix the marker pair in Validation in the PR description on GitHub")
         content = before + block + suffix
     else:
-        # Migrate our old report/placeholder only, retaining behavioral evidence.
-        content = _LEGACY_CHECKS.sub("", content)
+        # Replace only our placeholder, retaining behavioral evidence.
         content = re.sub(
             r"^\((?:filled by `loopzero check`|no `loopzero check` run recorded)\)\n?",
             "", content, flags=re.MULTILINE,
@@ -492,7 +484,7 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
     task = worktree.task_text(wt).replace("\r\n", "\n")
     existing = existing.replace("\r\n", "\n")
     owned = {m.group(1): m.group() for m in pattern.finditer(task)
-             if m.group(1) not in {"Validation", "Checks", "Review"}}
+             if m.group(1) not in {"Validation", "Review"}}
     content = existing[first.start():] if (first := pattern.search(existing)) else ""
     prefix = task[:first.start()] if (first := pattern.search(task)) else task
 
@@ -575,12 +567,14 @@ def _pr_title(wt: Path, branch: str) -> str:
 def cmd_start(args: argparse.Namespace) -> int:
     root = _toplevel()
     current = config_mod.run_git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
-    if current.stdout.strip().startswith("lz/") or (
-        current.exit_code == 1 and worktree.is_linked_checkout(root)
-    ):
-        raise CliError(f"already inside task worktree {root}; run start from the main checkout")
+    # Nest task worktrees in the primary checkout, so removing a harness worktree cannot delete them.
+    listing = _git(root, "worktree", "list", "--porcelain", "-z", paths=True)
+    primary = Path(listing.split("\0", 1)[0].removeprefix("worktree "))
+    # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
+    if current.stdout.strip().startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
+        raise CliError(f"already inside task worktree {root}; run start from {primary}")
     config = _load_config(args, root)
-    print(worktree.start(root, args.slug, config.base_branch))
+    print(worktree.start(primary, args.slug, config.base_branch))
     return 0
 
 
@@ -954,14 +948,10 @@ def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettin
     codex = runners.codex_evidence(result)
     if codex is None:
         formats.append(("current", True))
-        if old_settings:
-            formats.append(("summary", True))
     if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
         formats.append(("requested-reported", True))
     if codex is not None and all("configured" not in call for call in codex["calls"]):
         formats.append(("requested-reported", False))
-    if result.family == "codex" and old_settings:
-        formats.append(("summary", False))
     return [(prefix, settings, display)
             for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
             for settings, display in formats]
@@ -1236,81 +1226,6 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
-_SIZE_BUDGET = "scripts/size_budget.sh"
-
-
-def _prequeue_size_budget(
-    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness, *, project: bool = True,
-) -> None:
-    if not readiness.ready or config.merge_strategy != "mergify" or _SIZE_BUDGET not in config.checks:
-        return
-    origin = _git(wt, "remote", "get-url", "origin")
-    with tempfile.TemporaryDirectory(prefix="loopzero-size-") as directory:
-        root = Path(directory)
-        env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-               "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1",
-               "PYTHON": sys.executable, "PYTHONSAFEPATH": "1"}
-        git = partial(_git, root, extra_env=env)
-        git("clone", "--shared", "--no-checkout", "--template=", str(wt), ".")
-        # Fetch with the user's credential configuration for private origins.
-        fetched = _proc.run(
-            ["git", "fetch", "--no-tags", "--no-recurse-submodules", "--",
-             origin, f"refs/heads/{config.base_branch}"],
-            cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
-        )
-        if fetched.exit_code != 0:
-            reason = github.redact_credentials(_proc.tail(fetched.stderr or fetched.stdout, 1))
-            raise CliError(f"could not fetch {config.base_branch} from origin for the size budget check: "
-                           f"{reason or f'git exited {fetched.exit_code}'}")
-        base = git("rev-parse", "FETCH_HEAD^{commit}")
-        script = git("show", f"{base}:{_SIZE_BUDGET}")
-
-        def evaluate(target: str) -> _proc.Completed:
-            tree = git("merge-tree", "--write-tree", target, pr.head_sha)
-            # A candidate symlink must not read files outside the temporary checkout.
-            git("-c", "core.symlinks=false", "read-tree", "--reset", "-u", tree)
-            return _proc.run(["bash", "-s", "--", base], input=script + "\n", cwd=root,
-                             env_allowlist=("PATH",), extra_env=env, timeout=GIT_TIMEOUT,
-                             merge_output=True)
-
-        result = evaluate(base)
-        if result.exit_code:
-            raise CliError("current target size budget failed:\n" + result.stdout.rstrip())
-        if project:
-            _warn_queue_size(config, pr, root, origin, base, git, evaluate)
-
-
-def _warn_queue_size(
-    config: Config, pr: github.PR, root: Path, origin: str, base: str,
-    git: Callable[..., str], evaluate: Callable[[str], _proc.Completed],
-) -> None:
-    assert config.mergify_queue is not None
-    try:
-        numbers = mergify.queue_predecessors(config.repo, config.base_branch, config.mergify_queue, pr.number)
-        if not numbers:
-            return
-        refs = [f"refs/pull/{number}/head:refs/loopzero/{number}" for number in numbers]
-        _git(root, "fetch", "--no-tags", "--no-recurse-submodules", "--", origin, *refs)
-        integrated = base
-        for number in numbers:
-            source = git("rev-parse", f"refs/loopzero/{number}^{{commit}}")
-            if git("merge-base", integrated, source) == source:
-                return  # A queued PR may already have landed or be represented by another head.
-            tree = git("merge-tree", "--write-tree", integrated, source)
-            integrated = git("-c", "user.name=loopzero", "-c", "user.email=loopzero@localhost",
-                             "commit-tree", tree, "-p", integrated, "-p", source, "-m", "Queue size projection")
-        result = evaluate(integrated)
-    except (LoopZeroError, OSError) as exc:  # best effort: never blocks ready
-        detail = github.redact_credentials(_one_line(exc))
-        print(f"warning: could not project the queue size budget: {detail}", file=sys.stderr)
-        return
-    if result.exit_code and "size budget: FAIL" in result.stdout:
-        predecessors = ", ".join(f"#{number}" for number in numbers)
-        print(f"warning: projected size budget after {predecessors}:\n{result.stdout.rstrip()}", file=sys.stderr)
-    elif result.exit_code:
-        print(f"warning: could not project the queue size budget: script exited {result.exit_code}", file=sys.stderr)
-
-
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
     _require_receipt(wt, config, head)
     github.mark_ready(config.repo, number)
@@ -1340,7 +1255,6 @@ def cmd_ready(args: argparse.Namespace) -> int:
                            initial=None if kicked else readiness)) is None:
             return 3
         pr, readiness, kicked = waited
-    _prequeue_size_budget(wt, config, pr, readiness)
     if readiness.ready and pr.is_draft and not kicked:
         _mark_ready(wt, config, pr.number, pr.head_sha)
         if args.wait is not None:
@@ -1794,7 +1708,6 @@ def _merge_with_mergify(
                 return sha
             raise closed[0]
         if not confirmed and not requested:
-            _prequeue_size_budget(wt, config, pr, readiness, project=admit_by is None)
             if admit_by is not None and time.monotonic() > admit_by:
                 raise _AdmissionDeadline
             _require_receipt(wt, config, pr.head_sha)

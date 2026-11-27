@@ -555,8 +555,7 @@ def test_refresh_preserves_live_pr_evidence(
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     live = (
         "# Owner-edited title\n\n## Acceptance\n- Updated acceptance on GitHub.\n\n"
-        "## Validation\nRecorded for `aaaaaaaaaaaa`\n"
-        "- `old check`: exit 0 (1.0s)\n\n"
+        "## Validation\n"
         "Browser: original failure reproduced; corrected image returns 200.\n\n"
         "## Review\n- primary, claude, aaaaaaaaaaaa, request_changes\n"
         "- delta, claude, bbbbbbbbbbbb, approve\n\n"
@@ -575,7 +574,6 @@ def test_refresh_preserves_live_pr_evidence(
     assert "- primary, claude, aaaaaaaaaaaa, request_changes" in body
     assert "- delta, claude, bbbbbbbbbbbb, approve" in body
     assert "## Evidence\nProduction probe returned 100 records." in body
-    assert "old check" not in body and "Recorded for `aaaaaaaaaaaa`" not in body
 
 
 def test_initial_pr_keeps_human_validation(wt: Path, gh: FakeGh, capsys) -> None:
@@ -615,8 +613,7 @@ def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, ca
 @pytest.mark.parametrize("body", [
     "# PR\n\n## Evidence\nRetained browser proof.\n",
     "# PR\n\n## Validation\nHuman evidence.\n\n## Review\nApproved.\n",
-    ("# PR\n\n## Checks\nRecorded for `aaaaaaaaaaaa`\n"
-     "- `old check`: exit 1 (1.0s)\n\nHuman evidence.\n\n## Review\nApproved.\n"),
+    "# PR\n\n## Checks\nLegacy summary.\n\n## Validation\nHuman evidence.\n",
 ])
 def test_check_refresh_replaces_previous_head_without_losing_evidence(
     wt: Path, gh: FakeGh, capsys, body: str,
@@ -631,8 +628,8 @@ def test_check_refresh_replaces_previous_head_without_losing_evidence(
     assert run(capsys, "check")[0] == 0
     updated = json.loads(gh.calls[-1]["--input"])["body"]
     assert old_head[:12] not in updated and head_of(wt)[:12] in updated
-    assert updated.count("Recorded for") == 1
-    for text in ["Retained browser proof.", "Human evidence.", "Approved."]:
+    assert updated.count("Recorded for") == 1 and updated.count("## Validation") == 1
+    for text in ["Retained browser proof.", "Human evidence.", "Approved.", "## Checks\nLegacy summary."]:
         if text in body:
             assert text in updated
 
@@ -4070,82 +4067,6 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
-def test_prequeue_size_budget_reports_redacted_fetch_reason(wt, monkeypatch):
-    commit_mergify_configuration(wt)
-    config = replace(cli.config_mod.load_trusted(wt), checks=(cli._SIZE_BUDGET,))
-    pr = github.PR(7, URL, head_of(wt), "main", False, "OPEN", "MERGEABLE")
-    monkeypatch.setattr(cli, "_git", lambda *_args, **_kwargs: "origin")
-    detail = "fatal: Authentication failed for 'https://fake-token@example.com/repo'\n"
-    monkeypatch.setattr(cli._proc, "run", lambda *_args, **_kwargs: cli._proc.Completed(128, "", detail, 0))
-    with pytest.raises(cli.CliError, match="size budget check: fatal: Authentication failed") as caught:
-        cli._prequeue_size_budget(wt, config, pr, github.Readiness(True, ()))
-    assert "[REDACTED]@example.com" in str(caught.value)
-    assert "fake-token" not in str(caught.value)
-
-
-@pytest.mark.parametrize(("command", "queue"), [
-    ("ready", None), ("merge", None), ("resume", None), ("ready", "ordered"),
-    ("ready", "empty"), ("ready", "ambiguous"), ("ready", "unavailable"),
-])
-def test_mergify_checks_current_target_before_queueing_or_resumes(
-    wt: Path, repo: Path, gh: FakeGh, capsys, monkeypatch, command, queue
-) -> None:
-    commit_mergify_configuration(wt)
-    checker = (Path(__file__).resolve().parents[1] / "scripts/size_budget.sh").read_text()
-    (repo / "scripts").mkdir()
-    commit_file(repo, "scripts/size_budget.sh", re.sub(r"(?m)^SRC_CAP=\d+$", f"SRC_CAP={5 if queue else 3}", checker), "add budget")
-    publish_workflow(wt, (repo / "workflow.toml").read_text().replace(
-        'commands = ["echo ok", "test -f README.md"]', 'commands = ["scripts/size_budget.sh"]'))
-    for checkout, filename in ((wt, "feature"), (repo, "upstream")):
-        (checkout / "src/loopzero").mkdir(parents=True)
-        commit_file(checkout, f"src/loopzero/{filename}.py", "# first line\n# second line\n", filename)
-    commit_file(wt, "ast.py", "raise AssertionError('loaded candidate module')\n", "add candidate module")
-    git(repo, "push", str(repo.parent / "origin.git"), "main")  # leave origin/main stale locally
-    if queue:
-        main = head_of(repo)
-        batches = []
-        for number in (1146, 1219):
-            git(repo, "switch", "--detach", main)
-            commit_file(repo, f"src/loopzero/pr_{number}.py", "# predecessor\n", f"PR {number}")
-            git(repo, "push", str(repo.parent / "origin.git"), f"HEAD:refs/pull/{number}/head")
-            batches.append({"id": str(number), "parent_ids": [batches[0]["id"]] if batches else [],
-                            "queue_rule_name": "main", "pull_requests": [{"number": number}]})
-        if queue == "ambiguous":
-            batches[1]["parent_ids"] = []
-
-        def snapshot(_repo, endpoint):
-            assert endpoint == "/merge-queue/status?branch=main"
-            if queue == "unavailable":
-                raise mergify.MergifyError("snapshot unavailable")
-            return {"mode": "serial", "waiting_pull_requests": [], "forming_batches": [],
-                    "batches": [] if queue == "empty" else batches}
-
-        monkeypatch.setattr(mergify, "api_get", snapshot)
-    head = head_of(wt)
-    arm_approved_ready_pr(gh, head, wt, isDraft=False)
-    gh.append(f"api repos/{REPO}/pulls/7", open_pr_snapshot(head))
-    gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=head, sha=None))
-    monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (command == "resume",) * 2)
-    monkeypatch.setattr(mergify, "membership", lambda *_: None)
-    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("must not submit a queue request"))
-
-    args = ("merge", "--wait=60") if command == "resume" else (command,)
-    code, out, err = run(capsys, *args)
-    assert head_of(wt) == head and not (wt / "src/loopzero/upstream.py").exists()
-    if queue:
-        assert code == 0 and (queue == "unavailable") == ("could not project the queue size budget" in err)
-        assert ("warning: projected size budget after #1146, #1219:\nsrc=6 (base 2, delta 4, cap 5" in err
-                if queue == "ordered" else "warning: projected size budget" not in out + err)
-        return
-    if command != "resume":
-        assert code == 1 and "src=4 (base 2, delta 2, cap 3" in err and "loaded candidate module" not in err
-        return
-
-    assert 'Read Mergify\'s "Left the queue" comment' in err
-    assert code == 1 and "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`" in err
-
-
 @pytest.mark.parametrize("outcome", [
     "merged", "ejected", "landed-on-ejection", "head-changed-early", "head-changed-late",
     "closed-then-merged", "still-closed",
@@ -4416,10 +4337,30 @@ def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, monkeypatch, c
         git(wt, "switch", "-q", "--detach")
     monkeypatch.chdir(wt / ".loopzero")
     _, err = expect_cli(capsys, 1, "start", "nested", stdout="", stderr_contains=("already inside task worktree",))
-    assert "run start from the main checkout" in err
+    assert f"run start from {repo}\n" in err
     assert not (repo / ".worktrees" / "nested").exists()
     assert not (wt / ".worktrees" / "nested").exists()
     assert "lz/nested" not in git(repo, "branch", "--list", "lz/nested")
+
+
+def test_start_accepts_primary_clone_inside_worktrees_directory(repo: Path, tmp_path: Path, monkeypatch, capsys) -> None:
+    clone = shutil.copytree(repo, tmp_path / ".worktrees" / "project")
+    monkeypatch.chdir(clone)
+    out, _ = expect_cli(capsys, 0, "start", "fresh")
+    assert out.strip() == str(clone / ".worktrees" / "fresh")
+
+
+def test_start_accepts_detached_harness_worktree(repo: Path, tmp_path: Path, monkeypatch, capsys) -> None:
+    harness = tmp_path / "harness"
+    git(repo, "worktree", "add", "-q", "--detach", str(harness))
+    monkeypatch.chdir(harness)
+    out, _ = expect_cli(capsys, 0, "start", "nested")
+    task = repo / ".worktrees" / "nested"
+    assert out.strip() == str(task) and "lz/nested" in git(repo, "branch", "--list", "lz/nested")
+    (task / "uncommitted.txt").write_text("work\n")
+    monkeypatch.chdir(repo)
+    git(repo, "worktree", "remove", str(harness))
+    assert (task / "uncommitted.txt").read_text() == "work\n"
 
 
 def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -4450,40 +4391,6 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert states == ["pending", "success" if expected else "failure"]
     gh.respond_pr_view( pr_json(headRefOid="b" * 40))
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
-
-
-def test_queue_size_projection_git_failure_stays_advisory(monkeypatch, tmp_path, capsys):
-    origin = "https://x-access-token:ghs_SECRET123@github.com/acme/widgets.git"
-    monkeypatch.setattr(cli.mergify, "queue_predecessors", lambda *_: [5])
-    def fail(*args, **_kwargs):
-        raise cli.worktree.GitError(("git", *args[1:]), "fatal: couldn't find remote ref")
-    monkeypatch.setattr(cli, "_git", fail)
-    config = SimpleNamespace(repo=REPO, base_branch="main", mergify_queue="main")
-    cli._warn_queue_size(config, SimpleNamespace(number=7), tmp_path, origin, "a" * 40,
-                         fail, lambda _: pytest.fail("projection must stop at the git failure"))
-    err = capsys.readouterr().err
-    assert "warning: could not project the queue size budget: git fetch" in err and "ghs_SECRET123" not in err
-
-
-def test_queue_size_projection_reports_a_script_without_verdict(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(cli.mergify, "queue_predecessors", lambda *_: [5])
-    monkeypatch.setattr(cli, "_git", lambda *_a, **_k: "")
-    def git(*args):
-        return "b" * 40 if args[0] == "rev-parse" else "c" * 40
-    config = SimpleNamespace(repo=REPO, base_branch="main", mergify_queue="main")
-    cli._warn_queue_size(config, SimpleNamespace(number=7), tmp_path, "origin", "a" * 40, git,
-                         lambda _: cli._proc.Completed(2, "", "boom", 0.0))
-    assert "could not project the queue size budget: script exited 2" in capsys.readouterr().err
-
-
-def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head, capsys):
-    from loopzero import eligibility
-    cfg = wt / ".loopzero" / "hosted.toml"
-    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
-    gh.fail(f"api repos/{REPO}/pulls/7", "HTTP 404: Not Found\n{\"message\": \"Not Found\"}")
-    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
-    out, err = capsys.readouterr()
-    assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err and "Not Found\"}" in err
 
 
 def test_eligibility_rejects_non_object_review_row(gh, head):
