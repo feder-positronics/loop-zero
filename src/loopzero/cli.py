@@ -124,6 +124,11 @@ def _load_config(
         return config_mod.load(args.config or root / "workflow.toml", require_ci=require_ci)
     config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
                                      require_ci=require_ci, read_timeout=github._read_timeout)
+    if require_ci and not config.review_publishers:
+        raise config_mod.ConfigError(
+            f"origin/{config.base_branch}:workflow.toml: delivery.review_publishers must list the intended "
+            'publisher logins; add `review_publishers = ["<login>"]` under `[delivery]` and merge it to the base branch'
+        )
     if args.command == "check":
         print(f"checks pinned to origin/{config.base_branch}@{config.trusted_base_revision}")
     return config
