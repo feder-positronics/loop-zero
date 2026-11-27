@@ -113,6 +113,13 @@ def _repo_root(wt: Path) -> None:
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
 
 
+def _publisher_problem(args: argparse.Namespace, config: Config) -> str | None:
+    if config.review_publishers:
+        return None
+    return (f'{args.config or f"origin/{config.base_branch}:workflow.toml"}: delivery.review_publishers must list the '
+            'intended publisher logins; add `review_publishers = ["<login>"]` under `[delivery]`')
+
+
 def _load_config(
     args: argparse.Namespace, root: Path, *, pin_checks: bool = False, previous: Config | None = None,
     refresh: bool = False,
@@ -121,11 +128,14 @@ def _load_config(
     if not pin_checks or args.config:
         if pin_checks:
             print("checks are unpinned because --config was provided")
-        return config_mod.load(args.config or root / "workflow.toml", require_ci=require_ci)
-    config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
-                                     require_ci=require_ci, read_timeout=github.read_timeout)
-    if args.command == "check":
-        print(f"checks pinned to origin/{config.base_branch}@{config.trusted_base_revision}")
+        config = config_mod.load(args.config or root / "workflow.toml", require_ci=require_ci)
+    else:
+        config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
+                                         require_ci=require_ci, read_timeout=github.read_timeout)
+        if args.command == "check":
+            print(f"checks pinned to origin/{config.base_branch}@{config.trusted_base_revision}")
+    if require_ci and (problem := _publisher_problem(args, config)):
+        raise config_mod.ConfigError(problem)
     return config
 
 
@@ -277,7 +287,7 @@ def _readiness(
         return github.Readiness(False, (problem,))
     # GitHub's Date header, not the host clock, ages the review.
     reviews = _pr_reviews(config.repo, pr.number, dates=(dates := [])) if reviews is None else reviews
-    publishers = config.review_publishers or (github.login(),)
+    publishers = config.review_publishers
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
     )
@@ -1999,14 +2009,16 @@ def cmd_status(args: argparse.Namespace) -> int:
         _print_display("pr:       none (commit changes, then open with `loopzero pr` before a long check)")
         return 0
     _print_display(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
+    problem = _publisher_problem(args, config)
     reviews = _pr_reviews(config.repo, pr.number, dates=(dates := []))
-    markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
+    markers = [] if problem else _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
         _print_display(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         _print_display("review:   none on this PR")
-    readiness = _readiness(wt, config, pr, head, reviews, diagnostics=True, dates=tuple(dates))
+    readiness = (github.Readiness(False, (problem,)) if problem else
+                 _readiness(wt, config, pr, head, reviews, diagnostics=True, dates=tuple(dates)))
     _print_display(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         _print_display(f"  - {reason}")
