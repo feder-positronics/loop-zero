@@ -1236,7 +1236,6 @@ exec /usr/bin/git "$@"
     assert git(wt, "config", "branch.lz/t1.merge").strip() == "refs/heads/lz/t1"
 
 
-@pytest.mark.parametrize("live", [dict(headRefOid="b" * 40), dict(baseRefName="release")], ids=["head", "target"])
 def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, gh, capsys):
     head = head_of(wt)
     gh.respond(branch_history_key(), [])
@@ -1249,6 +1248,7 @@ def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, g
     assert "Recorded for" not in json.loads(gh.calls[-2]["--input"])["body"]
 
 
+@pytest.mark.parametrize("live", [dict(headRefOid="b" * 40), dict(baseRefName="release")], ids=["head", "target"])
 def test_pr_does_not_patch_a_body_for_a_head_or_target_the_pr_moved_from(wt, gh, capsys, live):
     arm_pr_body_patch(gh, head_of(wt))
     gh.respond_pr_view(pr_json(**{"headRefOid": head_of(wt), **live}))
