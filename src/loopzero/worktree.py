@@ -9,8 +9,7 @@ import re
 import stat
 import subprocess
 import time
-from collections.abc import Iterator
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from select import select
