@@ -471,9 +471,9 @@ configured publishers and the helper path. Other GitHub writes and git push use 
 every repository loop-zero delivers: reads through the app do not fall back on 404.
 
 Set `[delivery].review_publishers` to the GitHub logins that publish model reviews.
-Local readiness reads that list from the base configuration (legacy installations
-without it use the local GitHub login). Hosted evaluation requires an explicit list;
-its CI token's login is never a reviewer identity.
+Local readiness reads that list from the base configuration and blocks when it is
+absent or empty; hosted evaluation requires it too. The CI token's login is never a
+reviewer identity.
 
 Advance the consumer CI pin that supplies `loopzero.hosted` or
 `loopzero.eligibility` (the loop-zero checkout ref or installed package revision)
