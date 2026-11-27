@@ -1777,6 +1777,9 @@ def _follow_blocked_mergify(
     if deadline is not None and pr.base_ref == config.base_branch:
         try:
             state = mergify.membership(config.repo, pr.number, queue, deadline if bounded else None)
+        except github.ReadDeadline:
+            print(f"timed out waiting for Mergify to land PR #{pr.number}")
+            return None
         except mergify.MergifyError as exc:
             hint += f"; Mergify membership unverified: {exc}"
         else:

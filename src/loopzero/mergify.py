@@ -328,15 +328,6 @@ def _job_failure(repo: str, job_id: str) -> str:
     return ", ".join(repr(name) for name in tuple(dict.fromkeys(names))[:10]) or "no test failures in log tail"
 
 
-def _departure_payload(body: str, queue: str) -> dict:
-    with suppress(json.JSONDecodeError):
-        payload = json.loads(body.partition("-*- Mergify Payload -*-\n")[2].partition("\n-*- Mergify Payload End -*-")[0])
-        if (isinstance(payload, dict) and payload.get("version") == 1
-                and payload.get("state") == "dequeued" and payload.get("queue_rule_name") == queue):
-            return payload
-    return {}
-
-
 def _departure(
     comments: list[dict], repo: str, number: int, head: str, queue: str,
 ) -> tuple[Departure | None, dict]:
@@ -348,12 +339,16 @@ def _departure(
     )
     latest = max(_comments_by(comments, "mergify[bot]"), key=lambda item: (_updated_at(item), item["id"]), default={})
     body = str(latest.get("body") or "")
-    payload = _departure_payload(body, queue)
+    payload = None
+    with suppress(json.JSONDecodeError):
+        text = body.partition("-*- Mergify Payload -*-\n")[2]
+        payload = json.loads(text.partition("\n-*- Mergify Payload End -*-")[0])
     url = f"https://github.com/{repo}/pull/{number}#issuecomment-"
     lines = body.splitlines()
     entered = next((line for line in lines if line.startswith("- ✅ **Entered the queue** ")), "")
     source = re.search(r"^- 🚫 \*\*Left the queue\*\* [^\n]+ · `([0-9a-f]{7,40})`$", body, re.M)
-    if not payload or not entered or not source or not head.startswith(source[1]):
+    if (not isinstance(payload, dict) or payload.get("version") != 1 or payload.get("state") != "dequeued"
+            or payload.get("queue_rule_name") != queue or not entered or not source or not head.startswith(source[1])):
         return None, {}
     linked = re.search(rf"\]\({re.escape(url)}(\d+)\)", entered)  # absent when a rule or unlinked command admitted
     admitted = next((item for item in comments if linked and item["id"] == int(linked[1])), {})
