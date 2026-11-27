@@ -136,8 +136,10 @@ class FakeGh:
 
 
 @pytest.fixture
-def gh(fake_bin: Path, tmp_path: Path) -> FakeGh:
-    return FakeGh(fake_bin, tmp_path)
+def gh(fake_bin: Path, tmp_path: Path, monkeypatch) -> FakeGh:
+    fake = FakeGh(fake_bin, tmp_path)
+    fake.replay_in_process(monkeypatch)
+    return fake
 
 
 def pr_json(**over: object) -> dict:
@@ -647,32 +649,30 @@ def test_post_review_submits_comment(gh: FakeGh, app_token_helper, verdict: str,
             assert gh.argv(int(looked_up))[:2] == ["api", "graphql"]
 
 
-@pytest.mark.parametrize("live,first_post_fails", [
-    (dict(state="CLOSED"), False), (dict(baseRefName="release"), False),
-    (dict(baseRefName="release"), True), (dict(headRefOid="b" * 40), False),
-], ids=["closed", "retargeted", "retargeted-before-fallback", "moved"])
-def test_post_review_rereads_the_live_pr_before_each_post(gh: FakeGh, live: dict, first_post_fails: bool) -> None:
-    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
-    gh.respond(FILES_KEY, PR_FILES)
-    open_pr = pr_json(headRefOid=HEAD)
-    if first_post_fails:
-        rejection = {"message": "Unprocessable Entity", "errors": [{"message": "Can not approve your own pull request"}]}
-        gh.respond(REVIEWS_KEY, {"stdout": json.dumps(rejection), "stderr": "gh: Unprocessable Entity (HTTP 422)\n", "exit": 1})
-        gh.respond_pr_view(open_pr, pr_json(**{"headRefOid": HEAD, **live}))
-    else:
-        gh.respond_pr_view(pr_json(**{"headRefOid": HEAD, **live}))
-    pr = github.PR(7, "url", HEAD, "main", False, "OPEN", "UNKNOWN", author="someone-else")
-    with pytest.raises(github.GhError, match="PR is"):
-        github.post_review(REPO, 7, HEAD, review(verdict="approve"), pr=pr, token="", publisher="bot-user", base="main")
-    assert len(calls_for(gh, REVIEWS_KEY)) == int(first_post_fails)
-
-
-def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
+@pytest.mark.parametrize("live,rejection,attempts,diagnostic", [
+    ({"state": "CLOSED"}, None, 0, "PR is"),
+    ({"baseRefName": "release"}, None, 0, "PR is"),
+    ({"baseRefName": "release"}, "own PR", 1, "PR is"),
+    ({"headRefOid": "b" * 40}, None, 0, "PR is"),
+    ({}, "server error", 1, "HTTP 500"),
+], ids=["closed", "retargeted", "retargeted-before-fallback", "moved", "posting-fails"])
+def test_post_review_fails_closed(gh, live, rejection, attempts, diagnostic):
     arm_review(gh)
-    gh.fail(REVIEWS_KEY, "HTTP 500 server error")
-    with pytest.raises(github.GhError):
-        github.post_review(REPO, 7, HEAD, review())
-    assert len(calls_for(gh, REVIEWS_KEY)) == 1
+    if rejection == "own PR":
+        error = {"message": "Unprocessable Entity", "errors": [{"message": "Can not approve your own pull request"}]}
+        gh.respond(REVIEWS_KEY, {"stdout": json.dumps(error), "stderr": "gh: Unprocessable Entity (HTTP 422)\n", "exit": 1})
+        gh.respond_pr_view(pr_json(**live))
+    else:
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(**live)))
+        if rejection:
+            gh.fail(REVIEWS_KEY, "HTTP 500 server error")
+    with pytest.raises(github.GhError, match=diagnostic):
+        if rejection == "server error":
+            github.post_review(REPO, 7, HEAD, review())
+        else:
+            pr = github.PR(7, "url", HEAD, "main", False, "OPEN", "UNKNOWN", author="someone-else")
+            github.post_review(REPO, 7, HEAD, review(verdict="approve"), pr=pr, token="", publisher="bot-user", base="main")
+    assert len(calls_for(gh, REVIEWS_KEY)) == attempts
 
 
 # --- blocking findings ------------------------------------------------------------
@@ -750,7 +750,8 @@ def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
         github.pr_for_branch(REPO, "lz/x")
 
 
-def test_api_get_and_login_helpers(gh: FakeGh, monkeypatch) -> None:
+def test_api_get_and_login_helpers(fake_bin, tmp_path, monkeypatch) -> None:
+    gh = FakeGh(fake_bin, tmp_path)
     monkeypatch.setattr(subprocess, "_text_encoding", lambda: "ascii")
     gh.respond("api graphql viewer", '{"data":{"viewer":{"login":"Łódź"}}}', {"data": {"viewer": {}}})
     gh.respond("api repos/acme/widgets", '{"default_branch":"Łódź"}')
@@ -978,37 +979,32 @@ def arm_workflow_runs(gh, *runs):
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", *pages)
 
 
-@pytest.mark.parametrize("reviewed,finding,reasons", [
-    (HEAD, None, ()),
-    ("b" * 40, None, (f"head {HEAD[:12]} differs from reviewed {'b' * 12}",)),
-    (None, None, ("no review recorded for the current head",)),
-    pytest.param(HEAD, thread(f"{marker('important')}\n**important: Oops**"),
+NONBLOCKING_THREADS = (
+    thread(f"{marker('critical')}\nResolved", resolved=True),
+    thread(f"{marker('suggestion')}\nSuggestion"),
+)
+
+
+@pytest.mark.parametrize("reviewed,threads,reasons", [
+    (HEAD, (), ()),
+    ("b" * 40, (), (f"head {HEAD[:12]} differs from reviewed {'b' * 12}",)),
+    (None, (), ("no review recorded for the current head",)),
+    pytest.param(HEAD, (thread(f"{marker('important')}\n**important: Oops**"),),
                  ("open important finding at src/a.py:3: Oops",), id="located"),
-    pytest.param(HEAD, thread(f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n"
-                            "**critical: Global**\n\nno file", path="src/first.py", line=12),
+    pytest.param(HEAD, (thread(f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n"
+                              "**critical: Global**\n\nno file", path="src/first.py", line=12),),
                  ("open critical finding at src/first.py:12: Global",), id="anchored"),
-])
-def test_readiness_requires_current_review_and_resolved_findings(gh: FakeGh, reviewed, finding, reasons) -> None:
-    threads = (finding,) if finding else (thread(f"{marker('critical')}\nX", resolved=True),
-                                          thread(f"{marker('suggestion')}\nY"))
-    arm_readiness(gh, threads=threads)
-    assert readiness(reviewed=reviewed) == github.Readiness(not reasons, reasons)
-    assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
-
-
-def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(gh: FakeGh) -> None:
-    stale = "b" * 40
-    arm_readiness(gh, threads=(
-        thread(f"{marker('important', stale)}\n**important: Still applies**"),
-        thread(f"{marker('critical', stale)}\n**critical: Obsolete**", outdated=True),
+    pytest.param(HEAD, (
+        thread(f"{marker('important', 'b' * 40)}\n**important: Still applies**"),
+        thread(f"{marker('critical', 'b' * 40)}\n**critical: Obsolete**", outdated=True),
         thread(f"{marker('critical')}\n**critical: Current**", outdated=True),
-        thread(f"{marker('critical')}\n**critical: Resolved**", resolved=True),
-    ))
-    result = readiness()
-    assert result.reasons == (
-        "open important finding at src/a.py:3: Still applies",
-        "open critical finding at src/a.py:3: Current",
-    )
+    ), ("open important finding at src/a.py:3: Still applies",
+        "open critical finding at src/a.py:3: Current"), id="outdated"),
+])
+def test_readiness_requires_current_review_and_resolved_findings(gh, reviewed, threads, reasons):
+    arm_readiness(gh, threads=(*threads, *NONBLOCKING_THREADS))
+    assert readiness(reviewed=reviewed) == github.Readiness(not reasons, reasons)
+    assert not calls_for(gh, f"api repos/{REPO}/actions/runs?head_sha={HEAD}")
 
 
 @pytest.mark.parametrize("failure", ["failure", "error", "cancelled", "timed_out"])
@@ -1443,7 +1439,6 @@ def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, stat
     (100, True, False, None),
 ])
 def test_readiness_at_check_suite_limit(gh: FakeGh, monkeypatch, unrelated, legacy_success, check_failure, reason):
-    gh.replay_in_process(monkeypatch)
     arm_readiness(gh)
     if legacy_success:
         gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
@@ -1472,9 +1467,8 @@ def test_readiness_at_check_suite_limit(gh: FakeGh, monkeypatch, unrelated, lega
     (3001, "file-3001", "suggestion", HEAD, None),
     (3000, "outside-diff", "important", "b" * 40, None),
 ])
-def test_review_file_limit(gh: FakeGh, monkeypatch, changed_files: int, path: str, severity: str,
+def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: str,
                            live_head: str, anchor: str | None) -> None:
-    gh.replay_in_process(monkeypatch)
     files = [{"filename": f"file-{i:04d}", "patch": "@@ -1 +1 @@\n-before\n+after"}
              for i in range(1, changed_files + 1)][:3000]
     gh.respond(FILES_KEY, *(files[i:i + 100] for i in range(0, 3001, 100)))
@@ -1496,80 +1490,64 @@ def test_review_file_limit(gh: FakeGh, monkeypatch, changed_files: int, path: st
     assert len(calls_for(gh, detail_key)) == int(severity == "important" and path != "file-3000")
 
 
-def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(monkeypatch, app_token_helper):
+def etag_response(body, tag="v1"):
+    return f'HTTP/2.0 200 OK\r\nEtag: "{tag}"\r\n\r\n{body}'
+
+
+def conditional_headers(gh):
+    return [arg for call in gh.calls for arg in call["argv"] if arg.startswith("If-None-Match")]
+
+
+def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(gh, app_token_helper):
     app_token_helper()
-    sent = []
-    real_run = github.run
-    def run(argv, **kwargs):
-        if argv[0] != "gh":
-            return real_run(argv, **kwargs)
-        sent.append(argv)
-        if "graphql" in argv:
-            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"bot"}}}', "stderr": ""})
-        if "If-None-Match: \"v1\"" in argv:
-            return type("Done", (), {"exit_code": 1, "stdout": "HTTP/2.0 304 Not Modified\r\nDate: Fri, 27 Nov 2026 15:00:00 GMT\r\n\r\n", "stderr": "gh: HTTP 304"})
-        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{"n": 7}', "stderr": ""})
-    monkeypatch.setattr(github, "run", run)
+    endpoint = f"repos/{REPO}/pulls/7"
+    date = "Fri, 27 Nov 2026 15:00:00 GMT"
+    gh.respond(f"api {endpoint}", etag_response('{"n": 7}'), {
+        "exit_code": 1, "stdout": f"HTTP/2.0 304 Not Modified\r\nDate: {date}\r\n\r\n",
+        "stderr": "gh: HTTP 304",
+    })
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot"}}})
+    comments = f"repos/{REPO}/issues/1/comments"
+    gh.respond(f"api {comments}", {})
     dates: list[str] = []
-    assert github.api_get("repos/acme/widgets/pulls/7") == {"n": 7}
-    assert github._gh("api", "repos/acme/widgets/pulls/7", conditional=True, dates=dates) == '{"n": 7}'
-    assert dates == ["Fri, 27 Nov 2026 15:00:00 GMT"]
+    assert github.api_get(endpoint) == {"n": 7}
+    assert github._gh("api", endpoint, conditional=True, dates=dates) == '{"n": 7}'
+    assert dates == [date]
     assert github.login() == github.login() == "bot"
-    assert sum("graphql" in argv for argv in sent) == 1
-    assert [any(part.startswith("If-None-Match") for part in argv) for argv in sent[:2]] == [False, True]
-    github._gh("api", "repos/acme/widgets/issues/1/comments", "-f", "body=x")
-    assert not any(part.startswith("If-None-Match") for part in sent[-1])
+    assert sum("graphql" in call["argv"] for call in gh.calls) == 1
+    github._gh("api", comments, "-f", "body=x")
+    assert conditional_headers(gh) == ['If-None-Match: "v1"']
+    assert 'If-None-Match: "v1"' in gh.argv(1)
 
 
-def test_oversized_response_does_not_evict_other_reads(monkeypatch, app_token_helper):
+def test_oversized_response_does_not_evict_other_reads(gh, monkeypatch, app_token_helper):
     app_token_helper()
     monkeypatch.setattr(github, "_ETAG_CACHE_BYTES", 100)
-    real_run = github.run
-    def run(argv, **kwargs):
-        if argv[0] != "gh":
-            return real_run(argv, **kwargs)
-        body = "ł" * (60 if argv[2].endswith("big") else 5)  # 120 vs 10 bytes
-        return type("Done", (), {"exit_code": 0, "stdout": f'HTTP/2.0 200 OK\r\nEtag: "e"\r\n\r\n{body}', "stderr": ""})
-    monkeypatch.setattr(github, "run", run)
-    github._gh("api", "repos/a/b/small", conditional=True)
-    github._gh("api", "repos/a/b/big", conditional=True)
+    for name, count in (("small", 5), ("big", 60)):  # 10 vs 120 UTF-8 bytes
+        endpoint = f"repos/a/b/{name}"
+        gh.respond(f"api {endpoint}", etag_response("ł" * count))
+        github._gh("api", endpoint, conditional=True)
     assert [key[0][1] for key in github._etag_cache] == ["repos/a/b/small"]
 
 
-def test_login_is_cached_under_the_credential_that_answered(monkeypatch, fake_tool):
-    helper = fake_tool("app-token", "echo app-a\n")
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    real_run = github.run
-    tokens = []
-    def run(argv, **kwargs):
-        if argv[0] != "gh":
-            return real_run(argv, **kwargs)
-        tokens.append((kwargs.get("extra_env") or {}).get("GH_TOKEN", ""))
-        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"bot"}}}', "stderr": ""})
-    monkeypatch.setattr(github, "run", run)
-    assert github.login() == "bot" and tokens == ["app-a"]
-    assert github._logins == {"app-a": "bot"}
-
-
-@pytest.mark.parametrize("token", [None, "env-a"], ids=["stored-account", "environment-token"])
-def test_login_and_etag_cache_depend_on_token(monkeypatch, token):
-    sent = []
-    def run(argv, **_):
-        sent.append(argv)
-        if "graphql" in argv:
-            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"a"}}}', "stderr": ""})
-        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{}', "stderr": ""})
-    monkeypatch.setattr(github, "run", run)
-    if token:
+@pytest.mark.parametrize("token", ["app-a", None, "env-a"], ids=["app", "stored-account", "environment-token"])
+def test_login_and_etag_cache_depend_on_token(gh, monkeypatch, app_token_helper, token):
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "a"}}})
+    endpoint = "repos/a/b/pulls/1"
+    gh.respond(f"api {endpoint}", etag_response("{}"))
+    if token == "app-a":
+        app_token_helper("echo app-a\n")
+    elif token:
         monkeypatch.setenv("GH_TOKEN", token)
     assert github.login() == github.login() == "a"
-    github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
-    conditional = [arg for argv in sent for arg in argv if arg.startswith("If-None-Match")]
-    assert (len(sent), conditional) == ((3, ['If-None-Match: "v1"']) if token else (4, []))
+    github.api_get(endpoint)
+    github.api_get(endpoint)
+    assert (len(gh.calls), conditional_headers(gh)) == ((3, ['If-None-Match: "v1"']) if token else (4, []))
     assert github._logins == ({token: "a"} if token else {})
-    if token:
+    assert all(call["token"] == token for call in gh.calls)
+    if token == "env-a":
         monkeypatch.setenv("GH_TOKEN", "env-b")
-        assert github.login() == "a" and len(sent) == 4
+        assert github.login() == "a" and len(gh.calls) == 4
 
 
 @pytest.mark.parametrize("repo", ["acme/123", "acme/true", "acme/@etc-passwd"])

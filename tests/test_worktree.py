@@ -10,6 +10,7 @@ import sys
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
+from shutil import copytree
 
 import pytest
 
@@ -18,14 +19,19 @@ from tests.conftest import commit_file, git, git_environment, init_git_repo
 from tests.test_setup import SETUP, setup_commands
 
 
+@pytest.fixture(scope="session")
+def origin_seed(git_repo_seed, tmp_path_factory):
+    origin = tmp_path_factory.mktemp("worktree-origin") / "origin.git"
+    git(git_repo_seed, "clone", "-q", "--bare", str(git_repo_seed), str(origin))
+    return origin
+
+
 @pytest.fixture
-def repo(git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """`git_repo` wired to a bare origin that already holds `main`."""
+def repo(git_repo: Path, origin_seed: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Private checkout and origin, both seeded with the same main commit."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-    origin = tmp_path / "origin.git"
-    git(git_repo, "init", "-q", "--bare", "-b", "main", str(origin))
+    origin = copytree(origin_seed, tmp_path / "origin.git")
     git(git_repo, "remote", "add", "origin", str(origin))
-    git(git_repo, "push", "-q", "origin", "main")
     return git_repo
 
 

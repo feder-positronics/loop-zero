@@ -11,11 +11,11 @@ import signal
 import subprocess
 import sys
 import textwrap
-import time
 import tomllib
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
+from select import select
 
 import pytest
 
@@ -1230,19 +1230,9 @@ def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, repo
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
 def test_sigterm_removes_only_cancelled_review_home(family, fake_tool, tmp_path):
-    binary = fake_tool(family, """#!/usr/bin/python3
-import os
-import signal
-from pathlib import Path
-
-signal.alarm(15)
-home = Path.home()
-(home / "starting").write_text(str(os.getpid()))
-(home / "starting").rename(home / "pid")
-signal.pause()
-""")
+    binary = fake_tool(family, "exec sleep 15")
     script = """
-import sys
+import subprocess, sys
 from pathlib import Path
 from loopzero import runners
 
@@ -1252,6 +1242,15 @@ runners._sandbox_prefix = lambda family, cwd, home, *args: (
     ["env", f"HOME={home}"], runners._review_config(family, Path(binary), ()), Path(binary)
 )
 runners._observe_codex_version = lambda *args: None
+communicate = subprocess.Popen.communicate
+
+def announce(child, *args, **kwargs):
+    argv = child.args
+    if argv[0] == "env" and argv[2] == binary:
+        print(child.pid, argv[1].removeprefix("HOME="), sep="\\t", flush=True)
+    return communicate(child, *args, **kwargs)
+
+subprocess.Popen.communicate = announce
 runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
                     diff="diff", task_text="task")
 """
@@ -1265,18 +1264,13 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
         def start_review():
             process = stack.enter_context(subprocess.Popen(
                 [sys.executable, "-c", script, family, str(binary)], env=env,
+                stdout=subprocess.PIPE, text=True,
             ))
             stack.callback(process.kill)
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and process.poll() is None:
-                for pid_file in tmp_path.glob("loopzero-review-home-*/pid"):
-                    if pid_file.parent not in homes:
-                        homes.add(pid_file.parent)
-                        pid = int(pid_file.read_text())
-                        stack.callback(stop_if_running, pid)
-                        return process, pid_file.parent, pid
-                time.sleep(0.02)
-            pytest.fail("native reviewer did not start")
+            assert select([process.stdout], [], [], 5)[0], "native reviewer did not start"
+            pid, home = process.stdout.readline().rstrip("\n").split("\t")
+            stack.callback(stop_if_running, int(pid))
+            return process, Path(home), int(pid)
 
         def running(pid):
             try:
@@ -1295,7 +1289,6 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
             assert not home.exists()
             assert not running(pid)
 
-        homes = set()
         concurrent, concurrent_home, concurrent_pid = start_review()
         terminate_review(*start_review())
         assert concurrent.poll() is None
