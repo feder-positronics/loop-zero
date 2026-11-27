@@ -168,9 +168,9 @@ A schedule firing or a relayed go-ahead grants no new authority.
 One bounded delivery under a brief (see
 [Briefs and ownership](#briefs-and-ownership)); returns acceptance evidence
 or one named blocker. An unattended worker never uses an ask-the-user or
-request-input tool. Every worker sends no mid-task messages to its parent: it
-ends its turn at once with a blocker or question as its final message. A
-delegate that asks directly is treated as blocked.
+request-input tool. Workers send no mid-task messages to their parent. If a
+blocker or question needs the parent's input, the worker returns it at once in
+its final message. A delegate that asks directly is treated as blocked.
 
 ### Dispatch authority
 
@@ -244,7 +244,7 @@ shortages, "in the queue", the change class from the PR file list. A stale draft
 ownership. Record one entry: the outcome and its current condition, the
 obstacle, the next step with its predicted effect and check time, and at that
 check the actual result. Judge these wakes by changed next actions and shortened
-blockages; a recurring check keeps or reverts each adjustment against its
+blockages; the weekly retro keeps or reverts each adjustment against its
 numbers.
 
 **Retrospectives.** The outcome owner records a retro, in loop-zero and in
@@ -277,15 +277,12 @@ a deletion or a check inside an existing mechanism) with owner, observable
 result and check date, or why none remains. Workflow health still governs
 any change.
 
-Close the loop on a schedule that host policy sets. A recurring check rules on
-every action whose check date has arrived: keep, revert or extend once with a
-reason. It also pushes the owner of any trigger event still missing its retro.
-An action more than a day overdue counts as an occurrence under trigger 6. A
-broader audit covers every dimension of the fleet against its sources, rechecks
-whether earlier actions were shipped, used and effective, and names at least one
-mechanism to delete, or why none qualifies.
-
-For the weekly workflow review, use the [retro skill](../core/skills/retro/SKILL.md).
+Close the loop on a schedule that host policy sets: the weekly
+[retro skill](../core/skills/retro/SKILL.md) rules on every retro action whose
+check date has arrived or passed, collected from the owning issues and PRs,
+including actions that never shipped. It also pushes the owner of any trigger event still missing
+its retro. An action more than a day overdue counts as an occurrence under
+trigger 6.
 
 **Goal first.** Each owner holds its commissioned outcome (for example
 "ordinary changes reach users") and treats its plan as replaceable; finishing
