@@ -719,6 +719,7 @@ def test_api_get_and_login_helpers(gh: FakeGh, monkeypatch) -> None:
     gh.respond("api repos/acme/widgets", '{"default_branch":"Łódź"}')
     assert (github.api_get("repos/acme/widgets"), gh.argv(0)) == ({"default_branch": "Łódź"}, ["api", "repos/acme/widgets", "--include"])
     assert github.login() == "Łódź"
+    github._logins.clear()
     with pytest.raises(github.GhError, match="no login"):
         github.login()
 
@@ -1459,3 +1460,24 @@ def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: 
         (comment,) = payload["comments"]
         assert (comment["path"], comment["line"]) == (anchor, 1)
     assert len(calls_for(gh, detail_key)) == int(severity == "important" and path != "file-3000")
+
+
+def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(monkeypatch):
+    sent = []
+    def run(argv, **_):
+        sent.append(argv)
+        if "graphql" in argv:
+            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"bot"}}}', "stderr": ""})
+        if "If-None-Match: \"v1\"" in argv:
+            return type("Done", (), {"exit_code": 1, "stdout": "HTTP/2.0 304 Not Modified\r\nDate: Fri, 27 Nov 2026 15:00:00 GMT\r\n\r\n", "stderr": "gh: HTTP 304"})
+        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{"n": 7}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    dates: list[str] = []
+    assert github.api_get("repos/acme/widgets/pulls/7") == {"n": 7}
+    assert github._gh("api", "repos/acme/widgets/pulls/7", conditional=True, dates=dates) == '{"n": 7}'
+    assert dates == ["Fri, 27 Nov 2026 15:00:00 GMT"]
+    assert github.login() == github.login() == "bot"
+    assert sum("graphql" in argv for argv in sent) == 1
+    assert [any(part.startswith("If-None-Match") for part in argv) for argv in sent[:2]] == [False, True]
+    github._gh("api", "repos/acme/widgets/issues/1/comments", "-f", "body=x")
+    assert not any(part.startswith("If-None-Match") for part in sent[-1])
