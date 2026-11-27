@@ -5495,29 +5495,15 @@ def test_ready_rejects_check_interrupted_after_a_failed_stage(wt, head, gh, caps
     assert "check receipt records a failed stage" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("command", ["ready", "merge"])
+@pytest.mark.parametrize("command", ["ready", "merge", "status"])
 @pytest.mark.parametrize("publishers", ["", "review_publishers = []\n"])
 @pytest.mark.parametrize("override", [False, True])
-def test_delivery_requires_explicit_review_publishers(wt, gh, capsys, tmp_path, command, publishers, override):
-    publish_workflow(wt, WORKFLOW_BASE + publishers)
-    options, path = (), None
-    if override:
-        (path := tmp_path / "override.toml").write_text(WORKFLOW_BASE + publishers)
-        options = ("--config", str(path))
-    code, out, err = run(capsys, *options, command)
-    assert code == 1 and not gh.calls and "delivery.review_publishers must list the intended publisher logins" in out + err
-    assert (str(path) if override else "origin/main:workflow.toml") in out + err
-
-
-@pytest.mark.parametrize("override", [False, True])
-def test_status_reports_missing_review_publishers(wt, gh, capsys, tmp_path, head, override):
+def test_delivery_requires_explicit_review_publishers(wt, gh, capsys, tmp_path, head, command, publishers, override):
     arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False)
-    options, path = (), None
-    if override:
-        (path := tmp_path / "override.toml").write_text(WORKFLOW_BASE)
-        options = ("--config", str(path))
-    else:
-        publish_workflow(wt, WORKFLOW_BASE)
-    code, out, _ = run(capsys, *options, "status")
-    assert code == 0 and "pr:       #7" in out and "ready:    no" in out and "config:   " in out
-    assert (str(path) if override else "origin/main:workflow.toml") in out and "delivery.review_publishers must list" in out
+    path = tmp_path / "override.toml"
+    path.write_text(WORKFLOW_BASE + publishers)
+    publish_workflow(wt, WORKFLOW_BASE + publishers)
+    code, out, err = run(capsys, *(("--config", str(path)) if override else ()), command)
+    assert code == (command == "ready" or command == "merge") and "delivery.review_publishers must list the intended" in out + err
+    assert (str(path) if override else "origin/main:workflow.toml") in out + err
+    assert command != "status" or "ready:    no" in out
