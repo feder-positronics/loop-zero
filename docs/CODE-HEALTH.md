@@ -178,9 +178,8 @@ each. Include scope, environment and an evidence link on each stage row. See [In
 and outcome sample](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/code-health.md#local-timing-and-outcomes).
 
 Read generic SSH-pool connection, capability and capacity from consumer config;
-use disposable checkouts without production checkout access. An owner-trusted
-pool host may hold test-scoped credentials only: never production or deploy
-keys, short-lived per job where possible, files mode 600, never in argv or logs.
+use disposable checkouts without production checkout access. Follow the
+[credential rules for test hosts](../core/CREDENTIALS.md#resolve-only-when-needed).
 Dependency setup comes from the checked-out repository (its own preparation
 script, otherwise its lock files), not from another repository's tooling. Pool
 hosts run jobs under the repository-pinned interpreter (for example a user-level
