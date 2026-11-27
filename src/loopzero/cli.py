@@ -501,8 +501,14 @@ def _validate_pr_body_size(body: str) -> str:
     return body
 
 
-def _sync_task_narrative(wt: Path, existing: str) -> str:
-    """Explicit pr updates task-owned sections; live evidence/reviews stay authoritative."""
+def _sync_task_narrative(wt: Path, existing: str, draft_task: str | None = None) -> str:
+    """Seed missing evidence on a new draft or refresh task-owned prose on an existing PR."""
+    if draft_task is not None:
+        present = {section[1] for section in _TASK_EVIDENCE.finditer(existing)}
+        return existing.rstrip() + "".join(
+            "\n\n" + section[0].rstrip() for section in _TASK_EVIDENCE.finditer(draft_task) if section[1] not in present
+        ) + "\n"
+
     pattern = re.compile(r"^## ([^\n]+)\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
     task = worktree.task_text(wt).replace("\r\n", "\n")
     existing = existing.replace("\r\n", "\n")
@@ -705,10 +711,11 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
     _track_upstream(wt, git_branch)
-    created = pr is None
-    if created:
-        task = worktree.task_text(wt).replace("\r\n", "\n")
-        pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), _TASK_EVIDENCE.sub("", task))
+    draft_task = None
+    if pr is None:
+        draft_task = worktree.task_text(wt).replace("\r\n", "\n")
+        prose = _TASK_EVIDENCE.sub("", draft_task)
+        pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), prose)
     with github.pr_lock(config.repo, pr.number):
         live = github.pr_view(config.repo, pr.number)
         if live.state != "OPEN":
@@ -716,13 +723,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
         if (live.head_sha, live.base_ref) != (head, config.base_branch):
             raise CliError(f"PR #{pr.number} is at {live.head_sha[:12]} on {live.base_ref}; rerun loopzero pr")
         live_body = live.body.replace("\r\n", "\n")
-        if created:
-            present = {section[1] for section in _TASK_EVIDENCE.finditer(live_body)}
-            body = live_body.rstrip() + "".join(
-                "\n\n" + section[0].rstrip() for section in _TASK_EVIDENCE.finditer(task) if section[1] not in present
-            ) + "\n"
-        else:
-            body = _sync_task_narrative(wt, live_body)
+        body = _sync_task_narrative(wt, live_body, draft_task)
         if (body := _pr_body(wt, head, config, body)) != live_body:
             github.update_body(config.repo, pr.number, body)
     print(pr.url)
