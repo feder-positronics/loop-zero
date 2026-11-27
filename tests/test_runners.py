@@ -610,6 +610,17 @@ def test_linked_worktree_and_git_directory_are_read_only(
     assert all((str(path),) * 2 in binds for path in (linked.resolve(), common))
 
 
+@pytest.mark.parametrize("severities,verdict", [
+    ((), "approve"), (("suggestion",), "approve"), (("suggestion", "important"), "request_changes"),
+])
+def test_only_blocking_findings_request_changes(severities, verdict):
+    findings = [{"severity": s, "path": None, "line": None, "title": "t", "body": "b"} for s in severities]
+    # The model's own verdict no longer decides; exit 5 must mean something to resolve.
+    result = runners.parse_review({"verdict": "request_changes", "findings": findings},
+                                  family="claude", head="a" * 40, kind="primary", raw="{}")
+    assert result.verdict == verdict
+
+
 @pytest.mark.parametrize("family", ["claude", "codex"])
 def test_review_escalates_verdict_with_blocking_finding(fake_bin, tmp_path, family):
     _fake_review(fake_bin, family, CHANGES, diagnostic="model: fallback" if family == "codex" else None)
