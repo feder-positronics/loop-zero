@@ -22,8 +22,9 @@ commitments require direction.
 Do not manipulate severity; corrections need evidence in-thread, and critical or
 security-path downgrades need requester authority. For conflicting findings,
 reconcile their acceptance and impact. Only threads a review publisher opens
-[block](../../CONTRACT.md#findings): report new critical evidence to the requester and fix it in
-this batch or file an issue.
+[block](../../CONTRACT.md#findings). Report new critical evidence to the requester.
+For security defects, keep details private and follow [security-review](../security-review/SKILL.md).
+Fix in this batch where possible. File follow-up issues only for other defects.
 
 Before requesting the delta, compare the full repair with the primary-reviewed
 head. Identify affected callers and guarantees for each repaired behavior. Use
