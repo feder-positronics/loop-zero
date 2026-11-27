@@ -226,7 +226,6 @@ def test_mark_ready_retries_a_transient_failure(gh: FakeGh, monkeypatch) -> None
     assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 2
 
 
-@pytest.mark.parametrize("stdout", ["", '{"message": "detail on stdout"}'])
 def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
     gh.fail(pr_list_key("lz/x"), "To get started with GitHub CLI, please run:  gh auth login\n", exit=4)
     with pytest.raises(github.GhAuth) as info:
