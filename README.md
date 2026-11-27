@@ -73,7 +73,8 @@ permission. Wait, REST/GraphQL and quota rules live in the contract's
 4. Install the [core/skills](core/skills) once per machine from a source
    checkout at the same pinned revision as the CLI
    ([agent setup](SETUP.md#connect-your-agent)); the
-   [skills index](core/skills/README.md) names the entry skills. Repositories keep no skill copies and customise through
+   [skills index](core/skills/README.md#skill-routing) names the four entry
+   skills. Repositories keep no skill copies and customise through
    `AGENTS.md` and the docs it links. Optional TypeSafe guidance lives in
    [integrations/typesafe-ai](integrations/typesafe-ai).
 5. For integrations that need API keys, follow

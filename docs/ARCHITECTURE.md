@@ -393,8 +393,8 @@ diff, challenges misplaced ownership and distinguishes shipped behavior from
 proposals and dated observations.
 
 The existing repository coordinator or T3 integration maintainer also follows
-[T3 upstream review](T3-UPSTREAM.md): event-triggered reading before the next
-T3-dependent task, relevant upgrades or compatibility repairs. This is maintenance triage,
+[T3 upstream review](T3-UPSTREAM.md): event-triggered reading; its
+[trigger list](T3-UPSTREAM.md#owner-and-triggers) is the only home for when. This is maintenance triage,
 not a new scheduler or permission to adopt upstream policy. Version-specific
 comparisons remain dated evidence; the running tools and instructions must be
 reconciled with matching source before changing the integration.
