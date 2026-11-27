@@ -196,8 +196,8 @@ The [sandbox](../src/loopzero/sandbox.py) bounds check writes, credentials,
 network access and resources. Checks and their Bubblewrap probes pass
 sandbox environment settings over a private file descriptor, keeping
 forwarded values out of process arguments. [Reviewer runners](../src/loopzero/runners.py)
-bound source access while allowing the network required by model CLIs; that
-network means the sandbox cannot prevent exfiltration of readable data.
+bound source access while allowing the network required by model CLIs (the
+contract states what that network allows).
 For a reviewer executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable, read-only; for Codex it also
 exposes the existing sibling `codex-code-mode-host`, read-only. Neighboring history and configuration remain
