@@ -1,5 +1,6 @@
 """Trusted publisher behavior against GitHub metadata, without candidate execution."""
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -430,13 +431,15 @@ def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
     assert "github.event.label.name == 'hold'" in source
     assert "environment:\n      name: mergify-metadata\n      deployment: false" in candidate
     assert f"MERGIFY_API_KEY: {secret}" in candidate
+    assert re.search(r"LOOPZERO_PUBLISHER: .*github.repository == 'feder-positronics/loop-zero' && '\.' \|\| "
+                     r"'git\+https://github.com/feder-positronics/loop-zero@[0-9a-f]{40}'", workflow)
     for job in (source, candidate):
         assert "ref: ${{ github.event.repository.default_branch }}" in job
         assert "ref: ${{ github.event.pull_request.head" not in job
         assert "persist-credentials: false" in job
         assert "permissions:\n      contents: read\n      pull-requests: read\n      statuses: write" in job
-        assert "PYTHONPATH: src" in job
-        assert "python -m loopzero.hosted" in job
+        assert "PYTHONPATH" not in job and "uv run --no-project" in job and '--with "$LOOPZERO_PUBLISHER"' in job
+        assert "python -P -m loopzero.hosted" in job
     ruleset = json.loads((Path(__file__).parents[1] / ".github/rulesets/main.json").read_text())
     status_rule = next(rule for rule in ruleset["rules"] if rule["type"] == "required_status_checks")
     assert [check["context"] for check in status_rule["parameters"]["required_status_checks"]] == [

@@ -1602,8 +1602,8 @@ MERGIFY_DEQUEUE_HINT = 'Read Mergify\'s "Left the queue" comment on the PR for t
 
 def _mergify_departure(
     config: Config, pr: github.PR, queue: str, closed: list[github.GhError], confirmed: bool,
+    report: mergify.Departure | None,
 ) -> str | None:
-    report = mergify.departure_report(config.repo, pr.number, pr.head_sha, queue)
     if not confirmed and report is None:
         return None
     sha = _landed(config, pr, closed)
@@ -1645,7 +1645,8 @@ def _mergify_wait_poll(
     deferred = confirmed and state is not None and not closed
     sha = None if deferred else _landed(config, pr, closed)
     if state is None and sha is None:
-        sha = _mergify_departure(config, pr, queue, closed, confirmed)
+        report = mergify.departure_report(config.repo, pr.number, pr.head_sha, queue)
+        sha = _mergify_departure(config, pr, queue, closed, confirmed, report)
     return sha, state, deferred
 
 
@@ -1692,16 +1693,17 @@ def _follow_blocked_mergify(
     config: Config, pr: github.PR, readiness: github.Readiness, queue: str, deadline: float | None,
 ) -> str | None:
     hint = _merge_check_hint(config, pr, readiness)
-    try:
-        confirmed = (deadline is not None and pr.base_ref == config.base_branch
-                     and mergify.membership(config.repo, pr.number, queue) is not None)
-    except mergify.MergifyError as exc:
-        confirmed = False
-        hint += f"; Mergify membership unverified: {exc}"
-    if confirmed:
-        return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), True)
-    if sha := _mergify_departure(config, pr, queue, [], confirmed=False):  # a rule may have queued and ejected it
-        return sha
+    if deadline is not None and pr.base_ref == config.base_branch:
+        try:
+            state = mergify.membership(config.repo, pr.number, queue, deadline)
+        except mergify.MergifyError as exc:
+            hint += f"; Mergify membership unverified: {exc}"
+        else:
+            if state is not None:
+                return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), True)
+            report = mergify.departure_report(config.repo, pr.number, pr.head_sha, queue)
+            if sha := _mergify_departure(config, pr, queue, [], confirmed=False, report=report):
+                return sha
     raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
 
 
@@ -1717,26 +1719,23 @@ def _merge_with_mergify(
     if pr.is_draft:
         raise CliError(f"PR #{pr.number} is still a draft; next: loopzero ready --wait")
     with worktree.lock_local_state(wt):
-        requested, confirmed_marker = mergify.markers(
-            config.repo, pr.number, pr.head_sha, queue
-        )
+        attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
         state = mergify.membership(config.repo, pr.number, queue, deadline)
         if sha := github.merged_sha(
-            config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
+            config.repo, pr.number, expected_head=pr.head_sha, check_hold=not attempt.requested and state is None,
         ):
             return sha
         confirmed = state is not None
-        if confirmed and not confirmed_marker:
+        if confirmed and not attempt.confirmed:
             _require_receipt(wt, config, pr.head_sha)
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
         # A repository rule may have queued and ejected the PR before any loopzero request.
-        if not confirmed and (confirmed_marker or (not requested and mergify.departure_report(
-                config.repo, pr.number, pr.head_sha, queue))):
+        if not confirmed and (attempt.confirmed or attempt.departure):
             closed: list[github.GhError] = []
-            if sha := _mergify_departure(config, pr, queue, closed, confirmed=True):
+            if sha := _mergify_departure(config, pr, queue, closed, attempt.confirmed, attempt.departure):
                 return sha
             raise closed[0]
-        if not confirmed and not requested:
+        if not confirmed and not attempt.requested:
             if admit_by is not None and time.monotonic() > admit_by:
                 raise _AdmissionDeadline
             _require_receipt(wt, config, pr.head_sha)

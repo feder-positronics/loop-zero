@@ -553,10 +553,11 @@ PR configuration. A source push needs a status on its new SHA; base-only movemen
 does not invalidate an unchanged source review. This status does not replace
 integration CI or a local `loopzero check` receipt.
 
-Use the [Actions publisher workflow](.github/workflows/eligibility.yml) as a
-reference. In a consumer, install the pinned loop-zero package for both jobs
-and remove the repository-specific `PYTHONPATH: src`. Run from the consumer
-checkout at its trusted default branch. Create an environment named
+Copy the [Actions publisher workflow](.github/workflows/eligibility.yml)
+to `.github/workflows/eligibility.yml` in the consumer repository. Both jobs
+install the revision pinned by `LOOPZERO_PUBLISHER` and run from the trusted
+default branch checkout. Update that pin when adopting a newer publisher.
+Create an environment named
 `mergify-metadata`, restrict its deployment branches to the protected default
 branch, and store `MERGIFY_API_KEY` as an environment secret rather than a
 repository secret. Use the narrowest Mergify credential that can read queue status.
