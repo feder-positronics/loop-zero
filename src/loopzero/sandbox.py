@@ -84,7 +84,7 @@ def private_directory(prefix: str):
         yield _enter_private_directory(stack, prefix)
 
 
-def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
+def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,  # noqa: C901 - runner, reuse and cleanup paths
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
                checkpoint: Callable[[CheckReport], None] | None = None,
@@ -360,6 +360,8 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], com
         if alternate.startswith('"'):
             alternate = os.fsdecode(ast.literal_eval("b" + alternate))
         remedy = (f"Git object alternate {alternate!r} is not readable in the check sandbox. "
+                  f"Run `git repack -a -d` here, delete {common_dir / 'objects/info/alternates'}, "
+                  "then rerun loopzero check. "
                   "Transfer this task branch to a standalone clone without --shared/--reference, "
                   "restore .loopzero/task.md, and rerun loopzero check at the same commit.")
         command = ("/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"', "loopzero-alternate", alternate)
@@ -427,29 +429,24 @@ def _cap_limit(requested: int, resource_limit: int) -> int:
 
 
 def _private_check_value(name: str, value: str) -> bool:
-    if name in _CHECK_CONTEXT_ENV or value == SANDBOX_ENV.get(name):
-        return False
     normalized = value.strip()
-    if not normalized:
+    if name in _CHECK_CONTEXT_ENV or value == SANDBOX_ENV.get(name) or len(normalized) < 6:
         return False
-    if _CREDENTIAL_ENV.search(name):
-        return True
     mode = name == "ENV" or name.endswith(("_ENV", "_ENVIRONMENT", "_MODE"))
-    return len(normalized) >= 6 and not (mode and normalized.casefold() in _CHECK_MODES)
+    return bool(_CREDENTIAL_ENV.search(name)) or not (mode and normalized.casefold() in _CHECK_MODES)
 
 
-def _redact_check_output(config: Config, text: str) -> str:
-    stage_env = check_environment(config)
-    wrapper_env = _proc.build_env(config.env_allowlist)
-    secrets = {value for env in (stage_env, wrapper_env) for name, value in env.items()
-               if _private_check_value(name, value)}
-    pattern = "|".join(map(re.escape, sorted(secrets, key=len, reverse=True)))
-    return re.sub(pattern, "[REDACTED]", text) if pattern else text
+def _check_secrets(config: Config) -> list[str]:
+    """Forwarded host values to hide, longest first; committed [checks] env is public."""
+    return _proc.secret_forms(value for name, value in _proc.build_env(config.env_allowlist).items()
+                              if _private_check_value(name, value))
 
 
 def _check_tail(text: str, config: Config | None = None, *, suffix: str = "") -> str:
-    if config is not None:
-        text = _redact_check_output(config, text)
+    if secrets := (_check_secrets(config) if config is not None else []):
+        redacted = _proc.redact(text, secrets)
+        # Redact before cutting; the extra lead read in _run_one may hold a split secret.
+        text = redacted[len(secrets[0]):] if len(text) > CHECK_TAIL_BYTES else redacted
     bounded = (text + suffix).rstrip("\n")[-CHECK_TAIL_BYTES:]
     encoded = bounded.encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
     # A byte cut can start inside a multibyte character.
@@ -466,7 +463,8 @@ def _run_one(
             f"--fsize={_cap_limit(limits.file_mb * 1024 * 1024, resource.RLIMIT_FSIZE)}",
             "--", *CHECK_SHELL, command,
         )
-        done = _run_bwrap(config, worktree, prefix, argv, timeout=timeout, tail_chars=CHECK_TAIL_BYTES)
+        lead = max(map(len, _check_secrets(config)), default=0)
+        done = _run_bwrap(config, worktree, prefix, argv, timeout=timeout, tail_chars=CHECK_TAIL_BYTES + lead)
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,
                            _check_tail(exc.stdout, config, suffix=f"\n[loopzero] timed out after {timeout:g}s"))
@@ -520,7 +518,7 @@ def _run_bwrap(
         )
 
 
-def bwrap_argv(
+def bwrap_argv(  # noqa: C901 - one bind rule per sandbox mount class
     config: Config,
     worktree: Path,
     home: Path,

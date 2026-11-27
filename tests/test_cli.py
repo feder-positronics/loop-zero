@@ -2404,7 +2404,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     def fail(family, **kwargs):
         if family == "claude":
             raise cli.runners.RunnerAuthFailed(
-                "claude: CLI is not authenticated\nfirst detail\nsecond detail\nnot printed"
+                "claude: CLI is not authenticated\nnot printed\nsecond detail\nlast cause"
             )
         raise cli.runners.RunnerMissing("codex: 'codex' not found on PATH")
 
@@ -2415,7 +2415,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     assert ("author family: claude, codex" if mixed_authors else "author family: unknown") in err
     assert "Fix the reviewer failures below and rerun" in err
     assert "delivery.reviewers" not in err and "exception" not in err
-    assert "claude: CLI is not authenticated\nfirst detail\nsecond detail" in err
+    assert "claude: CLI is not authenticated\nsecond detail\nlast cause" in err  # The cause ends the tail.
     assert "not printed" not in err
     assert "Fix: run `claude auth login`." in err
     assert err.count("codex: 'codex' not found on PATH") == 1
@@ -2716,6 +2716,45 @@ def test_pending_required_check_names_the_wait(wt, gh, capsys, head, command):
         assert out == f"not ready: {reason}\nnext: loopzero ready --wait\n" and err == ""
     else:
         assert out == "" and f"{reason}; next: loopzero merge --wait" in err
+
+
+def test_missing_run_grace_does_not_parse_reason_wording(wt, gh, capsys, monkeypatch, head):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_check_runs(gh, head, [])
+    monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
+    monkeypatch.setattr(cli.github, "_missing_check_reason", lambda name, *_: f"no {name} run yet")
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": []})
+    code, _out, err = run(capsys, "ready", "--wait")
+    assert code == 1 and "workflow scheduling, triggers and permissions" in err
+
+
+def test_repeated_required_check_keeps_each_reason(wt, gh, capsys, head):
+    publish_workflow(wt, WORKFLOW.replace('["checks"]', '["checks", "checks"]'))
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_check_runs(gh, head, [])
+    _code, out, _err = run(capsys, "ready")
+    assert out.count(f"not ready: required check 'checks' missing on {head[:12]}") == 2
+
+
+def test_check_state_drives_failure_hints_and_wait_keys(capsys):
+    unknown, capped = "required check 'a' is unknown", "cannot determine required check 'b'"
+    readiness = github.Readiness(False, (unknown, capped), checks={unknown: ("a", "unknown"), capped: ("b", "capped")})
+    hinted, plain = cli._readiness_messages(github.PR(7, URL, "a" * 40, "main", False, "OPEN", "MERGEABLE"), readiness)
+    assert "Inspect" in hinted and plain == capped
+    name = check = github.MERGEABILITY_PENDING  # a required check may share a non-check reason's text
+    check = f"required check '{name}' is pending"
+    both = github.Readiness(False, (check, name), checks={check: (name, "pending")})
+    only_check = github.Readiness(False, (check,), checks=both.checks)
+    cli._print_wait_changes(cli._by_check(both, both.reasons), cli._by_check(only_check, only_check.reasons))
+    assert capsys.readouterr().out == f"cleared: {name}\n"
+
+
+def test_check_wait_does_not_parse_reason_wording(wt, gh, capsys, head, monkeypatch):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_check_runs(gh, head, [])
+    monkeypatch.setattr(cli.github, "_missing_check_reason", lambda name, *_: f"no {name} run yet")
+    out, err = expect_cli(capsys, 3, "ready")  # 3: still waitable despite the new wording
+    assert without_accepted_receipt(out) == "not ready: no checks run yet\nnext: loopzero ready --wait\n" and err == ""
 
 
 @pytest.mark.parametrize("draft", [True, False])
@@ -3238,6 +3277,19 @@ def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, hea
         ) == 1
 
 
+def test_ready_points_to_owner_route_when_receipt_changes_before_undraft(wt, gh, capsys, head, monkeypatch):
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=True)
+    pr = github.PR(7, URL, head, "main", True, "OPEN", "MERGEABLE")
+
+    def snapshot(*_args, **_kwargs):  # the receipt is valid at the snapshot and removed before the mutation
+        (wt / ".loopzero/checks.json").unlink()
+        return pr, github.Readiness(True, ())
+
+    monkeypatch.setattr(cli, "_pr_readiness", snapshot)
+    monkeypatch.setattr(github, "mark_ready", lambda *_: pytest.fail("undrafted without a receipt"))
+    expect_cli(capsys, 1, "ready", stderr_contains=("run loopzero check at this head", cli.OWNER_ROUTE))
+
+
 @pytest.mark.parametrize("command", ["ready", "merge"])
 @pytest.mark.parametrize("condition,reason", [
     *((case, "run loopzero check at this head") for case in ("missing", "during-gates", "transient")),
@@ -3282,10 +3334,12 @@ def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, co
         path.write_text(json.dumps(report))
     out, err = expect_cli(capsys, 1, command, *(["--wait"] if command == "merge" or condition == "during-gates" else []))
     assert reason in out + err and "receipt accepted:" not in out
+    assert ("owner queue route applies, post its one reason" in out) == (command == "ready")
     assert all(github._read_only(tuple(c["argv"])) for c in gh.calls)
     if condition != "during-gates":
         expected = [commit_lookup.split()[:2]] * (2 if condition == "transient" else 1) + [LOOKUP_CALLS[-1]]
-        assert [c["argv"][:2] for c in gh.calls] == expected
+        departure = [["api", f"repos/{REPO}/issues/7/comments"]] if command == "merge" else []
+        assert [c["argv"][:2] for c in gh.calls] == expected + departure
 
 
 @pytest.fixture
@@ -4411,6 +4465,14 @@ def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, monkeypatch, c
     assert "lz/nested" not in git(repo, "branch", "--list", "lz/nested")
 
 
+def test_start_on_primary_task_branch_says_to_switch_branch(repo: Path, monkeypatch, capsys) -> None:
+    git(repo, "switch", "-q", "-c", "lz/stray")
+    monkeypatch.chdir(repo)
+    _, err = expect_cli(capsys, 1, "start", "nested", stdout="", stderr_contains=("switch it to another branch first",))
+    assert f"primary checkout {repo} is on task branch lz/stray" in err and "run start from" not in err
+    assert not (repo / ".worktrees" / "nested").exists()
+
+
 def test_start_accepts_primary_clone_inside_worktrees_directory(repo: Path, tmp_path: Path, monkeypatch, capsys) -> None:
     clone = shutil.copytree(repo, tmp_path / ".worktrees" / "project")
     monkeypatch.chdir(clone)
@@ -4736,7 +4798,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert wt.exists() and code == (3 if outcome == "timeout" else 1)
         if outcome == "ejected":
             assert err.index('"Left the queue" comment') < err.index("post `@mergifyio queue`")
-        message = {"ejected": "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`", "head_changed": "head changed",
+        message = {"ejected": "post `@mergifyio queue` as the whole PR comment (same login); a new head", "head_changed": "head changed",
                    "timeout": "timed out", "api_error": "HTTP 503",
                    "incompatible_absent": "incompatible settings fingerprint", "incompatible_unverified": "HTTP 503",
                    "unsafe_config": "unsafe or unavailable", "unsafe_pending": "unsafe or unavailable", "config_error": "HTTP 503",
@@ -4748,20 +4810,27 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     (False, "current"), (False, "stale"), (False, "missing"),
     (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"), (True, "conflict"),
     (False, "head"), (False, "requeue"), (False, "author"), (False, "landed"),
+    (False, "rule"), (False, "rule_requeue"), (True, "batch"), (True, "dequeued"),
+    (False, "rule_same"), (False, "rule_unrequested"), (False, "rule_blocked"), (False, "linked_already"),
 ])
 def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, confirmed, kind):
-    head = arm_mergify_pr(wt, gh)
+    head = arm_mergify_pr(wt, gh, "failure" if kind == "rule_blocked" else "success")
     admission = kind in MERGIFY_QUEUE_FIXTURE["admission"]
-    comments = [{"id": 42, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
-                 "body": MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)}]
+    comments = [] if kind in {"rule_unrequested", "rule_blocked"} else [
+        {"id": 42, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
+         "body": MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)}]
     if kind != "missing":
-        template = MERGIFY_QUEUE_FIXTURE.get("admission_report" if admission else f"{kind}_report", MERGIFY_QUEUE_FIXTURE["report"])
+        template = MERGIFY_QUEUE_FIXTURE.get(
+            "admission_report" if admission else f"{kind.partition('_')[0]}_report", MERGIFY_QUEUE_FIXTURE["report"])
         body = template.replace("@url@", URL).replace("@sha@", "f" * 7 if kind == "head" else head[:7])
         comments.append({"id": 43, "user": {"login": "someone-else" if kind == "author" else "mergify[bot]"},
-                         "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind),
+                         "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind, "2026-11-25T19:01:00Z"),
                          "body": body + MERGIFY_QUEUE_FIXTURE["attribution"].get(kind, "")})
-    if kind == "requeue":
-        comments.append({"id": 44, "user": {"login": LOGIN}, "body": "@mergifyio queue"})
+    requeued = {"rule_requeue": "19:02", "requeue": "19:02", "rule_same": "19:01", "linked_already": "19:00:30"}
+    if kind in requeued:  # linked_already: a command Mergify answered "already queued" before the departure
+        at = requeued[kind]
+        comments.append({"id": 44, "user": {"login": LOGIN}, "body": "@mergifyio queue",
+                         "created_at": f"2026-11-25T{at}{':00' if at.count(':') == 1 else ''}Z"})
     gh.respond(f"api repos/{REPO}/issues/7/comments", comments)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     membership = iter([mergify.Membership()] if confirmed else [])
@@ -4779,27 +4848,31 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
     if kind == "landed":
         assert (code, err) == (0, "") and not wt.exists() and out.splitlines()[-1] == "e" * 40
     elif kind in MERGIFY_QUEUE_FIXTURE["expected"]:
-        assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and ("'checks'" in err) == (kind != "conflict")
+        assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and ("'checks'" in err) == (kind not in {"conflict", "dequeued"})
         assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["expected"][kind])
-        assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["requeue_guidance"]) is (kind != "conflict")
+        assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["requeue_guidance"]) is (kind not in {"conflict", "dequeued"})
     else:
         assert code == 3 and wt.exists() and "waiting for admission" in out
         assert (f"{URL}#issuecomment-43" in out) is (kind == "current")
 
 
-@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None, "long", "many"])
+@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None, "long", "many", "any_of"])
 def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result):
     arm_mergify_pr(wt, gh)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
-    payload = MERGIFY_QUEUE_FIXTURE["candidate_responses"]["blocking" if result in {"long", "many"} else result or "missing"]
-    if extra := {"long": 1, "many": 30}.get(result, 0):
-        conditions = payload["mergeability_check"]["conditions_evaluation"]
-        monkeypatch.setitem(conditions, "subconditions", conditions["subconditions"] + [{"match": False, "label": "界" * 3000}] * extra)
+    blocking = result in {"long", "many", "any_of"}
+    payload = MERGIFY_QUEUE_FIXTURE["candidate_responses"]["blocking" if blocking else result or "missing"]
+    conditions = payload["mergeability_check"]["conditions_evaluation"]
+    any_of = {"match": False, "label": "any of", "subconditions": [{"match": False, "label": f"check-{s} = gate"} for s in ("neutral", "success")]}
+    if extra := {"long": 1, "many": 30, "any_of": 1}.get(result, 0):
+        added = any_of if result == "any_of" else {"match": False, "label": "界" * 3000}
+        monkeypatch.setitem(conditions, "subconditions", conditions["subconditions"] + [added] * extra)
     monkeypatch.setattr(mergify, "api_get", lambda *_: payload)
     out, _ = expect_cli(capsys, 3, "merge", "--wait=0", stderr="")
     assert f"https://github.com/{REPO}/pull/42" in out
-    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) == (result in {"blocking", "long", "many"})
+    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) == (result == "blocking" or blocking)
+    assert ("check-neutral = gate | check-success = gate" in out) == (result == "any_of")
     assert "failed" not in out and "check-success = checks" not in out
     assert len(out.encode()) < 2048 and ("27 more" in out) == (extra == 30)
 

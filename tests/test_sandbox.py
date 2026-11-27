@@ -19,6 +19,7 @@ from pathlib import Path
 from select import select
 from threading import Event, current_thread
 from unittest.mock import Mock
+from urllib.parse import quote
 
 import pytest
 
@@ -116,14 +117,25 @@ def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
     assert before in drift.tail and after in drift.tail
 
 
+SERVICE_KEY = 'p@ss/w0rd+1&"x\\9'
+
+
 @pytest.mark.parametrize("command,exit_code,line_count,start,end", [
     ("for i in $(seq 1 50); do echo $i; done; echo err >&2", 0, 40, "12", "err"),
     ("""python3 -c 'print("x" * 20000 + " Ω end")'""", 0, 1, "x", " Ω end"),
     ("""python3 -c 'print("terminal line" + "\\n" * 20_000)'""", 0, 1, "terminal line", "terminal line"),
     ("./" * 8_200 + "absent/file", 1, 1, "", "otherwise restore the required file."),
-], ids=["lines", "oversized-line", "trailing-newlines", "missing-file"])
-def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, command, exit_code, line_count, start, end):
-    (result,) = sandbox.run_checks(make_config(checks=(command,)), git_repo).results
+    ('for i in $(seq 1 1000); do printf "%s----------" "$SERVICE_KEY"; done', 0, 1, "", "----------"),
+    (f"printf %s {shlex.quote(json.dumps(SERVICE_KEY) + ' ' + quote(SERVICE_KEY, safe='') + ' ' + SERVICE_KEY)}", 0, 1,
+     '"[REDACTED]"', "[REDACTED]"),
+], ids=["lines", "oversized-line", "trailing-newlines", "missing-file", "split-key", "padded-and-encoded-key"])
+def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, monkeypatch, command, exit_code, line_count, start, end):
+    monkeypatch.setenv("SERVICE_KEY", f" {SERVICE_KEY}\n" if end == "[REDACTED]" else SERVICE_KEY)
+    (result,) = sandbox.run_checks(make_config(checks=(command,), env_allowlist=("PATH", "SERVICE_KEY")), git_repo).results
+    if end == "----------":
+        assert "[REDACTED]" in result.tail and all(piece in "[REDACTED]" for piece in result.tail.split("----------"))
+    elif end == "[REDACTED]":
+        assert result.tail == '"[REDACTED]" [REDACTED] [REDACTED]'
     lines = result.tail.splitlines()
     assert (result.exit_code, len(lines)) == (exit_code, line_count)
     assert lines[0].startswith(start) and lines[-1].endswith(end)
@@ -541,13 +553,14 @@ def test_silent_stage_reports_live_metadata_then_completion(
 
     events, _, status, wait_for_heartbeat = heartbeat_log
     monkeypatch.setenv("LZ_KEEP", "credential-value")
-    monkeypatch.setenv("AUDIT_TOKEN", "p1n")
+    monkeypatch.setenv("AUDIT_TOKEN", "p1n-secret")
+    monkeypatch.setenv("AUTH_ENABLED", "1")
     monkeypatch.setenv("RUST_BACKTRACE", "1")
     command = ('test -z "$LZ_KEEP" || echo "$LZ_KEEP"; echo "$AUDIT_TOKEN"; '
-               'echo "tests/test_example.py:12: $RUST_BACKTRACE $NODE_ENV $DJANGO_DEBUG" >&2; '
+               'echo "tests/test_example.py:12: $RUST_BACKTRACE $NODE_ENV $DJANGO_DEBUG $CHECK_PYTHON $AUTH_ENABLED" >&2; '
                f'exit {exit_code}')
-    cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN", "RUST_BACKTRACE"),
-                      env=(("NODE_ENV", "test"), ("DJANGO_DEBUG", "true")))
+    cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN", "AUTH_ENABLED", "RUST_BACKTRACE"),
+                      env=(("NODE_ENV", "test"), ("DJANGO_DEBUG", "true"), ("CHECK_PYTHON", "/opt/cpython-3.14/bin/python3.14")))
     run_one = sandbox._run_one
 
     def run_stage(config, worktree, prefix, stage_command, timeout):
@@ -558,7 +571,7 @@ def test_silent_stage_reports_live_metadata_then_completion(
     monkeypatch.setattr(sandbox, "_run_one", run_stage)
     report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
     assert report.results[0].exit_code == exit_code
-    assert report.results[0].tail == "[REDACTED]\ntests/test_example.py:12: 1 test true"
+    assert report.results[0].tail == "[REDACTED]\ntests/test_example.py:12: 1 test true /opt/cpython-3.14/bin/python3.14 1"
     statuses = [event for event in events if event not in cfg.checks]
     heartbeats = [event for event in statuses if "running" in event]
     assert heartbeats and all(re.fullmatch(
@@ -729,7 +742,8 @@ def cache_check(git_repo, receipt_path):
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy', 'grant'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change, cache_check, receipt_path):
-    cfg = make_config(checks=('echo one', 'echo two'), env=(('AUDIT_TOKEN', 'fake-cached-token'), ('NODE_ENV', 'test')),
+    monkeypatch.setenv('AUDIT_TOKEN', 'fake-cached-token')
+    cfg = make_config(checks=('echo one', 'echo two'), env=(('NODE_ENV', 'test'),), env_allowlist=('PATH', 'HOME', 'LZ_KEEP', 'AUDIT_TOKEN'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     if change == 'grant':
         cfg = replace(cfg, env_allowlist=(*cfg.env_allowlist, "HEAVY_SLOT_GRANTED_CORES"))

@@ -40,6 +40,9 @@ class Membership:
     unmet_conditions: tuple[str, ...] = ()
 
 
+_MODES = " (need directory 0700 and file 0600; see SETUP.md)"
+
+
 def _credential(path: Path | None = None) -> str:
     supplied = os.environ.get("MERGIFY_API_KEY", "").strip()
     if supplied:
@@ -54,16 +57,16 @@ def _credential(path: Path | None = None) -> str:
         ) from exc
     if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
             or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
-        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}; expected mode 0700 and user ownership")
+        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}; expected mode 0700 and user ownership{_MODES}")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
-        raise MergifyError(f"unable to open Mergify credential file: {path}") from exc
+        raise MergifyError(f"unable to open Mergify credential file: {path}{_MODES}") from exc
     info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600):
         os.close(fd)
-        raise MergifyError(f"unsafe Mergify credential file permissions: {path}; expected mode 0600 and user ownership")
+        raise MergifyError(f"unsafe Mergify credential file permissions: {path}; expected mode 0600 and user ownership{_MODES}")
     with os.fdopen(fd, encoding="utf-8") as handle:
         token = handle.read().strip()
     if not token:
@@ -158,7 +161,8 @@ def _unmet_conditions(node: object) -> tuple[str, ...]:
         return ()
     children = node.get("subconditions")
     if isinstance(children, list) and children:
-        return tuple(label for child in children for label in _unmet_conditions(child))
+        labels = tuple(label for child in children for label in _unmet_conditions(child))
+        return (" | ".join(labels),) if labels and node.get("label") == "any of" else labels
     label = node.get("label")
     return (label,) if isinstance(label, str) and label.isprintable() else ()
 
@@ -187,7 +191,8 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
             _unmet_conditions(check.get("conditions_evaluation")),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise MergifyError("invalid Mergify queue membership response") from exc
+        detail = f": {exc}" if type(exc) is ValueError else ""
+        raise MergifyError(f"invalid Mergify queue membership response{detail}") from exc
 
 
 def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
@@ -311,7 +316,7 @@ def _departure_payload(body: str, queue: str) -> dict:
 
 
 def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
-    """Use a bot report only when it identifies the latest command and current head."""
+    """Use the latest bot departure for the current head; a later queue command starts a new attempt."""
     try:
         comments = github.paged(f"repos/{repo}/issues/{number}/comments")
     except github.GhError:
@@ -324,28 +329,29 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
     latest = max(_comments_by(comments, "mergify[bot]"), key=lambda item: (_updated_at(item), item["id"]), default={})
     body = str(latest.get("body") or "")
     payload = _departure_payload(body, queue)
-    if not command or not payload:
-        return None
-
     url = f"https://github.com/{repo}/pull/{number}#issuecomment-"
     lines = body.splitlines()
     entered = next((line for line in lines if line.startswith("- ✅ **Entered the queue** ")), "")
     source = re.search(r"^- 🚫 \*\*Left the queue\*\* [^\n]+ · `([0-9a-f]{7,40})`$", body, re.M)
-    if f"]({url}{command['id']})" not in entered or not source or not head.startswith(source[1]):
+    if not payload or not entered or not source or not head.startswith(source[1]):
         return None
-    markers = [line for line in str(command.get("body") or "").splitlines()
-               if line.startswith(f"<!-- {REQUEST} ")]
-    if markers and _marker(REQUEST, head, queue) not in markers:
+    linked = re.search(rf"\]\({re.escape(url)}(\d+)\)", entered)  # absent when a rule or unlinked command admitted
+    admitted = next((item for item in comments if linked and item["id"] == int(linked[1])), {})
+    markers = [line for line in str(admitted.get("body") or "").splitlines() if line.startswith(f"<!-- {REQUEST} ")]
+    if linked and (not admitted or (markers and _marker(REQUEST, head, queue) not in markers)):
+        return None
+    # Second-precision timestamps: a command in the departure's second may be a new attempt.
+    if command is not admitted and str(command.get("created_at") or "") >= _updated_at(latest):
         return None
 
-    reason = payload.get("dequeue_reason")
-    checks = reason.get("checks") if isinstance(reason, dict) else None
+    reason = payload["dequeue_reason"] if isinstance(payload.get("dequeue_reason"), dict) else {}
+    checks = reason.get("checks")
     names = tuple(name for name in checks if isinstance(name, str) and name) if isinstance(checks, list) else ()
     attribution = next((kind for prefix, kind in (
-        ("**The failure is in this pull request.** It failed tested alone on top of ", "isolated"),
-        ("**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.", "stacked"),
+        ("**The failure is in this pull request.** ", "isolated"),
+        ("**Not proven to be this pull request's failure.** ", "stacked"),
     ) if any(line.startswith(prefix) for line in lines)), "")
-    if isinstance(reason, dict) and reason.get("code") == "CONFLICT_WITH_BASE_BRANCH":
+    if reason.get("code") == "CONFLICT_WITH_BASE_BRANCH" or "> - [ ] `-conflict`" in body:
         attribution = "base_conflict"
     return Departure(f"{url}{latest['id']}", names, attribution)
 

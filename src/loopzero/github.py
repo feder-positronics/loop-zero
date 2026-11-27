@@ -13,7 +13,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from itertools import chain, islice, pairwise
@@ -22,7 +22,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from loopzero import runners
-from loopzero._proc import ProcTimeout, ToolMissing, run
+from loopzero._proc import SECRET_PATTERNS, ProcTimeout, ToolMissing, build_env, redact, run, secret_forms
 from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, LoopZeroError, ReviewResult, is_sha
 
@@ -125,6 +125,7 @@ class Readiness:
     waitable_failures: tuple[str, ...] = ()
     stale_verdicts: tuple[str, ...] = ()
     has_pending_checks: bool = False
+    checks: dict[str, tuple[str, str]] = field(default_factory=dict)  # reason -> (check name, state)
 
 
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
@@ -138,9 +139,7 @@ _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
 _READINESS_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.([0-9]+))?"
                                   r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
 _HTTP_DATE = re.compile(r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT")
-_CREDENTIAL_TOKEN_RE = re.compile(
-    r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})"
-)
+_CREDENTIAL_TOKEN_RE = re.compile("|".join(SECRET_PATTERNS))
 
 
 @contextmanager
@@ -450,7 +449,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     return "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None) + guidance
 
 
-def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:
+def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:  # noqa: C901 - best-effort parse of each rate-limit evidence source
     """Best-effort reset evidence for a primary GraphQL limit, never a preflight."""
     if re.search(r"secondary|HTTP 429", tail, re.IGNORECASE):
         return ""
@@ -788,8 +787,14 @@ def finding_marker(severity: str, head_sha: str, finding: Finding) -> str:
     return f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
 
 
+def _redact_published(text: str) -> str:
+    """Reviewers can read login files and saved output; hide reviewer keys and credential shapes."""
+    keys = build_env((*runners.CLAUDE_AUTH_ENV, *runners.CODEX_AUTH_ENV)).values()
+    return redact(text, secret_forms(keys), *SECRET_PATTERNS)
+
+
 def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
-    text = prefix + _CREDENTIAL_TOKEN_RE.sub("[REDACTED]", f"**{f.severity}: {f.title}**\n\n{f.body}").rstrip()
+    text = _redact_published(f"{prefix}**{f.severity}: {f.title}**\n\n{f.body}").rstrip()
     if f.severity in BLOCKING:
         return f"{finding_marker(f.severity, head_sha, f)}\n{text}"
     return text
@@ -842,7 +847,7 @@ def _unplaced_findings(unplaced: list[Finding]) -> tuple[str, list[str]]:
     for finding in unplaced:
         where = f" ({finding.path}:{finding.line})" if finding.path and finding.severity in BLOCKING else ""
         line = f"- **{finding.severity}**: {finding.title}{where} — {finding.body}".rstrip(" —")
-        lines.append(_CREDENTIAL_TOKEN_RE.sub("[REDACTED]", line))
+        lines.append(_redact_published(line))
     return (BODY_BLOCKERS if blocked else ""), lines
 
 
@@ -1415,13 +1420,13 @@ def readiness(
         name: f"required check '{name}' is {checks[name]}" for name in required_ci
         if name in checks and checks[name] != "success"
     }
+    check_reasons = {}
     for name in required_ci:
-        if name not in checks:
-            reasons.append(_missing_check_reason(name, pr.head_sha, capped))
-        elif name in failures:
-            reasons.append(failures[name])
+        if name not in checks or name in failures:
+            reasons.append(reason := failures.get(name) or _missing_check_reason(name, pr.head_sha, capped))
+            check_reasons[reason] = (name, checks.get(name) or ("capped" if capped else "missing"))
     return Readiness(
-        ready=not reasons, reasons=tuple(reasons),
+        ready=not reasons, reasons=tuple(reasons), checks=check_reasons,
         waitable_failures=tuple(failures[name] for name in required_ci if name in stale
                                or (workflow_wait and review_grace and checks.get(name) in _FAILED_VERDICTS)),
         stale_verdicts=tuple(name for name in required_ci if name in stale_verdicts),

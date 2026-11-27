@@ -5,9 +5,7 @@
 - `git` 2.40+, Python 3.14, [uv](https://docs.astral.sh/uv/).
 - `gh` from GitHub's [package repository](https://github.com/cli/cli/blob/trunk/docs/install_linux.md)
   (tested with 2.101.0), logged in with `repo` scope, so system updates keep it
-  current. Distribution packages lag: Ubuntu's 2.46.0 lacks
-  `gh pr checks --json`, so scripts written for a current `gh` fail on it. Do
-  not use the snap: its confinement cannot reach the keyring. Without root,
+  current. Distribution packages lag (Ubuntu ships 2.46.0). Do not use the snap: its confinement cannot reach the keyring. Without root,
   unpack the [release](https://github.com/cli/cli/releases) tarball and put
   `bin/gh` in `~/.local/bin` ahead of `/usr/bin`; that copy does not update.
 - Keep `gh`, `claude` and `codex` current. Tools that shape the build (`uv`,
@@ -23,6 +21,10 @@
 ## Install
 
 Pin to a full commit SHA from `main` and upgrade by re-running with a new SHA.
+An unknown `workflow.toml` key blocks every command and hosted eligibility, so
+order upgrades: before adding a key to the base `workflow.toml`, advance every
+pin that reads it (host CLI and CI); before upgrading past a release that
+removes a key, delete the key from the base with the old CLI.
 The `v0.4.x` tags refer to the retired tool.
 `loopzero --version` prints the revision of a Git-URL install; the verified
 install below prints `unknown revision`, so record its checked-out SHA. Never
@@ -32,12 +34,6 @@ User-wide:
 
 ```sh
 uv tool install "git+https://github.com/feder-positronics/loop-zero@<sha>"
-```
-
-As a dev dependency when your project requires Python 3.14 or newer:
-
-```sh
-uv add --dev "loopzero @ git+https://github.com/feder-positronics/loop-zero@<sha>"
 ```
 
 For a verified CI install, check out the full commit SHA and run these commands
@@ -68,9 +64,10 @@ contract, credential guidance, and supporting references.
 
 Install the skills once per machine, not per repository: link each directory
 under the checkout's `core/skills` into `~/.agents/skills` (Codex) and
-`~/.claude/skills` (Claude Code). Link through one stable path that you repoint
-when you upgrade the CLI. Reconcile the skill links for added or removed
-directories and keep the previous revision for rollback. Never edit the linked checkout. Both harnesses follow a
+`~/.claude/skills` (Claude Code), through one stable path. Rerun the block
+below with the new checkout to upgrade, or the previous one to roll back: it
+repoints the stable path, links added skills and removes links to removed ones.
+Keep the previous revision for rollback. Never edit the linked checkout. Both harnesses follow a
 symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
@@ -88,7 +85,7 @@ directory, move it aside before linking that skill.
 
 ```sh
 CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
-SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
+SRC=~/.local/share/loopzero/source    # stable path; rerun this block to upgrade or roll back
 mkdir -p ~/.local/share/loopzero ~/.agents/skills ~/.claude/skills
 python3 - "$CHECKOUT" "$SRC" <<'PYTHON' &&
 import os
@@ -107,6 +104,12 @@ PYTHON
     n=$(basename "$d")
     ln -sfnT "$SRC/core/skills/$n" ~/.agents/skills/"$n" || exit
     ln -sfnT "$SRC/core/skills/$n" ~/.claude/skills/"$n" || exit
+  done
+  for l in ~/.agents/skills/* ~/.claude/skills/*; do
+    if [ -L "$l" ] && [ "$(readlink "$l")" = "$SRC/core/skills/${l##*/}" ] &&
+      [ ! -d "$l" ]; then
+      rm "$l" || exit
+    fi
   done
 )
 ```
@@ -372,6 +375,8 @@ Make a scratch clone standalone before queueing, for example with
 `git clone --no-local`. If a Git object alternate is outside the check sandbox,
 `loopzero check` refuses it before any stage runs. Move the task branch and
 `.loopzero/task.md` to the standalone clone, then recheck the same commit.
+To repair the original clone, run `git repack -a -d`, remove
+`objects/info/alternates`, and rerun the check.
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"
@@ -444,7 +449,9 @@ Mergify queue-rule name. `loopzero merge` posts the unnamed `@mergifyio queue`
 command (Mergify deprecates naming a queue and picks the first whose conditions
 match) once for the current source head, then confirms membership in the
 configured queue through `https://api.mergify.com/v1`. A command comment is only a
-request; a behind branch is treated as queued only after that API confirms it.
+request; a behind branch is treated as queued only after that API confirms it. A
+repository queue rule may admit the PR instead; Mergify's "already queued" reply
+to the command is then harmless.
 
 Set `merge_queue.mode: serial`. For draft-PR integration checks, set
 `merge_queue.max_parallel_checks` greater
@@ -452,8 +459,8 @@ than one, or to one only when the matching queue rule sets an explicit integer
 `batch_size` greater than one. In-place updates (one parallel check and batch size
 one) rewrite the reviewed source head and are unsupported. Admission checks the
 live serial queue's identity and reads `.mergify.yml` from GitHub's default
-branch, requiring that explicit integer parallelism and batch size and the
-matching queue name. The configuration blob
+branch, requiring explicit `mode: serial`, integer parallelism (and batch size
+when parallelism is one) and the matching queue name. The configuration blob
 must stay unchanged across verification. Local/PR files, `extends`, scopes,
 duplicate YAML keys and ambiguous or missing values do not establish this proof.
 
@@ -471,6 +478,9 @@ below deployed first. Preserve that condition on candidates (omit
 `merge_conditions` to inherit it, or include the same check explicitly). For example:
 
 ```yaml
+merge_queue:
+  mode: serial
+  max_parallel_checks: 2
 queue_rules:
   - name: main
     queue_conditions:
@@ -485,7 +495,7 @@ error refuses further delivery and cleanup; it cannot revoke an asynchronous
 command atomically. A newly pushed head must lack eligibility until its own
 review passes. Never deploy the adapter with only product-CI queue conditions.
 Before pushing to a requested or queued PR, withdraw it, confirm removal, then
-push, review the new head and explicitly admit it again. Do not interpret a CLI
+push, review the new head and admit it again. Do not interpret a CLI
 failure as proof that Mergify has removed an outstanding request.
 
 Provide an admin-scope Mergify application key in `MERGIFY_API_KEY`, or store it
@@ -542,9 +552,14 @@ Only the candidate job uses this environment and credential. The source job runs
 without either. Restricting the environment to the protected default branch limits
 credential access, while commit-status publishers still share a context namespace.
 
-Require `Loop-zero Eligibility` in GitHub branch protection and in
-`[checks].required_ci` on the trusted base. GitHub and Mergify match it by
-context name. A repository
+Publishing the status alone gates nothing. First land the publisher and its
+configuration on the base and confirm the status appears on a PR (a publisher
+added by a PR cannot publish for that PR's own head). Then require
+`Loop-zero Eligibility` and every other `[checks].required_ci` context on the
+base branch in GitHub (branch protection or a ruleset), add it to
+`[checks].required_ci` on the trusted base, and refresh open PRs that lack it.
+[MERGIFY.md](docs/MERGIFY.md#protection-and-credentials) shows loop-zero's own
+rulesets as a worked example. GitHub and Mergify match it by context name. A repository
 writer who can add an Actions workflow can publish the same context with its
 `GITHUB_TOKEN`. Before cutover, either explicitly accept that cooperative writer
 boundary or replace this publisher with a dedicated GitHub App and bind the
@@ -565,8 +580,10 @@ existing cooperative trust policy, not instantaneous invalidation: metadata can
 change after the last read and before landing. Do not claim atomic review/merge
 validation or enable unattended landing without accepting this boundary.
 
-After cancellation or ejection, repair the cause and explicitly requeue with
-`@mergifyio queue` as the whole PR comment, then
-resume `loopzero merge --wait`.
+### Requeue after cancellation or ejection
+
+After cancellation or ejection, repair the cause and requeue: an unchanged head
+needs `@mergifyio queue` as the whole PR comment; `loopzero merge` requests a new
+head, or a repository queue rule readmits it. Then resume `loopzero merge --wait`.
 The CLI never retries a failed admission automatically. Resume request markers
 are scoped to the publishing GitHub login; use the same account across sessions.

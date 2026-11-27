@@ -53,7 +53,7 @@ Merge is authorized by default under [merge authority](#merge-authority).
 
 On start/resume, use `loopzero status` in an existing worktree to read Git, GitHub
 and the receipt. Rerun the last `--wait` if pending. After ejection, read the
-reason and follow [Mergify recovery](../SETUP.md#mergify). If cleanup removed the
+reason and follow [Mergify recovery](../SETUP.md#requeue-after-cancellation-or-ejection). If cleanup removed the
 worktree, verify the merge in GitHub. Never yield (end the turn while
 something is pending) waiting for a notice that
 may already have fired. Notifications never replace the waiter.
@@ -150,7 +150,9 @@ of draft and queues it directly in GitHub:
 - The head moved only by a clean base merge and the old head was green.
 
 This is the documented owner route; a red receipt still blocks `loopzero ready`
-and `loopzero merge`.
+and `loopzero merge`. Where a repository rule queues ready PRs, taking a PR out of
+draft is the queue request, whatever tool does it: after a receipt refusal, post
+the one reason first, or fix the cause and rerun `loopzero check`.
 
 An attributed main regression is repaired or reverted by the PR owner of the change
 that caused it; for a shared critical
