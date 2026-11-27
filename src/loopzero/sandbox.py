@@ -126,8 +126,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         current = _current_commands(config, worktree, commands, settings_sha256)
         keys = [_input_key(config, worktree, c, "" if dirty else base, status=status, workflow=workflow)
                 for c in commands]
-        last_run = max((i for i, (c, k) in enumerate(zip(commands, keys, strict=True), 1) if config.scratch
-                        and not (k and (o := previous.get(c)) and o.input_key == k)), default=0)
+        last_run = max((i for i, k in enumerate(keys, 1) if config.scratch and not k), default=0)
         for ordinal, command in enumerate(current, 1):
             if progress:
                 progress(command)
