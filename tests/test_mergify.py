@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import http.client
+import http.server
 import io
 import json
 import signal
 import ssl
 import subprocess
 import sys
+import threading
 import traceback
 from types import SimpleNamespace
 import urllib.error
@@ -179,6 +181,9 @@ def test_comment_writes_use_github_rest_api(monkeypatch, writer, body):
     ("file", r"unsafe Mergify credential file permissions: .*expected mode 0600"),
     ("directory", r"unsafe Mergify credential directory permissions: .*expected mode 0700"),
     ("symlink", "unable to open Mergify credential file"),
+    ("parent_file", "unsafe Mergify credential directory permissions"),
+    ("not_regular", "unsafe Mergify credential file permissions"),
+    ("foreign_owner", "unsafe Mergify credential file permissions"),
 ])
 def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnostic):
     monkeypatch.delenv("MERGIFY_API_KEY", raising=False)
@@ -190,6 +195,23 @@ def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnost
         key.chmod(0o644)
     elif unsafe == "directory":
         tmp_path.chmod(0o755)
+    elif unsafe == "parent_file":
+        parent = tmp_path / "not-a-directory"
+        parent.write_text("")
+        parent.chmod(0o700)
+        key = parent / "api-key"
+    elif unsafe == "not_regular":
+        key.unlink()
+        key.mkdir(mode=0o600)
+    elif unsafe == "foreign_owner":
+        fstat = mergify.os.fstat
+
+        def foreign(fd):
+            fields = list(fstat(fd))
+            fields[4] = mergify.os.getuid() + 1
+            return mergify.os.stat_result(fields)
+
+        monkeypatch.setattr(mergify.os, "fstat", foreign)
     else:
         target = key.with_name("real-key")
         key.rename(target)
@@ -198,7 +220,9 @@ def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnost
         mergify._credential(key)
 
 
-@pytest.mark.parametrize("field,value", [("number", "7"), ("position", None), ("queued_at", None)])
+@pytest.mark.parametrize("field,value", [
+    ("number", "7"), ("position", None), ("queued_at", None), ("number", 8),
+])
 def test_malformed_membership_never_confirms(request_log, field, value):
     request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "main", field: value})
     with pytest.raises(mergify.MergifyError):
@@ -211,9 +235,35 @@ def test_membership_names_a_different_queue(request_log):
         mergify.membership("acme/widgets", 7, "main")
 
 
-def test_redirect_is_refused_before_credentials_can_leave_origin():
+def test_redirect_is_refused_before_credentials_can_leave_origin(monkeypatch):
     with pytest.raises(mergify.MergifyError, match="redirect"):
         mergify._NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid/")
+    for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    followed = []
+
+    class Redirecting(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/elsewhere":
+                followed.append(self.headers.get("Authorization"))
+            self.send_response(302 if self.path == "/" else 200)
+            self.send_header("Location", "/elsewhere")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirecting) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        request = urllib.request.Request(f"http://127.0.0.1:{server.server_address[1]}/",
+                                         headers={"Authorization": "Bearer secret"})
+        try:
+            with pytest.raises(mergify.MergifyError, match="redirect"), mergify._open(request, timeout=10):
+                pass
+        finally:
+            server.shutdown()
+    assert followed == []
 
 
 def test_hosted_import_does_not_load_yaml():
