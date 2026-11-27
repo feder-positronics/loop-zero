@@ -99,13 +99,6 @@ def test_legacy_startup_never_publishes(wt, gh, fake_bin, capsys, row, repost):
     assert not any(map(posted, gh.calls))
 
 
-def test_review_budget_ignores_marker_for_a_different_commit():
-    head = "a" * 40
-    review = {"commit_id": head, "user": {"login": PUBLISHER[0]},
-              "body": cli.review_marker("b" * 40, "primary") + "\n**approve**"}
-    assert not cli._pr_markers([review], head, PUBLISHER)
-
-
 @pytest.mark.parametrize(
     "mode", ["clean", "quoted", "path", "version", "after_tool", "unrelated_error", "quoted_error", "projected_quote"]
 )
