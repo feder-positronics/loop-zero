@@ -450,3 +450,10 @@ def test_repost_confirms_pre_configured_codex_publication(replay_gh, wt, gh, cap
     if altered:
         assert "conflicting or ambiguous review publication" in err
     assert all("--input" not in call for call in gh.calls)
+
+
+def test_old_notice_heading_is_normalized_only_for_the_trailing_notice():
+    quoted = raw_details("Native Codex transcript quoted")
+    notice = raw_details("Native Codex transcript retained")
+    new = notice.replace("Raw reviewer output", "Review evidence notice")
+    assert cli._comparable_body("x" + quoted + notice) == "x" + quoted + new

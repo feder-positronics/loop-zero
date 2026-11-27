@@ -1009,9 +1009,9 @@ def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettin
 def _comparable_body(body: str) -> str:
     """Normalize retired Codex inspection fields and the old notice heading, as eligibility reads them."""
     rest = body.removeprefix(github.BODY_BLOCKERS)
-    old = "<summary>Raw reviewer output</summary>\n\n```\nNative Codex transcript"
-    return body[:len(body) - len(rest)] + runners.retire_inspection(
-        rest.replace(old, old.replace("Raw reviewer output", "Review evidence notice")))
+    notice = re.sub(r"<summary>Raw reviewer output(</summary>\n\n```\nNative Codex transcript[^`]*\n```\n</details>)\Z",
+                    r"<summary>Review evidence notice\1", rest)
+    return body[:len(body) - len(rest)] + runners.retire_inspection(notice)
 
 
 def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
