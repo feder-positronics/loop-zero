@@ -694,7 +694,7 @@ _save_report(repo, report)
         def start_check(check_mode):
             process = processes.enter_context(subprocess.Popen(
                 [sys.executable, "-c", script, check_mode], cwd=git_repo, stdout=subprocess.PIPE,
-                env={**os.environ, "TMPDIR": str(tmp_path), "PYTHONPATH": str(Path.cwd())}, text=True,
+                env={**os.environ, "TMPDIR": str(tmp_path), "PYTHONPATH": str(Path(__file__).resolve().parents[1])}, text=True,
             ))
             processes.callback(process.kill)
             assert select([process.stdout], [], [], 5)[0]
