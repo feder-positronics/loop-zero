@@ -22,7 +22,6 @@ from tests.test_cli import (
 )
 
 gh, git_seed, repo, wt = support.gh, support.git_seed, support.repo, support.wt
-replay_gh = support.replay_gh
 REVIEW_COMMENTS = f"api repos/{REPO}/pulls/7/reviews/17/comments --method GET"
 
 
@@ -104,7 +103,7 @@ def assert_single_publication(gh, fake_bin, *, allow_body_update=False):
 
 @pytest.mark.parametrize("override", [None, "pr", "head", "raw", "bytes", "effort"])
 def test_plain_review_surfaces_receipt_after_interruption_before_post(
-    replay_gh, wt, gh, fake_bin, monkeypatch, capsys, override,
+    wt, gh, fake_bin, monkeypatch, capsys, override,
 ):
     head = support.prepare_review(wt, gh, fake_bin)
     record_claude_runs(fake_bin)
@@ -146,7 +145,7 @@ def test_plain_review_surfaces_receipt_after_interruption_before_post(
 @pytest.mark.parametrize("verdict", [0, 5])
 @pytest.mark.parametrize("interrupted", [False, True, "timeout"])
 def test_accepted_publication_recovers_saved_verdict(
-    wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, interrupted, replay_gh,
+    wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, interrupted,
 ):
     lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict,
                interrupted=interrupted is True, timeout=interrupted == "timeout")
@@ -169,7 +168,7 @@ def test_accepted_publication_recovers_saved_verdict(
                                      "head", "comment_page", "kind", "wrong_head"])
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_recovery_requires_exact_live_publication(
-    wt, gh, fake_bin, monkeypatch, capsys, change, interrupted, replay_gh,
+    wt, gh, fake_bin, monkeypatch, capsys, change, interrupted,
 ):
     def mutate(rows, comments):
         row = rows[-1]
@@ -217,7 +216,7 @@ def test_recovery_requires_exact_live_publication(
 
 @pytest.mark.parametrize("change", ["login", "raw", "repo", "publisher", "number"])
 def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
-    replay_gh, wt, gh, fake_bin, monkeypatch, capsys, change,
+    wt, gh, fake_bin, monkeypatch, capsys, change,
 ):
     if change == "login":
         support.commit_file(wt, "workflow.toml", support.WORKFLOW_BASE + f'review_publishers = ["{LOGIN}", "other-login"]\n', "publishers")
@@ -239,7 +238,7 @@ def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
 
 @pytest.mark.parametrize("change", ["revoked", "deadline", "read_timeout"])
 def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
-    replay_gh, wt, gh, fake_bin, monkeypatch, capsys, change,
+    wt, gh, fake_bin, monkeypatch, capsys, change,
 ):
     lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5)
     original, monotonic = github.paged, github.time.monotonic
@@ -261,7 +260,7 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
 
-def test_repost_recovers_review_with_redacted_findings(replay_gh, wt, gh, fake_bin, monkeypatch, capsys):
+def test_repost_recovers_review_with_redacted_findings(wt, gh, fake_bin, monkeypatch, capsys):
     title = "Rotate sk-ant-FAKE0123"
     findings = [
         {"severity": "important", "path": "feature.py", "line": 1,
@@ -283,7 +282,7 @@ def test_repost_recovers_review_with_redacted_findings(replay_gh, wt, gh, fake_b
     assert_single_publication(gh, fake_bin)
 
 
-def test_interrupted_explicit_repost_recovers_repost_body(replay_gh, wt, gh, fake_bin, monkeypatch, capsys):
+def test_interrupted_explicit_repost_recovers_repost_body(wt, gh, fake_bin, monkeypatch, capsys):
     head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=5, interrupted=True)
     original = github._api
     def rejected(endpoint, payload, **kwargs):
@@ -319,32 +318,9 @@ def test_recovery_transport_retries_only_within_deadline(monkeypatch, failure, b
     assert (timeouts, sleeps) == (([10, 5], [5]) if budget == 10 else ([120 if failure == "write" else 0.5], []))
 
 
-@pytest.mark.parametrize("source", ["model", "repost"])
-@pytest.mark.parametrize("metadata", ["legacy", "null", "empty", "malformed"])
-def test_repost_refuses_publications_without_usable_settings(
-    replay_gh, interrupted_receipt, gh, fake_bin, capsys, metadata, source,
-):
-    head, path, saved, _ = interrupted_receipt
-    if metadata == "legacy":
-        saved["provenance"].pop("requested_settings", None)
-    else:
-        saved["provenance"]["requested_settings"] = {"null": None, "empty": [], "malformed": "bad"}[metadata]
-    path.write_text(json.dumps(saved))
-    prefix = support.marker(head, "primary", source)
-    if source == "repost":
-        prefix += "\nReposted from runner session: `claude-session-123`"
-    effort = f" (effort {saved['effort']})" if saved["effort"] else ""
-    body = (f"{prefix}\nloopzero primary review by claude on `{head}`, "
-            f"model {saved['model'] or 'unknown'}{effort}, {saved['duration_s']:.1f}s: "
-            f"**approve** (0 critical, 0 important, 0 suggestion)" + raw_details(saved["raw"]))
-    arm_published_review(gh, head, body)
-    expect_cli(capsys, 1, "review", "--repost")
-    assert_single_publication(gh, fake_bin)
-
-
 @pytest.mark.parametrize("optional", ["junk", [], [{"model": "request"}] * 5])
 def test_optional_settings_cannot_block_explicit_repost(
-    replay_gh, interrupted_receipt, gh, fake_bin, monkeypatch, capsys, optional,
+    interrupted_receipt, gh, fake_bin, monkeypatch, capsys, optional,
 ):
     _, path, saved, original = interrupted_receipt
     saved["provenance"]["requested_settings"] = optional
@@ -361,7 +337,7 @@ def test_optional_settings_cannot_block_explicit_repost(
 
 @pytest.mark.parametrize("published", [True, False])
 def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
-    replay_gh, wt, gh, fake_bin, fake_tool, monkeypatch, capsys, published,
+    wt, gh, fake_bin, fake_tool, monkeypatch, capsys, published,
 ):
     legacy = "independent reviewers failed: codex: /home/u/secret: boom"
     git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
@@ -387,34 +363,50 @@ def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
 
-@pytest.mark.parametrize("publication", ["pre-configured", "transcript", "summary"])
+@pytest.mark.parametrize("publication,source,metadata", [
+    *((fmt, "model", None) for fmt in ("pre-configured", "transcript", "summary")),
+    *(("legacy", source, metadata) for source in ("model", "repost")
+      for metadata in ("legacy", "null", "empty", "malformed")),
+])
 def test_repost_confirms_historical_claude_publication(
-    replay_gh, interrupted_receipt, gh, fake_bin, capsys, publication,
+    interrupted_receipt, gh, fake_bin, capsys, publication, source, metadata,
 ):
     head, path, saved, _ = interrupted_receipt
-    request = saved["provenance"]["requested_settings"][0]
-    settings = ("CLI claims" if publication == "pre-configured"
-                else "launch configuration and CLI claims")
-    body = (
-        f'{support.marker(head, "primary", "model")}\n'
-        f"loopzero primary review by claude on `{head}`, {saved['duration_s']:.1f}s: "
-        "**approve** (0 critical, 0 important, 0 suggestion)\n\n"
-        + legacy_settings(settings, request, saved)
-    )
-    if publication != "pre-configured":
-        body += "; configured model unknown (effort unknown)"
+    provenance = saved["provenance"]
+    prefix = support.marker(head, "primary", source)
+    qualified = publication != "legacy"
+    identity = f"loopzero primary review by claude on `{head}`, "
+    verdict = "**approve** (0 critical, 0 important, 0 suggestion)"
+    elapsed = f"{saved['duration_s']:.1f}s"
+    if qualified:
+        settings = "CLI claims" if publication == "pre-configured" else "launch configuration and CLI claims"
+        body = f"{prefix}\n{identity}{elapsed}: {verdict}\n\n"
+        body += legacy_settings(settings, provenance["requested_settings"][0], saved)
+        if publication != "pre-configured":
+            body += "; configured model unknown (effort unknown)"
+    else:
+        if metadata == "legacy":
+            provenance.pop("requested_settings", None)
+        else:
+            provenance["requested_settings"] = {"null": None, "empty": [], "malformed": "bad"}[metadata]
+        path.write_text(json.dumps(saved))
+        if source == "repost":
+            prefix += "\nReposted from runner session: `claude-session-123`"
+        effort = f" (effort {saved['effort']})" if saved["effort"] else ""
+        body = f"{prefix}\n{identity}model {saved['model'] or 'unknown'}{effort}, {elapsed}: {verdict}"
     if publication == "summary":
         body += "\n\nNative Claude output is retained in the restricted local review receipt."
     else:
         body += raw_details(saved["raw"])
     arm_published_review(gh, head, body)
     if publication == "pre-configured":
-        assert "configured_settings" in saved["provenance"]
+        assert "configured_settings" in provenance
         assert run(capsys, "review", "--repost")[0] == 1
-        saved["provenance"].pop("configured_settings")
+        provenance.pop("configured_settings")
         path.write_text(json.dumps(saved))
-    out, err = expect_cli(capsys, 0, "review", "--repost")
-    assert saved["raw"] not in out + err
+    out, err = expect_cli(capsys, int(not qualified), "review", "--repost")
+    if qualified:
+        assert saved["raw"] not in out + err
     if publication == "pre-configured":
         arm_published_review(gh, head, body + "changed")
         assert run(capsys, "review", "--repost")[0] == 1
@@ -422,7 +414,7 @@ def test_repost_confirms_historical_claude_publication(
 
 
 @pytest.mark.parametrize("altered", [False, True])
-def test_repost_confirms_pre_configured_codex_publication(replay_gh, wt, gh, capsys, monkeypatch, altered):
+def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkeypatch, altered):
     head = head_of(wt)
     arm_pr(gh, head)
     result = support._native_codex_result(head, repo=REPO, publisher=LOGIN, cwd=str(wt))

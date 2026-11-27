@@ -8,6 +8,7 @@ import json
 import subprocess
 from contextlib import nullcontext
 from pathlib import Path
+from shutil import copytree
 
 import pytest
 
@@ -17,18 +18,25 @@ from tests import test_cli, test_runners
 from tests.conftest import commit_file, git, git_environment
 
 fake_bwrap = test_runners.fake_bwrap
-gh, replay_gh = test_cli.gh, test_cli.replay_gh
+gh = test_cli.gh
 APPROVE = test_runners.APPROVE
 SYNTHETIC_NATIVE = test_runners._native_codex_result("a" * 40)
 
 
-@pytest.fixture
-def native(git_repo, fake_tool):
-    base = git(git_repo, "rev-parse", "HEAD").strip()
+@pytest.fixture(scope="session")
+def native_history(git_repo_seed, tmp_path_factory):
+    repo = copytree(git_repo_seed, tmp_path_factory.mktemp("native-history") / "repo")
+    base = git(repo, "rev-parse", "HEAD").strip()
     content = "PRIVATE_CANARY /home/private/secret.txt\n" + "x" * 40000 + "Ω\n"
-    commit_file(git_repo, "large.txt", content, "large synthetic source")
-    head = git(git_repo, "rev-parse", "HEAD").strip()
-    patch = git(git_repo, "diff", "--no-color", base, head).strip()
+    commit_file(repo, "large.txt", content, "large synthetic source")
+    head = git(repo, "rev-parse", "HEAD").strip()
+    return repo, base, head, git(repo, "diff", "--no-color", base, head).strip()
+
+
+@pytest.fixture
+def native(native_history, tmp_path, fake_tool):
+    seed, base, head, patch = native_history
+    git_repo = copytree(seed, tmp_path / "repo")
     script = """#!/usr/bin/env python3
 import json,pathlib,subprocess,sys,uuid
 args=sys.argv[1:]
@@ -70,6 +78,23 @@ print('model: gpt-6.2-astra\\nreasoning effort: medium',file=sys.stderr)
         )
 
     return invoke, context, git_repo
+
+
+@pytest.fixture(scope="module")
+def native_transcripts():
+    return {}
+
+
+@pytest.fixture
+def recorded_native(request, native_transcripts):
+    """Replay immutable runner output for tests that mutate transcript data."""
+    def capture(chunk=None):
+        if chunk not in native_transcripts:
+            invoke, context, repo = request.getfixturevalue("native")
+            native_transcripts[chunk] = invoke(chunk), context, repo
+        return native_transcripts[chunk]
+
+    return capture
 
 
 def body(result):
@@ -123,8 +148,9 @@ def packed(value):
 
 
 @pytest.mark.parametrize("formatted", [False, True])
-def test_large_real_native_private_public_saved_and_exact_bytes(native, git_repo, formatted):
-    result = native[0]()
+def test_large_real_native_private_public_saved_and_exact_bytes(native, formatted):
+    invoke, _, git_repo = native
+    result = invoke()
     if formatted:
         changed = dataclasses.replace(
             result, raw=json.dumps(json.loads(result.raw), ensure_ascii=False, indent=1)
@@ -149,7 +175,7 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, git_repo
     )
     assert all(
         secret not in rendered
-        for secret in ("PRIVATE_CANARY", "/home/private", "git -C", str(native[2]))
+        for secret in ("PRIVATE_CANARY", "/home/private", "git -C", str(git_repo))
     )
     assert projection(result) == (True, evidence)
     assert eligible(row(result))
@@ -167,8 +193,8 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, git_repo
     "moving_range", "failed", "echo", "unmatched", "wrong_head", "wrong_diff",
     "duplicate_event", "after_verdict", "terminal_failure",
 ])
-def test_full_native_attribution_and_fatal_controls(native, mutation):
-    result = native[0]()
+def test_full_native_attribution_and_fatal_controls(recorded_native, mutation):
+    result, context, repo = recorded_native()
     data = json.loads(result.raw)
     events = data["events"]
     fatal = {
@@ -191,10 +217,10 @@ def test_full_native_attribution_and_fatal_controls(native, mutation):
     if mutation == "mixed_session":
         events[2]["session_id"] = "another-session"
     command_edits = {
-        "wrong_repo": (str(native[2]), "/wrong/repo"),
-        "wrong_cd": ("git -C " + str(native[2]), "cd /wrong/repo && git"),
-        "unbound_repo": ("git -C " + str(native[2]), "git"),
-        "moving_range": (native[1]["base"], "origin/main"),
+        "wrong_repo": (str(repo), "/wrong/repo"),
+        "wrong_cd": ("git -C " + str(repo), "cd /wrong/repo && git"),
+        "unbound_repo": ("git -C " + str(repo), "git"),
+        "moving_range": (context["base"], "origin/main"),
     }
     output_edits = {"wrong_head": (result.head, "a" * 40), "wrong_diff": ("PRIVATE_CANARY", "FAKE_CANARY")}
     for event in events:
@@ -236,8 +262,9 @@ def test_full_native_attribution_and_fatal_controls(native, mutation):
 @pytest.mark.parametrize("mutation", [
     "valid", "missing", "reorder", "duplicate_session", "range", "context", "chunk_index",
 ])
-def test_complete_ordered_native_chunks(native, mutation):
-    first, second = native[0]((1, 2)), native[0]((2, 2))
+def test_complete_ordered_native_chunks(recorded_native, mutation):
+    first, _, _ = recorded_native((1, 2))
+    second, _, _ = recorded_native((2, 2))
     merged = runners.merge_reviews([first, second])
     data = json.loads(merged.raw)
     edits = {
@@ -388,7 +415,7 @@ def test_retired_pair_marker_cannot_pass_eligibility(published_native, source, i
 
 @pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_legacy",
                                   "verified_inspection"])
-def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, gh, fake_bin, monkeypatch, kind):
+def test_large_publication_confirmation_and_hosted_agreement(native, gh, fake_bin, monkeypatch, kind):
     from tests.test_github import pr_json, rest_pr_json, threads_json
 
     result = native[0]()

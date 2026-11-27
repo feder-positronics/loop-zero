@@ -64,6 +64,7 @@ def prepare_event(tmp_path, monkeypatch, repo, event, *, base="main"):
 def publisher(tmp_path, fake_bin, monkeypatch):
     prepare_event(tmp_path, monkeypatch, REPO, {"pull_request": {"number": 7}})
     gh = FakeGh(fake_bin, tmp_path)
+    gh.replay_in_process(monkeypatch)
     gh.respond_pr_view(pr_json(), branch="lz/task")
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 11})
@@ -244,24 +245,24 @@ def test_hosted_review_coverage_after_source_head_changes(
         assert "source #7: no review recorded" in statuses[-1]["description"]
 
 
-def test_merged_source_refresh_publishes_nothing(publisher):
-    body = json.dumps({"head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"}, "merged": True,
-                       "title": "before\u2028after"}, ensure_ascii=False)
+@pytest.mark.parametrize("unfinished_refresh", [False, True])
+def test_landed_source_refresh_preserves_settled_verdict(publisher, unfinished_refresh):
+    body = json.dumps({
+        "head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"},
+        "merged": True, "title": "before\u2028after",
+    }, ensure_ascii=False)
     publisher.respond(f"api repos/{REPO}/pulls/7", f"HTTP/2.0 200 OK\r\nX-GitHub-Request-Id: GHREQ-456\r\n\r\n{body}")
-    check_source(publisher, [])
+    if unfinished_refresh:
+        context = {"context": "Loop-zero Eligibility"}
+        prior = context | {"id": 1, "state": "failure", "description": "Blocking finding"}
+        refresh = context | {"id": 11, "state": "pending", "description": "Refreshing live source review evidence"}
+        publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [refresh, prior])
+        publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 12})
+        posted = check_source(publisher, ["failure"])
+        assert posted[0]["description"] == prior["description"]
+    else:
+        check_source(publisher, [])
     assert publisher.argv(0)[-1] == "--include"
-
-
-def test_rerun_on_landed_source_restores_verdict_hidden_by_failed_restore(publisher):
-    ctx = {"context": "Loop-zero Eligibility"}
-    old = ctx | {"id": 1, "state": "failure", "description": "Blocking finding"}
-    marker = ctx | {"id": 11, "state": "pending", "description": "Refreshing live source review evidence"}
-    body = json.dumps({"head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"}, "merged": True})
-    publisher.respond(f"api repos/{REPO}/pulls/7", f"HTTP/2.0 200 OK\r\n\r\n{body}")
-    publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [marker, old])
-    publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 12})
-    posted = check_source(publisher, ["failure"])
-    assert posted[0]["description"] == "Blocking finding"
 
 
 @pytest.mark.parametrize("state,readback", [
@@ -366,6 +367,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     polling = case in {"settled_mergeability", "pending_mergeability", "poll_drift"}
     if polling or case in {"valid", "trunk", "hold"}:
         gh = FakeGh(fake_bin, tmp_path)
+        gh.replay_in_process(monkeypatch)
         gh.respond("api graphql", threads_json())
     for number, sha in [(101, "1" * 40), (102, "2" * 40), (900, "c" * 40)]:
         path = f"/repos/owner/repo/pulls/{number}"
@@ -497,7 +499,6 @@ def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
 
 @pytest.mark.parametrize("prior", [998, 999, 1000])
 def test_source_status_limit(publisher, capsys, monkeypatch, prior):
-    publisher.replay_in_process(monkeypatch)
     context = hosted.eligibility.CONTEXT
     endpoint = f"api repos/{REPO}/statuses/{HEAD}"
     refused = {

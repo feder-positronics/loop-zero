@@ -88,7 +88,7 @@ def test_timeout_stops_descendant_and_preserves_output(tmp_path, monkeypatch):
         try:
             with pytest.raises(_proc.ProcTimeout, match="timed out") as raised:
                 _proc.run(
-                    [sys.executable, "-c", parent], cwd=tmp_path, env_allowlist=(), timeout=0.75,
+                    [sys.executable, "-c", parent], cwd=tmp_path, env_allowlist=(), timeout=0.05,
                 )
             pid = int(raised.value.stdout)
             stat = Path(f"/proc/{pid}/stat")
