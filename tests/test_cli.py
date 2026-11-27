@@ -1211,6 +1211,7 @@ def test_pr_pushes_the_captured_commit_not_the_moved_branch(wt, gh, fake_tool, t
     gh.respond(branch_history_key(), [])
     gh.respond_pr_list([])
     gh.respond_pr_create(pr_json(headRefOid=head))
+    git(wt, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")  # single-branch clone
     pushes = tmp_path / "pushes"  # another writer moves the branch name just before the push
     fake_tool("git", f'''if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; /usr/bin/git commit -q --allow-empty -m moved; fi
 exec /usr/bin/git "$@"
@@ -1218,13 +1219,28 @@ exec /usr/bin/git "$@"
     expect_cli(capsys, 0, "pr", stdout=URL + "\n")
     assert pushes.read_text() == f"push origin {head}:refs/heads/lz/t1\n"
     assert git(wt.parent.parent.parent / "origin.git", "rev-parse", "lz/t1").strip() == head
+    assert git(wt, "config", "branch.lz/t1.merge").strip() == "refs/heads/lz/t1"
 
 
-def test_pr_does_not_patch_a_body_for_a_head_the_pr_moved_from(wt, gh, capsys):
+@pytest.mark.parametrize("live", [dict(headRefOid="b" * 40), dict(baseRefName="release")], ids=["head", "target"])
+def test_pr_does_not_patch_a_body_for_a_head_or_target_the_pr_moved_from(wt, gh, capsys, live):
     arm_pr_body_patch(gh, head_of(wt))
-    gh.respond_pr_view(pr_json(headRefOid="b" * 40))
+    gh.respond_pr_view(pr_json(**{"headRefOid": head_of(wt), **live}))
     _, err = expect_cli(capsys, 1, "pr", stdout="")
-    assert "bbbbbbbbbbbb" in err and not any(map(wrote, gh.calls))
+    assert "rerun loopzero pr" in err and not any(map(wrote, gh.calls))
+
+
+def test_review_summary_is_not_patched_into_a_closed_pr(wt, gh, fake_bin, capsys, monkeypatch):
+    head = prepare_review(wt, gh, fake_bin)
+    post = github.post_review
+
+    def publish(*args, **kwargs):
+        post(*args, **kwargs)
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, state="CLOSED")))
+
+    monkeypatch.setattr(github, "post_review", publish)
+    expect_cli(capsys, 0, "review", stderr="")
+    assert posted_review(gh) and not any("PATCH" in call["argv"] for call in gh.calls)
 
 
 def arm_unproven_history(gh, failure):

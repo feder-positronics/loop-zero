@@ -641,7 +641,10 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def _receipt_inode(path: Path) -> int | None:
-    return path.lstat().st_ino if path.exists() else None
+    try:
+        return path.lstat().st_ino
+    except FileNotFoundError:
+        return None
 
 
 def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int) -> int:
@@ -707,14 +710,15 @@ def cmd_pr(args: argparse.Namespace) -> int:
     push.append(f"{head}:refs/heads/{git_branch}")  # the captured commit, never the mutable local name
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
-    _git(wt, "branch", f"--set-upstream-to=origin/{git_branch}", git_branch)
+    for key, value in (("remote", "origin"), ("merge", f"refs/heads/{git_branch}")):  # no tracking ref needed
+        _git(wt, "config", f"branch.{git_branch}.{key}", value)
     if pr is not None:
         with github.pr_lock(config.repo, pr.number):
             live = github.pr_view(config.repo, pr.number)
             if live.state != "OPEN":
                 raise CliError(f"PR #{pr.number} closed during publication; reopen it before retrying loopzero pr")
-            if live.head_sha != head:
-                raise CliError(f"PR #{pr.number} head is {live.head_sha[:12]}, not {head[:12]}; integrate it and rerun loopzero pr")
+            if (live.head_sha, live.base_ref) != (head, config.base_branch):
+                raise CliError(f"PR #{pr.number} is at {live.head_sha[:12]} on {live.base_ref}; rerun loopzero pr")
             if (body := _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))) != live.body.replace("\r\n", "\n"):
                 github.update_body(config.repo, pr.number, body)
     else:
@@ -885,7 +889,8 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
                     body = _validate_pr_body_size(_append_review(refreshed, result))
             except (LoopZeroError, OSError, ValueError):
                 pass
-            github.update_body(config.repo, pr.number, body)
+            if (live.head_sha, live.state, live.base_ref) == (head, "OPEN", config.base_branch):
+                github.update_body(config.repo, pr.number, body)
         except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
             print(f"warning: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
