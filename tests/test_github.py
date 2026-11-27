@@ -718,6 +718,7 @@ def test_api_get_and_login_helpers(gh: FakeGh, monkeypatch) -> None:
     gh.respond("api repos/acme/widgets", '{"default_branch":"Łódź"}')
     assert (github.api_get("repos/acme/widgets"), gh.argv(0)) == ({"default_branch": "Łódź"}, ["api", "repos/acme/widgets", "--include"])
     assert github.login() == "Łódź"
+    github._logins.clear()
     with pytest.raises(github.GhError, match="no login"):
         github.login()
 
@@ -1461,6 +1462,92 @@ def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: 
         assert (comment["path"], comment["line"]) == (anchor, 1)
     assert len(calls_for(gh, detail_key)) == int(severity == "important" and path != "file-3000")
 
+
+def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(monkeypatch, app_token_helper):
+    app_token_helper()
+    sent = []
+    real_run = github.run
+    def run(argv, **kwargs):
+        if argv[0] != "gh":
+            return real_run(argv, **kwargs)
+        sent.append(argv)
+        if "graphql" in argv:
+            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"bot"}}}', "stderr": ""})
+        if "If-None-Match: \"v1\"" in argv:
+            return type("Done", (), {"exit_code": 1, "stdout": "HTTP/2.0 304 Not Modified\r\nDate: Fri, 27 Nov 2026 15:00:00 GMT\r\n\r\n", "stderr": "gh: HTTP 304"})
+        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{"n": 7}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    dates: list[str] = []
+    assert github.api_get("repos/acme/widgets/pulls/7") == {"n": 7}
+    assert github._gh("api", "repos/acme/widgets/pulls/7", conditional=True, dates=dates) == '{"n": 7}'
+    assert dates == ["Fri, 27 Nov 2026 15:00:00 GMT"]
+    assert github.login() == github.login() == "bot"
+    assert sum("graphql" in argv for argv in sent) == 1
+    assert [any(part.startswith("If-None-Match") for part in argv) for argv in sent[:2]] == [False, True]
+    github._gh("api", "repos/acme/widgets/issues/1/comments", "-f", "body=x")
+    assert not any(part.startswith("If-None-Match") for part in sent[-1])
+
+
+def test_ambient_credential_is_never_cached(monkeypatch):
+    sent = []
+    def run(argv, **_):
+        sent.append(argv)
+        if "graphql" in argv:
+            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"a"}}}', "stderr": ""})
+        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    github.login(), github.login(), github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
+    assert len(sent) == 4 and not any(part.startswith("If-None-Match") for argv in sent for part in argv)
+
+
+def test_oversized_response_does_not_evict_other_reads(monkeypatch, app_token_helper):
+    app_token_helper()
+    monkeypatch.setattr(github, "_ETAG_CACHE_BYTES", 100)
+    real_run = github.run
+    def run(argv, **kwargs):
+        if argv[0] != "gh":
+            return real_run(argv, **kwargs)
+        body = "ł" * (60 if argv[2].endswith("big") else 5)  # 120 vs 10 bytes
+        return type("Done", (), {"exit_code": 0, "stdout": f'HTTP/2.0 200 OK\r\nEtag: "e"\r\n\r\n{body}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    github._gh("api", "repos/a/b/small", conditional=True)
+    github._gh("api", "repos/a/b/big", conditional=True)
+    assert [key[0][1] for key in github._etag_cache] == ["repos/a/b/small"]
+
+
+def test_login_is_cached_under_the_credential_that_answered(monkeypatch, tmp_path, fake_tool):
+    helper = fake_tool("app-token", "echo app-a\n")
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    real_run = github.run
+    tokens = []
+    def run(argv, **kwargs):
+        if argv[0] != "gh":
+            return real_run(argv, **kwargs)
+        tokens.append((kwargs.get("extra_env") or {}).get("GH_TOKEN", ""))
+        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"bot"}}}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    assert github.login() == "bot" and tokens == ["app-a"]
+    assert github._logins == {"app-a": "bot"}
+    monkeypatch.setattr(github, "_select_token", lambda *_: "")  # ambient: nothing to key a cached login on
+    github._logins.clear()
+    github.login(), github.login()
+    assert github._logins == {}
+
+
+def test_environment_token_is_cached_but_stored_account_is_not(monkeypatch):
+    sent = []
+    def run(argv, **_):
+        sent.append(argv)
+        if "graphql" in argv:
+            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"a"}}}', "stderr": ""})
+        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{}', "stderr": ""})
+    monkeypatch.setattr(github, "run", run)
+    monkeypatch.setenv("GH_TOKEN", "env-a")
+    assert github.login() == github.login() == "a"
+    github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
+    assert len(sent) == 3 and "If-None-Match: \"v1\"" in sent[-1]
+    monkeypatch.setenv("GH_TOKEN", "env-b")  # a different account does not reuse the first one's answers
+    assert github.login() == "a" and len(sent) == 4
 
 @pytest.mark.parametrize("repo", ["acme/123", "acme/true", "acme/@etc-passwd"])
 def test_graphql_string_variables_are_raw_fields(repo: str) -> None:

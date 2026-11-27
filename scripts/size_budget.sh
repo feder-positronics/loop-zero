@@ -12,15 +12,19 @@ CORE_DOCS_CAP=1500
 DELEGATION_DOC_CAP=660
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
-  local path=$1 ext=$2
+  local path=$1 ext=$2 file
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$path" | { grep -z "$ext" || true; } \
-    | xargs -0 -r -I{} git show "$base:{}" | wc -l
+    | while IFS= read -r -d '' file; do printf '%s\0' "$base:$file"; done \
+    | xargs -0 -r git show | wc -l
 }
 # The candidate is the working tree, so uncommitted and new files count too.
 count_tree() {
-  local path=$1 ext=$2
+  local path=$1 ext=$2 file
   git -c core.quotepath=off ls-files -zco --exclude-standard -- "$path" | { grep -z "$ext" || true; } \
-    | xargs -0 -r sh -ec 'for f; do if [ -f "$f" ]; then cat -- "$f"; fi; done' _ | wc -l
+    | while IFS= read -r -d '' file; do
+        if [ -f "$file" ]; then printf '%s\0' "$file"; fi
+      done \
+    | xargs -0 -r cat -- | wc -l
 }
 status=0
 report() { # name path cap ext_re
