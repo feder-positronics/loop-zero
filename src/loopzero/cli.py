@@ -276,8 +276,7 @@ def _readiness(
     ):
         return github.Readiness(False, (problem,))
     dates: list[str] = []
-    reviews = (_pr_reviews(config.repo, pr.number, **({"dates": dates} if workflow_wait else {}))
-               if reviews is None else reviews)
+    reviews = _pr_reviews(config.repo, pr.number, dates=dates) if reviews is None else reviews  # GitHub's clock
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
@@ -867,7 +866,10 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
     _save_review(wt, result, publication_context)
     token = _refresh_publisher_token(token, publisher)
     with github.pr_lock(config.repo, pr.number):
-        _require_open_review_round(config, pr, head, kind)
+        try:
+            _require_open_review_round(config, pr, head, kind)
+        except (github.GhError, _proc.ProcTimeout) as exc:
+            raise CliError(f"{exc} | review saved at {_review_file(wt, head, kind)}; run `loopzero review --repost`") from exc
         try:
             github.post_review(
                 config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
