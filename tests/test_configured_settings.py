@@ -50,7 +50,7 @@ def test_refused_stream_fresh_launch_records_only_explicit_flags(fake_bin, tmp_p
     projection = runners.codex_evidence(native)
     assert runners.decode_codex_evidence(runners.encode_codex_evidence(projection)) == projection
     assert projection["calls"][0]["configured"] == call["configured"]
-    assert projection["calls"][0]["inspection"] == ("unknown" if mode == "failed-read" else "verified")
+    assert projection["calls"][0]["inspection"] == "unknown"
     body = github._review_body(native, [], cli.review_marker(native.head, native.kind))
     assert f"configured model {pins.get('model', 'unknown')} (effort {pins.get('effort', 'unknown')})" in body
     # A retained receipt from before the fix cannot be upgraded from requested/model fields.
