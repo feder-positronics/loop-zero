@@ -78,8 +78,8 @@ repository instead of adding prompt prose—respecting the
 [findings rule](../core/CONTRACT.md#findings) by encoding the defect class, never
 copying raw PR findings into files or backlogs. Prefer one maintained, pinned
 tool per job inside `[checks].commands`: for Python, Ruff
-(`UP/B/SIM/PIE/PERF/RUF/RET/ERA/ARG/PGH003/PGH004`, `ARG` off in tests), a
-per-function complexity ratchet, `tach` for declared module boundaries, and one
+(`UP/B/SIM/PIE/PERF/RUF/RET/ERA/ARG/PGH003/PGH004/C901`, `ARG` off in tests,
+existing complexity offenders marked `# noqa: C901` with a reason), `tach` for declared module boundaries, and one
 type checker (`ty` or `basedpyright`); for TypeScript, `tsc --noEmit` and Oxlint
 with `@cloudflare/oxlint-config` (plus restricted-import rules or
 `dependency-cruiser` when a consumer needs graph-wide layer rules). Entry-point

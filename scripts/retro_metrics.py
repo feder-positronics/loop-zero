@@ -133,6 +133,7 @@ def pages(inputs, path, cutoff=None, **params):
             cutoff is not None and timestamp(batch[-1]["updated_at"]) < cutoff
         ):
             return rows
+    return rows
 
 
 def receipts(path, lower, end):
