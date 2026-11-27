@@ -65,8 +65,8 @@ action with its owner. Add no gate, ledger, scheduler or skill for this.
 
 Each repository names its collector command, scope, exclusions, cadence,
 baseline location and owner in its own `AGENTS.md` or the docs it links.
-loop-zero ships no collector, schedule or baseline store; its own code-health
-audit runs as a host schedule, and `loopzero check` runs only its blocking checks. See [IntelFlo's audit runbook](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/audit-health.md#standing-nightly-audit)
+loop-zero ships no recurring code-health collector, schedule or baseline store;
+`loopzero check` runs the repository's blocking checks. See [IntelFlo's audit runbook](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/audit-health.md#standing-nightly-audit)
 for a consumer example.
 
 ### Anti-slop checks and Rule of Two
