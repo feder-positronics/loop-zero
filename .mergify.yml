@@ -1,4 +1,4 @@
-# Admission is explicit: @mergifyio queue main. No automatic queue rules.
+# Admission is explicit: @mergifyio queue. No automatic queue rules.
 # Requires Loop-zero Eligibility on originals AND attested temporary candidates.
 merge_queue:
   mode: serial
