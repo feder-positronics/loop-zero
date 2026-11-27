@@ -690,7 +690,7 @@ def test_delayed_check_preserves_review_summary(wt, gh, fake_bin, tmp_path, monk
         monkeypatch.setattr(github, "update_body", patch)
         assert cli.main(["check"]) == pending[0].result(timeout=10) == 0
     final = json.loads(gh.calls[-1]["--input"])["body"]
-    assert_contains(final, "Human evidence.", "- primary, claude")
+    assert_contains(final, "Human evidence.", "Recorded for", "- primary, claude")
 
 
 @pytest.mark.parametrize("command,exit_code", [("check", 0), ("pr", 1)])
@@ -1647,8 +1647,17 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
         if body_case == "existing-review":
             assert updated.index(prior) < updated.index(line) < updated.index("## Notes")
         else:
-            assert "Edited during review" in updated and "New check results" in updated
-            assert "loopzero:checks:start" in updated and updated.endswith(f"## Review\n{line}\n")  # The record is refreshed too.
+            assert updated == f"{live}\n## Review\n{line}\n"  # No receipt here: the live record is kept.
+
+
+def test_review_refreshes_the_check_record_from_its_receipt(wt, gh, fake_bin, capsys):
+    head = prepare_review(wt, gh, fake_bin)
+    assert cli.main(["check"]) == 0
+    stale = "# T1\n\n## Validation\n<!-- loopzero:checks:start -->\nRecorded for `aaaaaaaaaaaa`\n<!-- loopzero:checks:end -->\n"
+    gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=stale)))
+    expect_cli(capsys, 0, "review", stdout_contains=(f"primary review by claude on {head[:12]}: approve",))
+    updated = json.loads(next(c for c in gh.calls if "PATCH" in c["argv"])["--input"])["body"]
+    assert f"Recorded for `{head[:12]}`" in updated and "aaaaaaaaaaaa" not in updated
 
 
 @pytest.mark.parametrize("source", ["task", "base", "override", "missing_ref", "bootstrap"])

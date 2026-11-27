@@ -861,11 +861,14 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
             ) from exc
         try:
             live = github.pr_view(config.repo, pr.number)
-            try:
-                refreshed = _pr_body(wt, head, config, live.body)  # The record must name the reviewed head.
+            body = _append_review(live.body, result)
+            try:  # Refresh the record only from a receipt for this head, never over a newer head or a missing receipt.
+                refreshed = _pr_body(wt, head, config, live.body)
+                if live.head_sha == head and "(no `loopzero check` run recorded)" not in refreshed:
+                    body = _validate_pr_body_size(_append_review(refreshed, result))
             except (LoopZeroError, OSError, ValueError):
-                refreshed = live.body
-            github.update_body(config.repo, pr.number, _append_review(refreshed, result))
+                pass
+            github.update_body(config.repo, pr.number, body)
         except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
             print(f"warning: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
