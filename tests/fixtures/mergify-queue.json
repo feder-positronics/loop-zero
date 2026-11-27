@@ -4,7 +4,8 @@
   "conflict_report": "<!---\nDO NOT EDIT\n-*- Mergify Payload -*-\n{\"version\": 1, \"state\": \"dequeued\", \"queue_rule_name\": \"main\", \"dequeue_reason\": {\"code\": \"CONFLICT_WITH_BASE_BRANCH\"}}\n-*- Mergify Payload End -*-\n-->\n\n### 🚫 Left the queue · conflict with base branch\n\n**So far**\n- ✅ **Entered the queue** Wed 25 Nov, 22:12 · rule `main` · triggered by @eowca with the [`@mergifyio queue` command](@url@#issuecomment-42)\n- ❌ **Checks failed** · draft [#965](/feder-positronics/loop-zero/pull/965)\n- 🚫 **Left the queue** 22:13 · `@sha@`\n\n",
   "attribution": {
     "stacked": "**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.",
-    "isolated": "**The failure is in this pull request.** It failed tested alone on top of `main`."
+    "isolated": "**The failure is in this pull request.** It failed tested alone on top of `main`.",
+    "batch": "**Not proven to be this pull request's failure.** It failed in a batch with [#14186](/feder-positronics/intelflo/pull/14186)."
   },
   "expected": {
     "stacked": [
@@ -16,7 +17,13 @@
       "flake"
     ],
     "conflict": ["conflicts with main", "git fetch origin main", "After resolving the conflict", "loopzero review", "loopzero merge --wait"],
-    "unknown": ["Address it before requeueing"]
+    "unknown": ["Address it before requeueing"],
+    "batch": ["stack", "earlier"],
+    "rule": ["Address it before requeueing"],
+    "rule_unrequested": ["Address it before requeueing"],
+    "rule_blocked": ["Address it before requeueing"],
+    "linked_already": ["Address it before requeueing"],
+    "dequeued": ["conflicts with main", "git fetch origin main", "After resolving the conflict", "loopzero review", "loopzero merge --wait"]
   },
   "admission": {
     "current": "2026-11-25T19:01:00Z",
@@ -26,6 +33,7 @@
   "admission_report": "### ⏳ Waiting for queue conditions\n\n- [ ] `check-success = Queue Preflight`",
   "requeue_guidance": [
     "as the whole PR comment (same login)",
+    "\"already queued\" reply to a request means a rule queued it first and is harmless",
     "`loopzero merge --wait`"
   ],
   "candidate_responses": {
@@ -146,5 +154,7 @@
       }
     }
   },
-  "candidate_condition": "check-success = Queue Quality Gate"
+  "candidate_condition": "check-success = Queue Quality Gate",
+  "rule_report": "<!---\nDO NOT EDIT\n-*- Mergify Payload -*-\n{\"version\": 1, \"state\": \"dequeued\", \"queue_rule_name\": \"main\", \"dequeue_reason\": {\"code\": \"CHECKS_FAILED\", \"checks\": [\"checks\"]}}\n-*- Mergify Payload End -*-\n-->\n\n### ❌ Left the queue · `checks` failed\n\n**So far**\n- ✅ **Entered the queue** Wed 25 Nov, 22:12 · rule `main` · triggered by rule `auto-queue admitted PRs`\n- ❌ **Checks failed** · draft [#965](/feder-positronics/loop-zero/pull/965)\n- 🚫 **Left the queue** 22:13 · `@sha@`\n\n",
+  "dequeued_report": "<!---\nDO NOT EDIT\n-*- Mergify Payload -*-\n{\"version\": 1, \"state\": \"dequeued\", \"queue_rule_name\": \"main\", \"dequeue_reason\": {\"code\": \"PR_DEQUEUED\", \"label\": \"pull request dequeued\"}}\n-*- Mergify Payload End -*-\n-->\n\n### ❌ Left the queue · `checks` failed\n\n**So far**\n- ✅ **Entered the queue** Wed 25 Nov, 22:12 · rule `main` · triggered by @eowca with the [`@mergifyio queue` command](@url@#issuecomment-42)\n- ❌ **Checks failed** · draft [#965](/feder-positronics/loop-zero/pull/965)\n- 🚫 **Left the queue** 22:13 · `@sha@`\n\n**Reason**\n\nQueue conditions are not satisfied:\n\n> - [ ] `-conflict` [📌 queue requirement]\n"
 }

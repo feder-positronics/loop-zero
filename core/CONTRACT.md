@@ -26,7 +26,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    block. Drafts need no approving review.
 4. `loopzero review` runs a reviewer model's own CLI (a native review), by
    default from a family independent of the writers, on the exact head and posts
-   one GitHub review with inline findings. Approval exits 0, changes requested 5.
+   one GitHub review with inline findings. If there is no commentable line,
+   blocking findings go in the review body and need a reviewed fix. Approval
+   exits 0, changes requested 5.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
    passes. A PR whose only blockers are missing or skipped required checks
    (with or without pending mergeability) also leaves draft but is not ready
@@ -148,7 +150,9 @@ of draft and queues it directly in GitHub:
 - The head moved only by a clean base merge and the old head was green.
 
 This is the documented owner route; a red receipt still blocks `loopzero ready`
-and `loopzero merge`.
+and `loopzero merge`. Where a repository rule queues ready PRs, taking a PR out of
+draft is the queue request, whatever tool does it: after a receipt refusal, post
+the one reason first, or fix the cause and rerun `loopzero check`.
 
 An attributed main regression is repaired or reverted by the PR owner of the change
 that caused it; for a shared critical
