@@ -81,7 +81,7 @@ def approval(head=HEAD, *, state="APPROVED", verdict="**approve**"):
     ("restore", ["pending", "failure"]), ("newer success", ["pending"]), ("newer pending", ["pending"]),
     ("stale marker", ["pending", "failure"]), ("write lost", ["pending", "failure"]),
     ("many markers", ["pending", "failure"]), ("other publisher marker", ["pending", "failure"]),
-    ("case-insensitive newer", ["pending"]), ("verdict worded like marker", ["pending", "failure"]),
+    ("case-insensitive newer", ["pending"]), ("pending verdict like marker", ["pending", "pending"]), ("verdict worded like marker", ["pending", "failure"]),
 ])
 def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, states):
     ctx = {"context": "Loop-zero Eligibility"}
@@ -92,6 +92,7 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
                "newer pending": [marker | {"id": 12, "description": "Awaiting trusted review"}, marker, old],
                "write lost": [marker, old],
                "other publisher marker": [marker, marker | {"id": 9, "description": "Refreshing source review evidence"}, old],
+               "pending verdict like marker": [marker, marker | {"id": 9, "description": "Refreshing sources"}, old],
                "case-insensitive newer": [old | {"id": 12, "state": "success", "context": "loop-zero eligibility"}, marker, old],
                "many markers": [marker] + [marker | {"id": i + 2} for i in range(25)] + [old],
                "verdict worded like marker": [marker, old | {"description": "Refreshing live source (verdict)"}]}[case]

@@ -139,7 +139,7 @@ def _run(cfg: Config) -> int:
 def _restore_landed(repo: str, head: str, marker: int | None) -> int:
     rows = github.context_statuses(repo, head, eligibility.CONTEXT)
     if marker and next(rows, {}).get("id") == marker and (prior := next(
-            (r for r in rows if r["state"] != "pending" or not (r.get("description") or "").startswith("Refreshing")), None)):
+            (r for r in rows if (r["state"], r.get("description")) not in {("pending", "Refreshing live source review evidence"), ("pending", "Refreshing source review evidence")}), None)):
         _publish_verdict(repo, head, prior["state"], prior["description"])
     return 0
 
