@@ -21,7 +21,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from functools import partial, wraps
 from pathlib import Path
 from urllib.parse import quote
@@ -123,7 +123,7 @@ def _load_config(
             print("checks are unpinned because --config was provided")
         return config_mod.load(args.config or root / "workflow.toml", require_ci=require_ci)
     config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
-                                     require_ci=require_ci, read_timeout=github._read_timeout)
+                                     require_ci=require_ci, read_timeout=github.read_timeout)
     if require_ci and not config.review_publishers:
         raise config_mod.ConfigError(
             f"origin/{config.base_branch}:workflow.toml: delivery.review_publishers must list the intended "
@@ -274,15 +274,14 @@ def _select_review_round(config: Config, pr: github.PR, head: str, reviews: list
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False, diagnostics: bool = False,
-    mergify_deadline: float | None = None,
+    mergify_deadline: float | None = None, dates: tuple[str, ...] = (),
 ) -> github.Readiness:
     if problem := github.merge_hold(pr.number, pr.labels) or (
         None if diagnostics else _check_report_problem(_load_report(wt), config, head)
     ):
         return github.Readiness(False, (problem,))
-    dates: list[str] = []
-    reviews = (_pr_reviews(config.repo, pr.number, **({"dates": dates} if workflow_wait else {}))
-               if reviews is None else reviews)
+    # GitHub's Date header, not the host clock, ages the review.
+    reviews = _pr_reviews(config.repo, pr.number, dates=(dates := [])) if reviews is None else reviews
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
@@ -870,9 +869,12 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
         raise
     prefix = _repost_prefix(result) if args.repost else review_marker(head, kind, "model")
     _save_review(wt, result, publication_context)
-    token = _refresh_publisher_token(token, publisher)
     with github.pr_lock(config.repo, pr.number):
-        _require_open_review_round(config, pr, head, kind)
+        try:  # a refused token or a GitHub error here leaves the saved review to --repost
+            token = _refresh_publisher_token(token, publisher)
+            _require_open_review_round(config, pr, head, kind)
+        except (github.GhError, _proc.ProcTimeout) as exc:
+            raise CliError(f"{exc} | review saved at {_review_file(wt, head, kind)}; run `loopzero review --repost`") from exc
         try:
             github.post_review(
                 config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
@@ -1307,19 +1309,28 @@ OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its on
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
     if problem := _check_report_problem(_load_report(wt), config, head):
         raise CliError(f"{problem}. {OWNER_ROUTE}")
-    github.mark_ready(config.repo, number)
+    try:
+        github.mark_ready(config.repo, number)
+    except github.GhUnavailable as exc:
+        raise CliError(f"{exc}\nRerun the same command once GitHub recovers.") from exc
 
 
 def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-kick paths share one readiness flow
     wt, config = _context(args)
-    read_started = time.monotonic()
-    pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None)
+    started = time.monotonic()
+    deadline = started + args.wait if args.wait else None
+    try:
+        with github.bounded_reads(deadline, token=None, retry=True) if deadline else nullcontext():
+            pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None,
+                                          mergify_deadline=deadline)
+    except github.ReadDeadline:
+        print(f"timed out while checking readiness. {_wait_resume(args)}")
+        return 3
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
     kicked = bool(waiting)
-    started = time.monotonic()
     wait = partial(_wait_with_deadline, wt, config, timeout=args.wait, started=started,
-                   args=args, allow_skipped=True, initial_read_time=started - read_started)
+                   args=args, allow_skipped=True, initial_read_time=time.monotonic() - started)
     if waiting:
         _mark_ready(wt, config, pr.number, pr.head_sha)
         if args.wait is None:
@@ -1327,9 +1338,7 @@ def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-k
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
-    if args.wait is not None and (
-        waiting or _pending_checks(readiness, allow_skipped=not pr.is_draft)
-    ):
+    if args.wait is not None and (kicked or _pending_checks(readiness, allow_skipped=not pr.is_draft)):
         if (waited := wait(pr, kicked=kicked, shown=_by_check(readiness, readiness.reasons) if kicked else (),
                            initial=None if kicked else readiness)) is None:
             return 3
@@ -1343,18 +1352,14 @@ def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-k
     for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
     if not readiness.ready:
-        _print_owner_route(pr, readiness)
+        if pr.is_draft and any(reason.startswith(("run loopzero check", "check receipt")) for reason in readiness.reasons):
+            print(OWNER_ROUTE)
         if args.wait is None and _pending_checks(readiness):
             print(NEXT_WAIT)
             return 3
         return 1
     print(f"ready: {pr.url}")
     return 0
-
-
-def _print_owner_route(pr: github.PR, readiness: github.Readiness) -> None:
-    if pr.is_draft and any(reason.startswith(("run loopzero check", "check receipt")) for reason in readiness.reasons):
-        print(OWNER_ROUTE)
 
 
 def _check_reasons(readiness: github.Readiness, *states: str) -> dict[str, str]:
@@ -1446,18 +1451,16 @@ def _wait_with_deadline(
     if timeout == 0:
         return wait()
     deadline = started + timeout
-    reported_timeout = False
     try:
-        if time.monotonic() < deadline:
-            with github.bounded_reads(deadline, token=None, retry=True):
-                waited = wait(bounded=True, initial_read_time=initial_read_time)
-                reported_timeout = waited is None
+        with github.bounded_reads(deadline, token=None, retry=True, check_on_exit=False):
+            waited = wait(bounded=True, initial_read_time=initial_read_time)
+            if waited is not None:
+                github.read_timeout(0)
             return waited
     except (github.ReadDeadline, _proc.ProcTimeout) as exc:
         if isinstance(exc, _proc.ProcTimeout) and time.monotonic() < deadline:
             raise
-    if not reported_timeout:
-        _print_check_wait_timeout(pr, args)
+    _print_check_wait_timeout(pr, args)
     return None
 
 
@@ -1468,10 +1471,8 @@ def _print_check_wait_timeout(pr: github.PR, args: argparse.Namespace) -> None:
 
 
 def _wait_resume(args: argparse.Namespace) -> str:
-    command = ["loopzero", args.command, "--wait"]
-    if args.config:
-        command.insert(1, f"--config={args.config}")
-    return f"Run `{shlex.join(command)}` to resume on this head."
+    config = [f"--config={args.config}"] if args.config else []
+    return f"Run `{shlex.join(['loopzero', *config, args.command, '--wait'])}` to resume on this head."
 
 def _verify_wait_snapshot(
     args: argparse.Namespace, wt: Path, config: Config, head: str, current_head: str,
@@ -1516,7 +1517,7 @@ def _read_wait_poll[T](read: Callable[[], T], deadline: float) -> T:
 
 def _check_wait_poll(
     wt: Path, config: Config, pr: github.PR, previous: Config, args: argparse.Namespace,
-    allow_merged: bool, deadline: float,
+    allow_merged: bool, deadline: float | None,
 ) -> tuple[github.PR, Config, github.Readiness | None]:
     current = github.pr_view(config.repo, pr.number)
     previous = _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha, previous)
@@ -1544,18 +1545,19 @@ def _wait_for_checks(
             initial = None
         else:
             deadline = started + timeout
-            poll = partial(_check_wait_poll, wt, config, pr, previous, args, allow_merged, deadline)
+            poll = partial(_check_wait_poll, wt, config, pr, previous, args, allow_merged,
+                           deadline if bounded else None)
             current, previous, readiness = _read_wait_poll(poll, deadline)
-            if readiness is None:
-                return current, None, kicked
+        if readiness is None:
+            return current, None, kicked
         if not kicked and _draft_checks_waiting(config, current, readiness):
+            if bounded:
+                github.read_timeout(0)
             _mark_ready(wt, config, pr.number, current.head_sha)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
                                     shown=_by_check(readiness, readiness.reasons), args=args, bounded=bounded,
                                     allow_merged=allow_merged)
-        if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
-            break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft))
         if pending or readiness.ready:
             _print_wait_changes(shown, _by_check(readiness, pending))
@@ -1572,7 +1574,7 @@ def _wait_for_checks(
         # An active workflow may not have created its check runs yet.
         if (
             elapsed >= MISSING_RUN_GRACE
-            and all(readiness.checks.get(r, ("", ""))[1] == "missing" for r in pending)
+            and set(pending) <= _check_reasons(readiness, "missing", "skipped").keys()
             and not _read_wait_poll(
                 partial(github.has_check_activity, config.repo, pr.head_sha, readiness),
                 started + timeout,
@@ -1587,15 +1589,30 @@ def _wait_for_checks(
     return None
 
 
+def _queue_wait(deadline: float, poll: Callable[[float], str | None], *, bounded: bool) -> str | None:
+    if not bounded:  # Explicit --wait=0 still observes once.
+        return poll(0)
+    with github.bounded_reads(deadline, token=None, retry=True, check_on_exit=False):
+        try:
+            return poll(github.read_timeout())
+        except (github.MergeFailed, github.ClosedUnmerged, CliError):
+            raise  # Concluded from reads that finished inside the budget.
+        except (LoopZeroError, github.GhError, _proc.ProcTimeout):
+            github.read_timeout(0)
+            raise
+
+
 def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str | None:
     """Merge SHA if landed; a closed-unmerged read is held as not final (GitHub lags a
     queue merge) until the next poll or the deadline."""
     try:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
     except github.ClosedUnmerged as exc:
+        github.read_timeout(0)  # A late observation is a timeout, not evidence.
         closed[:] = [exc]
         return None
-    closed.clear()
+    closed.clear()  # Even a late read contradicts earlier lagging closed evidence.
+    github.read_timeout(0)
     return sha
 
 
@@ -1604,21 +1621,36 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
     started = time.monotonic()
     closed: list[github.GhError] = []
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
-    for _ in _poll_until(started, timeout):
-        was_closed = bool(closed)
-        if sha := _landed(config, pr, closed):
-            return sha
-        if closed:
-            if was_closed:
-                raise closed[0]
-            continue
-        if not github.merge_pending(config.repo, pr.number, pr.head_sha):
+    with suppress(github.ReadDeadline):
+        for _ in _poll_until(started, timeout, bounded=True):
+            was_closed = bool(closed)
             if sha := _landed(config, pr, closed):
                 return sha
-            if not closed:
-                raise CliError(f"PR #{pr.number} left the merge queue unmerged")
-    if closed:
+            if closed:
+                if was_closed:
+                    raise closed[0]
+                continue
+            if not github.merge_pending(config.repo, pr.number, pr.head_sha):
+                if sha := _landed(config, pr, closed):
+                    return sha
+                if not closed:
+                    raise CliError(f"PR #{pr.number} left the merge queue unmerged")
+    if closed:  # Recorded only from reads that finished inside the budget.
         raise closed[0]
+    return None
+
+
+def _merge_and_follow(
+    config: Config, pr: github.PR, deadline: float | None, admit_by: float | None,
+) -> str | None:
+    merge = partial(github.merge, config.repo, pr.number, config.merge_strategy, pr.head_sha)
+    if deadline is None:
+        return merge()
+    with suppress(github.ReadDeadline):
+        # Measure the follow budget after the merge write, which may take most of it.
+        return _queue_wait(deadline, lambda remaining: merge() or _wait_for_merge(
+            config, pr, remaining and max(0.0, deadline - time.monotonic())),
+                           bounded=admit_by is not None)
     return None
 
 
@@ -1628,7 +1660,8 @@ def _mergify_timeout_detail(
     if state is None:
         report = None
         with suppress(github.GhError):
-            _, _, report = mergify.request_status(config.repo, pr.number, pr.head_sha, queue)
+            github.read_timeout(0)
+            report = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue).admission
         return f"waiting for admission to Mergify queue {queue}. " + (
             f"Mergify report: {report}" if report else "Check the PR for Mergify's admission report."
         )
@@ -1670,8 +1703,7 @@ def _mergify_departure(
     if report is not None:
         detail = f"Mergify report: {report.url}."
         if report.attribution == "base_conflict":
-            base = pr.base_ref
-            detail = (f"The PR conflicts with {base}. Run `git fetch origin {base}` and resolve the base "
+            detail = (f"The PR conflicts with {pr.base_ref}. Run `git fetch origin {pr.base_ref}` and resolve the base "
                       f"integration according to the PR's review state. {detail}")
             requeue = ("After resolving the conflict, run `loopzero check`, `loopzero pr`, "
                        "`loopzero review`, `loopzero ready --wait` and `loopzero merge --wait`.")
@@ -1683,11 +1715,12 @@ def _mergify_departure(
                 "isolated": "Mergify tested this PR alone. Inspect or fix the failed check before requeueing unless it is a known flake.",
             }
             detail += " " + guidance.get(report.attribution, MERGIFY_DEQUEUE_HINT)
+            detail += report.jobs(config.repo)
     raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {requeue}")
 
 
 def _mergify_wait_poll(
-    config: Config, pr: github.PR, queue: str, deadline: float, closed: list[github.GhError], confirmed: bool,
+    config: Config, pr: github.PR, queue: str, deadline: float | None, closed: list[github.GhError], confirmed: bool,
 ) -> tuple[str | None, mergify.Membership | None, bool]:
     was_closed = bool(closed)
     if sha := _landed(config, pr, closed):
@@ -1703,7 +1736,7 @@ def _mergify_wait_poll(
             "Once the queue is reachable and preserves PR heads, rerun `loopzero merge --wait`."
         )
     state = mergify.membership(config.repo, pr.number, queue, deadline)
-    deferred = confirmed and state is not None and not closed
+    deferred = deadline is not None and confirmed and state is not None and not closed
     sha = None if deferred else _landed(config, pr, closed)
     if state is None and sha is None:
         report = mergify.departure_report(config.repo, pr.number, pr.head_sha, queue)
@@ -1720,23 +1753,24 @@ def _wait_for_mergify(
     queue = config.mergify_queue
     assert queue is not None
     state = None
-    deferred_landing_read = False
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
-    polls = _poll_until(started, timeout, admitted=lambda: confirmed)
-    for _ in polls:
-        deadline = started + timeout
-        poll = partial(_mergify_wait_poll, config, pr, queue, deadline, closed, confirmed)
-        sha, state, deferred_landing_read = _read_wait_poll(poll, deadline)
-        if sha:
+    polls = _poll_until(started, timeout, bounded=True, admitted=lambda: confirmed)
+    deadline = started + timeout
+    deferred_landing_read = False
+    with suppress(github.ReadDeadline):
+        for _ in polls:
+            poll = partial(_mergify_wait_poll, config, pr, queue, deadline if timeout else None, closed, confirmed)
+            sha, state, deferred_landing_read = _read_wait_poll(poll, deadline)
+            if sha:
+                return sha
+            if state is not None and not confirmed:
+                mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
+                confirmed = True
+                print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
+        # A queued, open PR normally gets its next landing read on the next tick.
+        if deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
-        if state is not None and not confirmed:
-            mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
-            confirmed = True
-            print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
-    # A queued, open PR normally gets its next landing read on the next tick.
-    if deferred_landing_read and (sha := _landed(config, pr, closed)):
-        return sha
-    if closed:
+    if closed:  # Recorded only from reads that finished inside the budget.
         raise closed[0]
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
     print(_mergify_timeout_detail(config, pr, queue, state))
@@ -1746,22 +1780,21 @@ def _wait_for_mergify(
 _FOLLOW_QUEUE = "next: loopzero merge --wait follows the queue, verifies and cleans up"
 
 
-class _AdmissionDeadline(Exception):
-    """The --wait budget expired before a new merge or queue request."""
-
-
 def _follow_blocked_mergify(
-    config: Config, pr: github.PR, readiness: github.Readiness, queue: str, deadline: float | None,
+    config: Config, pr: github.PR, readiness: github.Readiness, queue: str, deadline: float | None, *, bounded: bool,
 ) -> str | None:
     hint = _merge_check_hint(config, pr, readiness)
     if deadline is not None and pr.base_ref == config.base_branch:
         try:
-            state = mergify.membership(config.repo, pr.number, queue, deadline)
+            state = mergify.membership(config.repo, pr.number, queue, deadline if bounded else None)
+        except github.ReadDeadline:
+            print(f"timed out waiting for Mergify to land PR #{pr.number}")
+            return None
         except mergify.MergifyError as exc:
             hint += f"; Mergify membership unverified: {exc}"
         else:
             if state is not None:
-                return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), True)
+                return _queue_wait(deadline, partial(_wait_for_mergify, config, pr, confirmed=True), bounded=bounded)
             report = mergify.departure_report(config.repo, pr.number, pr.head_sha, queue)
             if sha := _mergify_departure(config, pr, queue, [], confirmed=False, report=report):
                 return sha
@@ -1776,12 +1809,12 @@ def _merge_with_mergify(
     queue = config.mergify_queue
     assert queue is not None
     if not readiness.ready:
-        return _follow_blocked_mergify(config, pr, readiness, queue, deadline)
+        return _follow_blocked_mergify(config, pr, readiness, queue, deadline, bounded=admit_by is not None)
     if pr.is_draft:
         raise CliError(f"PR #{pr.number} is still a draft; next: loopzero ready --wait")
     with worktree.lock_local_state(wt):
         attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
-        state = mergify.membership(config.repo, pr.number, queue, deadline)
+        state = mergify.membership(config.repo, pr.number, queue, admit_by)
         if sha := github.merged_sha(
             config.repo, pr.number, expected_head=pr.head_sha, check_hold=not attempt.requested and state is None,
         ):
@@ -1792,17 +1825,20 @@ def _merge_with_mergify(
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
         # A repository rule may have queued and ejected the PR before any loopzero request.
         if not confirmed and (attempt.confirmed or attempt.departure):
-            closed: list[github.GhError] = []
-            if sha := _mergify_departure(config, pr, queue, closed, attempt.confirmed, attempt.departure):
+            if sha := _mergify_departure(config, pr, queue, closed := [], attempt.confirmed, attempt.departure):
                 return sha
             raise closed[0]
         if not confirmed and not attempt.requested:
             if admit_by is not None and time.monotonic() > admit_by:
-                raise _AdmissionDeadline
+                print(f"timed out before requesting Mergify for PR #{pr.number}")
+                return None
             _require_receipt(wt, config, pr.head_sha)
             mergify.request(config.repo, pr.number, pr.head_sha, queue)
     if deadline is not None:
-        return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), confirmed)
+        return _queue_wait(
+            deadline, lambda remaining: _wait_for_mergify(config, pr, remaining, confirmed),
+            bounded=admit_by is not None,
+        )
     state_name = "confirmed in" if confirmed else "requested from"
     print(f"PR #{pr.number} {state_name} Mergify queue {queue}; {_FOLLOW_QUEUE}")
     return None
@@ -1833,11 +1869,15 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
         return 0
     started = time.monotonic()
     deadline = None if args.wait is None else started + args.wait
-    pr, readiness = _pr_readiness(
-        wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None, mergify_deadline=deadline,
-    )
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
     admit_by = deadline if args.wait else None
+    try:
+        pr, readiness = _pr_readiness(
+            wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None, mergify_deadline=admit_by,
+        )
+    except github.ReadDeadline:
+        print("timed out while checking merge readiness")
+        return 3
     if readiness is not None and args.wait is not None and _pending_checks(readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
@@ -1855,8 +1895,8 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
     elif config.merge_strategy == "mergify":
         try:
             sha = _merge_with_mergify(wt, config, pr, readiness, deadline, admit_by)
-        except _AdmissionDeadline:
-            print(f"timed out before requesting Mergify for PR #{pr.number}")
+        except github.ReadDeadline:
+            print(f"timed out waiting for Mergify to land PR #{pr.number}")
             return 3
         if sha is None:
             return 3 if args.wait is not None else 0
@@ -1868,15 +1908,15 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
             print(f"timed out before merging PR #{pr.number}")
             return 3
         _require_receipt(wt, config, pr.head_sha)
-        sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
+        sha = _merge_and_follow(config, pr, deadline, admit_by)
+        if sha is None and deadline is not None:
+            print(f"timed out waiting for the merge queue to land PR #{pr.number}")
+            return 3
         if sha is None:
-            if args.wait is None:
-                print(f"PR #{pr.number} is queued for merge into {config.base_branch}; {_FOLLOW_QUEUE}")
-                return 0
-            sha = _wait_for_merge(config, pr, max(0.0, deadline - time.monotonic()))
-            if sha is None:
-                print(f"timed out waiting for the merge queue to land PR #{pr.number}")
-                return 3
+            print(
+                f"PR #{pr.number} is queued for merge into {config.base_branch}; {_FOLLOW_QUEUE}"
+            )
+            return 0
     _cleanup_remote_refs(wt, config, branch, pr.head_sha)
     _cleanup(wt, pr)
     print(sha)
@@ -1960,37 +2000,33 @@ def cmd_status(args: argparse.Namespace) -> int:
         _print_display("pr:       none (commit changes, then open with `loopzero pr` before a long check)")
         return 0
     _print_display(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
-    reviews = _pr_reviews(config.repo, pr.number)
+    reviews = _pr_reviews(config.repo, pr.number, dates=(dates := []))
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
         _print_display(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         _print_display("review:   none on this PR")
-    readiness = _readiness(wt, config, pr, head, reviews, diagnostics=True)
+    readiness = _readiness(wt, config, pr, head, reviews, diagnostics=True, dates=tuple(dates))
     _print_display(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         _print_display(f"  - {reason}")
-    if config.merge_strategy == "mergify" and pr.state == "OPEN" and pr.head_sha == head:
-        _print_mergify_status(config, pr, readiness)
-    return 0
-
-
-def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readiness) -> None:
-    queue = config.mergify_queue
-    assert queue is not None
-    requested, confirmed, report = mergify.request_status(config.repo, pr.number, pr.head_sha, queue)
+    if config.merge_strategy != "mergify" or pr.state != "OPEN" or pr.head_sha != head:
+        return 0
+    queue = config.mergify_queue or ""
+    attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
     state = mergify.membership(config.repo, pr.number, queue)
     label = "not admitted"
     if state:
         label = "confirmed"
-    elif confirmed:
+    elif attempt.confirmed:
         label = "ejected"
-    elif requested or (readiness.ready and report):
+    elif attempt.requested or (readiness.ready and attempt.admission):
         label = "waiting for admission"
     _print_display(f"mergify:  {label} ({queue})")
-    if label == "waiting for admission" and report:
-        _print_display(f"  Mergify report: {report}")
+    if label == "waiting for admission" and attempt.admission:
+        _print_display(f"  Mergify report: {attempt.admission}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

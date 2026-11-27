@@ -219,6 +219,13 @@ def test_missing_gh_raises_typed_error(fake_bin: Path, monkeypatch: pytest.Monke
     assert "required token scope: repo" in str(info.value)
 
 
+def test_mark_ready_retries_a_transient_failure(gh: FakeGh, monkeypatch) -> None:
+    monkeypatch.setattr(github, "_retry_sleep", lambda _delay: None)
+    gh.respond("pr ready", {"stdout": "", "stderr": "gh: HTTP 502: Bad Gateway\n", "exit": 1}, "")
+    github.mark_ready(REPO, 7)  # r7-d4-1: one GraphQL 502 no longer ends ready/merge --wait.
+    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 2
+
+
 def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
     gh.fail(pr_list_key("lz/x"), "To get started with GitHub CLI, please run:  gh auth login\n", exit=4)
     with pytest.raises(github.GhAuth) as info:

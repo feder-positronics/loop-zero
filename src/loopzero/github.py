@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -23,7 +24,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from loopzero import runners
-from loopzero._proc import SECRET_PATTERNS, ProcTimeout, ToolMissing, build_env, redact, run, secret_forms
+from loopzero._proc import SECRET_PATTERNS, Completed, ProcTimeout, ToolMissing, build_env, redact, run, secret_forms
 from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, LoopZeroError, ReviewResult, is_sha
 
@@ -144,19 +145,20 @@ _CREDENTIAL_TOKEN_RE = re.compile("|".join(SECRET_PATTERNS))
 
 
 @contextmanager
-def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False):
+def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False, check_on_exit: bool = True):
     """Share a monotonic budget across reads, including any retries."""
     previous = _read_scope.get()
     deadline = min(previous[0], deadline) if previous else deadline
     scope = _read_scope.set((deadline, token, retry))
     try:
         yield
-        _read_timeout(0)
+        if check_on_exit:
+            read_timeout(0)
     finally:
         _read_scope.reset(scope)
 
 
-def _read_timeout(limit: float, *, scoped: bool = True) -> float:
+def read_timeout(limit: float = math.inf, *, scoped: bool = True) -> float:
     scope = _read_scope.get() if scoped else None
     if scope is None:
         return limit
@@ -298,7 +300,7 @@ def app_token() -> str:
         return ""
     minted = _app_token_clock()  # before minting so a suspend mid-call ages the token
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_BASE_ENV, timeout=_read_timeout(10))
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_BASE_ENV, timeout=read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
@@ -326,7 +328,7 @@ def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> boo
 
 
 def _retry_pause(delay: float | None, limit: float, *, scoped: bool = True) -> bool:
-    if delay is None or delay >= _read_timeout(limit, scoped=scoped):
+    if delay is None or delay >= read_timeout(limit, scoped=scoped):
         return False
     _retry_sleep(delay)
     return True
@@ -376,12 +378,12 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout, scoped=read_only), encoding="utf-8")
+                       timeout=read_timeout(timeout, scoped=read_only), encoding="utf-8")
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
-            _read_timeout(timeout, scoped=bool(scope and scope[2]))
+            read_timeout(timeout, scoped=bool(scope and scope[2]))
             if not _retry_pause(delay, timeout, scoped=read_only):
                 raise ProcTimeout(
                     _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
@@ -470,7 +472,7 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         query = "query { rateLimit { remaining resetAt } }"
         result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=cwd,
                      env_allowlist=GH_ENV, extra_env={"GH_TOKEN": token} if token else None,
-                     timeout=_read_timeout(10))
+                     timeout=read_timeout(10))
         if result.exit_code:
             return ""
         data = json.loads(result.stdout)
@@ -530,6 +532,12 @@ def paged(endpoint: str, key: str | None = None, **kwargs) -> list[dict]:
 def api_get(endpoint: str, **kwargs) -> object:
     """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
     return _gh_json("api", endpoint, **kwargs)
+
+
+def job_log(repo: str, job_id: str) -> Completed:
+    return run(["gh", "api", f"repos/{repo}/actions/jobs/{job_id}/logs",
+                "--hostname", "github.com", "--allow-escape-sequences"], cwd=Path.cwd(), env_allowlist=GH_ENV,
+               timeout=read_timeout(5), encoding="utf-8", merge_output=True, tail_chars=256 * 1024)
 
 
 def response_date(value: str) -> datetime | None:
@@ -1247,16 +1255,15 @@ def _check_signals(
     stale_verdict_grace: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
-    latest_runs: dict[str, dict] = {}
+    latest_runs: dict[tuple[str, int | None], dict] = {}
     runs = paged(f"repos/{repo}/commits/{head_sha}/check-runs", "check_runs")
     for cr in runs:
-        previous = latest_runs.get(cr["name"])
-        if previous is None or _check_run_order(cr) > _check_run_order(previous):
-            latest_runs[cr["name"]] = cr
-    for name, cr in latest_runs.items():
+        key = cr["name"], (cr.get("app") or {}).get("id")
+        latest_runs[key] = max(latest_runs.get(key, cr), cr, key=_check_run_order)
+    for (name, _), cr in latest_runs.items():
         state = cr.get("conclusion") or cr.get("status") or "unknown"
         timestamp = cr.get("started_at" if state in _PENDING_CHECKS else "completed_at")
-        signals[name] = [(state, readiness_timestamp(timestamp))]
+        signals.setdefault(name, []).append((state, readiness_timestamp(timestamp)))
     latest_status: dict[str, dict] = {}
     for status in paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status)
@@ -1273,12 +1280,11 @@ def _check_signals(
     stale += stale_verdicts
     superseded: list[str] = []
     workflows: list[dict] | None = None
-    for name in required_ci:
-        cr = latest_runs.get(name)
-        if (name in stale or cr is None or states.get(name) in _NONFAILING_CHECKS
+    for (name, _), cr in latest_runs.items():
+        if (name not in required_ci or name in stale
                 or cr.get("conclusion") not in {"failure", "cancelled", "timed_out"}
                 or cr.get("status") != "completed" or not (cr.get("check_suite") or {}).get("id")
-                or any(state not in _NONFAILING_CHECKS for state, _ in signals[name][1:])):
+                or sum(state not in _NONFAILING_CHECKS for state, _ in signals[name]) != 1):
             continue
         if workflows is None:
             workflows = paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
@@ -1286,10 +1292,10 @@ def _check_signals(
             superseded.append(name)
     capped = _check_suites_at_limit(runs)
     # A status-only success may hide a failed run outside the returned suites.
-    verified = {
-        name: state for name, state in states.items() if state != "success" or name in latest_runs
-    } if capped else states
-    return verified, (*stale, *superseded), stale_verdicts, capped
+    if capped:
+        run_names = {name for name, _ in latest_runs}
+        states = {name: state for name, state in states.items() if state != "success" or name in run_names}
+    return states, (*stale, *superseded), stale_verdicts, capped
 
 
 def _check_suites_at_limit(runs: list[dict]) -> bool:
@@ -1427,7 +1433,7 @@ def readiness(
 
 
 def mark_ready(repo: str, number: int) -> None:
-    _gh("pr", "ready", str(number), "--repo", repo)
+    _gh("pr", "ready", str(number), "--repo", repo, retry_idempotent=_read_scope.get() is None)
 
 
 _QUEUE_QUERY = (
@@ -1473,6 +1479,8 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
         auto = pr.get("autoMergeRequest")
         if type(queued) is not bool or (auto is not None and not isinstance(auto, dict)):
             raise ValueError("invalid queue fields")
+    except ReadDeadline:
+        raise
     except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
         raise MergeFailed(("gh", "api", "graphql"),
                           f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
@@ -1482,19 +1490,27 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
     return queued or bool(auto)
 
 
-def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
-    """Merge PR `number` at exactly `head_sha` and return the verified merge SHA.
+def _merge_evidence(repo: str, number: int, head_sha: str) -> tuple[str | None, bool, MergeFailed | None]:
+    """Read the merge SHA, queued state and queue error after a merge request."""
+    if sha := merged_sha(repo, number, expected_head=head_sha):
+        return sha, False, None
+    queue_error = None
+    try:
+        if merge_pending(repo, number, head_sha):
+            return None, True, None
+    except MergeFailed as exc:
+        queue_error = exc
+    # The queue may have landed the PR between the two reads.
+    return merged_sha(repo, number, expected_head=head_sha), False, queue_error
 
-    Returns None when the base branch uses a merge queue and GitHub accepted the PR
-    into it: the merge will land later, and the caller must verify on a later run.
-    """
+
+def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
+    """Merge at exactly this head, returning None if GitHub queued the PR."""
     if strategy not in ("squash", "merge", "rebase", "queue"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
     # A merge queue owns the method; gh rejects an explicit --squash/--merge/--rebase.
     method = () if strategy == "queue" else (f"--{strategy}",)
-    argv = (
-        "pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha,
-    )
+    argv = ("pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha)
     if strategy == "queue" and merge_pending(repo, number, head_sha):
         return None
     write_error = None
@@ -1502,18 +1518,20 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         _gh(*argv, timeout=300)
     except (GhError, ProcTimeout, OSError) as exc:
         write_error = exc
-    sha = merged_sha(repo, number, expected_head=head_sha)
-    if sha:
-        return sha
-    queue_error = None
+    # A direct merge already in flight still needs verification and cleanup.
+    scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
     try:
-        if merge_pending(repo, number, head_sha):
-            return None
-    except MergeFailed as exc:
-        queue_error = exc
-    # The queue may have landed the PR between the two reads; look once more.
-    sha = merged_sha(repo, number, expected_head=head_sha)
-    if sha:
+        sha, queued, queue_error = _merge_evidence(repo, number, head_sha)
+        if strategy == "queue":
+            read_timeout(0)  # Queue evidence read after the wait budget is a timeout.
+    except (GhError, ProcTimeout) as exc:
+        if strategy == "queue" or isinstance(exc, (MergeFailed, ClosedUnmerged)):
+            raise
+        # A direct merge reports its own verification failure, never a queue timeout.
+        raise MergeFailed(("gh", *argv), f"PR #{number} merge could not be verified: {exc}") from exc
+    finally:
+        _read_scope.reset(scope)
+    if sha or queued:
         return sha
     if queue_error:
         raise queue_error

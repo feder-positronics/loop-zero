@@ -162,8 +162,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    with the actual merge tree. Unavailable history blocks inherited coverage.
    Ancestor coverage includes outdated unresolved blocking threads. A primary
    that requested changes also requires resolved findings at the reviewed head.
-   For check runs with the same name, the latest run (by run ID) decides. After its own write taking the PR out of draft, `ready --wait`
-   revalidates through the same waiter, policy refresh and original deadline.
+   Readiness keeps the latest run ID for each GitHub App and check name, then
+   combines the current verdicts for each required name. A positive `ready --wait`
+   budget covers the first readiness read and revalidation after taking a PR out of draft.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in
    [cli.py](../src/loopzero/cli.py)), the check blocks readiness throughout,
