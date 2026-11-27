@@ -34,7 +34,6 @@ CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, OSError, ValueError)
-UNEXPECTED = (KeyError, TypeError)
 # --wait: poll interval, and how long a required check may stay
 # missing before GitHub is assumed to have dropped the event for this head.
 # Each poll costs several GitHub API calls from a quota shared by every session.
@@ -584,16 +583,10 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         print(f"warning: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
-_SECTIONS = {
-    "objective", "context and goal", "acceptance", "base", "checks", "validation",
-    "review", "notes",
-}
-
-
 def _pr_title(wt: Path, branch: str) -> str:
-    """First heading of task.md that is not a template section name; else the branch."""
-    headings = [ln.lstrip("#").strip() for ln in worktree.task_text(wt).splitlines() if ln[:1] == "#"]
-    return next((t for t in headings if t and t.lower() not in _SECTIONS), branch)
+    """Use the first nonempty top-level task heading, or the branch."""
+    headings = (line[2:].strip() for line in worktree.task_text(wt).splitlines() if line.startswith("# "))
+    return next(filter(None, headings), branch)
 
 
 def cmd_start(args: argparse.Namespace) -> int:
@@ -2007,14 +2000,14 @@ def _run(args: argparse.Namespace) -> int:
     except IndependentReviewerUnavailable as exc:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
         return 4
-    except HANDLED + UNEXPECTED as exc:
+    except Exception as exc:
         if isinstance(exc, sandbox.SandboxUnavailable) and args.command in {"check", "review"}:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
         prefix = ""
-        if isinstance(exc, UNEXPECTED):
+        if not isinstance(exc, HANDLED):
             where = traceback.extract_tb(exc.__traceback__)[-1]
-            prefix = f"unexpected response ({type(exc).__name__} at {Path(where.filename).name}:{where.lineno}): "
+            prefix = f"unexpected error ({type(exc).__name__} at {Path(where.filename).name}:{where.lineno}): "
         print(f"loopzero {args.command}: {prefix}{_one_line(exc)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

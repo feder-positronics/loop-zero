@@ -364,7 +364,7 @@ def assert_one_workflow_read(calls):
 
 
 def test_config_help_identifies_explicit_policy_override():
-    assert "explicit workflow.toml override" in cli.build_parser().format_help()
+    assert "override trusted-base settings" in " ".join(cli.build_parser().format_help().split())
 
 
 def run(capsys, *argv: str) -> tuple[int, str, str]:
@@ -1224,10 +1224,10 @@ def arm_unproven_history(gh, failure):
 
 
 @pytest.mark.parametrize(("heading", "expected"), [("", "lz/t1"), ("\n# Zażółć gęślą jaźń\n", "Zażółć gęślą jaźń")])
-def test_pr_title_prefers_human_heading(wt: Path, monkeypatch, heading, expected) -> None:
+def test_pr_title_uses_only_top_level_heading(wt: Path, monkeypatch, heading, expected) -> None:
     task, read_text = wt / ".loopzero" / "task.md", Path.read_text
     monkeypatch.setattr(Path, "read_text", lambda path, encoding="ascii", **kw: read_text(path, encoding, **kw))
-    task.write_text(f"## Objective\nZażółć gęślą jaźń\n{heading}", encoding="utf-8")
+    task.write_text(f"## Summary\nZażółć gęślą jaźń\n{heading}", encoding="utf-8")
     assert cli._pr_title(wt, "lz/t1") == expected
 
 
@@ -4438,14 +4438,14 @@ def test_resolve_groups_arguments_before_loading_context(monkeypatch, capsys, ar
     assert 'resolve [<finding-id> "<reply>"]' in (err if code else out)
 
 
-@pytest.mark.parametrize("failure,code", [(KeyError("headRefOid"), 1), (KeyboardInterrupt, 130)])
+@pytest.mark.parametrize("failure,code", [(KeyError("headRefOid"), 1), (RuntimeError("broken"), 1), (KeyboardInterrupt, 130)])
 def test_unexpected_and_interrupt_exit_codes(wt, capsys, monkeypatch, failure, code):
     def fail(*_):
         raise failure
     monkeypatch.setattr(cli.github, "pr_for_branch", fail)
     _, err = expect_cli(capsys, code, "status")
     if code == 1:  # a programming error names its location
-        assert re.fullmatch(r"loopzero status: unexpected response \(KeyError at test_cli\.py:\d+\): 'headRefOid'\n", err)
+        assert re.fullmatch(rf"loopzero status: unexpected error \({type(failure).__name__} at test_cli\.py:\d+\): {re.escape(str(failure))}\n", err)
 
 
 @pytest.mark.parametrize("detached", [False, True])
