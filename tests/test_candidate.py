@@ -532,16 +532,16 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
         assert caught.value is expected and len(source_reads) == 2
 
 
-@pytest.mark.parametrize(
-    "elapsed,oversleep,attempt_count",
-    [(0, 0, 8), (29, 0, 1), (0, 30, 1)],
-)
-def test_persistent_race_preserves_last_error_and_bounds_retry(
-    monkeypatch, no_retry_delay, elapsed, oversleep, attempt_count
-):
+@pytest.mark.parametrize("elapsed,oversleep,attempt_count,landing", [
+    (0, 0, 8, None), (29, 0, 1, None), (0, 30, 1, None), (0, 0, None, 10), (0, 0, None, 24),
+])
+def test_candidate_race_retry_budget(monkeypatch, no_retry_delay, elapsed, oversleep, attempt_count, landing):
     attempts, sleeps, clock = [], [], no_retry_delay
+    sources = expected_sources((102, "2" * 40))
 
-    def race(*_, **__):
+    def attest(*_, **__):
+        if landing is not None and clock[0] >= landing:
+            return sources
         error = CandidateRaceError("Mergify candidate membership changed during attestation")
         attempts.append(error)
         clock[0] += elapsed
@@ -551,26 +551,15 @@ def test_persistent_race_preserves_last_error_and_bounds_retry(
         sleeps.append(seconds)
         clock[0] += seconds + oversleep
 
-    monkeypatch.setattr(candidate, "_attest_candidate_once", race)
-    monkeypatch.setattr(candidate, "_retry_sleep", sleep)
-    with pytest.raises(CandidateRaceError, match="membership changed") as caught:
-        run_attestation(github_get=lambda _: None, status_reads=[None])
-    assert len(attempts) == attempt_count and caught.value is attempts[-1]
-    assert sum(sleeps) < 30
-
-
-@pytest.mark.parametrize("landing", [10, 24])
-def test_candidate_retries_across_predecessor_landing(monkeypatch, no_retry_delay, landing):
-    clock = no_retry_delay
-    sources = expected_sources((102, "2" * 40))
-
-    def attest(*_args, **_kwargs):
-        if clock[0] < landing:
-            raise CandidateRaceError("source PR #101 is not open")
-        return sources
-
     monkeypatch.setattr(candidate, "_attest_candidate_once", attest)
-    assert run_attestation() == sources
+    monkeypatch.setattr(candidate, "_retry_sleep", sleep)
+    if landing is not None:
+        assert run_attestation() == sources
+    else:
+        with pytest.raises(CandidateRaceError, match="membership changed") as caught:
+            run_attestation(github_get=lambda _: None, status_reads=[None])
+        assert len(attempts) == attempt_count and caught.value is attempts[-1]
+        assert sum(sleeps) < 30
 
 
 def test_membership_drift_is_a_retryable_race():
