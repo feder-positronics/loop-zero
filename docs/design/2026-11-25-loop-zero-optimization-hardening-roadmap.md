@@ -1,6 +1,7 @@
 # Long-Term `loop-zero` Optimization & Hardening Roadmap
 
-**Status:** Active synthesis record (dated `2026-11-25`)
+**Status:** Dated synthesis record (`2026-11-25`). Its rules bind only where
+`core/CONTRACT.md` or `docs/DELEGATION.md` carries them.
 **Tracking issue:** `feder-positronics/loop-zero#552`
 **Scope:** Multi-horizon hardening, latency reduction, and cross-repo operating rules for `loop-zero` and its primary consumer (`feder-positronics/intelflo` + `eowca/host-config`).
 
@@ -53,7 +54,7 @@ These rules represent Owner + cross-model (Neon + Fable) consensus and govern on
 1. **Two-Lane Rollout (Merge-Gated, Non-Retroactive):**
    - *Fast lane (backward-compatible fixes, speedups, relaxations, deletions):* merge to `loop-zero` `main` and refresh hosts/pins **ASAP (same hour)**.
    - *Quiet-window lane (contract-tightening or eligibility-breaking changes):* because `main` is linear, **hold tightening PRs unmerged until a 24–48h quiet window** so they never sit ahead of urgent fast-lane fixes.
-   - *Non-retroactive enforcement:* use evidence-envelope versioning plus warn-first stderr output in `loopzero ready`. Add **zero date cutoffs or state** to `eligibility.py`.
+   - *Non-retroactive enforcement:* proposed evidence-envelope versioning plus warn-first stderr output in `loopzero ready` (today the CLI accepts only version 1 markers). Add **zero date cutoffs or state** to `eligibility.py`.
 2. **Mechanical Dynamic Priority (No Fixed Ratios, No LLM ROI Scoring):**
    - Under the `N=10` WIP cap (`intelflo#14237`), dispatch uses one mechanical rule: **anything blocking `main` or `≥3` open PRs goes first; otherwise strategy outcome work**. Do not impose a static product/infra split (e.g., 80/20) or subjective LLM ROI scores.
 3. **3-Speed Adaptive Control Loop (Fit for `~70 PRs/day`):**

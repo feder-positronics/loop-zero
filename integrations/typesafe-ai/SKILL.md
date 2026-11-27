@@ -15,11 +15,8 @@ serves the task's acceptance criteria.
 
 Read [the contract](../../core/CONTRACT.md), repository guidance, the current
 request or `.loopzero/task.md`, and the affected application boundary. Read
-[the building reference](reference.md) for judgment design and composition.
-Start with the [live documentation index](https://docs.typesafe.ai/llms.txt),
-then read the current API or chosen SDK, relevant primitive, and closest cookbook
-before writing an integration. If live docs are unavailable, report that limit
-and use installed SDK types or available local docs without inventing contracts.
+[the building reference](reference.md) for judgment design and composition; its
+live-documentation procedure is required reading before an integration.
 
 ## Local Credentials
 
