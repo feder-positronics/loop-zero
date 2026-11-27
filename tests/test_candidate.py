@@ -616,7 +616,7 @@ def test_rebuild_wait(monkeypatch, no_retry_delay, matches, second, stop):
         assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
 
 
-@pytest.mark.parametrize("outcome,message", [("normal", ""), ("bound", ""), ("fetch", "returned error: 503"), ("fetch", "Could not resolve host: github.com"), ("fetch", "fatal: early EOF"), ("fetch", "GnuTLS recv error (-110)"), ("fetch", "unable to access 'https://github.com/o/r.git': Empty reply from server"), ("denied", "unable to access 'https://github.com/acme/proxy-ssl.git': The requested URL returned error: 403"), ("denied", "RPC failed; HTTP 403 curl 22")])
+@pytest.mark.parametrize("outcome,message", [("normal", ""), ("bound", ""), ("fetch", "returned error: 503"), ("fetch", "Could not resolve host: github.com"), ("fetch", "fatal: early EOF"), ("fetch", "GnuTLS recv error (-110)"), ("fetch", "unable to access 'https://github.com/o/r.git': Empty reply from server"), ("denied", "unable to access 'https://github.com/acme/proxy-ssl.git': The requested URL returned error: 403"), ("fetch", "Could not resolve proxy: proxy.example"), ("fetch", "RPC failed; curl 92 HTTP/2 stream 3 was not closed cleanly"), ("fetch", "RPC failed; HTTP 429 curl 22"), ("denied", "RPC failed; HTTP 403 curl 22"), ("denied", "repository 'https://github.com/acme/ssl_connect.git/' not found")])
 def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome, message):
     waits, killed = [], []
     class Child:
