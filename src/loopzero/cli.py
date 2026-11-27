@@ -1007,9 +1007,13 @@ def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettin
 
 
 def _comparable_body(body: str) -> str:
-    """Normalize retired Codex inspection fields, reading the machine block as eligibility does."""
+    """Normalize retired Codex inspection fields and the old notice heading, as eligibility reads them."""
     rest = body.removeprefix(github.BODY_BLOCKERS)
-    return body[:len(body) - len(rest)] + runners.retire_inspection(rest)
+    notice = re.sub(r"<summary>Raw reviewer output(</summary>\n\n```\nNative Codex transcript retained in the "
+                    r"restricted local review receipt; public evidence is publisher-derived, not backend attestation\. "
+                    r"Exact raw SHA256: [0-9a-f]{64}\n```\n</details>)\Z",
+                    r"<summary>Review evidence notice\1", rest)
+    return body[:len(body) - len(rest)] + runners.retire_inspection(notice)
 
 
 def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,

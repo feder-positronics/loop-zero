@@ -427,8 +427,7 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> 
         assert raw not in body
     if family == "codex":
         assert hashlib.sha256(raw.encode()).hexdigest() in body
-    else:
-        assert "Raw reviewer output" not in body
+    assert "Raw reviewer output" not in body and (family != "codex" or "<summary>Review evidence notice<" in body)
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
     assert all("subject_type" not in c for c in comments)
 
@@ -437,7 +436,7 @@ def test_legacy_transcript_truncates_on_utf8_boundary():
     tail = "x" * 29_999
     result = ReviewResult("claude", HEAD, "primary", "approve", (), "🧪" + tail)
     output = github._review_transcript(result, legacy_display=True)
-    assert "Transcript truncated" in output
+    assert "Transcript truncated" in output and "<summary>Raw reviewer output<" in output
     assert output.endswith(f"\n{tail}\n```\n</details>")
 
 
