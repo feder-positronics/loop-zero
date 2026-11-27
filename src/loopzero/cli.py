@@ -767,7 +767,7 @@ def _lock_review(run_review: Callable[[argparse.Namespace, Path, Config], int]):
 
 
 @_lock_review
-def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
+def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # noqa: C901 - PR guard, publish, repost and recovery paths
     runtime_source = (
         "reviewer paths are unpinned because --config was provided" if args.config
         else f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}"
@@ -1051,7 +1051,7 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
     return patch
 
 
-def _run_review(
+def _run_review(  # noqa: C901 - reviewer fallback across families
     wt: Path, config: Config, head: str, kind: str, reviewed: str | None,
     model: str | None = None, effort: str | None = None, *, runtime_source: str = "",
     publication: tuple[str, int, str] | None = None,
@@ -1253,7 +1253,7 @@ def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
     github.mark_ready(config.repo, number)
 
 
-def cmd_ready(args: argparse.Namespace) -> int:
+def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-kick paths share one readiness flow
     wt, config = _context(args)
     read_started = time.monotonic()
     pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None)
@@ -1750,7 +1750,7 @@ def _merge_with_mergify(
     return None
 
 
-def cmd_merge(args: argparse.Namespace) -> int:
+def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and per-strategy merge paths
     wt, config = _context(args)
     branch = worktree.branch(wt)
     if args.cancel:
