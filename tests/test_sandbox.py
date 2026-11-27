@@ -749,10 +749,12 @@ def cache_check(git_repo, receipt_path):
     return cache
 
 
+@pytest.mark.parametrize("middle", [(), ("*.nomatch",)])
 @pytest.mark.parametrize("scratch", [True, False])
-def test_reuse_skipped_before_unkeyed_stage(git_repo, bwrap_log, fetched_base, cache_check, scratch):
+def test_reuse_skipped_before_unkeyed_stage(git_repo, bwrap_log, fetched_base, cache_check, scratch, middle):
+    inputs = {"echo one": ("*.md",), "echo three": ("*.md",), **({"echo two": middle} if middle else {})}
     cfg = make_config(checks=("echo one", "echo two", "echo three"), scratch=(".venv",) if scratch else (),
-                      inputs={"echo one": ("*.md",), "echo three": ("*.md",)})
+                      inputs=inputs)
     cache_check(cfg)
     reused = [bool(r.reused_from) for r in sandbox.run_checks(cfg, git_repo).results]
     assert reused == ([False, False, True] if scratch else [True, False, True])

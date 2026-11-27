@@ -124,8 +124,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
         current = _current_commands(config, worktree, commands, settings_sha256)
-        last_run = max((i for i, c in enumerate(commands, 1)
-                        if config.scratch and not _has_inputs(config, c)), default=0)
+        last_run = max((i for i, c in enumerate(commands, 1) if config.scratch
+                        and not _input_key(config, worktree, c, "" if dirty else base)), default=0)
         for ordinal, command in enumerate(current, 1):
             if progress:
                 progress(command)
