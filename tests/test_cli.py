@@ -2897,7 +2897,8 @@ def test_source_wait_reads_once_before_first_interval(wt, gh, capsys, monkeypatc
     assert before_sleep.count(reviews_key().split()[1]) == 1
     assert before_sleep.count(f"{repo}/commits/{head}/check-runs") == 1
     assert before_sleep.count(f"{repo}/commits/{head}/statuses") == 1
-    assert before_sleep.count(repo) == before_sleep.count(config_path) == 2
+    assert before_sleep.count(repo) == 1
+    assert before_sleep.count(config_path) == 2
     assert vendor_count == 2
     assert sum(call["argv"][1] == f"{repo}/commits/{head}/check-runs" for call in gh.calls) == 2
 
@@ -3724,7 +3725,8 @@ def test_merge_uses_one_queue_proof_for_admission(
     assert code == (3 if safe else 1), out + err
     assert ("Mergify queue configuration is unverified" in err) == (not safe)
     paths = [call["argv"][1] for call in gh.calls[before_final:]]
-    assert paths.count(repo) == paths.count(config_path) == (2 if safe else 1)
+    assert paths.count(repo) == int(safe)
+    assert paths.count(config_path) == (2 if safe else 1)
     assert vendor_calls == ["/merge-queue/status?branch=main", "/queues/configuration"]
 
 
