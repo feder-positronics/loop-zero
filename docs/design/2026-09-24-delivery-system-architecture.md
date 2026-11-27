@@ -85,17 +85,11 @@ per-job minutes rounded up at Blacksmith list rates) and the Pulls API.
 | P6 | One owner for shared infrastructure | A repository's CI, queue and workflow configuration change through one coordinator; this note is the reference topology consumers adopt. |
 | P7 | Steer by five numbers, computed from GitHub on demand | No new state or ledger; see Metrics. |
 
-## Current state and gaps
+## Current state
 
-| Principle | Delivered | Open gap | Owner |
-|---|---|---|---|
-| P1 | Product suites on candidates only (IntelFlo #4811, #4840, #4845). In the merge queue on 2026-09-24: integration on every backend candidate and one PR per candidate (#4938), local unit and related-frontend lanes (#4952), nightly retry/alert for every job (#4954) | Measure first-pass rate; fix the Playwright content-detail failures that time out nightly | IntelFlo coordinator |
-| P2 | PR body rewritten only when it changes | Trim policy-workflow triggers (keep review/thread and base transitions; skip title-only edits) after the hosted eligibility pin upgrade | Session owning GitHub transport (d48663c8) |
-| P3 | — | GitHub App for automation; `review_publishers` and eligibility trust must accept its bot login | Owner action, then loopzero change |
-| P4 | REST PR reads and queue comments (#220, #223, #225) | Conditional requests in waits | Session owning GitHub transport |
-| P5 | Parent-batch fallback (#218) | Retries in candidate policy and eligibility reads; admission-pending vs removed in `merge --wait` | Session owning Mergify integration |
-| P6 | — | Record the coordinator per consumer repository | Owner |
-| P7 | — | A consumer-side report of the five metrics | IntelFlo coordinator |
+P3 (GitHub App publisher), P5 (candidate and eligibility retries, queue
+admission waits) and P6 (a coordinator per consumer) have shipped; P4's
+conditional requests in waits did not.
 
 ## Metrics
 
@@ -122,12 +116,4 @@ window. Targets are the owner's 2026-09-24 goals, not measured guarantees.
 ## Non-goals
 
 No local daemon, queue ledger, global `gh` wrapper or new loopzero gate. Each
-gap above is a bounded change in the component that already owns the concern.
-
-## Open questions
-
-- GitHub App scope and review provenance: which permissions the app needs and
-  how existing eowca-published reviews stay valid during the switch. Owner;
-  blocks the P3 loopzero change.
-- Batching: re-enable pairs only when measured first-attempt pair failures are
-  well below 50%. IntelFlo coordinator.
+change is bounded to the component that already owns the concern.
