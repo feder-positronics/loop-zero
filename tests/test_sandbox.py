@@ -893,7 +893,7 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, c
     base_ref = "refs/remotes/origin/main"
     if base == "recorded":
         (git_repo / ".loopzero").mkdir()
-        (git_repo / ".loopzero/task.md").write_text(f"Base: {head}\n")
+        (git_repo / ".loopzero/task.md").write_text(f"## Base\nmain @ {head}\n")
     elif base == "tracked":
         git(git_repo, "update-ref", base_ref, head)
 

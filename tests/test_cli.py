@@ -969,7 +969,7 @@ def test_check_selects_and_reports_workflow(wt, repo, tmp_path, capsys, policy):
 @pytest.mark.parametrize("command", ["check", "review", "ready", "merge"])
 def test_privileged_commands_resolve_policy_independently_of_task(wt, command):
     (wt / "workflow.toml").write_text(WORKFLOW.replace('base = "main"', 'base = "topic"'))
-    (wt / ".loopzero/task.md").write_text(f"Base: {head_of(wt)}\n")
+    (wt / ".loopzero/task.md").write_text(f"## Base\nmain @ {head_of(wt)}\n")
 
     config = cli._load_config(SimpleNamespace(config=None, command=command), wt, pin_checks=True)
 
