@@ -143,7 +143,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 results.append(result)
                 _checkpoint_stage(
                     checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
-                    previous, commands[ordinal:],
+                    previous, commands[max(ordinal, last_run):], scratch,
                 )
             if status:
                 status(f"stage {ordinal}/{len(commands)}: exit {result.exit_code} "
@@ -205,7 +205,7 @@ INCOMPLETE_CHECK = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
 
 def _checkpoint_stage(checkpoint: Callable[[CheckReport], None] | None,
                       report: CheckReport, previous: dict[str, CheckResult],
-                      remaining: tuple[str, ...]) -> None:
+                      reusable_remaining: tuple[str, ...], scratch: dict[str, Path]) -> None:
     if checkpoint is None:
         return
     stage = report.results[-1]
@@ -213,8 +213,16 @@ def _checkpoint_stage(checkpoint: Callable[[CheckReport], None] | None,
         checkpoint(report)
     elif stage.input_key:
         # Even the last stage leaves a nonpassing receipt until final validation.
-        unvisited = tuple(previous[command] for command in remaining if command in previous)
-        checkpoint(replace(report, results=(*report.results, *unvisited, INCOMPLETE_CHECK)))
+        unvisited = tuple(previous[command] for command in reusable_remaining if command in previous)
+        results = report.results
+        try:
+            populated = any(next(path.iterdir(), None) is not None for path in scratch.values())
+        except OSError:
+            populated = True
+        if populated:
+            # The next run must rebuild scratch before relying on this prefix.
+            results = tuple(replace(result, input_key=None) for result in results)
+        checkpoint(replace(report, results=(*results, *unvisited, INCOMPLETE_CHECK)))
 
 
 def _previous(config: Config, worktree: Path, settings_sha256: str,

@@ -393,7 +393,8 @@ def _real_bwrap_works() -> bool:
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
 class TestRealSandbox:
-    def test_changed_consumer_input_refreshes_scratch(self, git_repo, fetched_base, cache_check):
+    @pytest.mark.parametrize("interrupt", [False, True])
+    def test_changed_consumer_input_refreshes_scratch(self, git_repo, fetched_base, cache_check, interrupt):
         commit_file(git_repo, "consumer.txt", "old\n", "Add consumer input")
         producer = "echo generated > .venv/generated"
         consumer = "test -s .venv/generated && cat consumer.txt"
@@ -401,6 +402,14 @@ class TestRealSandbox:
                              inputs={producer: ("README.md",), consumer: ("consumer.txt",)})
         cache_check(config, clean=True, verify_reuse=True)
         commit_file(git_repo, "consumer.txt", "new\n", "Update consumer input")
+
+        if interrupt:
+            def checkpoint(report):
+                _save_report(git_repo, report)
+                raise KeyboardInterrupt
+
+            with pytest.raises(KeyboardInterrupt):
+                sandbox.run_checks(config, git_repo, checkpoint=checkpoint)
 
         report = sandbox.run_checks(config, git_repo)
         assert report.ok
