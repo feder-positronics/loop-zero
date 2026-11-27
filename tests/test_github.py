@@ -1412,7 +1412,7 @@ def test_merged_branch_history_requires_consistent_evidence(gh: FakeGh, change: 
 
 
 def test_merged_branch_history_fails_at_page_limit(monkeypatch) -> None:
-    monkeypatch.setattr(github, "_branch_head", lambda repo, branch: None)
+    monkeypatch.setattr(github, "_branch_sha", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(github, "PAGE", 1)
     pages = ({branch_history_key(page).removeprefix("api ").replace("per_page=100", "per_page=1"):
               [closed_history_row(pr_json(number=page, state="CLOSED"))]} for page in range(1, 101))

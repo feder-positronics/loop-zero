@@ -369,25 +369,11 @@ def _cache_credential(selected: str) -> str:
     return selected or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
 
 
-def _etag_key(args: tuple[str, ...], selected: str, enabled: bool) -> tuple[tuple[str, ...], int] | None:
-    credential = _cache_credential(selected)
-    return (args, hash(credential)) if enabled and credential else None
-
-
-def _with_validator(argv: tuple[str, ...], cached: tuple[str, str, int] | None) -> list[str]:
-    return [*argv, *(("-H", f"If-None-Match: {cached[0]}") if cached else ())]
-
-
-def _report_used(used: list[str] | None, selected: str) -> None:
+def _remember_response(dates, used, selected, key, headers, body):
+    dates[:] = [headers.get("date", "")]
     if used is not None:
         used[:] = [selected]
-
-
-def _settled_body(cached: tuple[str, str, int] | None, status: str | None, exit_code: int, body: str) -> str | None:
-    """The response body of a success or of a 304 revalidating `cached`; None for an error."""
-    if cached and status == "304":
-        return cached[1]
-    return body if exit_code == 0 else None
+    _remember_etag(key, headers, body)
 
 
 def _remember_etag(key: tuple[tuple[str, ...], int] | None, headers: dict[str, str], body: str) -> None:
@@ -419,10 +405,12 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     delays = (RETRY_DELAY, None) if retryable and (not scope or scope[2]) else (None,)
     for delay in delays:
         selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
-        key = _etag_key(args, selected, conditional and rest_api and read_only)
+        credential = _cache_credential(selected)
+        key = (args, hash(credential)) if credential and conditional and rest_api and read_only else None
         cached = _etag_cache.get(key)
+        request = [*argv, "-H", f"If-None-Match: {cached[0]}"] if cached else list(argv)
         try:
-            done = run(_with_validator(argv, cached), cwd=cwd, env_allowlist=GH_ENV,
+            done = run(request, cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
                        timeout=read_timeout(timeout, scoped=read_only), encoding="utf-8")
         except ToolMissing as exc:
@@ -436,13 +424,11 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                     stderr=_redact_tokens(exc.stderr, selected), duration_s=exc.duration_s,
                 ) from None
             continue
-        response = _included_response(done.stdout) if api else (None, {}, done.stdout)
-        status, headers, body = response
+        status, headers, body = response = _included_response(done.stdout) if api else (None, {}, done.stdout)
         tail = "\n".join(part for part in (done.stderr, body) if part)
-        if (settled := _settled_body(cached, status, done.exit_code, body)) is not None:
-            dates[:] = [headers.get("date", "")]
-            _report_used(used, selected)
-            _remember_etag(key, headers, settled)
+        settled = cached[1] if cached and status == "304" else body if done.exit_code == 0 else None
+        if settled is not None:
+            _remember_response(dates, used, selected, key, headers, settled)
             return settled
         rate_limited = _rate_limited(status, headers, tail)
         transient = rate_limited or _transient_error(tail, status)
@@ -632,9 +618,7 @@ def _api(endpoint: str, payload: dict, method: str = "POST",
 
 
 def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
-    if "hold" in labels:
-        return f"PR #{number} has a merge-authority hold; ask the decisions owner to release it"
-    return None
+    return f"PR #{number} has a merge-authority hold; ask the decisions owner to release it" if "hold" in labels else None
 
 
 def _pr_labels(data: dict) -> tuple[str, ...]:
@@ -704,11 +688,6 @@ def _branch_sha(endpoint: str, field: str, invalid: str, *, full_sha: bool = Fal
     return sha
 
 
-def _branch_head(repo: str, branch: str) -> str | None:
-    endpoint = f"repos/{repo}/branches/{quote(branch, safe='')}"
-    return _branch_sha(endpoint, "commit", "invalid remote branch SHA", full_sha=True)
-
-
 def _matches_commit_pr(row: dict, repo: str, branch: str, endpoint: str) -> bool:
     if not isinstance(row, dict) or not isinstance(row.get("head"), dict):
         raise GhError(("gh", "api", endpoint), "invalid commit PR head")
@@ -722,7 +701,10 @@ def _matches_commit_pr(row: dict, repo: str, branch: str, endpoint: str) -> bool
 
 
 def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> tuple[str, list[dict]]:
-    sha = head_sha if head_sha is not None else _branch_head(repo, branch)
+    sha = head_sha
+    if sha is None:
+        sha = _branch_sha(f"repos/{repo}/branches/{quote(branch, safe='')}", "commit",
+                          "invalid remote branch SHA", full_sha=True)
     if sha is None:
         return "", []
 
