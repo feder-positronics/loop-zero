@@ -180,18 +180,10 @@ def run_git_paths(argv: Sequence[str], *, cwd: Path, env_allowlist: Sequence[str
 
 
 def run(
-    argv: Sequence[str],
-    *,
-    cwd: Path | str,
-    env_allowlist: Sequence[str],
-    extra_env: Mapping[str, str] | None = None,
-    timeout: float,
-    merge_output: bool = False,
-    input: str | None = None,
-    encoding: str | None = None,
-    preserve_newlines: bool = False,
-    tail_chars: int | None = None,
-    graceful_interrupt: bool = False,
+    argv: Sequence[str], *, cwd: Path | str, env_allowlist: Sequence[str],
+    extra_env: Mapping[str, str] | None = None, timeout: float,
+    merge_output: bool = False, input: str | None = None, encoding: str | None = None,
+    preserve_newlines: bool = False, tail_chars: int | None = None, graceful_interrupt: bool = False,
     pass_fds: tuple[int, ...] = (),
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.

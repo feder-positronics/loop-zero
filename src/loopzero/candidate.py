@@ -143,13 +143,10 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
         pull_requests = batch.get("pull_requests")
         _require(isinstance(pull_requests, list), f"Mergify batch {batch_id} has no pull_requests list")
         for pull_request in pull_requests:
-            _require(
-                isinstance(pull_request, dict)
-                and isinstance(pull_request.get("number"), int)
-                and pull_request["number"] > 0,
-                f"Mergify batch {batch_id} has an invalid source pull request",
-            )
-            source_numbers.append(pull_request["number"])
+            number = _field(pull_request, "number")
+            _require(isinstance(number, int) and number > 0,
+                     f"Mergify batch {batch_id} has an invalid source pull request")
+            source_numbers.append(number)
         parent_ids = batch.get("parent_ids", [])
         _require(isinstance(parent_ids, list)
                  and all(isinstance(parent, str) and parent for parent in parent_ids),
@@ -205,35 +202,22 @@ def _lookup_source(github_get: GitHubGet, repo: str, number: int) -> JsonObject:
 
 
 def _attest_source(
-    source: JsonObject,
-    *,
-    number: int,
-    repository: JsonObject,
-    candidate_sha: str,
-    github_get: GitHubGet,
-    base_branch: str,
+    source: JsonObject, *, number: int, repository: JsonObject, candidate_sha: str,
+    github_get: GitHubGet, base_branch: str,
 ) -> str:
     _require(source.get("number") == number, f"GitHub returned the wrong source PR for #{number}")
-    _require(
-        source.get("state") == "open",
-        f"source PR #{number} is not open",
-        CandidateRaceError if source.get("merged") is True else CandidateError,
-    )
+    _require(source.get("state") == "open", f"source PR #{number} is not open",
+             CandidateRaceError if source.get("merged") is True else CandidateError)
     head, base = source.get("head"), source.get("base")
     _require(isinstance(head, dict) and isinstance(base, dict), f"source PR #{number} refs are missing")
     base_repo = base.get("repo")
-    _require(
-        base.get("ref") == base_branch
-        and isinstance(base_repo, dict)
-        and _repo_identity(base_repo) == _repo_identity(repository),
-        f"source PR #{number} does not target this repository's {base_branch} branch",
-    )
+    _require(base.get("ref") == base_branch and isinstance(base_repo, dict)
+             and _repo_identity(base_repo) == _repo_identity(repository),
+             f"source PR #{number} does not target this repository's {base_branch} branch")
     source_sha = head.get("sha")
     _require(is_sha(source_sha), f"source PR #{number} has an invalid head")
-    comparison = _object(
-        github_get(f"/repos/{repository['full_name']}/compare/{source_sha}...{candidate_sha}"),
-        "GitHub compare returned an invalid payload",
-    )
+    comparison_path = f"/repos/{repository['full_name']}/compare/{source_sha}...{candidate_sha}"
+    comparison = _object(github_get(comparison_path), "GitHub compare returned an invalid payload")
     _require(comparison.get("status") in {"ahead", "identical"}
              and _field(comparison.get("merge_base_commit"), "sha") == source_sha,
              f"source PR #{number} head {source_sha} is not an ancestor of the candidate")
@@ -354,10 +338,9 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                 process = subprocess.Popen(
                     [sys.executable, "-I", "-S", "-c", _LIMITED_GIT, str(_TREE_BYTES),
                      "git", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
-                     "-c", "maintenance.auto=false", *args], cwd=root, env=command_env,
-                    stdin=subprocess.DEVNULL, stdout=output,
-                    stderr=output if args[0] == "fetch" else subprocess.DEVNULL,
-                    start_new_session=True,
+                     "-c", "maintenance.auto=false", *args],
+                    cwd=root, env=command_env, stdin=subprocess.DEVNULL, stdout=output,
+                    stderr=output if args[0] == "fetch" else subprocess.DEVNULL, start_new_session=True,
                 )
                 def store_size() -> int:  # Git renames temporaries: skip files that vanish
                     total = 0
@@ -426,12 +409,8 @@ def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> No
 
 
 def attest_candidate(
-    event: JsonObject,
-    *,
-    base_branch: str = "main",
-    github_get: GitHubGet,
-    mergify_status: MergifyStatus,
-    source_policy: SourcePolicy,
+    event: JsonObject, *, base_branch: str = "main", github_get: GitHubGet,
+    mergify_status: MergifyStatus, source_policy: SourcePolicy,
 ) -> list[dict[str, object]]:
     """Retry races afresh, bounded by retry admission rather than synchronous I/O.
 
@@ -443,12 +422,8 @@ def attest_candidate(
     while True:
         try:
             return _attest_candidate_once(
-                event, base_branch,
-                github_get=github_get,
-                mergify_status=mergify_status,
-                source_policy=source_policy,
-                batch_deadline=batch_deadline,
-                batch_wait=batch_wait,
+                event, base_branch, github_get=github_get, mergify_status=mergify_status,
+                source_policy=source_policy, batch_deadline=batch_deadline, batch_wait=batch_wait,
             )
         except CandidateRaceError:
             race_deadline = min(batch_deadline, deadline + batch_wait[0])
@@ -460,13 +435,8 @@ def attest_candidate(
 
 
 def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcome per error
-    event: JsonObject, base_branch: str,
-    *,
-    github_get: GitHubGet,
-    mergify_status: MergifyStatus,
-    source_policy: SourcePolicy,
-    batch_deadline: float,
-    batch_wait: list[float],
+    event: JsonObject, base_branch: str, *, github_get: GitHubGet, mergify_status: MergifyStatus,
+    source_policy: SourcePolicy, batch_deadline: float, batch_wait: list[float],
 ) -> list[dict[str, object]]:
     """Return stable source evidence after every source passes `source_policy`."""
     repository = _object(event.get("repository"), "GitHub event repository is missing")
@@ -529,10 +499,7 @@ def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcom
     for number in first_lineage[1]:
         source = _lookup_source(github_get, full_name, number)
         source_sha = _attest_source(
-            source,
-            number=number,
-            repository=repository,
-            candidate_sha=candidate_sha,
+            source, number=number, repository=repository, candidate_sha=candidate_sha,
             github_get=github_get, base_branch=base_branch,
         )
         source_snapshots[number] = (source_sha, _source_fingerprint(source))
@@ -542,8 +509,7 @@ def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcom
             current = None
             with contextlib.suppress(Exception):
                 current = _lookup_source(github_get, full_name, number)
-            if (isinstance(current, dict) and current.get("merged") is True
-                    and _field(current.get("head"), "sha") == source_sha):
+            if _field(current, "merged") is True and _field(_field(current, "head"), "sha") == source_sha:
                 raise CandidateRaceError(f"source PR #{number} landed during attestation") from exc
             raise
 
@@ -554,11 +520,8 @@ def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcom
             _require(is_sha(base_sha), f"invalid {base_branch} head")
             _verify_tree(full_name, base_sha, candidate_sha,
                          [snapshot[0] for snapshot in source_snapshots.values()])
-            _require(
-                github_get(base_path) == base_before,
-                f"{base_branch} changed during attestation",
-                CandidateRaceError,
-            )
+            _require(github_get(base_path) == base_before,
+                     f"{base_branch} changed during attestation", CandidateRaceError)
         except CandidateRaceError:
             raise
         except (CandidateError, OSError, ValueError) as exc:
@@ -569,19 +532,13 @@ def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcom
             ) from None
 
     second_lineage = live_lineage()
-    _require(
-        second_lineage == first_lineage,
-        "Mergify candidate membership changed during attestation",
-        CandidateRaceError,
-    )
+    _require(second_lineage == first_lineage,
+             "Mergify candidate membership changed during attestation", CandidateRaceError)
     recheck_candidate()
     for number, (expected_sha, expected_fingerprint) in source_snapshots.items():
         current = _lookup_source(github_get, full_name, number)
         _require(_field(current.get("head"), "sha") == expected_sha,
                  f"source PR #{number} head changed during attestation")
-        _require(
-            _source_fingerprint(current) == expected_fingerprint,
-            f"source PR #{number} metadata changed during attestation",
-            CandidateRaceError,
-        )
+        _require(_source_fingerprint(current) == expected_fingerprint,
+                 f"source PR #{number} metadata changed during attestation", CandidateRaceError)
     return [{"number": number, "head_sha": sha} for number, (sha, _) in source_snapshots.items()]

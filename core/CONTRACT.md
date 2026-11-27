@@ -30,17 +30,14 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    blocking findings go in the review body and need a reviewed fix. Approval
    exits 0, changes requested 5.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
-   passes. A PR whose only blockers are missing or skipped required checks
-   (with or without pending mergeability) also leaves draft but is not ready
-   yet; without a wait that exits 3. Both waiters use `--wait[=SECONDS]` (default 5400) on the same
-   head. Zero can take a PR out of draft or enqueue. Mergeability can time out (exit 3)
-   with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`. Before
-   pushing to a requested or queued PR, withdraw it, confirm the removal on the PR,
-   then push, review the new head and admit it again; a CLI failure does not prove
-   the request was removed.
+   passes. A PR whose only blockers are missing or skipped required checks (even
+   while GitHub still computes mergeability) also leaves draft but is not ready
+   yet; without a wait that exits 3, and `--wait=0` can take the PR out of draft.
+   `ready` and `merge` take `--wait[=SECONDS]` (default 5400) on the same head.
+   Mergeability can time out (exit 3) with green checks.
    Green can precede CI scheduling. After two minutes of missing checks with
    none pending, inspect scheduling, triggers and permissions, then retry.
-6. After step 5 exits 0, run from a durable directory such as `/tmp`
+6. After step 5 exits 0, run from outside the task worktree
    using the absolute path to the task worktree.
 
    ```sh
@@ -50,7 +47,12 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    Merge rechecks readiness, uses the configured strategy, verifies the landed
    SHA and deletes the branch and worktree. A cleanup warning follows a verified
    merge. Follow its recovery step. Queueing without `--wait` exits 0 without
-   cleanup. With `--wait`, source checks and landing share one budget.
+   cleanup. With `--wait`, source checks and landing share one budget;
+   `merge --wait=0` can enqueue.
+   `loopzero merge --cancel` requests Mergify removal without `--wait`. Before
+   pushing to a requested or queued PR, withdraw it, confirm the removal on the PR,
+   then push, review the new head and admit it again; a CLI failure does not prove
+   the request was removed.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
