@@ -1,5 +1,8 @@
 # Skill routing
 
+Entry skills are `plan`, `implement`, `work-issue` and `write-design-doc`; use the
+others as needed.
+
 Use [delegation guidance](../../docs/DELEGATION.md) and the task repository's
 `models.toml` for subagents. Install these skills once per machine
 ([setup](../../SETUP.md#connect-your-agent)); repositories keep no copies and add
