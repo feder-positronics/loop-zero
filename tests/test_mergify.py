@@ -227,21 +227,17 @@ def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnost
 
 
 def test_redirect_is_refused_before_credentials_can_leave_origin(monkeypatch):
-    for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(urllib.request, "getproxies", dict)
     followed = []
 
     class Redirecting(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == "/elsewhere":
                 followed.append(self.headers.get("Authorization"))
-            self.send_response(302 if self.path == "/" else 200)
+            self.send_response_only(302 if self.path == "/" else 200)
             self.send_header("Location", "/elsewhere")
             self.send_header("Content-Length", "0")
             self.end_headers()
-
-        def log_message(self, *_args):
-            pass
 
     with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirecting) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
