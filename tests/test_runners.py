@@ -378,31 +378,6 @@ def test_codex_message_file_must_be_regular_owned_and_unlinked(tmp_path, monkeyp
         assert runners._read_codex_file(path) is None
 
 
-@pytest.mark.parametrize("version,failure", [
-    *((version, None) for version in ("codex-cli 0.168.0", "codex-cli 1.0.0-beta.1", "custom build", "")),
-    *(("codex-cli 0.161.0", failure) for failure in ("nonzero", "missing", "timeout")),
-])
-def test_codex_version_probe(fake_bin, tmp_path, monkeypatch, version, failure):
-    from loopzero import _proc
-
-    _fake_codex(fake_bin, json.dumps(APPROVE), version=version, version_exit=int(failure == "nonzero"))
-    if failure in ("missing", "timeout"):
-        original = _proc.run
-
-        def probe(argv, **kwargs):
-            if argv[-1] == "--version":
-                raise (_proc.ToolMissing("gone") if failure == "missing" else _proc.ProcTimeout("late"))
-            return original(argv, **kwargs)
-
-        monkeypatch.setattr(_proc, "run", probe)
-    result = _review("codex", tmp_path)
-    assert result.verdict == "approve"
-    assert result.provenance["cli_version"] == (None if failure else version)
-    if failure is None:
-        assert json.loads(result.raw)["cli_version"] == version
-    assert (fake_bin / "codex.stdin").exists()
-
-
 @pytest.mark.parametrize("runtime", [False, True], ids=["default", "explicit"])
 def test_claude_approve(
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, runtime: bool,

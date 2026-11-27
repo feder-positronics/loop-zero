@@ -1727,16 +1727,13 @@ allowed_efforts = {json.dumps(allowed)}
     model, effort = expected
     head = prepare_review(wt, gh, fake_bin)
     if family == "codex":
-        version = "codex-cli 0.168.0"
-        _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
+        _fake_codex(fake_bin, json.dumps(APPROVE))
     expect_cli(capsys, 0, "review", *options, stdout_contains=(f"review by {family}",), stderr="")
     if family == "claude":
         argv = _argv(fake_bin, "claude")
         assert (argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]) == expected
     saved, _ = cli._load_review(wt, head, "primary")
     assert (saved.model, saved.effort) == expected
-    if family == "codex":
-        assert saved.provenance["cli_version"] == version
     assert f"model {model} (effort {effort})" in posted_review(gh)["body"]
 
 

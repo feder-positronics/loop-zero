@@ -784,9 +784,9 @@ source. The selected installed CLI updated to 0.161.0 during preparation; its
 preflight SHA256 was
 `9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c`.
 That hash is research evidence, not a platform-specific runtime gate or backend
-attestation. Both source-reviewed versions are accepted by the selected
-executable's --version probe. Probe failure, malformed output or another version
-raises RunnerBadOutput before model stdin, allowing existing family fallback.
+attestation. The runner no longer probes the executable's --version (removed in
+2026-11); a version that rejects these keys fails as an ordinary reviewer error,
+allowing existing family fallback.
 Successful generic -c parsing alone is insufficient evidence of recognized keys.
 
 For 0.161.0 the source path is:

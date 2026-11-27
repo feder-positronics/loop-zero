@@ -595,7 +595,6 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
         tool.write_text(source.replace(" command=", f" if index != {index}: continue\n command="))
         partial.append(native[0]((index + 1, 2)))
     merged = runners.merge_reviews(partial)
-    assert merged.provenance["cli_versions"] == [result.provenance["cli_version"] for result in partial]
     proof = runners.codex_evidence(merged)
     assert proof["complete"] and len({call["session"] for call in proof["calls"]}) == 2
     assert all(call["inspection"] == "unknown" for call in proof["calls"])
