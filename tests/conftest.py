@@ -21,6 +21,8 @@ def isolate_github_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token")
     monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    monkeypatch.setattr(github, "_logins", {})
+    monkeypatch.setattr(github, "_etag_cache", {})
 
 
 @pytest.fixture(autouse=True)
