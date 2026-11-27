@@ -93,10 +93,7 @@ def _argv(bin_dir: Path, name: str) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def fake_bwrap(fake_tool, tmp_path: Path, tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> Path:
-    # Keep reviewer state outside tmp_path, which many tests mount as the checkout.
-    home = tmp_path_factory.mktemp("reviewer-home")
-    monkeypatch.setenv("HOME", str(home))
+def fake_bwrap(fake_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
                  *runners.CLAUDE_AUTH_ENV, *runners.CODEX_AUTH_ENV):
         monkeypatch.delenv(name, raising=False)
@@ -389,23 +386,20 @@ def test_codex_version_probe(fake_bin, tmp_path, monkeypatch, version, failure):
     from loopzero import _proc
 
     _fake_codex(fake_bin, json.dumps(APPROVE), version=version, version_exit=int(failure == "nonzero"))
-    if failure is None:
-        result = _review("codex", tmp_path)
-        assert result.verdict == "approve"
-        assert result.provenance["cli_version"] == json.loads(result.raw)["cli_version"] == version
-        assert (fake_bin / "codex.stdin").exists()
-        return
-    original = _proc.run
+    if failure in ("missing", "timeout"):
+        original = _proc.run
 
-    def probe(argv, **kwargs):
-        if argv[-1] == "--version" and failure != "nonzero":
-            raise (_proc.ToolMissing("gone") if failure == "missing" else _proc.ProcTimeout("late"))
-        return original(argv, **kwargs)
+        def probe(argv, **kwargs):
+            if argv[-1] == "--version":
+                raise (_proc.ToolMissing("gone") if failure == "missing" else _proc.ProcTimeout("late"))
+            return original(argv, **kwargs)
 
-    monkeypatch.setattr(_proc, "run", probe)
+        monkeypatch.setattr(_proc, "run", probe)
     result = _review("codex", tmp_path)
     assert result.verdict == "approve"
-    assert result.provenance["cli_version"] is None
+    assert result.provenance["cli_version"] == (None if failure else version)
+    if failure is None:
+        assert json.loads(result.raw)["cli_version"] == version
     assert (fake_bin / "codex.stdin").exists()
 
 

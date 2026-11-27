@@ -18,10 +18,7 @@ from tests.test_setup import SETUP, setup_commands
 @pytest.fixture
 def repo(git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """`git_repo` wired to a bare origin that already holds `main`."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     origin = tmp_path / "origin.git"
     git(git_repo, "init", "-q", "--bare", "-b", "main", str(origin))
     git(git_repo, "remote", "add", "origin", str(origin))
@@ -274,26 +271,28 @@ def test_task_helpers_errors(repo: Path) -> None:
         worktree.task_text(wt)
 
 
-@pytest.mark.parametrize("dirty", [False, True])
-def test_cleanup_with_ignored_artifacts(repo: Path, monkeypatch, dirty: bool) -> None:
+def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     (repo / ".git/info/exclude").write_text(".venv/\n")
     wt, calls, real = worktree.start(repo, "done", "main"), [], worktree.git
     monkeypatch.setattr(worktree, "git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
-    artifact = wt / ".venv/dependency"
-    artifact.parent.mkdir()
-    artifact.write_text("generated")
-    if dirty:
-        scratch = wt / "scratch.txt"
-        scratch.write_text("keep my work")
-        with pytest.raises(worktree.WorktreeError, match="worktree is dirty"):
-            worktree.cleanup(wt, worktree.head(wt))
-        assert scratch.read_text() == "keep my work" and artifact.read_text() == "generated"
-        assert "lz/done" in git(repo, "branch", "--list", "lz/done")
-        return
     (wt / f".loopzero/reviewer-output-{worktree.head(wt)[:12]}-primary.json").write_text("{}")
+    (wt / ".venv").mkdir()
+    (wt / ".venv/dependency").write_text("generated")
     worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
+
+
+def test_cleanup_preserves_untracked_work_with_ignored_artifacts(repo: Path) -> None:
+    (repo / ".git/info/exclude").write_text("local.env\n")
+    wt = worktree.start(repo, "dirty", "main")
+    (wt / "local.env").write_text("ignored")
+    (wt / "scratch.txt").write_text("keep my work")
+    with pytest.raises(worktree.WorktreeError, match="worktree is dirty"):
+        worktree.cleanup(wt, worktree.head(wt))
+    assert (wt / "scratch.txt").read_text() == "keep my work"
+    assert (wt / "local.env").read_text() == "ignored"
+    assert "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
 @pytest.mark.parametrize("kind", ["same repo", "other repo", "clone"])
