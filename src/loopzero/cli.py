@@ -680,6 +680,11 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
     return 0 if report.ok else 1
 
 
+def _track_upstream(wt: Path, branch: str) -> None:
+    for key, value in (("remote", "origin"), ("merge", f"refs/heads/{branch}")):  # no tracking ref needed
+        _git(wt, "config", f"branch.{branch}.{key}", value)
+
+
 def cmd_pr(args: argparse.Namespace) -> int:
     wt, config = _context(args)
     branch, head = worktree.branch(wt), worktree.head(wt)
@@ -710,8 +715,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     push.append(f"{head}:refs/heads/{git_branch}")  # the captured commit, never the mutable local name
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
-    for key, value in (("remote", "origin"), ("merge", f"refs/heads/{git_branch}")):  # no tracking ref needed
-        _git(wt, "config", f"branch.{git_branch}.{key}", value)
+    _track_upstream(wt, git_branch)
     if pr is not None:
         with github.pr_lock(config.repo, pr.number):
             live = github.pr_view(config.repo, pr.number)
