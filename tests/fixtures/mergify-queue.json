@@ -5,7 +5,7 @@
   "attribution": {
     "stacked": "**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.",
     "isolated": "**The failure is in this pull request.** It failed tested alone on top of `main`.",
-    "batch": "**Not proven to be this pull request's failure.** It failed in a batch with [#14186](/feder-positronics/intelflo/pull/14186)."
+    "batch": "**Not proven to be this pull request's failure.** It failed in a batch with [#124](/example-org/example-repo/pull/124)."
   },
   "expected": {
     "stacked": [
