@@ -65,7 +65,16 @@ jobs:
           command -v bwrap >/dev/null
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Tests
-        run: uv run --no-sync pytest
+        run: uv run --no-sync pytest --junitxml="$RUNNER_TEMP/pytest.xml"
+      - name: Upload pytest timings
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pytest-timings-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pytest.xml
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Wheel builds and CLI runs
         run: |
           uv build --python 3.14 --build-constraints build-constraints.txt --require-hashes --wheel -q
