@@ -2220,6 +2220,7 @@ def test_review_extra_delta_after_base_conflict(wt, repo, gh, fake_bin, capsys, 
 
 def test_review_ignores_forged_history(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
     history = [rev(head, "primary", login="stranger"), rev(head, "delta", commit="2" * 40)]
+    assert cli._pr_markers([*history, rev("b" * 40, "primary", commit=head)], head, (LOGIN,)) == []
     prepare_review(wt, gh, fake_bin, history=history)
     code, out, _ = run(capsys, "review")
     assert code == 0 and out.splitlines()[-1].startswith("primary review by claude")
