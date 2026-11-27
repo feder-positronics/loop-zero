@@ -303,6 +303,10 @@ review publication; the existing reviewer selector and delivery gates still appl
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
+In consumer repositories the copyable Actions publisher installs loop-zero at
+an immutable upstream revision and reads configuration from the trusted
+default-branch checkout. In loop-zero itself both jobs install the package from
+that checkout, so publisher fixes take effect when they land.
 Local readiness and hosted source and candidate eligibility reject PRs with
 merge-authority holds. Adding or removing a hold refreshes source eligibility
 even when the head stays the same. Merge admission rechecks the live hold.
