@@ -803,6 +803,7 @@ def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
     found = github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
     assert [f.title for f in found] == ["A", "B"]
     assert "after=C1" not in gh.argv(0) and "after=C1" in gh.argv(1)
+    assert gh.argv(1)[gh.argv(1).index("after=C1") - 1] == "-f"
 
 
 @pytest.mark.parametrize("cursors", [(None,), ("C1", "C2", "C1")])
@@ -819,7 +820,8 @@ def test_thread_reply_read_rejects_repeated_cursor(gh: FakeGh) -> None:
     node = {"id": "T1", "comments": {"pageInfo": page}}
     with pytest.raises(github.GhError, match="missing or repeated review thread cursor"):
         github._has_thread_reply(node, "reply")
-    assert len(gh.calls) == 1 and "after=C1" in gh.argv(0)
+    argv = gh.argv(0)
+    assert len(gh.calls) == 1 and argv[argv.index("after=C1") - 1] == argv[argv.index("thread=T1") - 1] == "-f"
 
 
 # --- checks --------------------------------------------------------------------------------
@@ -1478,6 +1480,18 @@ def test_app_token_helper_must_not_be_world_writable_or_foreign_owned(tmp_path: 
     helper.chmod(0o700)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     assert github.app_token() == "synthetic-app-token"
+    link = directory / "link"
+    link.symlink_to(helper)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", link)
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    assert github.app_token() == ""
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    alias = tmp_path / "alias"
+    alias.symlink_to(directory)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", alias / "app-token")
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    assert github.app_token() == ""
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     for target, mode in ((helper, 0o702), (helper, 0o777), (directory, 0o707), (directory, 0o777)):
         original = target.stat().st_mode & 0o777
         target.chmod(mode)
@@ -1487,3 +1501,15 @@ def test_app_token_helper_must_not_be_world_writable_or_foreign_owned(tmp_path: 
     monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
     monkeypatch.setattr(github.os, "getuid", lambda: helper.stat().st_uid + 1)
     assert github.app_token() == ""
+
+
+def test_resolve_finding_sends_thread_id_as_raw_field(gh: FakeGh) -> None:
+    node = {**thread(f"{marker('important')}\nA"), "id": "T1"}
+    node["comments"]["pageInfo"] = {"hasNextPage": False, "endCursor": None}
+    gh.respond("api graphql", threads_json(node),
+               {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}},
+               {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}})
+    github.resolve_finding(REPO, 7, "0b9b59e7", "Fixed.", PUBLISHERS)
+    for call in (1, 2):
+        argv = gh.argv(call)
+        assert argv[argv.index("thread=T1") - 1] == "-f"

@@ -465,7 +465,7 @@ supported Mergify API credential.
 For local GitHub reads, PR body updates, and review comments, an optional executable
 `~/.config/loopzero/app-token` may print a fresh GitHub App installation token.
 Loop-zero caches it for 50 minutes and uses the operator's `gh` login when the
-helper is unavailable. When `review_publishers` lists only an App login, the helper is
+helper is unavailable or is a symlink, or when the helper or its directory is owned by another user or world-writable. When `review_publishers` lists only an App login, the helper is
 required: `loopzero review` stops with a message naming the login it saw, the
 configured publishers and the helper path. Other GitHub writes and git push use the operator identity. Install the app on
 every repository loop-zero delivers: reads through the app do not fall back on 404.

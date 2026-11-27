@@ -294,17 +294,17 @@ def pr_lock(repo: str, number: int) -> Iterator[None]:
 
 
 def _trusted_helper(path: Path) -> bool:
-    """An executable owned by this user that other users cannot replace.
+    """A regular executable and a real directory, both owned by this user and not world-writable.
 
-    The helper runs with the publisher's credentials, so a world-writable file or
-    directory would let any local user run code as that identity. Group write stays
-    allowed: user-private groups with umask 002 are the common default.
+    The helper runs with the publisher's credentials, so a symlink or a world-writable
+    file or directory would let another local user run code as that identity. Group write
+    stays allowed: user-private groups with umask 002 are the common default.
     """
     try:
-        info, parent = path.stat(), path.parent.stat()
+        info, parent = path.lstat(), path.parent.lstat()
     except OSError:
         return False
-    return (stat.S_ISREG(info.st_mode) and os.access(path, os.X_OK)
+    return (stat.S_ISREG(info.st_mode) and stat.S_ISDIR(parent.st_mode) and os.access(path, os.X_OK)
             and all(item.st_uid == os.getuid() and not item.st_mode & 0o002 for item in (info, parent)))
 
 
