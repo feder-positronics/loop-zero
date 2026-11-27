@@ -33,7 +33,6 @@ MERGIFY_BOT_LOGIN = "mergify[bot]"
 QUEUE_BRANCH_PREFIX = "mergify/merge-queue/"
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_ATTEST_ATTEMPTS = 4
 _ATTEST_SECONDS = 30
 _ATTEST_DELAY = 4
 _BATCH_SECONDS = 90
@@ -416,7 +415,7 @@ def attest_candidate(
     batch_wait = [0.0]
     batch_deadline = _retry_clock() + _BATCH_SECONDS
     deadline = _retry_clock() + _ATTEST_SECONDS
-    for attempt in range(_ATTEST_ATTEMPTS):
+    while True:
         try:
             return _attest_candidate_once(
                 event, base_branch,
@@ -428,12 +427,11 @@ def attest_candidate(
             )
         except CandidateRaceError:
             race_deadline = min(batch_deadline, deadline + batch_wait[0])
-            if attempt + 1 == _ATTEST_ATTEMPTS or _retry_clock() + _ATTEST_DELAY >= race_deadline:
+            if _retry_clock() + _ATTEST_DELAY >= race_deadline:
                 raise
             _retry_sleep(_ATTEST_DELAY)
             if _retry_clock() >= race_deadline:
                 raise
-    raise AssertionError("unreachable")
 
 
 def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcome per error
