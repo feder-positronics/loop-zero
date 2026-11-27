@@ -3176,6 +3176,19 @@ def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, hea
         ) == 1
 
 
+def test_ready_points_to_owner_route_when_receipt_changes_before_undraft(wt, gh, capsys, head, monkeypatch):
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=True)
+    pr = github.PR(7, URL, head, "main", True, "OPEN", "MERGEABLE")
+
+    def snapshot(*_args, **_kwargs):  # the receipt is valid at the snapshot and removed before the mutation
+        (wt / ".loopzero/checks.json").unlink()
+        return pr, github.Readiness(True, ())
+
+    monkeypatch.setattr(cli, "_pr_readiness", snapshot)
+    monkeypatch.setattr(github, "mark_ready", lambda *_: pytest.fail("undrafted without a receipt"))
+    expect_cli(capsys, 1, "ready", stderr_contains=("run loopzero check at this head", cli.OWNER_ROUTE))
+
+
 @pytest.mark.parametrize("command", ["ready", "merge"])
 @pytest.mark.parametrize("condition,reason", [
     *((case, "run loopzero check at this head") for case in ("missing", "during-gates", "transient")),
@@ -3224,7 +3237,8 @@ def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, co
     assert all(github._read_only(tuple(c["argv"])) for c in gh.calls)
     if condition != "during-gates":
         expected = [commit_lookup.split()[:2]] * (2 if condition == "transient" else 1) + [LOOKUP_CALLS[-1]]
-        assert [c["argv"][:2] for c in gh.calls] == expected
+        departure = [["api", f"repos/{REPO}/issues/7/comments"]] if command == "merge" else []
+        assert [c["argv"][:2] for c in gh.calls] == expected + departure
 
 
 @pytest.fixture
@@ -4669,21 +4683,26 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"), (True, "conflict"),
     (False, "head"), (False, "requeue"), (False, "author"), (False, "landed"),
     (False, "rule"), (False, "rule_requeue"), (True, "batch"), (True, "dequeued"),
+    (False, "rule_same"), (False, "rule_unrequested"), (False, "rule_blocked"), (False, "linked_already"),
 ])
 def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, confirmed, kind):
-    head = arm_mergify_pr(wt, gh)
+    head = arm_mergify_pr(wt, gh, "failure" if kind == "rule_blocked" else "success")
     admission = kind in MERGIFY_QUEUE_FIXTURE["admission"]
-    comments = [{"id": 42, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
-                 "body": MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)}]
+    comments = [] if kind in {"rule_unrequested", "rule_blocked"} else [
+        {"id": 42, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
+         "body": MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)}]
     if kind != "missing":
         template = MERGIFY_QUEUE_FIXTURE.get(
-            "admission_report" if admission else f"{kind.removesuffix('_requeue')}_report", MERGIFY_QUEUE_FIXTURE["report"])
+            "admission_report" if admission else f"{kind.partition('_')[0]}_report", MERGIFY_QUEUE_FIXTURE["report"])
         body = template.replace("@url@", URL).replace("@sha@", "f" * 7 if kind == "head" else head[:7])
         comments.append({"id": 43, "user": {"login": "someone-else" if kind == "author" else "mergify[bot]"},
                          "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind, "2026-11-25T19:01:00Z"),
                          "body": body + MERGIFY_QUEUE_FIXTURE["attribution"].get(kind, "")})
-    if kind.endswith("requeue"):
-        comments.append({"id": 44, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:02:00Z", "body": "@mergifyio queue"})
+    requeued = {"rule_requeue": "19:02", "requeue": "19:02", "rule_same": "19:01", "linked_already": "19:00:30"}
+    if kind in requeued:  # linked_already: a command Mergify answered "already queued" before the departure
+        at = requeued[kind]
+        comments.append({"id": 44, "user": {"login": LOGIN}, "body": "@mergifyio queue",
+                         "created_at": f"2026-11-25T{at}{':00' if at.count(':') == 1 else ''}Z"})
     gh.respond(f"api repos/{REPO}/issues/7/comments", comments)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     membership = iter([mergify.Membership()] if confirmed else [])

@@ -331,11 +331,13 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
     source = re.search(r"^- 🚫 \*\*Left the queue\*\* [^\n]+ · `([0-9a-f]{7,40})`$", body, re.M)
     if not payload or not entered or not source or not head.startswith(source[1]):
         return None
-    if f"]({url}" in entered:  # admitted by a linked command, not by a rule or an unlinked command
-        markers = [line for line in str(command.get("body") or "").splitlines() if line.startswith(f"<!-- {REQUEST} ")]
-        if f"]({url}{command.get('id')})" not in entered or (markers and _marker(REQUEST, head, queue) not in markers):
-            return None
-    elif str(command.get("created_at") or "") > _updated_at(latest):
+    linked = re.search(rf"\]\({re.escape(url)}(\d+)\)", entered)  # absent when a rule or unlinked command admitted
+    admitted = next((item for item in comments if linked and item["id"] == int(linked[1])), {})
+    markers = [line for line in str(admitted.get("body") or "").splitlines() if line.startswith(f"<!-- {REQUEST} ")]
+    if linked and (not admitted or (markers and _marker(REQUEST, head, queue) not in markers)):
+        return None
+    # Second-precision timestamps: a command in the departure's second may be a new attempt.
+    if command is not admitted and str(command.get("created_at") or "") >= _updated_at(latest):
         return None
 
     reason = payload["dequeue_reason"] if isinstance(payload.get("dequeue_reason"), dict) else {}

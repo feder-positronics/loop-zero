@@ -20,6 +20,9 @@
     "unknown": ["Address it before requeueing"],
     "batch": ["stack", "earlier"],
     "rule": ["Address it before requeueing"],
+    "rule_unrequested": ["Address it before requeueing"],
+    "rule_blocked": ["Address it before requeueing"],
+    "linked_already": ["Address it before requeueing"],
     "dequeued": ["conflicts with main", "git fetch origin main", "After resolving the conflict", "loopzero review", "loopzero merge --wait"]
   },
   "admission": {
@@ -30,6 +33,7 @@
   "admission_report": "### ⏳ Waiting for queue conditions\n\n- [ ] `check-success = Queue Preflight`",
   "requeue_guidance": [
     "as the whole PR comment (same login)",
+    "\"already queued\" reply to a request means a rule queued it first and is harmless",
     "`loopzero merge --wait`"
   ],
   "candidate_responses": {
