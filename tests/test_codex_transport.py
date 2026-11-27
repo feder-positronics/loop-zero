@@ -273,6 +273,13 @@ def legacy_inspection(value):
     return value
 
 
+def test_retire_inspection_finds_the_header_after_a_blockers_line(published_native):
+    _, rendered, line = published_native
+    legacy = rendered.replace(line, packed(legacy_inspection(runners.decode_codex_evidence(line))))
+    assert legacy != rendered and runners.retire_inspection(legacy) == rendered
+    assert runners.retire_inspection(github.BODY_BLOCKERS + legacy) == github.BODY_BLOCKERS + rendered
+
+
 def test_published_verified_inspection_stays_valid(published_native):
     value = runners.decode_codex_evidence(published_native[2])
     assert runners.valid_codex_evidence(legacy_inspection(value))
