@@ -5183,13 +5183,18 @@ def test_plain_readiness_measures_review_age_with_github_date(wt, gh, head, monk
     pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
     cli._readiness(wt, config.load(wt / "workflow.toml"), pr, head, diagnostics=True)
     assert seen["review_grace"] is True  # 10 s by GitHub's Date header, not 20 minutes by the host
+    seen.clear()  # status reads the reviews itself and passes their Date header along
+    cli._readiness(wt, config.load(wt / "workflow.toml"), pr, head, [review], diagnostics=True,
+                   dates=("Wed, 23 Sep 2026 12:00:10 GMT",))
+    assert seen["review_grace"] is True
 
 
-def test_rejected_token_before_posting_names_the_saved_review(wt, gh, fake_bin, capsys, monkeypatch):
+@pytest.mark.parametrize("step", ["_refresh_publisher_token", "_require_open_review_round"])
+def test_rejected_token_before_posting_names_the_saved_review(wt, gh, fake_bin, capsys, monkeypatch, step):
     head = prepare_review(wt, gh, fake_bin)
     def reject(*_args):
         raise github.GhAuth(("gh", "api", "reviews"), "gh: Bad credentials (HTTP 401)")
-    monkeypatch.setattr(cli, "_require_open_review_round", reject)
+    monkeypatch.setattr(cli, step, reject)
     expect_cli(capsys, 1, "review", stderr_contains=("Bad credentials", "run `loopzero review --repost`"))
     assert cli._review_file(wt, head, "primary").exists()
 
