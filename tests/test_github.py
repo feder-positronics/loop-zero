@@ -1506,7 +1506,7 @@ def test_oversized_response_does_not_evict_other_reads(monkeypatch, app_token_he
     def run(argv, **kwargs):
         if argv[0] != "gh":
             return real_run(argv, **kwargs)
-        body = "x" * (500 if argv[2].endswith("big") else 10)
+        body = "ł" * (60 if argv[2].endswith("big") else 5)  # 120 vs 10 bytes
         return type("Done", (), {"exit_code": 0, "stdout": f'HTTP/2.0 200 OK\r\nEtag: "e"\r\n\r\n{body}', "stderr": ""})
     monkeypatch.setattr(github, "run", run)
     github._gh("api", "repos/a/b/small", conditional=True)

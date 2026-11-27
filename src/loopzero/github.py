@@ -360,7 +360,7 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
 
 
 _ETAG_CACHE_BYTES = 4_000_000
-_etag_cache: dict[tuple[tuple[str, ...], int], tuple[str, str]] = {}
+_etag_cache: dict[tuple[tuple[str, ...], int], tuple[str, str, int]] = {}
 
 
 def _etag_key(args: tuple[str, ...], selected: str, enabled: bool) -> tuple[tuple[str, ...], int] | None:
@@ -368,11 +368,11 @@ def _etag_key(args: tuple[str, ...], selected: str, enabled: bool) -> tuple[tupl
     return (args, hash(selected)) if enabled and selected else None
 
 
-def _with_validator(argv: tuple[str, ...], cached: tuple[str, str] | None) -> list[str]:
+def _with_validator(argv: tuple[str, ...], cached: tuple[str, str, int] | None) -> list[str]:
     return [*argv, *(("-H", f"If-None-Match: {cached[0]}") if cached else ())]
 
 
-def _settled_body(cached: tuple[str, str] | None, status: str | None, exit_code: int, body: str) -> str | None:
+def _settled_body(cached: tuple[str, str, int] | None, status: str | None, exit_code: int, body: str) -> str | None:
     """The response body of a success or of a 304 revalidating `cached`; None for an error."""
     if cached and status == "304":
         return cached[1]
@@ -382,10 +382,11 @@ def _settled_body(cached: tuple[str, str] | None, status: str | None, exit_code:
 def _remember_etag(key: tuple[tuple[str, ...], int] | None, headers: dict[str, str], body: str) -> None:
     if key and (etag := headers.get("etag")):
         _etag_cache.pop(key, None)
-        if len(body) > _ETAG_CACHE_BYTES:
+        size = len(body.encode())
+        if size > _ETAG_CACHE_BYTES:
             return
-        _etag_cache[key] = (etag, body)
-        while sum(len(held[1]) for held in _etag_cache.values()) > _ETAG_CACHE_BYTES:
+        _etag_cache[key] = (etag, body, size)
+        while sum(held[2] for held in _etag_cache.values()) > _ETAG_CACHE_BYTES:
             del _etag_cache[next(iter(_etag_cache))]
 
 
@@ -593,15 +594,17 @@ _logins: dict[str, str] = {}
 def login(token: str | None = None) -> str:
     """Login of the identity used for GitHub reads and review publishing.
 
-    Read once per explicit or app credential; an ambient gh account is read every time."""
+    Read once per explicit or app credential, filed under it only when the same credential
+    was selected before and after the query; an ambient gh account is read every time."""
     selected = _select_token(token, _read_scope.get(), True)
     if selected and (name := _logins.get(selected)):
         return name
-    data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }",
-                    token=selected if selected else token)
+    data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }", token=token)
     content = data.get("data") if isinstance(data, dict) else None
     if isinstance(content, dict) and isinstance(viewer := content.get("viewer"), dict) and (name := viewer.get("login")):
-        return _logins.setdefault(selected, str(name)) if selected else str(name)
+        if selected and _select_token(token, _read_scope.get(), True) == selected:
+            _logins[selected] = str(name)
+        return str(name)
     raise GhError(("gh", "api", "graphql"), "no login in viewer response")
 
 
