@@ -1304,7 +1304,10 @@ OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its on
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
     if problem := _check_report_problem(_load_report(wt), config, head):
         raise CliError(f"{problem}. {OWNER_ROUTE}")
-    github.mark_ready(config.repo, number)
+    try:
+        github.mark_ready(config.repo, number)
+    except github.GhUnavailable as exc:
+        raise CliError(f"{exc}\nRerun the same command once GitHub recovers.") from exc
 
 
 def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-kick paths share one readiness flow
@@ -1572,7 +1575,7 @@ def _wait_for_checks(
         # An active workflow may not have created its check runs yet.
         if (
             elapsed >= MISSING_RUN_GRACE
-            and all(readiness.checks.get(r, ("", ""))[1] == "missing" for r in pending)
+            and set(pending) <= _check_reasons(readiness, "missing", "skipped").keys()
             and not _read_wait_poll(
                 partial(github.has_check_activity, config.repo, pr.head_sha, readiness),
                 started + timeout,

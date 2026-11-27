@@ -1427,7 +1427,7 @@ def readiness(
 
 
 def mark_ready(repo: str, number: int) -> None:
-    _gh("pr", "ready", str(number), "--repo", repo)
+    _gh("pr", "ready", str(number), "--repo", repo, retry_idempotent=_read_scope.get() is None)
 
 
 _QUEUE_QUERY = (
