@@ -360,15 +360,14 @@ def _lock_verified_ref(wt: Path, ref: str, expected_head: str) -> Iterator[None]
             transaction.stdin.flush()
             if not select([transaction.stdout], [], [], 30)[0]:
                 raise GitError(argv, "timed out verifying the merged branch")
-            response = transaction.stdout.readline()
-            if response != "prepare: ok\n":
-                raise GitError(argv, response)
+            if not (response := os.read(transaction.stdout.fileno(), 256)).startswith(b"prepare: ok\n"):
+                raise GitError(argv, f"invalid prepare acknowledgement: {response!r}")
             yield
         finally:
             try:
                 transaction.communicate("abort\n", timeout=5)
             except subprocess.TimeoutExpired:
-                transaction.terminate()
+                transaction.kill()
 
 
 def _require_no_nested_worktree(wt: Path, git_dir: Path) -> None:

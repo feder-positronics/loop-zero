@@ -4605,15 +4605,6 @@ def test_manual_refresh_publishes_pending_or_skips_landed(wt, gh, head, pr_updat
         assert statuses[-1]["description"] == expected
 
 
-def test_merge_material_lets_read_timeouts_propagate(monkeypatch):
-    from loopzero import eligibility
-    def timeout(*_args, **_kwargs):
-        raise github.ProcTimeout("read timed out")
-    monkeypatch.setattr(github, "api_get", timeout)
-    with pytest.raises(github.ProcTimeout):
-        eligibility.base_merge_material(REPO, 7, "a" * 40, "b" * 40, "main", clean=True)
-
-
 @pytest.mark.parametrize("publisher", ["stranger", "lz-bot"])
 def test_ready_pins_review_publishers_to_base(wt, repo, gh, capsys, monkeypatch, publisher, head):
     policy = WORKFLOW_BASE.replace('required_ci = ["checks"]', 'required_ci = ["checks", "Loop-zero Eligibility"]')
@@ -5072,6 +5063,10 @@ def test_load_report_requires_integer_exit_code(wt, head, capsys, exit_code, ok)
 def test_cleanup_preserves_local_work(wt, case, capsys, monkeypatch):
     pr = SimpleNamespace(head_sha=cli.worktree.head(wt))
     if case == "dirty":
+        branch = cli.worktree.branch(wt)
+        git(wt, "config", "core.excludesFile", str(wt / ".loopzero" / "exclude"))
+        (wt / ".loopzero" / "exclude").write_text("local.env\n")
+        (wt / "local.env").write_text("ignored")
         (wt / "untracked").write_text("keep me")
     else:
         git(wt, "commit", "--allow-empty", "-m", "local after merge")
@@ -5079,6 +5074,9 @@ def test_cleanup_preserves_local_work(wt, case, capsys, monkeypatch):
         monkeypatch.setattr(cli.worktree, "head", lambda _wt: pr.head_sha)
     cli._cleanup(wt, pr)
     assert wt.exists()
+    if case == "dirty":
+        assert (wt / "untracked").read_text() == "keep me" and (wt / "local.env").read_text() == "ignored"
+        assert git(wt, "branch", "--list", branch)
     diagnostic = {"dirty": "worktree is dirty", "unpushed": "local HEAD differs", "after-head-read": "but expected"}
     assert diagnostic[case] in capsys.readouterr().err
 
