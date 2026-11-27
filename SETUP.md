@@ -5,9 +5,7 @@
 - `git` 2.40+, Python 3.14, [uv](https://docs.astral.sh/uv/).
 - `gh` from GitHub's [package repository](https://github.com/cli/cli/blob/trunk/docs/install_linux.md)
   (tested with 2.101.0), logged in with `repo` scope, so system updates keep it
-  current. Distribution packages lag: Ubuntu's 2.46.0 lacks
-  `gh pr checks --json`, so scripts written for a current `gh` fail on it. Do
-  not use the snap: its confinement cannot reach the keyring. Without root,
+  current. Distribution packages lag (Ubuntu ships 2.46.0). Do not use the snap: its confinement cannot reach the keyring. Without root,
   unpack the [release](https://github.com/cli/cli/releases) tarball and put
   `bin/gh` in `~/.local/bin` ahead of `/usr/bin`; that copy does not update.
 - Keep `gh`, `claude` and `codex` current. Tools that shape the build (`uv`,
@@ -564,6 +562,8 @@ again. External UI edits without that protocol are not covered. This is the
 existing cooperative trust policy, not instantaneous invalidation: metadata can
 change after the last read and before landing. Do not claim atomic review/merge
 validation or enable unattended landing without accepting this boundary.
+
+### Requeue after cancellation or ejection
 
 After cancellation or ejection, repair the cause and explicitly requeue with
 `@mergifyio queue` as the whole PR comment, then

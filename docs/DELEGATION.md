@@ -9,7 +9,8 @@ or exception record is required.
 
 This section applies to every owner role. Each role runs in one permanent T3
 thread that resets its session in place. At a delivery milestone or the host
-context hook's nudge, overwrite the role's fixed handoff file, then send the same thread
+context hook's nudge, overwrite the role's one fixed handoff file (never a new
+file per reset), then send the same thread
 `freshContext: true` with only "Read <handoff path>". Another owner can send
 the reset if that thread cannot act. Keep the handoff current after consequential
 decisions so recovery can use it if the session ends unexpectedly. The thread keeps its
@@ -244,8 +245,7 @@ shortages, "in the queue", the change class from the PR file list. A stale draft
 ownership. Record one entry: the outcome and its current condition, the
 obstacle, the next step with its predicted effect and check time, and at that
 check the actual result. Judge these wakes by changed next actions and shortened
-blockages; the weekly retro keeps or reverts each adjustment against its
-numbers.
+blockages; each adjustment goes to the weekly retro for its verdict.
 
 **Retrospectives.** The outcome owner records a retro, in loop-zero and in
 consumers, when any of these occurs:
@@ -533,6 +533,8 @@ canonical configuration, and use the supported CI trigger. Verify that all
 required checks pass on the current head against main before readiness.
 Follow the [local check receipt rules](../core/CONTRACT.md#check-reuse-and-delivery-priority)
 and [review budget](../core/CONTRACT.md#review-budget).
+
+### Integration and acceptance
 
 Nested background results may reach the top-level session instead of their
 owner: run nested reviewers in the foreground or forward results promptly.
