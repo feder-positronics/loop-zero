@@ -138,7 +138,6 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0, capture_e
 
 def _codex_probes(version, version_exit=0):
     return f'''if [ "$1" = --version ]; then printf '%s\\n' {shlex.quote(version)}; exit {version_exit}; fi
-if [ "$1" = exec ] && [ "$2" = --help ]; then echo --ignore-user-config; exit 0; fi
 '''
 
 
@@ -1037,7 +1036,7 @@ def test_codex_approve(repo, fake_bin, tmp_path, fake_bwrap, monkeypatch):
     assert "model_reasoning_effort=high" in argv
     # Codex's inner bwrap cannot nest inside loop-zero's; the outer sandbox bounds it.
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
-    assert "--ignore-user-config" in argv
+    assert "--ignore-user-config" not in argv
     assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" not in argv
     assert "mcp_servers={}" in argv
     assert "project_doc_max_bytes=0" in argv and not any(a.startswith("skills.") for a in argv)
@@ -1273,7 +1272,6 @@ runners._sandbox_prefix = lambda family, cwd, home, *args: (
     ["env", f"HOME={home}"], runners._review_config(family, Path(binary), ()), Path(binary)
 )
 runners._observe_codex_version = lambda *args: None
-runners._codex_supports_ignore_user_config = lambda *args: False
 runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
                     diff="diff", task_text="task")
 """

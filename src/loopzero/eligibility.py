@@ -152,9 +152,9 @@ def base_merge_material(
                         "--ignore-submodules=none", "--submodule=short",
                         f"{reviewed}..{head}", preserve_newlines=True)
             return patch.encode("utf-8", errors="surrogateescape")
-    except github.GhUnavailable:
+    except (github.GhUnavailable, github.ProcTimeout):
         raise
-    except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError):
+    except (LoopZeroError, KeyError, OSError, TypeError, ValueError):
         return None
 
 
@@ -248,18 +248,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         cfg = config.load(args.config)
-    except config.ConfigError as exc:
-        print(exc, file=sys.stderr)
+        if not cfg.review_publishers or args.pr <= 0 or not is_sha(args.head):
+            raise LoopZeroError("configure delivery.review_publishers and specify PR/full source SHA")
+        def publish(state: str, description: str) -> None:
+            github.commit_status(cfg.repo, args.head, CONTEXT, state, description[:140])
+        if args.publish:
+            publish("pending", "Refreshing source review evidence")
+        result = evaluate(cfg.repo, args.pr, args.head, cfg.base_branch, cfg.review_publishers)
+        if args.publish:
+            publish("success" if result.ready else "failure", "; ".join(result.reasons) or "Reviewed source head")
+    except (LoopZeroError, OSError) as exc:
+        print(" | ".join(line.strip() for line in str(exc).splitlines() if line.strip()), file=sys.stderr)
         return 1
-    if not cfg.review_publishers or args.pr <= 0 or not is_sha(args.head):
-        raise LoopZeroError("configure delivery.review_publishers and specify PR/full source SHA")
-    def publish(state: str, description: str) -> None:
-        github.commit_status(cfg.repo, args.head, CONTEXT, state, description[:140])
-    if args.publish:
-        publish("pending", "Refreshing source review evidence")
-    result = evaluate(cfg.repo, args.pr, args.head, cfg.base_branch, cfg.review_publishers)
-    if args.publish:
-        publish("success" if result.ready else "failure", "; ".join(result.reasons) or "Reviewed source head")
     print("eligible" if result.ready else "; ".join(result.reasons))
     return 0 if result.ready else 1
 

@@ -1,7 +1,4 @@
-"""Model review adapters: thin subprocess wrappers around ``claude -p`` and ``codex exec``.
-
-Host authentication is bound read-write into the sandbox HOME so OAuth refreshes persist.
-"""
+"""Model review adapters around ``claude -p`` and ``codex exec``."""
 
 from __future__ import annotations
 
@@ -445,18 +442,6 @@ def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ..
     return None if done.exit_code else done.stdout.rstrip("\n")
 
 
-def _codex_supports_ignore_user_config(
-    binary: Path, cwd: Path, env_allowlist: tuple[str, ...]
-) -> bool:
-    """Return whether this Codex version can avoid loading bound ``config.toml``."""
-    try:
-        done = _proc.run([str(binary), "exec", "--help"], cwd=cwd,
-                         env_allowlist=env_allowlist, timeout=30)
-    except (_proc.ToolMissing, _proc.ProcTimeout, FileNotFoundError):
-        return False
-    return done.exit_code == 0 and "--ignore-user-config" in f"{done.stdout}\n{done.stderr}"
-
-
 # Linux rejects one argv element over 128 KiB (MAX_ARG_STRLEN) before the reviewer starts.
 CODEX_SKILL_OVERRIDE_LIMIT = 100_000
 
@@ -861,13 +846,6 @@ def _codex_evidence(result):
             or not _bounded_int(context.get("diff_bytes"), 0)
             or not isinstance(context.get("cwd"), str)
             or not context["cwd"].startswith("/")
-            or any(
-                not _hex(context.get(key), 64)
-                for key in (
-                    "fragment_sha256", "prompt_sha256", "policy_sha256",
-                    "source_sha256", "binary_sha256", "argv_sha256",
-                )
-            )
         ):
             raise RunnerBadOutput("codex: inconsistent evidence context/chunk order")
         session, events = envelope.get("session_id"), envelope.get("events")
@@ -1120,13 +1098,11 @@ def _review_codex(
         prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
         skill_overrides = _codex_repository_skill_overrides(cwd)  # before Codex runs at all
         cli_version = _observe_codex_version(binary, cwd, config.env_allowlist)
-        ignore_user_config = _codex_supports_ignore_user_config(binary, cwd, config.env_allowlist)
         argv = [
             *prefix, str(binary), "exec",
             "-c", "developer_instructions=" + json.dumps(policy, ensure_ascii=False),
             *(["-m", model] if model else []),
             *(["-c", f"model_reasoning_effort={effort}"] if effort else []),
-            *(["--ignore-user-config"] if ignore_user_config else []),
             "--json",
             # Nested bwrap can fail on restricted hosts. The outer bwrap keeps the tree
             # read-only and HOME private.
@@ -1138,10 +1114,6 @@ def _review_codex(
             "--output-last-message", f"{sandbox.SANDBOX_HOME}/last.json", "-",
         ]
         configured = {"model": model or None, "effort": effort or None}  # explicit -m/-c above
-        if review_context is not None:
-            review_context = {**review_context,
-                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                "argv_sha256": hashlib.sha256(json.dumps(argv).encode()).hexdigest()}
         done = _run(
             argv, cwd=cwd, prompt=prompt,
             env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
@@ -1197,11 +1169,7 @@ def review_with(
     extra = {}
     if family == "codex" and review_context is not None:
         context = {**review_context, "cwd": str(cwd.resolve()), "index": chunk[0] if chunk else 1,
-                   "chunks": chunk[1] if chunk else 1, "requested": {"model": model, "effort": effort},
-                   "fragment_sha256": hashlib.sha256(diff.encode()).hexdigest()}
-        context.update(prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
-                       policy_sha256=hashlib.sha256(policy.encode()).hexdigest(),
-                       source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+                   "chunks": chunk[1] if chunk else 1, "requested": {"model": model, "effort": effort}}
         extra["review_context"] = context
     return adapter(
         prompt, policy=policy, cwd=cwd.resolve(), head=head, kind=kind, timeout=timeout,
