@@ -496,7 +496,8 @@ def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
 
 
 @pytest.mark.parametrize("prior", [998, 999, 1000])
-def test_source_status_limit(publisher, capsys, prior):
+def test_source_status_limit(publisher, capsys, monkeypatch, prior):
+    publisher.replay_in_process(monkeypatch)
     context = hosted.eligibility.CONTEXT
     endpoint = f"api repos/{REPO}/statuses/{HEAD}"
     refused = {
