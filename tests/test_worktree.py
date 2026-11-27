@@ -5,6 +5,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,28 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
     assert base_section.strip().splitlines() == [f"main @ {upstream}"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_start_rejects_origin_response_for_another_ref(repo, monkeypatch, legacy):
+    commit_on_origin(repo, "feature.txt")
+    actual_run = worktree.run
+
+    def wrong_ref(argv, **kwargs):
+        if argv[:3] == ("git", "fetch", "--porcelain"):
+            if legacy:
+                return actual_run(("git", "fetch", "--loopzero-unsupported"), **kwargs)
+            output = actual_run(argv, **kwargs)
+            return replace(output, stdout=output.stdout.replace("/origin/main", "/origin/unrelated"))
+        output = actual_run(argv, **kwargs)
+        if argv[:2] == ("git", "ls-remote"):
+            return replace(output, stdout=output.stdout.replace("/heads/main", "/heads/unrelated"))
+        return output
+
+    monkeypatch.setattr(worktree, "run", wrong_ref)
+    with pytest.raises(worktree.GitError, match=r"origin did not report|refs/remotes/origin/unrelated"):
+        worktree.start(repo, "wrong-ref", "main")
+    assert not (repo / ".worktrees" / "wrong-ref").exists()
 
 
 @pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base", "detached"])
