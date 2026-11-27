@@ -1623,8 +1623,10 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
 
     def change_body_during_review(*args, **kwargs):
         result = run_review(*args, **kwargs)
-        if body_case == "read-fails":
-            gh.respond(detail_key, {}, exit=1, stderr="body read failed")
+        if body_case == "read-fails":  # the pre-post head check reads the PR before the summary does
+            done = sum(call["argv"][:2] == detail_key.split() for call in gh.calls)
+            gh.respond(detail_key, *[rest_pr_json(pr_json(headRefOid=head))] * (done + 1),
+                       {"stdout": "", "stderr": "body read failed", "exit": 1})
         else:
             gh.respond(detail_key, rest_pr_json(pr_json(headRefOid=head, body=live)))
         return result
@@ -5132,9 +5134,17 @@ def test_final_review_round_check_distinguishes_heads(wt, gh, head, same_head):
     pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": LOGIN}}})
     gh.respond(reviews_key(), [rev(head if same_head else "a" * 40, "primary")])
+    gh.respond_pr_view(pr_json(headRefOid=head))
     expected = "round is already taken" if same_head else "round changed during publication"
     with pytest.raises(cli.CliError, match=expected):
         cli._require_open_review_round(cfg, pr, head, "primary")
+
+
+def test_review_is_not_posted_after_the_pr_head_moved(wt, gh, head):
+    gh.respond_pr_view(pr_json(headRefOid="b" * 40))
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    with pytest.raises(cli.CliError, match="PR head moved during the review"):
+        cli._require_open_review_round(config.load(wt / "workflow.toml"), pr, head, "primary")
 
 
 def test_late_checkpoint_preserves_completed_pass(wt, gh, capsys, head, monkeypatch):

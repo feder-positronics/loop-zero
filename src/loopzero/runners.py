@@ -1257,14 +1257,11 @@ def _validated_evidence(result: ReviewResult) -> tuple[bool, dict | None]:
         return False, None
 
 
-def family_from_trailer(value: str) -> str | None:
-    """Map a ``Co-Authored-By`` value to a reviewer family, if recognisable."""
+def families_from_trailer(value: str) -> set[str]:
+    """Every reviewer family a ``Co-Authored-By`` value names."""
     lowered = value.lower()
-    if "claude" in lowered or "anthropic" in lowered:
-        return "claude"
-    if any(word in lowered for word in ("codex", "gpt", "openai")):
-        return "codex"
-    return None
+    words = {"claude": ("claude", "anthropic"), "codex": ("codex", "gpt", "openai")}
+    return {family for family, names in words.items() if any(name in lowered for name in names)}
 
 
 def author_families(cwd: Path, head: str, base: str) -> set[str]:
@@ -1274,6 +1271,7 @@ def author_families(cwd: Path, head: str, base: str) -> set[str]:
     use the PR merge-base, including for delta reviews of a narrower diff.
     """
     revision = f"{base}..{head}"
-    trailers = _review_git(cwd, Config.env_allowlist, f"log {revision}",
-                           "log", "--format=%(trailers:key=Co-Authored-By,valueonly)", revision)
-    return {family for line in trailers.splitlines() if (family := family_from_trailer(line))}
+    # Writer lines count anywhere in a message, not only in Git's final trailer paragraph.
+    messages = _review_git(cwd, Config.env_allowlist, f"log {revision}", "log", "--format=%B", revision)
+    return {family for value in re.findall(r"(?im)^co-authored-by[ \t]*:(.+)$", messages)
+            for family in families_from_trailer(value)}

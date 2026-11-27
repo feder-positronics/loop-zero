@@ -855,10 +855,10 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
                 raise CliError(f"{exc} | publication read-back blocked: {recovery}; "
                                f"review saved at {path}; retry `loopzero review --repost` "
                                "after resolving the read-back failure") from recovery
-            raise CliError(
-                f"{exc} | publication unconfirmed; review saved at {path}; "
-                "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
-            ) from exc
+            retry = ("inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
+                     if isinstance(exc, (github.GhUnavailable, _proc.ProcTimeout)) else "GitHub rejected it and "
+                     f"`--repost` resends the same review: fix the cause, or delete {path} and run `loopzero review`")
+            raise CliError(f"{exc} | publication unconfirmed; review saved at {path}; {retry}") from exc
         try:
             live = github.pr_view(config.repo, pr.number)
             body = _append_review(live.body, result)
@@ -875,6 +875,8 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
 
 
 def _require_open_review_round(config: Config, pr: github.PR, head: str, kind: str) -> None:
+    if github.pr_view(config.repo, pr.number).head_sha != head:
+        raise CliError("PR head moved during the review; pull it and rerun `loopzero review`")
     reviews = _pr_reviews(config.repo, pr.number)
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if any(marker.kind == kind and marker.head == head for marker in markers):
@@ -985,9 +987,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
     trusted = config.review_publishers or (publisher,)
-    evidence = [r for r in reviews if "loopzero:review" in (r.get("body") or "") and (
-        r.get("commit_id") == result.head
-        or ((marker := eligibility.leading_marker(r["body"])) and marker.group(1) == result.head))]
+    # A publication starts with its marker; a review merely quoting the marker text is not one.
+    evidence = [r for r in reviews if (marker := eligibility.leading_marker(r.get("body") or ""))
+                and result.head in (r.get("commit_id"), marker.group(1))]
     fresh = github.pr_view(config.repo, pr.number)
     if fresh.head_sha != result.head or fresh.state != "OPEN" or fresh.base_ref != pr.base_ref:
         raise CliError("PR changed during publication recovery")
