@@ -127,8 +127,13 @@ or later) both read `AGENTS.md` directly. Do not add a `CLAUDE.md`, `.claude/CLA
 such as Bedrock, with telemetry or the `agents-md` plugin disabled, or in the
 first session after an install or upgrade; there, use a local, untracked
 `CLAUDE.md` containing `@AGENTS.md`. `/memory` lists the loaded files.
-For TypeSafe work, explicitly request [typesafe-ai](integrations/typesafe-ai/SKILL.md)
-from the optional integrations.
+For TypeSafe work, link [typesafe-ai](integrations/typesafe-ai/SKILL.md) the same
+way as the core skills, then request it explicitly:
+
+```sh
+ln -sfnT "$SRC/integrations/typesafe-ai" ~/.agents/skills/typesafe-ai
+ln -sfnT "$SRC/integrations/typesafe-ai" ~/.claude/skills/typesafe-ai
+```
 
 For model routing, copy [models.toml](models.toml) into the consuming repository,
 adjust its models and efforts to the available runtimes, and point repository
