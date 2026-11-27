@@ -14,7 +14,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from os.path import commonpath
@@ -98,7 +98,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config)
-    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and not dirty else {}
+    previous, resuming = (_previous(config, worktree, settings_sha256, head)
+                          if config.inputs and base and not dirty else ({}, False))
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -123,10 +124,10 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         missing, preparations = _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
-        current = _current_commands(config, worktree, commands, settings_sha256)
-        last_run = max((i for i, c in enumerate(commands, 1) if config.scratch and previous
-                        and not _input_key(config, worktree, c, "" if dirty else base)), default=0)
-        for ordinal, command in enumerate(current, 1):
+        last_run = _scratch_reuse_boundary(config, worktree, commands, base, previous, resuming)
+        scratch_writers: set[str] = set()
+        for ordinal, command in enumerate(_current_commands(config, worktree, commands, settings_sha256), 1):
+            is_check = ordinal > len(preparations)
             if progress:
                 progress(command)
             key = _input_key(config, worktree, command, "" if dirty else base,
@@ -136,15 +137,27 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 result = old
                 status and status(f"reused {(old.reused_from or head)[:8]}")
             else:
+                track_scratch = checkpoint is not None and bool(key) and bool(scratch) and is_check
+                before = _scratch_snapshot(scratch.values()) if track_scratch else None
                 with _stage_status(status, ordinal, len(commands)):
                     result = _run_one(config, worktree, prefix, command, timeout)
                 result = replace(result, input_key=key)
-            if ordinal > len(preparations) or result.exit_code:
+                if track_scratch and not result.exit_code and (
+                    before is None or before != _scratch_snapshot(scratch.values())
+                ):
+                    scratch_writers.add(command)
+            if is_check or result.exit_code:
                 results.append(result)
-                _checkpoint_stage(
-                    checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
-                    previous, commands[ordinal:],
-                )
+                if checkpoint is not None and (result.exit_code or result.input_key):
+                    saved = tuple(results)
+                    if not result.exit_code:
+                        # Scratch writers must run again. The marker keeps this receipt nonpassing.
+                        remaining = commands[max(ordinal, last_run):]
+                        unvisited = (previous[c] for c in remaining if c in previous)
+                        saved = tuple(replace(r, input_key=None) if r.command in scratch_writers else r
+                                      for r in (*saved, *unvisited))
+                        saved += (INCOMPLETE_CHECK,)
+                    checkpoint(CheckReport(head, dirty, saved, settings_sha256))
             if status:
                 status(f"stage {ordinal}/{len(commands)}: exit {result.exit_code} "
                        f"({result.duration_s:.1f}s)")
@@ -159,6 +172,23 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         )))
         dirty = True
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
+
+
+def _scratch_reuse_boundary(config: Config, worktree: Path, commands: tuple[str, ...],
+                            base: str, previous: dict[str, CheckResult], resuming: bool) -> int:
+    if config.scratch and previous:
+        for ordinal in range(len(commands), 0, -1):
+            command = commands[ordinal - 1]
+            try:
+                key = _input_key(config, worktree, command, base)
+            except (SandboxUnavailable, _proc.ProcTimeout, OSError, ValueError):
+                # Retry the lookup in stage order so earlier failures win.
+                return ordinal
+            old = previous.get(command)
+            # A checkpoint can contain unvisited keyed stages with stale or missing results.
+            if not key or (not resuming and (old is None or old.input_key != key)):
+                return ordinal
+    return 0
 
 
 def _current_commands(config: Config, worktree: Path, commands: tuple[str, ...],
@@ -186,38 +216,45 @@ INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
 INCOMPLETE_CHECK = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
 
 
-def _checkpoint_stage(checkpoint: Callable[[CheckReport], None] | None,
-                      report: CheckReport, previous: dict[str, CheckResult],
-                      remaining: tuple[str, ...]) -> None:
-    if checkpoint is None:
-        return
-    stage = report.results[-1]
-    if stage.exit_code:
-        checkpoint(report)
-    elif stage.input_key:
-        # Even the last stage leaves a nonpassing receipt until final validation.
-        unvisited = tuple(previous[command] for command in remaining if command in previous)
-        checkpoint(replace(report, results=(*report.results, *unvisited, INCOMPLETE_CHECK)))
+def _scratch_snapshot(paths: Iterable[Path]) -> dict[Path, tuple[int, ...]] | None:
+    """Track observable changes without reading files or following symlinks."""
+    pending = list(paths)
+    snapshot = {}
+    try:
+        while pending:
+            path = pending.pop()
+            info = path.lstat()
+            snapshot[path] = (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                              info.st_mtime_ns, info.st_ctime_ns)
+            if stat.S_ISDIR(info.st_mode):
+                pending.extend(path.iterdir())
+    except OSError:
+        return None
+    return snapshot
 
 
-def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
+def _previous(config: Config, worktree: Path, settings_sha256: str,
+              head: str) -> tuple[dict[str, CheckResult], bool]:
     try:
         data = json.loads(read_local_state(worktree, "checks.json"))
         if (data["dirty"] is not False or not isinstance(data["head"], str)
                 or data.get("settings_sha256") != settings_sha256):
-            return {}
+            return {}, False
         previous = {}
+        resuming = False
         for result in data["results"]:
             command, key = result.get("command"), result.get("input_key")
             code, tail = result.get("exit_code"), result.get("tail", "")
+            if command == INCOMPLETE_CHECK_COMMAND and code == 1:
+                resuming = data["head"] == head
             if (isinstance(command, str) and isinstance(key, str) and key
                     and is_check_exit_code(code) and code == 0 and isinstance(tail, str)):
                 source = result.get("reused_from")
                 reused_from = source if isinstance(source, str) else data["head"]
                 previous[command] = CheckResult(command, 0, 0.0, _check_tail(tail, config), key, reused_from)
-        return previous
+        return previous, resuming
     except (OSError, WorktreeError, ValueError, KeyError, TypeError, AttributeError):
-        return {}
+        return {}, False
 
 
 def _check_base(config: Config, worktree: Path) -> str:
