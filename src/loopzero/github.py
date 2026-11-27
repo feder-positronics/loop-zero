@@ -24,7 +24,7 @@ from urllib.parse import quote
 from loopzero import runners
 from loopzero._proc import ProcTimeout, ToolMissing, run
 from loopzero.runners import review_settings
-from loopzero.types import BLOCKING, Finding, ReviewResult, is_sha
+from loopzero.types import BLOCKING, Finding, LoopZeroError, ReviewResult, is_sha
 
 GH_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_HOST")
 GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
@@ -67,7 +67,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 """
 
 
-class GhError(Exception):
+class GhError(LoopZeroError):
     def __init__(self, command: tuple[str, ...], tail: str, *,
                  token: str = "", guidance: str = "", confirmed_rate_limit: bool = False,
                  rate_reset: int | None = None) -> None:

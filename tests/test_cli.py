@@ -562,7 +562,7 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, tmp_
         assert "local check [REDACTED] output" in report["results"][0]["tail"]
         assert "ghs_FAKE0123" not in err
     if refresh_timeout:
-        assert f"note: could not refresh PR checks: PATCH {endpoint} timed out" in err
+        assert f"warning: could not refresh PR checks: PATCH {endpoint} timed out" in err
     if pushed and not refresh_timeout:
         body = json.loads(gh.calls[-1]["--input"])["body"]
         assert body.count("## Validation") == 1
@@ -4394,10 +4394,12 @@ def test_resolve_groups_arguments_before_loading_context(monkeypatch, capsys, ar
 
 @pytest.mark.parametrize("failure,code", [(KeyError("headRefOid"), 1), (KeyboardInterrupt, 130)])
 def test_unexpected_and_interrupt_exit_codes(wt, capsys, monkeypatch, failure, code):
-    monkeypatch.setattr(cli.github, "pr_for_branch", Mock(side_effect=failure))
+    def fail(*_):
+        raise failure
+    monkeypatch.setattr(cli.github, "pr_for_branch", fail)
     _, err = expect_cli(capsys, code, "status")
-    if code == 1:
-        assert err == "loopzero status: unexpected response: 'headRefOid'\n"
+    if code == 1:  # a programming error names its location
+        assert re.fullmatch(r"loopzero status: unexpected response \(KeyError at test_cli\.py:\d+\): 'headRefOid'\n", err)
 
 
 @pytest.mark.parametrize("detached", [False, True])
@@ -4460,6 +4462,25 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert states == ["pending", "success" if expected else "failure"]
     gh.respond_pr_view( pr_json(headRefOid="b" * 40))
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
+
+
+def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head, capsys):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    gh.fail(f"api repos/{REPO}/pulls/7", "HTTP 404: Not Found\n{\"message\": \"Not Found\"}")
+    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err and "Not Found\"}" in err
+
+
+def test_merge_material_lets_read_timeouts_propagate(monkeypatch):
+    from loopzero import eligibility
+    def timeout(*_args, **_kwargs):
+        raise github.ProcTimeout("read timed out")
+    monkeypatch.setattr(github, "api_get", timeout)
+    with pytest.raises(github.ProcTimeout):
+        eligibility.base_merge_material(REPO, 7, "a" * 40, "b" * 40, "main", clean=True)
 
 
 def test_eligibility_rejects_non_object_review_row(gh, head):
