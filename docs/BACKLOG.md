@@ -36,7 +36,7 @@ limit on the backlog.
 - **Automated reporters** reuse one open issue per failure family. Repeated runs
   update its latest observation; distinct failures, especially security or
   privacy defects, get their own issue. A confirmed recurrence of a closed one
-  reopens it under the same recovery rule.
+  reopens it.
 - **Work and close:** follow [delivery roles](DELEGATION.md) for ownership and
   closure, and the contract for [holds](../core/CONTRACT.md#merge-authority)
   and [review findings](../core/CONTRACT.md#findings). Age, a count target or an
