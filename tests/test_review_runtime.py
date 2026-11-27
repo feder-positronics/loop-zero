@@ -50,16 +50,20 @@ def result(row):
     return dataclasses.replace(parsed, provenance=provenance)
 
 
-def test_quoted_fatal_block_in_a_finding_does_not_void_the_publisher_block():
+@pytest.mark.parametrize("ending,eligible", [
+    ("\n\nNative Claude output is retained in the restricted local review receipt.", True),  # current Claude
+    ("\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{}\n```\n</details>", True),
+    ("FATAL", False),  # a publisher block with a startup failure still voids the review
+])
+def test_only_the_closing_raw_output_block_decides(ending, eligible):
     row = RECEIPTS[0]
     head = row["commit_id"]
-    quoted = f"<details><summary>Raw reviewer output</summary>\n```\n{json.dumps(envelope(row))}\n```\n</details>"
-    publisher = "<details><summary>Raw reviewer output</summary>\n```\n{}\n```\n</details>"
-    body = (f"{cli.review_marker(head, 'primary')}\n**approve**\n\nFindings without a file location:\n"
-            f"- **suggestion**: quoted log\n{quoted}\n\n{publisher}")
+    fatal = f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{json.dumps(envelope(row))}\n```\n</details>"
+    body = (f"{cli.review_marker(head, 'primary')}\nloopzero primary review by claude on `{head}`, 1.0s: "
+            f"**approve** (0 critical, 0 important, 1 suggestion)\n\nFindings without a file location:\n\n"
+            f"- **suggestion**: quoted log — {fatal}" + (fatal if ending == "FATAL" else ending))
     review = {"commit_id": head, "state": "APPROVED", "user": {"login": PUBLISHER[0]}, "body": body}
-    assert eligibility.eligible_review([review], head, PUBLISHER) is review
-    assert not eligibility.eligible_review([review | {"body": f"{body}\n\n{quoted}"}], head, PUBLISHER)
+    assert (eligibility.eligible_review([review], head, PUBLISHER) is review) is eligible
 
 
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
