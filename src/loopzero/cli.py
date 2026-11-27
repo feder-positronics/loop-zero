@@ -19,6 +19,7 @@ import re
 import shlex
 import sys
 import time
+import traceback
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, suppress
 from functools import partial, wraps
@@ -31,7 +32,7 @@ from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroEr
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
-HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
+HANDLED = (LoopZeroError, OSError, ValueError)
 UNEXPECTED = (KeyError, TypeError)
 # --wait: poll interval, default timeout, and how long a required check may stay
 # missing before GitHub is assumed to have dropped the event for this head.
@@ -289,9 +290,10 @@ def _readiness(
     review_age = now - review_at[0].timestamp() if review_at else None
     if server and review_age is not None and -1 < review_age < 0:
         review_age = 0  # HTTP Date rounds down to the second.
+    review_blocker = eligibility.body_blocker(review)
     result = github.readiness(
         config.repo, pr, config.base_branch, config.required_ci,
-        head if review else None, review_at=review_at,
+        head if review else None, review_at=review_at, review_blocker=review_blocker,
         ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
@@ -310,18 +312,21 @@ def _readiness(
         else:
             reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
         result = dataclasses.replace(result, ready=not reasons, reasons=reasons)
-    if github.MISSING_REVIEW_REASON in result.reasons:
+    review_reason = review_blocker or github.MISSING_REVIEW_REASON
+    if review_reason in result.reasons:
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
-        if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
+        if _review_cap_spent(markers) and (review_blocker or all(marker.head != head for marker in markers)):
             if _conflict_delta_base(config, pr, head, reviews, markers, publishers):
                 exhausted = f"Run `loopzero review` for the available conflict-resolution delta on {head[:12]}."
             else:
+                context = (f"{review_blocker.capitalize()}. The review budget is exhausted." if review_blocker
+                           else f"The review budget is exhausted and {head[:12]} has no eligible review.")
                 exhausted = (
-                    f"The review budget is exhausted and {head[:12]} has no eligible review. "
+                    f"{context} "
                     "Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused."
                 )
             result = dataclasses.replace(result, reasons=tuple(
-                exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
+                exhausted if reason == review_reason else reason for reason in result.reasons
             ))
     report = _load_report(wt)
     receipt_problem = _check_report_problem(report, config, head)
@@ -375,8 +380,8 @@ def _require_receipt(wt: Path, config: Config, head: str) -> None:
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
     """Best-effort transcript identity; never authority or environment attestation."""
-    with suppress(Exception):
-        content = _git(wt, "rev-parse", f"{report.head}^{{tree}}").strip()
+    with suppress(LoopZeroError, OSError):
+        content = _git(wt, "rev-parse", f"{report.head}^{{tree}}")
         commands = json.dumps([r.command for r in report.results], separators=(",", ":"))
         digest = hashlib.sha256(commands.encode()).hexdigest()
         print(f"receipt {action}: head={report.head} content={content} "
@@ -547,8 +552,8 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
             body = _pr_body(wt, head, config, live.body)
             if body != live.body.replace("\r\n", "\n"):
                 github.update_body(config.repo, pr.number, body)
-    except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError, worktree.WorktreeError) as exc:
-        print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
+    except (LoopZeroError, OSError, ValueError) as exc:
+        print(f"warning: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
 _SECTIONS = {
@@ -780,7 +785,9 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     if config.review_publishers and publisher.casefold() not in {
         login.casefold() for login in config.review_publishers
     }:
-        raise CliError("current GitHub login is not a configured review publisher")
+        helper = f" The App token helper {github.APP_TOKEN_HELPER} did not supply a token." if not token else ""
+        raise CliError(f"GitHub login {publisher!r} is not a configured review publisher. "
+                       f"Configured publishers: {', '.join(config.review_publishers)}.{helper}")
     saved = [kind for kind, exists in zip(kinds, saved_files, strict=True) if exists] if args.repost else []
     if len(saved) > 1:
         raise CliError("multiple saved reviews for HEAD; publication is ambiguous")
@@ -855,7 +862,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             live = github.pr_view(config.repo, pr.number)
             github.update_body(config.repo, pr.number, _append_review(live.body, result))
         except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
-            print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
+            print(f"warning: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
 
 
@@ -1012,7 +1019,8 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
             "Back up your branch, reset to that tip and replay later fixes. To publish the restored head, "
             f"run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR"
         )
-    if not worktree.merges_since(wt, since):
+    merged = worktree.merges_since(wt, since)
+    if not merged:
         patch = worktree.diff_since(wt, since)  # Empty after an empty commit or a reverted change.
     else:
         patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
@@ -1024,11 +1032,19 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
                 "parents. If the history is correct, GitHub objects may be unavailable or exceed verification "
                 "limits. Open a new PR from the current base for a fresh review if verification still fails."
             )
-    if not patch and number is not None and github.open_blocking_findings(
-        config.repo, number, None, config.review_publishers or (github.login(),),
-    ):
-        raise CliError("empty delta leaves blocking findings open. Run `loopzero resolve` "
-                       "to list them, then address them before readiness.")
+    if not patch and number is not None:
+        publishers = config.review_publishers or (github.login(),)
+        if github.open_blocking_findings(config.repo, number, None, publishers):
+            raise CliError("empty delta leaves blocking findings open. Run `loopzero resolve` "
+                           "to list them, then address them before readiness.")
+        prior = eligibility.eligible_review(_pr_reviews(config.repo, number), since, publishers,
+                                            repo=config.repo, number=number)
+        if eligibility.body_blocker(prior):
+            raise CliError("empty delta leaves blocking findings in the review body. Push fixes before another review.")
+        if merged and eligibility.base_merge_material(
+            config.repo, number, since, head, config.base_branch, clean=True,
+        ) is not None:
+            raise CliError(f"nothing to review since {since[:12]}; run `loopzero ready` or push the fixes first")
     return patch
 
 
@@ -1149,8 +1165,8 @@ def _independence_message(
     detail = ("\n\nFailures:\n" + "\n\n".join(failures)) if failures else ""
     return (
         f"no configured reviewer can run (author family: {identity}; excluded families: "
-        f"{excluded_text}). Fix the reviewer failures below and rerun; wait for the owner "
-        f"if none can run. Do not remove truthful Co-authored-by attribution.{detail}"
+        f"{excluded_text}). Fix the reviewer failures below and rerun. "
+        f"Do not remove truthful Co-authored-by attribution.{detail}"
     )
 
 
@@ -1219,7 +1235,7 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         worktree.cleanup(wt, pr.head_sha)
     except PrimaryCheckout as exc:
         print(f"note: merged; {exc}", file=sys.stderr)
-    except (worktree.WorktreeError, CliError, OSError, _proc.ProcTimeout) as exc:
+    except (LoopZeroError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
             retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"
@@ -1802,7 +1818,7 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
         current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref, paths=True).rstrip(" ")
         if current == f"{expected_head} {ref}":
             _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
-    except (CliError, worktree.WorktreeError, OSError, _proc.ProcTimeout) as exc:
+    except (LoopZeroError, OSError) as exc:
         print(f"warning: merged but tracking ref cleanup failed for {ref}: {exc}", file=sys.stderr)
 
 
@@ -1838,8 +1854,11 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             f"Then, if no findings remain, run `{retry}`."
         ) from exc
     if not remaining:
-        github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers)
-        print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
+        if github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers,
+                                      required=eligibility.CONTEXT in config.required_ci):
+            print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
+        else:
+            print("Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete.")
     return 0
 
 
@@ -1902,7 +1921,10 @@ def _run(args: argparse.Namespace) -> int:
         if isinstance(exc, sandbox.SandboxUnavailable) and args.command in {"check", "review"}:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
-        prefix = "unexpected response: " if isinstance(exc, UNEXPECTED) else ""
+        prefix = ""
+        if isinstance(exc, UNEXPECTED):
+            where = traceback.extract_tb(exc.__traceback__)[-1]
+            prefix = f"unexpected response ({type(exc).__name__} at {Path(where.filename).name}:{where.lineno}): "
         print(f"loopzero {args.command}: {prefix}{_one_line(exc)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

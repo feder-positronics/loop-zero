@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="loopzero", description="One task, one branch, one draft PR, one review, one merge."
     )
     parser.add_argument(
-        "--config", type=Path, help="path to workflow.toml (default: repo root)"
+        "--config", type=Path, help="explicit workflow.toml override"
     )
     parser.add_argument("--version", action=_VersionAction, nargs=0, help="show program's version number and exit")
     sub = parser.add_subparsers(dest="command", required=True)

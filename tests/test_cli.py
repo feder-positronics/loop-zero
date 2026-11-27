@@ -265,6 +265,24 @@ def test_publication_recovery_ignores_markers_quoted_on_other_commits(wt: Path, 
     assert cli._confirm_review(wt, config, pr, result, LOGIN, [other]) is False
 
 
+@pytest.mark.parametrize("changed, publisher", [
+    ({"headRefOid": "b" * 40}, LOGIN),
+    ({"state": "CLOSED"}, LOGIN),
+    ({"baseRefName": "release"}, LOGIN),
+    ({}, "untrusted-publisher"),
+])
+def test_publication_recovery_rechecks_pr_and_publisher(wt, gh, head, changed, publisher):
+    config = replace(cli.config_mod.load(wt / "workflow.toml"), review_publishers=(LOGIN,))
+    result = ReviewResult("claude", head, "primary", "approve", (), "raw", provenance={"session_ids": ["session"]})
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    gh.respond_pr_view(pr_json(**({"headRefOid": head} | changed)))
+    reviews = [] if changed else [rev(head, "primary")]
+    error = "PR changed during publication recovery" if changed else "publication is revoked, pending or untrusted"
+
+    with pytest.raises(cli.CliError, match=error):
+        cli._confirm_review(wt, config, pr, result, publisher, reviews)
+
+
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
         login: str = LOGIN, verdict: str = "approve") -> dict:
     """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""
@@ -343,6 +361,10 @@ def git_calls(monkeypatch):
 
 def assert_one_workflow_read(calls):
     assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in calls) == 1
+
+
+def test_config_help_identifies_explicit_policy_override():
+    assert "explicit workflow.toml override" in cli.build_parser().format_help()
 
 
 def run(capsys, *argv: str) -> tuple[int, str, str]:
@@ -540,7 +562,7 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, tmp_
         assert "local check [REDACTED] output" in report["results"][0]["tail"]
         assert "ghs_FAKE0123" not in err
     if refresh_timeout:
-        assert f"note: could not refresh PR checks: PATCH {endpoint} timed out" in err
+        assert f"warning: could not refresh PR checks: PATCH {endpoint} timed out" in err
     if pushed and not refresh_timeout:
         body = json.loads(gh.calls[-1]["--input"])["body"]
         assert body.count("## Validation") == 1
@@ -1823,6 +1845,17 @@ def test_interrupted_review_save_preserves_previous_receipt(wt, gh, fake_bin, ca
         assert not saved.exists()
 
 
+def test_repost_refuses_a_saved_review_for_the_wrong_round(wt, gh, capsys, head, monkeypatch):
+    arm_empty_primary_review_history(gh, head)
+    cli._review_file(wt, head, "primary").touch()
+    result = ReviewResult("claude", head, "primary", "approve", (), "")
+    monkeypatch.setattr(cli, "_load_review", lambda *_args: (result, None))
+    monkeypatch.setattr(cli, "_select_review_round", lambda *_args: ("delta", None))
+    monkeypatch.setattr(cli, "_delta_patch", lambda *_args: pytest.fail("processed a mismatched review"))
+
+    expect_cli(capsys, 1, "review", "--repost", stderr_contains=("saved review kind differs",))
+
+
 @pytest.mark.parametrize("saved_state", ["missing", "stale", "hand-written", "retired"])
 def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_state, head):
     saved = cli._review_file(wt, head, "primary")
@@ -2011,7 +2044,9 @@ def conflict_merge(wt, repo):
     return reviewed
 
 
-@pytest.mark.parametrize("case", ["verified", "unverified", "second parent", "rewritten", "missing"])
+@pytest.mark.parametrize("case", [
+    "verified", "unverified", "second parent", "rewritten", "missing", "empty", "empty commit", "empty with blocker",
+])
 def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isolated_git, case):
     if case == "second parent":
         reviewed = head_of(wt)
@@ -2024,6 +2059,16 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
     elif case == "rewritten":
         base = reviewed = head_of(wt)
         git(wt, "commit", "--amend", "-qm", "rewritten feature")
+    elif case in {"empty commit", "empty with blocker"}:
+        gh.respond("api graphql", threads_json())
+        reviewed, base = head_of(wt), head_of(repo)
+        git(wt, "commit", "--allow-empty", "-qm", "empty topic commit")
+    elif case == "empty":
+        gh.respond("api graphql", threads_json())
+        reviewed = head_of(wt)
+        commit_file(repo, "new-base.txt", "new base\n", "advance base cleanly")
+        base = head_of(repo)
+        git(wt, "merge", "--no-ff", "--no-edit", base)
     else:
         reviewed = conflict_merge(wt, repo)
         (wt / ".gitmodules").write_text('[submodule "dep"]\npath = dep\nurl = ../dep\nignore = all\n')
@@ -2031,10 +2076,17 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
         git(wt, "update-index", "--add", "--cacheinfo", f"160000,{reviewed},dep")
         commit_file(wt, "topic.py", "topic = 2\n", "topic repair")
         base = git(repo, "rev-parse", "main" if case == "verified" else "main^").strip()
-    history = [rev(reviewed, "primary", state="CHANGES_REQUESTED" if case == "second parent" else "APPROVED")]
+    blocker = case in {"second parent", "empty with blocker"}
+    history = [rev(reviewed, "primary", state="CHANGES_REQUESTED" if blocker else "APPROVED")]
+    if case == "empty with blocker":
+        history[0]["body"] = github.BODY_BLOCKERS + history[0]["body"]
     head = prepare_review(wt, gh, fake_bin, history=history)
     arm_pr_base(gh, head, base)
     code, _, err = run(capsys, "review")
+    if case == "empty commit":
+        assert code == 0, err
+        assert marker(head, "delta") in posted_review(gh)["body"]
+        return
     if case != "verified":
         assert code == 1 and not list(fake_bin.glob("*.stdin"))
         if case == "missing":
@@ -2043,6 +2095,10 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
             assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
             assert "git reflog" in err and "open a new PR" in err
             assert "run `loopzero pr`, then `loopzero review` before merging main" in err
+        elif case == "empty with blocker":
+            assert "empty delta leaves blocking findings in the review body" in err
+        elif case == "empty":
+            assert f"nothing to review since {reviewed[:12]}" in err and "`loopzero ready`" in err
         else:
             assert f"{reviewed[:12]} must be on the first-parent history" in err
             assert "GitHub objects may be unavailable or exceed verification limits" in err
@@ -2157,18 +2213,20 @@ def configure_review_publisher(wt, publisher):
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
 
 
-@pytest.mark.parametrize("publisher, allowed", [("app[bot]", True), (LOGIN, False)])
+@pytest.mark.parametrize("publisher, allowed", [("app[bot]", True), (LOGIN, False), ("other[bot]", False)])
 def test_review_publisher_check_uses_app_identity(
     wt: Path, gh: FakeGh, fake_bin: Path, app_token_helper, capsys,
     publisher: str, allowed: bool,
 ) -> None:
-    app_token_helper()
+    app_token_helper("exit 1" if publisher == "other[bot]" else "echo synthetic-app-token")
     configure_review_publisher(wt, publisher)
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
     _, err = expect_cli(capsys, 0 if allowed else 1, "review")
     if not allowed:
-        assert "not a configured review publisher" in err
+        assert "GitHub login 'app[bot]' is not a configured review publisher" in err
+        assert f"Configured publishers: {publisher}" in err
+        assert ("App token helper" in err) is (publisher == "other[bot]")
 
 
 @pytest.mark.parametrize("after_review", ["app[bot]", "other[bot]", "helper fails"])
@@ -2321,7 +2379,7 @@ def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monke
     code, out, err = run(capsys, "review")
     size = len((out + err).encode())
     assert size < 650, size
-    assert code == 4 and "rerun" in err and "wait for the owner" in err
+    assert code == 4 and "Fix the reviewer failures below and rerun." in err
     for family in envelopes:
         assert f"{family}: review has unexpected or missing keys" in err
         assert family * 10 not in err
@@ -2566,16 +2624,23 @@ def test_overlapping_checks_share_only_a_pass(wt, capsys, monkeypatch, first_exi
     assert ("receipt reused:" in capsys.readouterr().out) == (first_exit == 0)
 
 
-def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
-    reviews = [rev("a" * 40, "primary"), rev("b" * 40, "delta", state="CHANGES_REQUESTED")]
+@pytest.mark.parametrize("body_blocker", [False, True])
+def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head, body_blocker: bool) -> None:
+    delta = rev(head if body_blocker else "b" * 40, "delta", state="CHANGES_REQUESTED")
+    if body_blocker:
+        delta["body"] = github.BODY_BLOCKERS + delta["body"]
+    reviews = [rev("a" * 40, "primary"), delta]
     arm_approved_pr_with_check_result(gh, head, wt, "failure", reviews=reviews)
     arm_check_runs(gh, head, [{
         "name": "checks", "status": "completed", "conclusion": "failure",
         "check_suite": {"id": 10}}])
     out, _ = expect_cli(capsys, 1, "ready")
     out = out.replace(FAILED_CHECK_HINT, "")
+    context = ("Blocking findings in the review body. The review budget is exhausted." if body_blocker
+               else f"The review budget is exhausted and {head[:12]} has no eligible review.")
     assert without_accepted_receipt(out).splitlines() == [
-        f"not ready: The review budget is exhausted and {head[:12]} has no eligible review. Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused.",
+        f"not ready: {context} Open a replacement PR for changes that need review. "
+        "Another `loopzero review` on this PR will be refused.",
         "not ready: required check 'checks' is failure",
     ]
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
@@ -4126,15 +4191,18 @@ REPLY_ACCEPTED = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id":
 THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
 
 
-@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "retry", "unknown"])
-def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, monkeypatch, outcome) -> None:
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "retry", "unknown", "missing", "missing-required"])
+def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh: FakeGh, capsys, monkeypatch, outcome) -> None:
+    if outcome == "missing-required":
+        publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', 'required_ci = ["Loop-zero Eligibility"]'))
     sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
     finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
     listing, backoffs = threads_json({**finding_pr, "path": "src/Łódź.py"}), []
     gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
                listing if outcome == "remaining" else threads_json())
     transient = outcome in {"applied", "retry", "unknown"}
-    gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": "HTTP 503" if transient else "HTTP 403"} if transient or outcome == "denied" else "", "")
+    error_status = 503 if transient else {"denied": 403, "missing": 404, "missing-required": 404}.get(outcome)
+    gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": f"HTTP {error_status}"} if error_status else "", "")
     monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
     runs = [] if outcome == "retry" else [{"display_title": "Refresh eligibility for PR #7" if outcome == "applied" else "unknown"}]
     monkeypatch.setattr(github.time, "time", lambda: 1795640554)
@@ -4152,12 +4220,15 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: Fak
     dispatches = [c["argv"] for c in gh.calls if ELIGIBILITY_DISPATCH in c["argv"]]
     assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "retry": 2}.get(outcome, 1)
     assert backoffs == ([5] if transient else [])
-    if outcome in {"denied", "unknown"}:
+    if outcome == "missing-required":
+        assert code == 1 and "Check that eligibility.yml exists" in err and "before retrying" not in err
+    elif outcome in {"denied", "unknown"}:
         assert code == 1 and "is resolved." in err and ("HTTP 403" if outcome == "denied" else "identify all recent refresh runs") in err
         assert f"gh api -X POST {ELIGIBILITY_DISPATCH} -f ref=main -f 'inputs[pr]=7'" in err
     else:
         assert (code, err) == (0, "")
-        assert out.splitlines()[1:] == ([] if outcome == "remaining" else ["refreshed Loop-zero Eligibility for PR #7"])
+        status = {"remaining": [], "missing": ["Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete."]}
+        assert out.splitlines()[1:] == status.get(outcome, ["refreshed Loop-zero Eligibility for PR #7"])
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
@@ -4323,10 +4394,12 @@ def test_resolve_groups_arguments_before_loading_context(monkeypatch, capsys, ar
 
 @pytest.mark.parametrize("failure,code", [(KeyError("headRefOid"), 1), (KeyboardInterrupt, 130)])
 def test_unexpected_and_interrupt_exit_codes(wt, capsys, monkeypatch, failure, code):
-    monkeypatch.setattr(cli.github, "pr_for_branch", Mock(side_effect=failure))
+    def fail(*_):
+        raise failure
+    monkeypatch.setattr(cli.github, "pr_for_branch", fail)
     _, err = expect_cli(capsys, code, "status")
-    if code == 1:
-        assert err == "loopzero status: unexpected response: 'headRefOid'\n"
+    if code == 1:  # a programming error names its location
+        assert re.fullmatch(r"loopzero status: unexpected response \(KeyError at test_cli\.py:\d+\): 'headRefOid'\n", err)
 
 
 @pytest.mark.parametrize("detached", [False, True])
@@ -4389,6 +4462,25 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert states == ["pending", "success" if expected else "failure"]
     gh.respond_pr_view( pr_json(headRefOid="b" * 40))
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
+
+
+def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head, capsys):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    gh.fail(f"api repos/{REPO}/pulls/7", "HTTP 404: Not Found\n{\"message\": \"Not Found\"}")
+    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err and "Not Found\"}" in err
+
+
+def test_merge_material_lets_read_timeouts_propagate(monkeypatch):
+    from loopzero import eligibility
+    def timeout(*_args, **_kwargs):
+        raise github.ProcTimeout("read timed out")
+    monkeypatch.setattr(github, "api_get", timeout)
+    with pytest.raises(github.ProcTimeout):
+        eligibility.base_merge_material(REPO, 7, "a" * 40, "b" * 40, "main", clean=True)
 
 
 def test_eligibility_rejects_non_object_review_row(gh, head):

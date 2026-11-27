@@ -24,6 +24,10 @@ key for production or another account.
 
 ## Resolve only when needed
 
+On owner-trusted shared test hosts, use test-scoped credentials only. Prefer
+short-lived per-job keys in mode `0600` files. Keep production and deploy keys
+off these hosts and all credentials out of arguments and logs.
+
 Inside the process making an authorized API request:
 
 1. Use the documented environment variable if it is nonempty after stripping

@@ -53,7 +53,7 @@ These rules represent Owner + cross-model (Neon + Fable) consensus and govern on
 1. **Two-Lane Rollout (Merge-Gated, Non-Retroactive):**
    - *Fast lane (backward-compatible fixes, speedups, relaxations, deletions):* merge to `loop-zero` `main` and refresh hosts/pins **ASAP (same hour)**.
    - *Quiet-window lane (contract-tightening or eligibility-breaking changes):* because `main` is linear, **hold tightening PRs unmerged until a 24–48h quiet window** so they never sit ahead of urgent fast-lane fixes.
-   - *Non-retroactive enforcement:* use evidence-envelope versioning (`eligible_review` already supports versioned envelopes) plus warn-first stderr output in `loopzero ready`. Add **zero date cutoffs or state** to `eligibility.py`.
+   - *Non-retroactive enforcement:* use evidence-envelope versioning plus warn-first stderr output in `loopzero ready`. Add **zero date cutoffs or state** to `eligibility.py`.
 2. **Mechanical Dynamic Priority (No Fixed Ratios, No LLM ROI Scoring):**
    - Under the `N=10` WIP cap (`intelflo#14237`), dispatch uses one mechanical rule: **anything blocking `main` or `≥3` open PRs goes first; otherwise strategy outcome work**. Do not impose a static product/infra split (e.g., 80/20) or subjective LLM ROI scores.
 3. **3-Speed Adaptive Control Loop (Fit for `~70 PRs/day`):**
