@@ -45,8 +45,8 @@ limit on the backlog.
   the REST API and reports any unlabelled or conflicting issues. Add no gate,
   ledger or second work state.
 - **Counting:** when asked for a count, state the repository's counting rule
-  and place every open issue as counted, ongoing duty or unclassified (see the
-  `backlog` skill).
+  and place every open issue as counted or ongoing duty. Unlabelled issues are
+  counted; list them by name so they get a kind (see the `backlog` skill).
 
 ## Consumer choices
 
