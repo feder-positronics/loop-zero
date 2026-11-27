@@ -66,19 +66,6 @@ def _candidate_event(event: dict, head: str) -> bool:
     return True
 
 
-def _source_status(result: github.Readiness, current: github.PR) -> tuple[str, str]:
-    reasons = result.reasons
-    if result.ready:
-        if not (blocker := github.mergeability_blocker(current)):
-            return "success", "Reviewed source head"
-        reasons = (blocker,)
-    if reasons and set(reasons) <= {github.MISSING_REVIEW_REASON, github.MERGEABILITY_PENDING}:
-        if github.MISSING_REVIEW_REASON in reasons:
-            return "pending", "Awaiting trusted review of current source head"
-        return "pending", github.MERGEABILITY_PENDING
-    return "failure", eligibility.reasons_text(reasons)
-
-
 def _check_candidate_source(cfg: Config, source_number: int, source: dict) -> None:
     original = github.pr_from_rest(source)
     snapshot = eligibility.source_snapshot(cfg.repo, source_number, original.head_sha, original)
@@ -140,8 +127,11 @@ def _run(cfg: Config) -> int:
             current = _publication_snapshot(cfg.repo, number, head, snapshot)
         if current is None:
             return 0
-        state, message = (("success", "All attested candidate sources are reviewed") if candidate
-                          else _source_status(result, current))
+        if candidate:
+            state, message = "success", "All attested candidate sources are reviewed"
+        else:
+            blocker = github.mergeability_blocker(current) if result.ready else None
+            state, message = eligibility.source_status(github.Readiness(False, (blocker,)) if blocker else result)
     except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable) as exc:
         print(f"Eligibility pending: evidence unavailable ({exc}); rerun this workflow", file=sys.stderr)
         return 1

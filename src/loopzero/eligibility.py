@@ -250,6 +250,17 @@ def reasons_text(reasons: tuple[str, ...]) -> str:
     return "; ".join(" ".join(reason.split())[:60] for reason in reasons)
 
 
+def source_status(result: github.Readiness) -> tuple[str, str]:
+    if result.ready:
+        return "success", "Reviewed source head"
+    reasons = result.reasons
+    if reasons and set(reasons) <= {github.MISSING_REVIEW_REASON, github.MERGEABILITY_PENDING}:
+        if github.MISSING_REVIEW_REASON in reasons:
+            return "pending", "Awaiting trusted review of current source head"
+        return "pending", github.MERGEABILITY_PENDING
+    return "failure", reasons_text(reasons)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="trusted base workflow.toml")
@@ -271,8 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             publish("pending", "Refreshing source review evidence")
         result = evaluate(cfg.repo, args.pr, args.head, cfg.base_branch, cfg.review_publishers)
         if args.publish:
-            state = "success" if result.ready else "pending" if result.reasons == (github.MERGEABILITY_PENDING,) else "failure"
-            publish(state, reasons_text(result.reasons) or "Reviewed source head")
+            publish(*source_status(result))
     except (LoopZeroError, OSError) as exc:
         print(" | ".join(line.strip() for line in str(exc).splitlines() if line.strip()), file=sys.stderr)
         return 1

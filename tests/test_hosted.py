@@ -483,5 +483,5 @@ def test_source_status_limit(publisher, capsys, prior):
 
 def test_source_status_flattens_reasons_and_keeps_later_ones_visible():
     result = github.Readiness(False, ("src/a\n::notice title=x::forged" + "z" * 200, "has merge conflicts"))
-    state, message = hosted._source_status(result, SimpleNamespace(mergeable=None))
+    state, message = hosted.eligibility.source_status(result)
     assert state == "failure" and "\n" not in message and message.endswith("; has merge conflicts")

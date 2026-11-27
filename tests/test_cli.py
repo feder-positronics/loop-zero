@@ -4516,7 +4516,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head,
                              "--publish"]) == (0 if expected else 1)
     states = [json.loads(c["--input"])["state"] for c in gh.calls if "--input" in c]
-    assert states == ["pending", "success" if expected else "failure"]
+    assert states == ["pending", "success" if expected else "pending"]
     gh.respond_pr_view( pr_json(headRefOid="b" * 40))
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
 
@@ -4543,19 +4543,25 @@ def test_eligibility_main_names_each_usage_mistake(wt, capsys, publishers, pr_he
     assert out == "" and message in err and "Traceback" not in err
 
 
-@pytest.mark.parametrize("pr_update,state", [({"mergeable": "UNKNOWN"}, "pending"), ({"state": "MERGED"}, None)])
-def test_manual_refresh_leaves_computing_pending_and_landed_unpainted(wt, gh, head, pr_update, state):
+@pytest.mark.parametrize("pr_update,reviewed,expected", [
+    ({"mergeable": "UNKNOWN"}, True, github.MERGEABILITY_PENDING),
+    ({}, False, "Awaiting trusted review of current source head"),
+    ({"state": "MERGED"}, True, None),
+])
+def test_manual_refresh_publishes_pending_or_skips_landed(wt, gh, head, pr_update, reviewed, expected):
     from loopzero import eligibility
     cfg = wt / ".loopzero" / "hosted.toml"
     cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
     gh.respond_pr_view(pr_json(headRefOid=head, **pr_update))
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "ci-service"}}})
-    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state="APPROVED", verdict="approve")])
+    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state="APPROVED", verdict="approve")] if reviewed else [])
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{head}", {})
     eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head, "--publish"])
-    states = [json.loads(c["--input"])["state"] for c in gh.calls if "--input" in c]
-    assert states == (["pending", state] if state else [])
+    statuses = [json.loads(c["--input"]) for c in gh.calls if "--input" in c]
+    assert [s["state"] for s in statuses] == (["pending", "pending"] if expected else [])
+    if expected:
+        assert statuses[-1]["description"] == expected
 
 
 def test_merge_material_lets_read_timeouts_propagate(monkeypatch):
