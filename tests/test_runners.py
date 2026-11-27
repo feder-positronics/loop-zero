@@ -1306,3 +1306,12 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
         assert concurrent_home.is_dir()
         assert marker.read_text() == "keep"
         terminate_review(concurrent, concurrent_home, concurrent_pid)
+
+
+@pytest.mark.parametrize(("family", "env"), [("claude", "ANTHROPIC_API_KEY"), ("codex", "OPENAI_API_KEY")])
+def test_invalid_review_diagnostic_redacts_forwarded_key(monkeypatch, family, env):
+    key = "synthetic-forwarded-key"
+    monkeypatch.setenv(env, key)
+    with pytest.raises(runners.RunnerMalformedOutput) as caught:
+        runners.parse_review({}, family=family, head="a" * 40, kind="primary", raw=key)
+    assert caught.value.tail == "[REDACTED]"

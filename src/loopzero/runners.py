@@ -168,16 +168,17 @@ def build_prompt(*, kind: str, head: str, task_text: str, diff: str,
 
 
 def _tail(text: str) -> str:
-    return text[-TAIL_CHARS:]
+    return _redact_keys(None, text)[-TAIL_CHARS:]
 
 
-def _redact_keys(family: str, text: str) -> str:
-    env = _proc.build_env(CLAUDE_AUTH_ENV if family == "claude" else CODEX_AUTH_ENV)
+def _redact_keys(family: str | None, text: str) -> str:
+    names = {"claude": CLAUDE_AUTH_ENV, "codex": CODEX_AUTH_ENV}
+    env = _proc.build_env(names.get(family, (*CLAUDE_AUTH_ENV, *CODEX_AUTH_ENV)))
     return _proc.redact(text, _proc.secret_forms(env.values()), *_proc.SECRET_PATTERNS)
 
 
 def _auth_failure(family: str, diagnostic: str) -> RunnerAuthFailed:
-    return RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(_redact_keys(family, diagnostic))}")
+    return RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(diagnostic)}")
 
 
 def _looks_like_auth_failure(text: str) -> bool:
@@ -267,7 +268,7 @@ def _run(
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
     except _proc.ProcTimeout as exc:
-        lines = _tail(_redact_keys(family, exc.stderr.strip() or exc.stdout.strip())).splitlines()
+        lines = _tail(exc.stderr.strip() or exc.stdout.strip()).splitlines()
         last_line = lines[-1] if lines else ""
         diagnostic = last_line.encode()
         tail = "…" + diagnostic[-320:].decode(errors="ignore") if len(diagnostic) > 320 else last_line
@@ -1043,30 +1044,27 @@ def _review_claude(
             env_allowlist=(*config.env_allowlist, *CLAUDE_AUTH_ENV),
         )
     raw = done.stdout
-    def diagnostic(text=raw):
-        return _tail(_redact_keys("claude", text))
-
     try:
         envelope = _extract_json_object(raw)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerMalformedOutput("claude: stdout is not JSON", diagnostic()) from exc
+        raise RunnerMalformedOutput("claude: stdout is not JSON", _tail(raw)) from exc
     if not isinstance(envelope, dict):
-        raise RunnerMalformedOutput("claude: result envelope is not an object", diagnostic())
+        raise RunnerMalformedOutput("claude: result envelope is not an object", _tail(raw))
     if _claude_envelope_auth_failure(envelope):
         raise _auth_failure("claude", raw)
     if envelope.get("is_error") and _subscription_exhausted(raw, envelope):
-        raise RunnerUsageLimit("claude: usage limit reached", diagnostic())
+        raise RunnerUsageLimit("claude: usage limit reached", _tail(raw))
     if envelope.get("is_error") or envelope.get("subtype", "success") != "success":
         text = str(envelope.get("result", ""))
         if _looks_like_auth_failure(text):
             raise _auth_failure("claude", text)
         if _looks_too_long(text) or _looks_too_long(raw):
-            raise RunnerPromptTooLong("claude: prompt is too long", diagnostic())
-        raise RunnerBadOutput(diagnostic(f"claude: {envelope.get('subtype', 'error')}"), diagnostic())
+            raise RunnerPromptTooLong("claude: prompt is too long", _tail(raw))
+        raise RunnerBadOutput(_tail(f"claude: {envelope.get('subtype', 'error')}"), _tail(raw))
     try:
         payload = _claude_payload(envelope)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerMalformedOutput("claude: result text is not JSON", diagnostic(str(envelope.get("result", "")))) from exc
+        raise RunnerMalformedOutput("claude: result text is not JSON", _tail(str(envelope.get("result", "")))) from exc
     usage = envelope.get("modelUsage")
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
     reported_model = ", ".join(models) or None
