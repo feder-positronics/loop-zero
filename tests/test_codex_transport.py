@@ -134,7 +134,7 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, git_repo
         result = changed
     assert len(result.raw.encode()) > 30000
     evidence = runners.codex_evidence(result)
-    assert evidence["complete"] and evidence["calls"][0]["inspection"] == "verified"
+    assert evidence["complete"] and evidence["calls"][0]["inspection"] == "unknown"
     assert evidence["calls"][0]["reported"] == {"model": "gpt-6.2-astra", "effort": "medium"}
     assert evidence["raw_bytes"] == len(result.raw.encode())
     assert evidence["raw_sha256"] == hashlib.sha256(result.raw.encode()).hexdigest()
@@ -257,7 +257,7 @@ def test_complete_ordered_native_chunks(native, mutation):
     if mutation == "valid":
         evidence = runners.codex_evidence(changed)
         assert [c["index"] for c in evidence["calls"]] == [1, 2]
-        assert all(c["inspection"] == "verified" for c in evidence["calls"])
+        assert all(c["inspection"] == "unknown" for c in evidence["calls"])
         assert len({c["session"] for c in evidence["calls"]}) == 2
         assert projection(changed) == (True, evidence)
     else:
@@ -266,7 +266,21 @@ def test_complete_ordered_native_chunks(native, mutation):
             runners.codex_evidence(changed)
 
 
+def legacy_inspection(value):
+    """Reviews published before inspection was retired carry verified event ranges."""
+    value["calls"][0] |= {"inspection": "verified", "head_event": {"id": "item_1", "start": 0, "end": 40},
+                          "diff_event": {"id": "item_2", "start": 40, "end": 80}}
+    return value
+
+
+def test_published_verified_inspection_stays_valid(published_native):
+    value = runners.decode_codex_evidence(published_native[2])
+    assert runners.valid_codex_evidence(legacy_inspection(value))
+
+
 def update_evidence(value, path, replacement):
+    if "head_event" in path or "diff_event" in path:
+        legacy_inspection(value)
     for key in path[:-1]:
         value = value[key]
     value[path[-1]] = replacement
@@ -393,7 +407,7 @@ def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, 
         assert b"-hello\n+" + content in delta_diff
         if kind == "delta_legacy":
             assert "+caf\\xe9\r\n" in runners.render_patch(delta_diff)
-        assert proof["calls"][0]["inspection"] == ("verified" if kind == "delta" else "unknown")
+        assert proof["calls"][0]["inspection"] == "unknown"
         assert proof["calls"][0]["diff_sha256"] == hashlib.sha256(delta_diff).hexdigest()
     head = result.head
     prefix = (

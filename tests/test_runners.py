@@ -1104,12 +1104,6 @@ def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap,
     assert len(detail.encode()) < 450 and ("…" in detail) == bool(size)
 
 
-def test_inspection_accepts_the_reviewer_patch_command() -> None:
-    command = (f"git -C /repo diff --no-color --no-ext-diff --no-textconv --text "
-               f"--ignore-submodules=none --submodule=short {'a' * 40} {'b' * 40}")
-    assert runners._inspection_commands(command, "/repo") == [("diff", "a" * 40, "b" * 40)]
-
-
 @pytest.mark.parametrize("name,budget", [
     ("zażółć gęślą.txt", 4096), ("gone with spaces.txt", 4096), ("gone.txt", 4096), ("gone.py", 100),
 ])

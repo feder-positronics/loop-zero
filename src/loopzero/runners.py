@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import sys
@@ -721,99 +720,6 @@ def decode_codex_evidence(header):
     return value
 
 
-def _inspection_commands(command, cwd):  # noqa: C901 - parses each allowed git inspection form
-    """Conservative shell grammar: explicit repo anchor, immutable range, no echo/expansion."""
-    try:
-        words = shlex.split(command)
-        if len(words) == 3 and Path(words[0]).name in {"sh", "bash"} and words[1] in {"-c", "-lc"}:
-            command = words[2]
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>`$()\n")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        groups = [[]]
-        for word in lexer:
-            if word == "&&":
-                groups.append([])
-            else:
-                groups[-1].append(word)
-        operations, anchored = [], False
-        for group in groups:
-            if len(group) == 2 and group[0] == "cd" and group[1].startswith("/"):
-                anchored = group[1] == cwd
-                continue
-            if not group or group.pop(0) != "git":
-                return []
-            local = anchored
-            if group[:1] == ["-C"] and len(group) >= 3:
-                local = group[1] == cwd
-                group = group[2:]
-            if not local:
-                return []
-            if group[:1] == ["--no-pager"]:
-                group = group[1:]
-            if group == ["rev-parse", "HEAD"]:
-                operations.append(("head",))
-            elif group[:1] == ["diff"]:
-                args = [
-                    part
-                    for part in group[1:]
-                    if part not in {"--no-color", "--no-ext-diff", "--no-textconv", "--text",
-                                    "--ignore-submodules=none", "--submodule=short"}
-                ]
-                if len(args) != 2 or not all(_hex(part, 40) for part in args):
-                    return []
-                operations.append(("diff", *args))
-            else:
-                return []
-        return operations
-    except ValueError, TypeError:
-        return []
-
-
-def _native_inspection(envelope, context):  # noqa: C901 - matches each Codex command event to expected output
-    started, completed, found = {}, set(), {}
-    for event in envelope["events"]:
-        item = event.get("item")
-        if not isinstance(item, dict) or item.get("type") != "command_execution" or not _identifier(item.get("id")):
-            continue
-        event_type = event.get("type")
-        if event_type == "item.started":
-            if item["id"] in started:
-                return {}
-            started[item["id"]] = item.get("command")
-            continue
-        if event_type != "item.completed":
-            continue
-        if item["id"] in completed:
-            return {}
-        completed.add(item["id"])
-        output, command = item.get("aggregated_output"), item.get("command")
-        if (
-            item.get("status") != "completed"
-            or type(item.get("exit_code")) is not int
-            or item["exit_code"] != 0
-            or not isinstance(output, str)
-            or not isinstance(command, str)
-            or started.get(item["id"]) != command
-        ):
-            continue
-        operations = _inspection_commands(command, context["cwd"])
-        data = output.encode("utf-8")
-        for operation in operations:
-            if operation == ("head",):
-                match = re.search(rb"(?m)^" + context["head"].encode() + rb"(?=\r?$)", data)
-                if match:
-                    found["head_event"] = {"id": item["id"], "start": match.start(), "end": match.end()}
-            elif operation == ("diff", context["base"], context["head"]):
-                match = re.search(rb"(?m)^diff --git ", data)
-                if not match:
-                    continue
-                start, end = match.start(), match.start() + context["diff_bytes"]
-                if end <= len(data) and hashlib.sha256(data[start:end]).hexdigest() == context["diff_sha256"]:
-                    found["diff_event"] = {"id": item["id"], "start": start, "end": end}
-    return found if set(found) == {"head_event", "diff_event"} else {}
-
-
 def _codex_evidence(result):  # noqa: C901 - one check per Codex evidence field
     """Pure extraction from complete normalized raw; caller/model summaries are never inputs."""
     try:
@@ -899,12 +805,10 @@ def _codex_evidence(result):  # noqa: C901 - one check per Codex evidence field
             if not isinstance(configured, dict) or configured != context.get("requested"):
                 raise RunnerBadOutput("codex: configured settings/context mismatch")
             settings["configured"] = configured
-        inspection = _native_inspection(envelope, context)
         calls.append({
             "index": index, "session": session, **settings,
             "fatal": "present" if codex_fatal_startup(envelope) else "absent",
-            "inspection": "verified" if inspection else "unknown",
-            **inspection,
+            "inspection": "unknown",  # published reviews may still carry "verified" plus event ranges
             "base": context["base"], "diff_sha256": context["diff_sha256"],
         })
     raw_bytes = result.raw.encode("utf-8")
