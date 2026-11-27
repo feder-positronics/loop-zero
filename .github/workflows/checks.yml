@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 2
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: "0.11.28"
@@ -52,11 +52,11 @@ jobs:
       # pull request touches the sandbox, its runners or this workflow.
       - name: Install bubblewrap for the sandbox test
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            git fetch -q --depth=1 origin "$BASE_SHA"
-            git diff --name-only "$BASE_SHA" HEAD \
-              | grep -qE '^(src/loopzero/(sandbox|runners)\.py|tests/test_(sandbox|runners)\.py|\.github/workflows/checks\.yml)$' \
-              || exit 0
+          # Checkout depth 2 holds the PR merge commit's base parent (HEAD^1).
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && git diff --quiet --no-renames HEAD^1 HEAD -- \
+            src/loopzero/sandbox.py src/loopzero/runners.py tests/test_sandbox.py tests/test_runners.py \
+            .github/workflows/checks.yml; then
+            exit 0
           fi
           for i in 1 2 3; do
             command -v bwrap >/dev/null && break
