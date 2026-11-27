@@ -245,6 +245,11 @@ def evaluate(repo: str, number: int, head: str, base: str,
     return result
 
 
+def reasons_text(reasons: tuple[str, ...]) -> str:
+    """One line per status: flatten whitespace and cap each reason so later ones stay visible."""
+    return "; ".join(" ".join(reason.split())[:60] for reason in reasons)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="trusted base workflow.toml")
@@ -254,15 +259,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         cfg = config.load(args.config)
-        if not cfg.review_publishers or args.pr <= 0 or not is_sha(args.head):
-            raise LoopZeroError("configure delivery.review_publishers and specify PR/full source SHA")
+        if not cfg.review_publishers:
+            raise LoopZeroError("configure delivery.review_publishers in the trusted workflow.toml")
+        if args.pr <= 0 or not is_sha(args.head):
+            raise LoopZeroError("specify the PR number and the full 40-character source SHA")
         def publish(state: str, description: str) -> None:
             github.commit_status(cfg.repo, args.head, CONTEXT, state, description[:140])
+        if args.publish and github.pr_view(cfg.repo, args.pr).state == "MERGED":
+            args.publish = False  # A landed head needs no verdict.
         if args.publish:
             publish("pending", "Refreshing source review evidence")
         result = evaluate(cfg.repo, args.pr, args.head, cfg.base_branch, cfg.review_publishers)
         if args.publish:
-            publish("success" if result.ready else "failure", "; ".join(result.reasons) or "Reviewed source head")
+            state = "success" if result.ready else "pending" if result.reasons == (github.MERGEABILITY_PENDING,) else "failure"
+            publish(state, reasons_text(result.reasons) or "Reviewed source head")
     except (LoopZeroError, OSError) as exc:
         print(" | ".join(line.strip() for line in str(exc).splitlines() if line.strip()), file=sys.stderr)
         return 1
