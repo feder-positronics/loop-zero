@@ -133,6 +133,7 @@ def pages(inputs, path, cutoff=None, **params):
             cutoff is not None and timestamp(batch[-1]["updated_at"]) < cutoff
         ):
             return rows
+    return rows
 
 
 def receipts(path, lower, end):
@@ -419,9 +420,7 @@ def parse_args(argv):
     parser.add_argument("--repo", required=True, help="GitHub OWNER/REPO")
     parser.add_argument("--base", help="base branch for PR metrics")
     parser.add_argument("--since", type=timestamp, help="start of an additional custom window")
-    ends = parser.add_mutually_exclusive_group(required=True)
-    ends.add_argument("--until", dest="end", type=timestamp)
-    ends.add_argument("--window-end", dest="end", type=timestamp)
+    parser.add_argument("--until", dest="end", type=timestamp, required=True)
     parser.add_argument("--label-outcome")
     parser.add_argument("--label-order")
     parser.add_argument("--label-p0")
@@ -462,6 +461,9 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv)
     inputs = Inputs(args.frozen_inputs, args.record)
+    if inputs.replay and inputs.alerts:
+        print(f"Cannot replay metrics: no readable snapshot at {inputs.path}. Run with --record first.", file=sys.stderr)
+        return 1
     end = args.end
     weekly = [(end - day * DAY, end - (day - 7) * DAY) for day in (28, 21, 14, 7)]
     names = ("week_minus_3", "week_minus_2", "previous_7_days", "last_7_days")

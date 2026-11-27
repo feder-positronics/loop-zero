@@ -24,8 +24,7 @@ this guide and the delivery contract describe current behavior.
 The smallest useful unit is one task, one branch and one draft PR. A deterministic
 check gives an exit-code verdict. A model reviews the authored head, independently
 by default, with a fresh same-family fallback and visible disclosure when
-independent runners are unavailable. The [bounded owner exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
-permits disclosed contributor review with reduced assurance.
+independent runners are unavailable.
 Readiness combines that evidence with live checks and findings. Merge verifies
 what actually landed. CLI checks stay strict, with no waiver file or unsandboxed
 fallback. The contract's owner queue route uses GitHub and the queue for
@@ -60,9 +59,16 @@ by one 30-second transport deadline. Recovery regenerates
 the exact review body and finding locations, checks the complete review/comment
 pages and unchanged head, and rereads review evidence before returning the saved
 verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
+When no diff line can anchor a blocker, the review body carries it behind a
+leading marker older readers reject. It blocks readiness until an eligible
+review covers the fixes.
 `review --repost` reconciles before enforcing the remaining publication budget;
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
+
+Tests use disposable user and reviewer homes. Credential refresh tests bind
+only the synthetic files they create. The generic fake reviewer has no
+credential read or write behavior.
 
 Private review receipts and malformed output excerpts live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
 Outside the worktree the CLI keeps per-PR write locks in `~/.cache/loopzero/pr-locks`,
@@ -114,10 +120,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    repository. A leased rewrite also requires the PR head in the task branch's
    local history.
 4. `review` publishes one native review of the exact authored SHA. The contract's
-   [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
-   the PR-wide review budget across head rewrites, and the
-   [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
-   which changes neither the selector nor the budget.
+   [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion
+   and the PR-wide review budget across head rewrites; truthful all-writer
+   trailers decide the reviewer family.
    The delta requires the reviewed commit on the current head's first-parent
    history and verifies merged parents against the live configured base. The
    runner receives topic patches in first-parent order and the difference
@@ -127,6 +132,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    suffix consisting only of verified base merges with a conflict. Isolated Git
    reconstructs the automatic merges to confirm the conflict. Unresolved
    blocking findings or a third recorded review rule out this allowance.
+   An empty base-merge delta cannot bypass unresolved blocking findings.
+   Without review coverage, readiness also shows outdated unresolved findings.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
@@ -156,8 +163,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    Ancestor coverage includes outdated unresolved blocking threads. A primary
    that requested changes also requires resolved findings at the reviewed head.
    For check runs with the same name, the latest run (by run ID, then start
-   time) decides; a retry supersedes a failure only when it starts after that
-   failure completed. After its own write taking the PR out of draft, `ready --wait`
+   time) decides. After its own write taking the PR out of draft, `ready --wait`
    revalidates through the same waiter, policy refresh and original deadline.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in
@@ -192,10 +198,11 @@ sandbox environment settings over a private file descriptor, keeping
 forwarded values out of process arguments. [Reviewer runners](../src/loopzero/runners.py)
 bound source access while allowing the network required by model CLIs; that
 network means the sandbox cannot prevent exfiltration of readable data.
-For a Codex executable installed inside protected native state, the implicit
-runtime mount exposes only the resolved executable and its existing sibling
-`codex-code-mode-host`, read-only. Neighboring history and configuration remain
-hidden; helper aliases into protected state and explicit state mounts fail closed.
+For a reviewer executable installed inside protected native state, the implicit
+runtime mount exposes only the resolved executable, read-only; for Codex it also
+exposes the existing sibling `codex-code-mode-host`, read-only. Neighboring history and configuration remain
+hidden; helper aliases into protected state and explicit state mounts fail closed,
+and explicit runtime paths get no such exception.
 Every command except `start` uses the workflow at one remote-tracking
 delivery revision selected by the workflow at Git's local `origin/HEAD`.
 Missing trusted refs or workflows block these commands. An explicit
@@ -212,10 +219,7 @@ config and mixed global-state exposure. Codex keeps its `auth.json` bind under
 `CODEX_HOME` or `~/.codex`, including when `OPENAI_API_KEY` is forwarded.
 File-backed binds preserve in-place writes, without guaranteeing host replacement
 visibility or shared-lock coordination. This boundary is route-specific, not full
-filesystem privacy. An implicit runtime inside state receives only the selected
-executable's exact read-only file mount, while explicit runtime paths have no
-exception. This preserves standalone CLI startup without exposing neighboring
-state; bundles needing protected siblings require installation outside state.
+filesystem privacy.
 The contract states the agent-facing consequences.
 
 Each reviewer runner separates fixed reviewer policy from supplied material
@@ -230,10 +234,8 @@ text hunks for every file (overriding `-diff`, `binary` and NUL detection) and
 runs no external diff command or text conversion, so changed lines stay visible.
 Chunked review summarizes only files whose Git header reports a deletion.
 The runner probes the selected Codex binary with `--version` and records its
-stdout in runner provenance and the saved review receipt. A failed probe uses
-RunnerBadOutput and existing family fallback before model input. Successful
-probe output is accepted across CLI releases. Unsupported Claude options follow
-existing native failure handling.
+stdout in runner provenance and the saved review receipt when available.
+Unsupported Claude options follow existing native failure handling.
 Native defaults and read-only tools remain enabled. Neither reviewer loads
 instructions from the reviewed head, which the PR controls: Claude runs with
 `--setting-sources ""`, and Codex runs with `project_doc_max_bytes=0` (no
@@ -301,6 +303,10 @@ review publication; the existing reviewer selector and delivery gates still appl
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
+In consumer repositories the copyable Actions publisher installs loop-zero at
+an immutable upstream revision and reads configuration from the trusted
+default-branch checkout. In loop-zero itself both jobs install the package from
+that checkout, so publisher fixes take effect when they land.
 Local readiness and hosted source and candidate eligibility reject PRs with
 merge-authority holds. Adding or removing a hold refreshes source eligibility
 even when the head stays the same. Merge admission rechecks the live hold.
@@ -311,11 +317,7 @@ verdict before publication. Standalone evaluation performs its own PR reads.
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Hosted attestation uses the trusted workflow's base branch for candidate and
 source targets, queue status and integration tree verification.
-When delivery uses the existing size checker, local readiness and new Mergify
-requests evaluate a temporary integration with the freshly fetched target. The
-target supplies the checker and baseline. Existing requests continue to the
-queue wait path. Readiness and new queue requests without an admission deadline can project an
-advisory budget after a single known chain of queued predecessors.
+The size budget runs only as a sandboxed check stage and in queue candidate CI.
 A candidate lineage read that finds zero or several live batch matches is
 reread within the current attempt, under a shared deadline. Separately,
 candidate attestation restarts as a complete fresh attempt, inside its own
@@ -368,7 +370,7 @@ against its owning code and consumer before calling it open or closed.
 The October 5 direction keeps this guide as the current entry point, preserves
 the small delivery toolkit, and makes architecture upkeep part of contribution
 and review. Early owning tests, truthful model attribution, independent review
-by default with the bounded owner exception, changed-only writes and explicit
+by default with a disclosed same-family fallback, changed-only writes and explicit
 ownership remain the design constraints.
 The approved execution direction is T3 V2 for coordination, with loop-zero
 retaining checks, formal native review under that policy, readiness and verified

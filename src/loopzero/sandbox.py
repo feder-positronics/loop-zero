@@ -1,4 +1,4 @@
-"""Run checks in bwrap, which gives no CPU/memory quotas; ulimit is best-effort."""
+"""Run checks in bwrap, with best-effort resource limits from prlimit."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from pathlib import Path
 from . import _proc, installed_version
 from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
-from .worktree import WorktreeError, read_local_state
+from .worktree import GitError, WorktreeError, git, read_local_state
 
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
@@ -84,7 +84,7 @@ def private_directory(prefix: str):
         yield _enter_private_directory(stack, prefix)
 
 
-def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
+def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,  # noqa: C901 - runner, reuse and cleanup paths
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
                checkpoint: Callable[[CheckReport], None] | None = None,
@@ -360,8 +360,10 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], com
         if alternate.startswith('"'):
             alternate = os.fsdecode(ast.literal_eval("b" + alternate))
         remedy = (f"Git object alternate {alternate!r} is not readable in the check sandbox. "
-                  "Create a standalone clone without --shared/--reference, then run "
-                  "loopzero start there and rerun loopzero check.")
+                  f"Run `git repack -a -d` here, delete {common_dir / 'objects/info/alternates'}, "
+                  "then rerun loopzero check. "
+                  "Transfer this task branch to a standalone clone without --shared/--reference, "
+                  "restore .loopzero/task.md, and rerun loopzero check at the same commit.")
         command = ("/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"', "loopzero-alternate", alternate)
         try:
             result = _run_bwrap(config, worktree, prefix, command, timeout=GIT_TIMEOUT)
@@ -427,29 +429,24 @@ def _cap_limit(requested: int, resource_limit: int) -> int:
 
 
 def _private_check_value(name: str, value: str) -> bool:
-    if name in _CHECK_CONTEXT_ENV or value == SANDBOX_ENV.get(name):
-        return False
     normalized = value.strip()
-    if not normalized:
+    if name in _CHECK_CONTEXT_ENV or value == SANDBOX_ENV.get(name) or len(normalized) < 6:
         return False
-    if _CREDENTIAL_ENV.search(name):
-        return True
     mode = name == "ENV" or name.endswith(("_ENV", "_ENVIRONMENT", "_MODE"))
-    return len(normalized) >= 6 and not (mode and normalized.casefold() in _CHECK_MODES)
+    return bool(_CREDENTIAL_ENV.search(name)) or not (mode and normalized.casefold() in _CHECK_MODES)
 
 
-def _redact_check_output(config: Config, text: str) -> str:
-    stage_env = check_environment(config)
-    wrapper_env = _proc.build_env(config.env_allowlist)
-    secrets = {value for env in (stage_env, wrapper_env) for name, value in env.items()
-               if _private_check_value(name, value)}
-    pattern = "|".join(map(re.escape, sorted(secrets, key=len, reverse=True)))
-    return re.sub(pattern, "[REDACTED]", text) if pattern else text
+def _check_secrets(config: Config) -> list[str]:
+    """Forwarded host values to hide, longest first; committed [checks] env is public."""
+    return _proc.secret_forms(value for name, value in _proc.build_env(config.env_allowlist).items()
+                              if _private_check_value(name, value))
 
 
 def _check_tail(text: str, config: Config | None = None, *, suffix: str = "") -> str:
-    if config is not None:
-        text = _redact_check_output(config, text)
+    if secrets := (_check_secrets(config) if config is not None else []):
+        redacted = _proc.redact(text, secrets)
+        # Redact before cutting; the extra lead read in _run_one may hold a split secret.
+        text = redacted[len(secrets[0]):] if len(text) > CHECK_TAIL_BYTES else redacted
     bounded = (text + suffix).rstrip("\n")[-CHECK_TAIL_BYTES:]
     encoded = bounded.encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
     # A byte cut can start inside a multibyte character.
@@ -466,7 +463,8 @@ def _run_one(
             f"--fsize={_cap_limit(limits.file_mb * 1024 * 1024, resource.RLIMIT_FSIZE)}",
             "--", *CHECK_SHELL, command,
         )
-        done = _run_bwrap(config, worktree, prefix, argv, timeout=timeout, tail_chars=CHECK_TAIL_BYTES)
+        lead = max(map(len, _check_secrets(config)), default=0)
+        done = _run_bwrap(config, worktree, prefix, argv, timeout=timeout, tail_chars=CHECK_TAIL_BYTES + lead)
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,
                            _check_tail(exc.stdout, config, suffix=f"\n[loopzero] timed out after {timeout:g}s"))
@@ -520,7 +518,7 @@ def _run_bwrap(
         )
 
 
-def bwrap_argv(
+def bwrap_argv(  # noqa: C901 - one bind rule per sandbox mount class
     config: Config,
     worktree: Path,
     home: Path,
@@ -576,15 +574,10 @@ def bwrap_argv(
 
 
 def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str:
-    run = _proc.run_git_paths if paths else _proc.run
-    done = run(
-        ["git", *args], cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT
-    )
-    if done.exit_code != 0:
-        raise SandboxUnavailable(
-            f"git {' '.join(args)} failed in {worktree}: {_proc.tail(done.stderr, 1)}"
-        )
-    return done.stdout
+    try:
+        return git(worktree, *args, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT, paths=paths, raw=True)
+    except GitError as exc:
+        raise SandboxUnavailable(f"{' '.join(exc.command)} failed in {worktree}: {_proc.tail(exc.tail, 1)}") from None
 
 
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:

@@ -163,8 +163,11 @@ def test_stall_and_dead_owner_modes_record_and_replay(record, alerts):
         assert not findings and {"kind": "stalled_p0", "number": 4} in report["weekly_sample"]["items"]
 
 
-def test_missing_and_failed_sources_do_not_report_zero(sources, record):
-    _, args = sources
+def test_missing_and_failed_sources_do_not_report_zero(sources, record, capsys):
+    calls, args = sources
+    assert retro_metrics.main(args) == 1 and calls == []
+    missing = capsys.readouterr()
+    assert not missing.out and "no readable snapshot" in missing.err and "--record" in missing.err
     args[args.index("--label-order") + 1] = "missing"
     args[args.index("--check-receipts") + 1] = "/no-such-receipt-test-file"
     report, _ = record(replay=False)

@@ -13,18 +13,18 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from itertools import count, pairwise
+from itertools import chain, islice, pairwise
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
 from loopzero import runners
-from loopzero._proc import ProcTimeout, ToolMissing, run
+from loopzero._proc import SECRET_PATTERNS, ProcTimeout, ToolMissing, build_env, redact, run, secret_forms
 from loopzero.runners import review_settings
-from loopzero.types import BLOCKING, Finding, ReviewResult
+from loopzero.types import BLOCKING, Finding, LoopZeroError, ReviewResult, is_sha
 
 GH_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_HOST")
 GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
@@ -32,6 +32,7 @@ APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 PR_LOCK_DIR = Path.home() / ".cache/loopzero/pr-locks"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
+BODY_BLOCKERS = "<!-- loopzero:body-blockers -->\n"
 MERGEABILITY_PENDING = "GitHub is computing mergeability"
 MARKER_RE = re.compile(
     r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
@@ -67,7 +68,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 """
 
 
-class GhError(Exception):
+class GhError(LoopZeroError):
     def __init__(self, command: tuple[str, ...], tail: str, *,
                  token: str = "", guidance: str = "", confirmed_rate_limit: bool = False,
                  rate_reset: int | None = None) -> None:
@@ -132,6 +133,7 @@ class Readiness:
     waitable_failures: tuple[str, ...] = ()
     stale_verdicts: tuple[str, ...] = ()
     has_pending_checks: bool = False
+    checks: dict[str, tuple[str, str]] = field(default_factory=dict)  # reason -> (check name, state)
 
 
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
@@ -145,9 +147,7 @@ _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
 _READINESS_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.([0-9]+))?"
                                   r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
 _HTTP_DATE = re.compile(r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT")
-_CREDENTIAL_TOKEN_RE = re.compile(
-    r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})"
-)
+_CREDENTIAL_TOKEN_RE = re.compile("|".join(SECRET_PATTERNS))
 
 
 @contextmanager
@@ -422,9 +422,8 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
     error = GhRateLimited if rate_limited else GhUnavailable if transient else GhError
-    # GraphQL reports an exhausted primary limit with HTTP 200 and the same headers.
     exhausted = rate_limited and headers.get("x-ratelimit-remaining") == "0"
-    confirmed_limit = exhausted or (rate_limited and status in {"403", "429"})
+    confirmed_limit = exhausted or (rate_limited and status in {"200", "403", "429"})
     reset = headers.get("x-ratelimit-reset", "")
     rate_reset = int(reset) if exhausted and re.fullmatch(r"[0-9]{1,18}", reset) else None
     raise error(error_command, detail, token=selected, guidance=guidance,
@@ -459,7 +458,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     return guidance + "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None)
 
 
-def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:
+def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:  # noqa: C901 - best-effort parse of each rate-limit evidence source
     """Best-effort reset evidence for a primary GraphQL limit, never a preflight."""
     if re.search(r"secondary|HTTP 429", tail, re.IGNORECASE):
         return ""
@@ -515,31 +514,27 @@ def record_full_page(endpoint: str, rows: list, seen: set[bytes]) -> None:
     seen.add(digest)
 
 
-def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
-    """Yield validated rows until the last page."""
+def _iter_paged(endpoint: str, key: str | None = None, **kwargs) -> Iterator[dict]:
+    """Yield validated rows of a list (or of `key` in an envelope) until the last of at most 100 pages."""
     seen: set[bytes] = set()
-    for page in count(1):
+    for page in range(1, 101):
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
-                         "-F", f"page={page}")
-        if isinstance(chunk, dict):
-            chunk = chunk.get(key)
-        if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
+                         "-F", f"page={page}", **kwargs)
+        if key is not None:
+            chunk = chunk.get(key) if isinstance(chunk, dict) else None
+        if (not isinstance(chunk, list) or len(chunk) > PAGE
+                or not all(isinstance(row, dict) for row in chunk)):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
-        if len(chunk) >= PAGE:
+        if len(chunk) == PAGE:
             record_full_page(endpoint, chunk, seen)
         yield from chunk
         if len(chunk) < PAGE:
             return
+    raise GhError(("gh", "api", endpoint), "pagination exceeds 100 pages")
 
 
-def _paged(endpoint: str, key: str = "check_runs") -> list:
-    return list(_iter_paged(endpoint, key))
-
-
-def has_active_workflow(repo: str, head_sha: str) -> bool:
-    """A run queued in a concurrency group can exist before any of its check runs."""
-    runs = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
-    return any(run.get("status") in _ACTIVE_WORKFLOWS for run in runs)
+def paged(endpoint: str, key: str | None = None, **kwargs) -> list[dict]:
+    return list(_iter_paged(endpoint, key, **kwargs))
 
 
 def api_get(endpoint: str, **kwargs) -> object:
@@ -610,8 +605,7 @@ def pr_from_rest(data: object) -> PR:
                 or (merged and state != "closed")
                 or not isinstance(url, str) or not url.startswith("https://")
                 or not isinstance(base_ref, str) or not base_ref
-                or not isinstance(head_sha, str)
-                or not re.fullmatch(r"[0-9a-f]{40}", head_sha)):
+                or not is_sha(head_sha)):
             raise ValueError("invalid PR state, mergeability, or head")
         return PR(
             number=number, url=url, head_sha=head_sha, base_ref=base_ref, is_draft=draft,
@@ -624,7 +618,7 @@ def pr_from_rest(data: object) -> PR:
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
-        raise _not_found(number, exc) from exc
+        raise GhError(("gh", "api"), f"malformed PR detail for #{number} ({exc!r})") from exc
 
 
 def _pr_detail(repo: str, number: int) -> tuple[PR, dict]:
@@ -651,7 +645,7 @@ def _branch_sha(endpoint: str, field: str, invalid: str, *, full_sha: bool = Fal
         raise
     ref_data = ref.get(field) if isinstance(ref, dict) else None
     sha = ref_data.get("sha") if isinstance(ref_data, dict) else None
-    if not isinstance(sha, str) or not sha or (full_sha and not re.fullmatch(r"[0-9a-f]{40}", sha)):
+    if not isinstance(sha, str) or not sha or (full_sha and not is_sha(sha)):
         raise GhError(("gh", "api", endpoint), invalid)
     return sha
 
@@ -678,25 +672,19 @@ def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> t
     if sha is None:
         return "", []
 
-    matches: list[dict] = []
-    for page in range(1, 101):
-        endpoint = f"repos/{repo}/commits/{sha}/pulls?per_page={PAGE}&page={page}"
-        try:
-            rows = api_get(endpoint)
-        except GhError as exc:
-            # A local head can be unpushed. Let the branch fallback find its actual PR.
-            missing_commit = re.search(r"\bHTTP 404\b", exc.tail) or (
-                f"No commit found for SHA: {sha}" in exc.tail and re.search(r"\bHTTP 422\b", exc.tail)
-            )
-            if head_sha is not None and page == 1 and missing_commit:
-                return endpoint, []
-            raise
-        if not isinstance(rows, list) or len(rows) > PAGE:
-            raise GhError(("gh", "api", endpoint), "invalid commit PR page")
-        matches.extend(row for row in rows if _matches_commit_pr(row, repo, branch, endpoint))
-        if len(rows) < PAGE:
-            return endpoint, matches
-    raise GhError(("gh", "api", endpoint), "commit PRs exceed 100 pages")
+    endpoint = f"repos/{repo}/commits/{sha}/pulls"
+    rows = _iter_paged(endpoint)
+    try:
+        first = list(islice(rows, 1))  # the first request
+    except GhError as exc:
+        # A local head can be unpushed. Let the branch fallback find its actual PR.
+        missing_commit = re.search(r"\bHTTP 404\b", exc.tail) or (
+            f"No commit found for SHA: {sha}" in exc.tail and re.search(r"\bHTTP 422\b", exc.tail)
+        )
+        if head_sha is not None and missing_commit:
+            return endpoint, []
+        raise
+    return endpoint, [row for row in chain(first, rows) if _matches_commit_pr(row, repo, branch, endpoint)]
 
 
 def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state: str) -> PR:
@@ -808,14 +796,20 @@ def finding_marker(severity: str, head_sha: str, finding: Finding) -> str:
     return f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
 
 
+def _redact_published(text: str) -> str:
+    """Reviewers can read login files and saved output; hide reviewer keys and credential shapes."""
+    keys = build_env((*runners.CLAUDE_AUTH_ENV, *runners.CODEX_AUTH_ENV)).values()
+    return redact(text, secret_forms(keys), *SECRET_PATTERNS)
+
+
 def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
-    text = prefix + _CREDENTIAL_TOKEN_RE.sub("[REDACTED]", f"**{f.severity}: {f.title}**\n\n{f.body}").rstrip()
+    text = _redact_published(f"{prefix}**{f.severity}: {f.title}**\n\n{f.body}").rstrip()
     if f.severity in BLOCKING:
         return f"{finding_marker(f.severity, head_sha, f)}\n{text}"
     return text
 
 
-ReviewSettingsLayout = Literal["current", "requested-reported", "summary"]
+ReviewSettingsLayout = Literal["current", "requested-reported"]
 
 
 def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = "", *,
@@ -836,29 +830,34 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         prefix = first + "\n" + header + (separator + rest if separator else "")
         _, span = runners.leading_review_block(prefix)
         if len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
-            raise runners.RunnerBadOutput("codex: oversized leading machine block; rerun loopzero review")
+            raise runners.RunnerBadOutput("codex: oversized leading machine block. To publish a review, split the PR and review the smaller changes.")
     severities = [f.severity for f in result.findings]
     summary = ", ".join(f"{severities.count(s)} {s}" for s in ("critical", "important", "suggestion"))
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
-    settings = ""
-    if settings_layout == "summary":
-        effort = f" (effort {result.effort})" if result.effort else ""
-        settings = f"model {result.model or 'unknown'}{effort}, "
     lines = [prefix.rstrip("\n")] if prefix else []
     lines.append(
         f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
-        f"{settings}{duration}: **{result.verdict}** ({summary})"
+        f"{duration}: **{result.verdict}** ({summary})"
     )
     if result.fallback:
         lines.append(f"\nSame-family fallback: {result.fallback}. Cross-family review is preferred.")
     if result.chunk_count > 1:
         lines.append(f"\nReviewed in {result.chunk_count} chunks with the same model family.")
-    if settings_layout != "summary":
-        lines.extend(_review_settings_lines(result, include_configured=settings_layout == "current"))
-    if unplaced:
-        lines.append("\nFindings without a file location:\n")
-        lines += [_CREDENTIAL_TOKEN_RE.sub("[REDACTED]", f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —")) for f in unplaced]
-    return "\n".join(lines) + _review_transcript(result, legacy_display)
+    lines.extend(_review_settings_lines(result, include_configured=settings_layout == "current"))
+    blocker_prefix, findings = _unplaced_findings(unplaced)
+    return blocker_prefix + "\n".join(lines + findings) + _review_transcript(result, legacy_display)
+
+
+def _unplaced_findings(unplaced: list[Finding]) -> tuple[str, list[str]]:
+    if not unplaced:
+        return "", []
+    blocked = any(f.severity in BLOCKING for f in unplaced)
+    lines = ["\nFindings without a commentable line:\n" if blocked else "\nFindings without a file location:\n"]
+    for finding in unplaced:
+        where = f" ({finding.path}:{finding.line})" if finding.path and finding.severity in BLOCKING else ""
+        line = f"- **{finding.severity}**: {finding.title}{where} — {finding.body}".rstrip(" —")
+        lines.append(_redact_published(line))
+    return (BODY_BLOCKERS if blocked else ""), lines
 
 
 def _review_settings_lines(result: ReviewResult, *, include_configured: bool) -> list[str]:
@@ -961,11 +960,8 @@ def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
         if f.path and f.line and f.line in commentable.get(f.path, ()):
             comments.append({"path": f.path, "line": f.line, "side": "RIGHT",
                              "body": _comment_body(f, head_sha)})
-        elif f.severity not in BLOCKING:
+        elif f.severity not in BLOCKING or anchor is None:
             loose.append(f)
-        elif anchor is None:
-            raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}/files"),
-                          f"cannot anchor '{f.title}': PR has no diff hunks")
         else:
             note = _MOVED_NOTE.format(where=f"{f.path}:{f.line}") if f.path else _ANCHOR_NOTE
             comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
@@ -995,7 +991,7 @@ def post_review(
     as a COMMENT, since GitHub rejects self-approval and self-request-changes.
 
     Findings whose location is missing or outside the diff are anchored on the first
-    changed file with a hunk, so every blocking finding creates a review thread.
+    changed file with a hunk. Without an anchor, blockers go in the review body.
     A supplied publisher is the login already checked for the supplied token.
     """
     author = (pr or pr_view(repo, number)).author
@@ -1168,7 +1164,8 @@ def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bo
     return False
 
 
-def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...]) -> None:
+def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...], *,
+                        required: bool = True) -> bool:
     args = eligibility_dispatch_args(repo, pr.number, base)
     since = datetime.fromtimestamp(time.time(), UTC).isoformat(timespec="seconds")
     try:
@@ -1184,15 +1181,23 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
             ):
                 raise GhError(("refresh Loop-zero Eligibility",), "the PR or head changed after resolution") from exc
             if _eligibility_dispatched(repo, pr.number, base, since):
-                return
+                return True
             if open_blocking_findings(repo, pr.number, None, publishers):
                 raise GhError(("refresh Loop-zero Eligibility",), "blocking findings appeared after resolution") from exc
             _gh(*args)
     except (GhError, ProcTimeout, OSError) as exc:
+        if (isinstance(exc, GhError) and exc.command[:len(args) + 1] == ("gh", *args)
+                and re.search(r"\bHTTP 404\b", exc.tail)):
+            if not required:
+                return False
+            raise GhError(("refresh Loop-zero Eligibility",),
+                          f"Finding on PR #{pr.number} is resolved. Check that eligibility.yml exists on "
+                          f"{base} and your GitHub login can dispatch it.") from exc
         retry = shlex.join(("gh", *args))
         raise GhError(("refresh Loop-zero Eligibility",),
                       f"Finding on PR #{pr.number} is resolved. {exc}\n"
                       f"Verify the PR head, remaining findings and recent runs before retrying: {retry}") from exc
+    return True
 
 
 def open_blocking_findings(
@@ -1260,7 +1265,7 @@ def _check_signals(
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
     latest_runs: dict[str, dict] = {}
-    runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
+    runs = paged(f"repos/{repo}/commits/{head_sha}/check-runs", "check_runs")
     for cr in runs:
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
@@ -1270,7 +1275,7 @@ def _check_signals(
         timestamp = cr.get("started_at" if state in _PENDING_CHECKS else "completed_at")
         signals[name] = [(state, readiness_timestamp(timestamp))]
     latest_status: dict[str, dict] = {}
-    for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
+    for status in paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status)
     for name, status in latest_status.items():
         signals.setdefault(name, []).append((status.get("state") or "unknown", readiness_timestamp(status.get("created_at"))))
@@ -1294,7 +1299,7 @@ def _check_signals(
                 or any(state not in _NONFAILING_CHECKS for state, _ in signals[name][1:])):
             continue
         if workflows is None:
-            workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
+            workflows = paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
         if _has_active_replacement(repo, cr, workflows, head_sha):
             superseded.append(name)
     capped = _check_suites_at_limit(runs)
@@ -1320,6 +1325,13 @@ def _missing_check_reason(name: str, head_sha: str, capped: bool) -> str:
     return f"required check '{name}' missing on {head_sha[:12]}"
 
 
+def has_check_activity(repo: str, head_sha: str, readiness: Readiness) -> bool:
+    if readiness.has_pending_checks:
+        return True
+    runs = _iter_paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
+    return any(run.get("head_sha") == head_sha and run.get("status") in _ACTIVE_WORKFLOWS for run in runs)
+
+
 def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_sha: str) -> bool:
     """A producer can be superseded only by its own workflow on the same head."""
     suite_id = check["check_suite"]["id"]
@@ -1328,7 +1340,7 @@ def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_
                      and run.get("head_sha") == head_sha), None)
     producer = find_producer(workflows)
     if producer is None and len(workflows) >= 1_000 and type(suite_id) is int:
-        producer = find_producer(_paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
+        producer = find_producer(paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
     if producer is None or not producer.get("workflow_id"):
         return False
     created = readiness_timestamp(producer.get("created_at"))
@@ -1365,7 +1377,7 @@ def _aggregate_signal(states: list[str]) -> str:
 
 def behind_reason(pr: PR) -> str:
     return (
-        f"PR #{pr.number} is behind {pr.base_ref}. Finish any pending delta review, then run "
+        f"PR #{pr.number} is behind {pr.base_ref}. Run "
         f"`git fetch origin {shlex.quote(pr.base_ref)}`, "
         f"`git merge {shlex.quote(f'origin/{pr.base_ref}')}`, `loopzero check` and `loopzero pr` before retrying readiness."
     )
@@ -1389,7 +1401,7 @@ def readiness(
     review_at: ReadinessTimestamp | None = None,
     review_grace: bool = False,
     workflow_wait: bool = False,
-    stale_verdict_grace: bool = False,
+    stale_verdict_grace: bool = False, review_blocker: str | None = None,
     publishers: tuple[str, ...],
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
@@ -1402,11 +1414,11 @@ def readiness(
         reasons.append(blocker)
     if pr.merge_state == "BEHIND" and not allow_behind:
         reasons.append(behind_reason(pr))
-    if not reviewed_head:
-        reasons.append(MISSING_REVIEW_REASON)
+    if review_blocker or not reviewed_head:
+        reasons.append(review_blocker or MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha,
+    for f in open_blocking_findings(repo, pr.number, None if ancestor_review or not reviewed_head else pr.head_sha,
                                     publishers):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
@@ -1418,13 +1430,13 @@ def readiness(
         name: f"required check '{name}' is {checks[name]}" for name in required_ci
         if name in checks and checks[name] != "success"
     }
+    check_reasons = {}
     for name in required_ci:
-        if name not in checks:
-            reasons.append(_missing_check_reason(name, pr.head_sha, capped))
-        elif name in failures:
-            reasons.append(failures[name])
+        if name not in checks or name in failures:
+            reasons.append(reason := failures.get(name) or _missing_check_reason(name, pr.head_sha, capped))
+            check_reasons[reason] = (name, checks.get(name) or ("capped" if capped else "missing"))
     return Readiness(
-        ready=not reasons, reasons=tuple(reasons),
+        ready=not reasons, reasons=tuple(reasons), checks=check_reasons,
         waitable_failures=tuple(failures[name] for name in required_ci if name in stale
                                or (workflow_wait and review_grace and checks.get(name) in _FAILED_VERDICTS)),
         stale_verdicts=tuple(name for name in required_ci if name in stale_verdicts),
@@ -1459,7 +1471,7 @@ def merged_sha(
         raise GhError(argv, "PR head changed before merge verification")
     state = view.get("state")
     if merged and state == "closed":
-        if isinstance(sha := view.get("merge_commit_sha"), str) and re.fullmatch(r"[0-9a-f]{40}", sha):
+        if is_sha(sha := view.get("merge_commit_sha")):
             return sha
     elif not merged and state == "open":
         if check_hold and (hold := merge_hold(number, _pr_labels(view))):
@@ -1586,6 +1598,6 @@ def _status_limit_reached(repo: str, head: str, context: str) -> bool:
     with suppress(GhError, ProcTimeout, OSError):
         return sum(
             str(status.get("context", "")).casefold() == context.casefold()
-            for status in _paged(f"repos/{repo}/commits/{head}/statuses")
+            for status in paged(f"repos/{repo}/commits/{head}/statuses")
         ) >= 1_000
     return False

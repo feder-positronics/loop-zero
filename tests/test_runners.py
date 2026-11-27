@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shlex
+import stat
 import signal
 import subprocess
 import sys
@@ -92,10 +93,7 @@ def _argv(bin_dir: Path, name: str) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def fake_bwrap(fake_tool, tmp_path: Path, tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> Path:
-    # Keep reviewer state outside tmp_path, which many tests mount as the checkout.
-    home = tmp_path_factory.mktemp("reviewer-home")
-    monkeypatch.setenv("HOME", str(home))
+def fake_bwrap(fake_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
                  *runners.CLAUDE_AUTH_ENV, *runners.CODEX_AUTH_ENV):
         monkeypatch.delenv(name, raising=False)
@@ -137,7 +135,6 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0, capture_e
 
 def _codex_probes(version, version_exit=0):
     return f'''if [ "$1" = --version ]; then printf '%s\\n' {shlex.quote(version)}; exit {version_exit}; fi
-if [ "$1" = exec ] && [ "$2" = --help ]; then echo --ignore-user-config; exit 0; fi
 '''
 
 
@@ -180,8 +177,6 @@ def _fake_codex(
         printf '%s\\0' "$@" > "{bin_dir}/codex.argv"
         printf '%s' "$codex_home" > "{bin_dir}/codex.home"
         [ -e "$codex_home/config.toml" ] && echo yes > "{bin_dir}/codex.config" || true
-        [ ! -f "$codex_home/auth.json" ] || cat "$codex_home/auth.json" > "{bin_dir}/codex.auth"
-        [ ! -f "$codex_home/auth.json" ] || printf refreshed > "$codex_home/auth.json"
         cat > "{bin_dir}/codex.stdin"
         [ "$1" = exec ] || {{ echo "expected exec subcommand" >&2; exit 64; }}
         out=""; schema=""
@@ -218,6 +213,28 @@ def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
             "result": json.dumps(payload), "structured_output": payload,
             "session_id": "claude-session-123", "usage": {"input_tokens": 10},
             "total_cost_usd": 0.01, "duration_api_ms": 25, **extra}
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_fake_codex_does_not_read_or_overwrite_auth(fake_bin, tmp_path, override):
+    script = _fake_codex(fake_bin, json.dumps(APPROVE))
+    home = tmp_path / "outer-home"
+    codex_home = tmp_path / "outer-codex" if override else home / ".codex"
+    codex_home.mkdir(parents=True)
+    auth = codex_home / "auth.json"
+    sentinel = '{"tokens":{"access_token":"synthetic-sentinel"}}'
+    auth.write_text(sentinel)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}")
+    env = {"HOME": str(home), "PATH": os.defpath}
+    if override:
+        env["CODEX_HOME"] = str(codex_home)
+    subprocess.run(
+        [str(script), "exec", "--output-last-message", str(tmp_path / "last.json"), "--output-schema", str(schema)],
+        input="", encoding="utf-8", capture_output=True, check=True, env=env,
+    )
+    assert auth.read_text() == sentinel
+    assert not (fake_bin / "codex.auth").exists()
 
 
 def replace_codex_events(script: Path, events, *, prepend=False) -> None:
@@ -332,7 +349,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
     for index, diff in enumerate(diffs, 1):
         results.append(review_with(
             "codex", cwd=tmp_path, head=head, kind=kind, diff=diff, task_text=task,
-            review_context=context, chunk=(index, len(diffs)) if split else None,
+            review_context=context, chunk=(index, len(diffs)),
         ))
         override = next(arg for arg in _argv(fake_bin, "codex")
                         if arg.startswith("developer_instructions="))
@@ -342,9 +359,23 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
         assert json.loads(header)["head"] == head and json.loads(header)["task_text"] == task
         assert raw_diff == diff.encode()
 
-    proof = codex_evidence(merge_reviews(results) if split else results[0])
+    proof = codex_evidence(merge_reviews(results))
     assert proof["complete"]
     assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
+
+
+@pytest.mark.parametrize("field, invalid", [
+    (stat.ST_MODE, stat.S_IFDIR), (stat.ST_UID, os.getuid() + 1), (stat.ST_NLINK, 2),
+])
+def test_codex_message_file_must_be_regular_owned_and_unlinked(tmp_path, monkeypatch, field, invalid):
+    path = tmp_path / "final-message"
+    path.write_bytes(b"synthetic reviewer output")
+    info = list(path.stat())
+    info[field] = invalid
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runners.os, "fstat", lambda _fd: os.stat_result(info))
+        assert runners._read_codex_file(path) is None
 
 
 @pytest.mark.parametrize("version,failure", [
@@ -355,23 +386,21 @@ def test_codex_version_probe(fake_bin, tmp_path, monkeypatch, version, failure):
     from loopzero import _proc
 
     _fake_codex(fake_bin, json.dumps(APPROVE), version=version, version_exit=int(failure == "nonzero"))
+    if failure in ("missing", "timeout"):
+        original = _proc.run
+
+        def probe(argv, **kwargs):
+            if argv[-1] == "--version":
+                raise (_proc.ToolMissing("gone") if failure == "missing" else _proc.ProcTimeout("late"))
+            return original(argv, **kwargs)
+
+        monkeypatch.setattr(_proc, "run", probe)
+    result = _review("codex", tmp_path)
+    assert result.verdict == "approve"
+    assert result.provenance["cli_version"] == (None if failure else version)
     if failure is None:
-        result = _review("codex", tmp_path)
-        assert result.verdict == "approve"
-        assert result.provenance["cli_version"] == json.loads(result.raw)["cli_version"] == version
-        assert (fake_bin / "codex.stdin").exists()
-        return
-    original = _proc.run
-
-    def probe(argv, **kwargs):
-        if argv[-1] == "--version" and failure != "nonzero":
-            raise (_proc.ToolMissing("gone") if failure == "missing" else _proc.ProcTimeout("late"))
-        return original(argv, **kwargs)
-
-    monkeypatch.setattr(_proc, "run", probe)
-    with pytest.raises(RunnerBadOutput, match="version probe failed"):
-        _review("codex", tmp_path)
-    assert not (fake_bin / "codex.stdin").exists()
+        assert json.loads(result.raw)["cli_version"] == version
+    assert (fake_bin / "codex.stdin").exists()
 
 
 @pytest.mark.parametrize("runtime", [False, True], ids=["default", "explicit"])
@@ -630,19 +659,21 @@ CLAUDE_EXPIRED_OAUTH = {
       for reason in ("Cannot authenticate", "OAuth failure", "Session expired", "401")),
     *(({"is_error": True, "api_error_status": status,
         "terminal_reason": "api_error", "result": "Internal server error"},
-       RunnerBadOutput, r"claude: (error|exited)") for status in (429, 500)),
+       RunnerBadOutput, r"claude: (error|exited)") for status in (429, 500, 529)),
     *(({"is_error": True, **details}, RunnerUsageLimit, None) for details in (
         {"result": "You've hit your weekly limit · resets 11pm (Europe/Warsaw)"},
         {"result": "You've hit your session limit"},
         {"terminal_reason": "blocking_limit", "result": "Please wait until reset"},
     )),
 ])
-def test_claude_classifies_error_envelopes(fake_bin, tmp_path, exit_code, output, error, diagnostic):
-    _fake_claude(fake_bin, output, exit_code=exit_code)
+def test_claude_classifies_error_envelopes(fake_bin, tmp_path, monkeypatch, exit_code, output, error, diagnostic):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", (key := "gw_FAKE0123456789abcdef") + "\n")
+    _fake_claude(fake_bin, {**output, "result": f"{output.get('result', '')} {key}"}, exit_code=exit_code)
     with pytest.raises(error, match=diagnostic) as raised:
         _review("claude", tmp_path)
     if error is RunnerBadOutput:
         assert not isinstance(raised.value, RunnerUsageLimit)
+    assert key not in f"{raised.value}{getattr(raised.value, 'tail', '')}"
     if output is CLAUDE_EXPIRED_OAUTH:
         assert "Token [REDACTED]." in str(raised.value)
 
@@ -874,6 +905,7 @@ def test_claude_settings_and_merged_calls_preserve_native_evidence(fake_bin, tmp
         result = _review("claude", tmp_path, model=model, effort=effort)
         assert result.provenance["requested_settings"] == [{"model": model, "effort": effort}]
         assert json.loads(result.raw) == envelope
+        assert runners.validate_runner_result(merge_reviews([result]))
         results.append(result)
     results[0].provenance.pop("requested_settings")
     merged = merge_reviews(results)
@@ -1000,7 +1032,7 @@ def test_codex_approve(repo, fake_bin, tmp_path, fake_bwrap, monkeypatch):
     assert "model_reasoning_effort=high" in argv
     # Codex's inner bwrap cannot nest inside loop-zero's; the outer sandbox bounds it.
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
-    assert "--ignore-user-config" in argv
+    assert "--ignore-user-config" not in argv
     assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" not in argv
     assert "mcp_servers={}" in argv
     assert "project_doc_max_bytes=0" in argv and not any(a.startswith("skills.") for a in argv)
@@ -1026,15 +1058,18 @@ def test_unknown_family_and_kind(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("finding", [
+    None,  # Invalid verdict instead of an invalid finding.
     {"severity": "critical"},
     {"severity": "critical", "path": None, "line": None, "title": 4, "body": "x"},
     {"severity": "critical", "path": None, "line": None, "title": "x", "body": []},
     {"severity": "critical", "path": None, "line": None, "title": "x", "body": "y", "extra": 1},
 ])
-def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) -> None:
-    message = json.dumps({"verdict": "request_changes", "findings": [finding]})
+def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict | None) -> None:
+    message = json.dumps(APPROVE | {"verdict": "unknown"} if finding is None
+                         else {"verdict": "request_changes", "findings": [finding]})
     _fake_codex(fake_bin, message)
-    with pytest.raises(runners.RunnerMalformedOutput) as error:
+    diagnostic = "review lacks verdict/findings" if finding is None else None
+    with pytest.raises(runners.RunnerMalformedOutput, match=diagnostic) as error:
         _review("codex", tmp_path)
     assert error.value.tail == message + "\n"
 
@@ -1083,6 +1118,15 @@ def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str, budg
     assert all(len(chunk.encode()) <= budget for chunk in chunks)
     assert any(f"{name}: deleted, 600 lines" in chunk for chunk in chunks)
     assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
+
+
+@pytest.mark.parametrize("extra,count", [(0, 1), (1, 2)])
+def test_split_diff_default_budget_is_200000_bytes(extra: int, count: int) -> None:
+    first = "diff --git a/a b/a\n+" + "x" * 99_000 + "\n"
+    second = "diff --git a/b b/b\n+"
+    second += "y" * (200_000 - len(first) - len(second) - 1 + extra) + "\n"
+    assert len((first + second).encode()) == 200_000 + extra
+    assert len(split_diff(first + second)) == count
 
 
 def test_split_diff_encodes_long_utf8_line_in_linear_work() -> None:
@@ -1221,7 +1265,6 @@ runners._sandbox_prefix = lambda family, cwd, home, *args: (
     ["env", f"HOME={home}"], runners._review_config(family, Path(binary), ()), Path(binary)
 )
 runners._observe_codex_version = lambda *args: None
-runners._codex_supports_ignore_user_config = lambda *args: False
 runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
                     diff="diff", task_text="task")
 """
@@ -1273,3 +1316,12 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
         assert concurrent_home.is_dir()
         assert marker.read_text() == "keep"
         terminate_review(concurrent, concurrent_home, concurrent_pid)
+
+
+@pytest.mark.parametrize(("family", "env"), [("claude", "ANTHROPIC_API_KEY"), ("codex", "OPENAI_API_KEY")])
+def test_invalid_review_diagnostic_redacts_forwarded_key(monkeypatch, family, env):
+    key = "synthetic-forwarded-key"
+    monkeypatch.setenv(env, key)
+    with pytest.raises(runners.RunnerMalformedOutput) as caught:
+        runners.parse_review({}, family=family, head="a" * 40, kind="primary", raw=key)
+    assert caught.value.tail == "[REDACTED]"

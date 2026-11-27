@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import codecs
 import io
+import json
 import os
+import re
 import selectors
 import signal
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import quote
 
 from .types import LoopZeroError
 
@@ -97,6 +100,27 @@ class Completed:
 def tail(text: str, lines: int = TAIL_LINES) -> str:
     """Return the last `lines` lines of `text`, without a trailing newline."""
     return "\n".join(text.rstrip("\n").splitlines()[-lines:])
+
+
+# Credential shapes hidden wherever loopzero prints or publishes text it did not write.
+SECRET_PATTERNS = (
+    r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})",
+    r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", r"\brt_[A-Za-z0-9_.-]{20,}", r"\bAKIA[0-9A-Z]{16}\b",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+    r"(?<=://)[^\s/:@]+:[^\s/@]+(?=@)",  # URL userinfo with a password
+)
+
+
+def secret_forms(values: Iterable[str]) -> list[str]:
+    """Stripped values with their JSON-escaped and URL-quoted forms, longest first."""
+    stripped = filter(None, (value.strip() for value in values))
+    return sorted({form for value in stripped for form in (value, json.dumps(value)[1:-1], quote(value, safe=""))},
+                  key=len, reverse=True)
+
+
+def redact(text: str, forms: Sequence[str], *patterns: str) -> str:
+    pattern = "|".join([*map(re.escape, forms), *patterns])
+    return re.sub(pattern, "[REDACTED]", text) if pattern else text
 
 
 def build_env(

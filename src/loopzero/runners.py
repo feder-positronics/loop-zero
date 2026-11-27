@@ -1,7 +1,4 @@
-"""Model review adapters: thin subprocess wrappers around ``claude -p`` and ``codex exec``.
-
-Host authentication is bound read-write into the sandbox HOME so OAuth refreshes persist.
-"""
+"""Model review adapters around ``claude -p`` and ``codex exec``."""
 
 from __future__ import annotations
 
@@ -168,16 +165,16 @@ def build_prompt(*, kind: str, head: str, task_text: str, diff: str,
 
 
 def _tail(text: str) -> str:
-    return text[-TAIL_CHARS:]
+    return _redact_keys(None, text)[-TAIL_CHARS:]
+
+
+def _redact_keys(family: str | None, text: str) -> str:
+    names = {"claude": CLAUDE_AUTH_ENV, "codex": CODEX_AUTH_ENV}
+    env = _proc.build_env(names.get(family, (*CLAUDE_AUTH_ENV, *CODEX_AUTH_ENV)))
+    return _proc.redact(text, _proc.secret_forms(env.values()), *_proc.SECRET_PATTERNS)
 
 
 def _auth_failure(family: str, diagnostic: str) -> RunnerAuthFailed:
-    names = CLAUDE_AUTH_ENV if family == "claude" else CODEX_AUTH_ENV
-    env = _proc.build_env(names)
-    values = {variant for value in env.values() if value for variant in (value, json.dumps(value)[1:-1])}
-    patterns = [*map(re.escape, sorted(values, key=len, reverse=True)), r"\bsk-[A-Za-z0-9_-]{8,}",
-                r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"]
-    diagnostic = re.sub("|".join(patterns), "[REDACTED]", diagnostic)
     return RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(diagnostic)}")
 
 
@@ -224,7 +221,7 @@ def _claude_payload(envelope: dict) -> object:
     return _extract_json_object(str(envelope.get("result", ""))) if payload is None else payload
 
 
-def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:
+def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:  # noqa: C901 - one check per review JSON field
     """Validate a decoded review object against the findings schema."""
     diagnostic = _tail(raw if excerpt is None else excerpt)
     if not isinstance(payload, dict):
@@ -273,7 +270,8 @@ def _run(
         diagnostic = last_line.encode()
         tail = "…" + diagnostic[-320:].decode(errors="ignore") if len(diagnostic) > 320 else last_line
         raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", tail) from exc
-    if done.exit_code != 0:
+    if done.exit_code != 0:  # Hide forwarded keys from every failure class, not only auth.
+        done = replace(done, stdout=_redact_keys(family, done.stdout), stderr=_redact_keys(family, done.stderr))
         combined = f"{done.stdout}\n{done.stderr}"
         envelope = None
         if family == "claude":
@@ -294,7 +292,6 @@ def _run(
     return done
 
 
-_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
 
 
 def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Config:
@@ -437,27 +434,12 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
     return tuple(binds)
 
 
-def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str:
-    diagnostic = "codex: version probe failed"
+def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str | None:
     try:
         done = _proc.run([str(binary), "--version"], cwd=cwd, env_allowlist=env_allowlist, timeout=30)
-    except (_proc.ToolMissing, _proc.ProcTimeout, OSError) as exc:
-        raise RunnerBadOutput(diagnostic) from exc
-    if done.exit_code:
-        raise RunnerBadOutput(diagnostic, _tail(done.stdout + done.stderr))
-    return done.stdout.rstrip("\n")
-
-
-def _codex_supports_ignore_user_config(
-    binary: Path, cwd: Path, env_allowlist: tuple[str, ...]
-) -> bool:
-    """Return whether this Codex version can avoid loading bound ``config.toml``."""
-    try:
-        done = _proc.run([str(binary), "exec", "--help"], cwd=cwd,
-                         env_allowlist=env_allowlist, timeout=30)
-    except (_proc.ToolMissing, _proc.ProcTimeout, FileNotFoundError):
-        return False
-    return done.exit_code == 0 and "--ignore-user-config" in f"{done.stdout}\n{done.stderr}"
+    except (_proc.ToolMissing, _proc.ProcTimeout, OSError):
+        return None
+    return None if done.exit_code else done.stdout.rstrip("\n")
 
 
 # Linux rejects one argv element over 128 KiB (MAX_ARG_STRLEN) before the reviewer starts.
@@ -644,7 +626,7 @@ def _hex(value, length):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{" + str(length) + "}", value)
 
 
-def _valid_codex_evidence(value):
+def _valid_codex_evidence(value):  # noqa: C901 - one check per evidence field
     """Strict closed schema, including exact context/order/offset bounds; no coercion."""
     fields = {
         "version", "family", "repo", "pr", "head", "kind", "publisher", "receipt",
@@ -720,7 +702,7 @@ def _codex_header(value):
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     header = CODEX_HEADER + base64.urlsafe_b64encode(encoded).decode().rstrip("=") + " -->"
     if len(header.encode()) > CODEX_HEADER_LIMIT:
-        raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes; rerun loopzero review")
+        raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes. To publish a review, split the PR and review the smaller changes.")
     return header
 
 
@@ -739,7 +721,7 @@ def decode_codex_evidence(header):
     return value
 
 
-def _inspection_commands(command, cwd):
+def _inspection_commands(command, cwd):  # noqa: C901 - parses each allowed git inspection form
     """Conservative shell grammar: explicit repo anchor, immutable range, no echo/expansion."""
     try:
         words = shlex.split(command)
@@ -788,7 +770,7 @@ def _inspection_commands(command, cwd):
         return []
 
 
-def _native_inspection(envelope, context):
+def _native_inspection(envelope, context):  # noqa: C901 - matches each Codex command event to expected output
     started, completed, found = {}, set(), {}
     for event in envelope["events"]:
         item = event.get("item")
@@ -832,7 +814,7 @@ def _native_inspection(envelope, context):
     return found if set(found) == {"head_event", "diff_event"} else {}
 
 
-def _codex_evidence(result):
+def _codex_evidence(result):  # noqa: C901 - one check per Codex evidence field
     """Pure extraction from complete normalized raw; caller/model summaries are never inputs."""
     try:
         envelopes = _read_envelopes(result.raw, _evidence_json)
@@ -864,13 +846,6 @@ def _codex_evidence(result):
             or not _bounded_int(context.get("diff_bytes"), 0)
             or not isinstance(context.get("cwd"), str)
             or not context["cwd"].startswith("/")
-            or any(
-                not _hex(context.get(key), 64)
-                for key in (
-                    "fragment_sha256", "prompt_sha256", "policy_sha256",
-                    "source_sha256", "binary_sha256", "argv_sha256",
-                )
-            )
         ):
             raise RunnerBadOutput("codex: inconsistent evidence context/chunk order")
         session, events = envelope.get("session_id"), envelope.get("events")
@@ -951,9 +926,10 @@ def _codex_evidence(result):
 def codex_evidence(result):
     if result.family != "codex":
         return None
-    if not validate_runner_result(result):
+    valid, evidence = _validated_evidence(result)
+    if not valid:
         raise RunnerBadOutput("codex: invalid complete native result")
-    return _codex_evidence(result)
+    return evidence
 
 
 def _codex_rollout_settings(home: Path, session_id: str) -> dict:
@@ -1062,7 +1038,7 @@ def _review_claude(
             raise _auth_failure("claude", text)
         if _looks_too_long(text) or _looks_too_long(raw):
             raise RunnerPromptTooLong("claude: prompt is too long", _tail(raw))
-        raise RunnerBadOutput(f"claude: {envelope.get('subtype', 'error')}", _tail(raw))
+        raise RunnerBadOutput(_tail(f"claude: {envelope.get('subtype', 'error')}"), _tail(raw))
     try:
         payload = _claude_payload(envelope)
     except (json.JSONDecodeError, ValueError) as exc:
@@ -1123,13 +1099,11 @@ def _review_codex(
         prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
         skill_overrides = _codex_repository_skill_overrides(cwd)  # before Codex runs at all
         cli_version = _observe_codex_version(binary, cwd, config.env_allowlist)
-        ignore_user_config = _codex_supports_ignore_user_config(binary, cwd, config.env_allowlist)
         argv = [
             *prefix, str(binary), "exec",
             "-c", "developer_instructions=" + json.dumps(policy, ensure_ascii=False),
             *(["-m", model] if model else []),
             *(["-c", f"model_reasoning_effort={effort}"] if effort else []),
-            *(["--ignore-user-config"] if ignore_user_config else []),
             "--json",
             # Nested bwrap can fail on restricted hosts. The outer bwrap keeps the tree
             # read-only and HOME private.
@@ -1141,10 +1115,6 @@ def _review_codex(
             "--output-last-message", f"{sandbox.SANDBOX_HOME}/last.json", "-",
         ]
         configured = {"model": model or None, "effort": effort or None}  # explicit -m/-c above
-        if review_context is not None:
-            review_context = {**review_context,
-                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                "argv_sha256": hashlib.sha256(json.dumps(argv).encode()).hexdigest()}
         done = _run(
             argv, cwd=cwd, prompt=prompt,
             env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
@@ -1200,11 +1170,7 @@ def review_with(
     extra = {}
     if family == "codex" and review_context is not None:
         context = {**review_context, "cwd": str(cwd.resolve()), "index": chunk[0] if chunk else 1,
-                   "chunks": chunk[1] if chunk else 1, "requested": {"model": model, "effort": effort},
-                   "fragment_sha256": hashlib.sha256(diff.encode()).hexdigest()}
-        context.update(prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
-                       policy_sha256=hashlib.sha256(policy.encode()).hexdigest(),
-                       source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+                   "chunks": chunk[1] if chunk else 1, "requested": {"model": model, "effort": effort}}
         extra["review_context"] = context
     return adapter(
         prompt, policy=policy, cwd=cwd.resolve(), head=head, kind=kind, timeout=timeout,
@@ -1229,6 +1195,8 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     envelopes = [json.loads(result.raw) for result in results]
     if any(codex_fatal_startup(envelope) for envelope in envelopes):
         raise RunnerBadOutput("codex: fatal Code Mode startup failure")
+    if len(results) == 1:
+        return first
     sessions = [str(result.provenance["session_id"]) for result in results]
     settings = [call for result in results for call in review_settings(result)]
     provenance: dict[str, object] = {
@@ -1342,6 +1310,10 @@ def _valid_claude_envelopes(envelopes, provenance):
 
 def validate_runner_result(result: ReviewResult) -> bool:
     """Return whether saved provenance agrees with the provider envelope(s)."""
+    return _validated_evidence(result)[0]
+
+
+def _validated_evidence(result: ReviewResult) -> tuple[bool, dict | None]:
     provenance = result.provenance
     if (not isinstance(provenance, dict)
             or provenance.get("family") != result.family
@@ -1349,34 +1321,32 @@ def validate_runner_result(result: ReviewResult) -> bool:
             or isinstance(result.chunk_count, bool)
             or not isinstance(result.chunk_count, int)
             or result.chunk_count <= 0):
-        return False
+        return False, None
     sessions = provenance.get("session_ids")
     if (not isinstance(sessions, list) or len(sessions) != result.chunk_count
             or not all(isinstance(item, str) and item for item in sessions)
             or provenance.get("session_id") != sessions[0]):
-        return False
+        return False, None
     try:
         envelopes = _read_envelopes(result.raw)
     except (json.JSONDecodeError, TypeError):
-        return False
+        return False, None
     if len(envelopes) != result.chunk_count or not all(isinstance(item, dict) for item in envelopes):
-        return False
+        return False, None
     payloads = _validated_payloads(result.family, envelopes, provenance, sessions)
     if payloads is None:
-        return False
+        return False, None
     try:
         parsed = [parse_review(payload, family=result.family, head=result.head, kind=result.kind,
                                raw=result.raw) for payload in payloads]
     except RunnerBadOutput:
-        return False
+        return False, None
     if (result.findings, result.verdict) != _review_outcome(parsed):
-        return False
+        return False, None
     try:
-        if result.family == "codex":
-            _codex_evidence(result)
+        return True, _codex_evidence(result) if result.family == "codex" else None
     except (RunnerBadOutput, ValueError, KeyError, TypeError, AttributeError):
-        return False
-    return True
+        return False, None
 
 
 def family_from_trailer(value: str) -> str | None:
@@ -1396,6 +1366,6 @@ def author_families(cwd: Path, head: str, base: str) -> set[str]:
     use the PR merge-base, including for delta reviews of a narrower diff.
     """
     revision = f"{base}..{head}"
-    trailers = _review_git(cwd, _ALLOWLIST, f"log {revision}",
+    trailers = _review_git(cwd, Config.env_allowlist, f"log {revision}",
                            "log", "--format=%(trailers:key=Co-Authored-By,valueonly)", revision)
     return {family for line in trailers.splitlines() if (family := family_from_trailer(line))}

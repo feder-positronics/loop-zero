@@ -9,13 +9,18 @@ or exception record is required.
 
 This section applies to every owner role. Each role runs in one permanent T3
 thread that resets its session in place. At a delivery milestone or the host
-context hook's nudge, overwrite the role's fixed handoff file, then send the same thread
-`freshContext: true` with only "Read <handoff path>". The thread keeps its
+context hook's nudge, overwrite the role's one fixed handoff file (never a new
+file per reset), then send the same thread
+`freshContext: true` with only "Read <handoff path>". Another owner can send
+the reset if that thread cannot act. Keep the handoff current after consequential
+decisions so recovery can use it if the session ends unexpectedly. The thread keeps its
 schedules, PR watches and delegate completions, so a reset rebinds, retargets
 and settles nothing; it changes no address, so it sends no routing notices,
 though state broadcasts still reach every owner. Before resetting, start heavy or long-running jobs as
 described in [Long-running jobs](#long-running-jobs) and name the unit, log and
 exit file in the handoff.
+
+### Handoff and output caps
 
 Cap the whole handoff at 2,000 characters, holding active links and up to
 three numbered first acts: only references needed for the next action, pending results or questions,
@@ -46,8 +51,7 @@ move the role to a new thread on another provider or model only within an
 explicit standing route; preserve commissioned choices and runtime permissions.
 Otherwise report the unavailable route and wait for owner direction. Confirm the
 old writer and its tool tree have stopped or are fenced before the new thread
-acts. Keep the handoff current after consequential decisions, within the caps
-above; recovery cannot depend on a failed session's final summary. Link owning
+acts. Link owning
 issue/PR, evidence, authority and holds; worktree/branch/head/dirty state;
 checks and interrupted tool outcomes; live delegate/task IDs, schedules and
 wakeups. Include the next authorized action. Git/GitHub and the handoff own
@@ -101,7 +105,7 @@ authorized.
 ## Team roles
 
 A long-running team gives each role one current owner. Owners read state from
-the owning issue and the live decision record, not from earlier sessions.
+the owning issue and open `p0` issues, not from earlier sessions.
 Address each role at its permanent thread; an in-place reset keeps that
 address, and a campaign owner is found from its tracking issue. Only a
 [provider move](#provider-portable-handoff) changes an address: after one,
@@ -116,8 +120,9 @@ A schedule firing or a relayed go-ahead grants no new authority.
 - **Coordinator:** owns one repository's delivery, main health and shared
   delivery infrastructure; drains startable backlog toward the current goal, routes
   incidents and dispatches workers and reviews. May delegate routine dispatch
-  and integration to named executors; it keeps main health, merge-authority holds,
-  shared delivery infrastructure and production observation. Reports to
+  and integration to named executors. It tracks required CI on the exact main
+  head, keeps merge-authority holds and owns shared delivery infrastructure
+  and production observation. Reports to
   the decisions owner. Its reconstruction from live remote state includes open
   PRs whose [PR owner](../core/CONTRACT.md#the-six-steps) session has ended: at each dispatch pass it adopts each or names a
   next-action owner.
@@ -147,12 +152,7 @@ A schedule firing or a relayed go-ahead grants no new authority.
   issue is open, and ends when it closes. Self-dispatches within approved scope
   and allocated host capacity without per-launch coordinator permission. Reports
   on the tracking issue; messages the coordinator only for blockers.
-- **Worker:** one bounded delivery under a brief (see
-  [Briefs and ownership](#briefs-and-ownership)); returns acceptance evidence
-  or one named blocker. An unattended worker never uses an ask-the-user or
-  request-input tool: send one message with any blocker or question to its
-  parent (or the owner named in the brief), then end the turn. A delegate that
-  asks directly is treated as blocked.
+- **Worker:** see [Worker](#worker).
 - **QA:** a round files reproducible defects in commissioned states, with every
   occurrence. A retest checks every recorded occurrence at the exact merged
   revision; the issue closes only on PASS, so repairs use `Refs`. A missing
@@ -164,6 +164,17 @@ A schedule firing or a relayed go-ahead grants no new authority.
   or nudge per new finding, and never decide for an owner. A periodic review
   first asks why an existing mechanism failed and repairs it before adding one.
 
+### Worker
+
+One bounded delivery under a brief (see
+[Briefs and ownership](#briefs-and-ownership)); returns acceptance evidence
+or one named blocker. An unattended worker never uses an ask-the-user or
+request-input tool. Workers send no mid-task messages to their parent. If a
+blocker or question needs the parent's input, the worker returns it at once in
+its final message. A delegate that asks directly is treated as blocked.
+
+### Dispatch authority
+
 Each task has one dispatch authority: the campaign owner within its
 commission or, for the remainder, the coordinator or the dispatcher it names.
 Record that partition on the existing owning issue or PR. Before commissioning
@@ -173,9 +184,11 @@ launches. A claim comment is evidence, not an atomic lock: one authority per
 task prevents races.
 Do not add a claim ledger, service or label system.
 
+### Team practices
+
 Fresh bounded runs send nothing when evidence is unchanged. Workers report deltas
-on the owning PR or issue, directly or through the parent, and message the parent
-mid-task only for a blocker. Combine notices to one recipient into one message;
+on the owning PR or issue, directly or through the parent, and report a blocker
+as in [Worker](#worker). Combine notices to one recipient into one message;
 request an acknowledgement only when confirming arrival changes the next action. Blockers
 and changed holds still go at once. Count productive work by verified activity (completed tool
 calls or output on the deliverable), including nested reviewers; report test-slot,
@@ -187,7 +200,7 @@ grants, owners act and record the decision on the issue/PR or their own log:
 
 - Re-own a stalled delegate under its existing brief and grant.
 - Integrate base changes under the [review budget](../core/CONTRACT.md#review-budget)
-  and [local check receipt rules](../core/CONTRACT.md#gate-execution-and-delivery-priority).
+  and [local check receipt rules](../core/CONTRACT.md#check-reuse-and-delivery-priority).
   Product conflicts or new migrations go to the decisions owner.
 - Close non-QA work whose full acceptance is proved; preserve separate QA,
   umbrella and hold conditions.
@@ -196,29 +209,7 @@ grants, owners act and record the decision on the issue/PR or their own log:
 
 **Merge authority.** See the contract's [merge authority](../core/CONTRACT.md#merge-authority).
 
-**Release plan review.** Before the human owner's go-ahead for a production window, verify
-every named backup/database provider, recovery point, CLI and identity against
-live infrastructure at review time; defer no check to the window. Prefer
-agent-readable evidence; avoid short-deadline human confirmations; name any
-human-only confirmation in advance with that person's confirmed availability. Before
-setting the production fence, require the full product/browser suites to
-actually run green (executed, not skipped) on release head combined with current
-main; never first-run in-window. Reconcile the newest scheduled main run of
-those suites; explain or fix red first; refresh if inputs change. Keep the
-production fence in place before landing; never merge early solely to obtain
-that suite run. Set per-step caps from measured queue, deploy and abort
-durations. Waiter expiry is not dequeue: verify queue state. Keep the approved
-plan's abort order unchanged. Compare release head and control on main by exact
-signature and mechanism, not aggregate red counts; record immutable heads, workflow
-version, run/job/test, assertion, setup and environment. A shared failure on
-comparable main is `KNOWN-RED-ON-MAIN`: record its issue, repair owner and expiry
-in the release packet. That attribution alone does not veto release; existing
-release gates still apply. Release-head-only, new or different signatures and
-missing, cancelled or skipped coverage remain unresolved, never green. Green main
-does not prove a release-head regression. Required hosted checks and the
-`loopzero ready`/`merge` tool checks stay strict; use the documented
-[owner queue route](../core/CONTRACT.md#blockers) for its three local-receipt reasons.
-Exclude a known non-critical shared-gate failure the change did not cause,
+Exclude a known non-critical shared check failure the change did not cause,
 after checking no protected check (one the consumer designates as protected,
 such as a release or deployment check) is involved, on its second strike in 7 days
 or when it also fails on main, then diagnose; name the exact test/signature,
@@ -233,7 +224,7 @@ allowed, no suite-wide skip or hidden xfail.
 a worker and never builds in a turn that answers a message. Measure progress by
 work output on the commissioned deliverable (a commit, push, PR or checks
 started on a new head), never by turns. Acknowledgements, unrelated commits,
-[unnecessary gate reruns](../core/CONTRACT.md#gate-execution-and-delivery-priority) and uncommitted changes older than 60 minutes are
+[unnecessary check reruns](../core/CONTRACT.md#check-reuse-and-delivery-priority) and uncommitted changes older than 60 minutes are
 not output; workers commit at every green step and push at least hourly. A
 stream holding addressable work is stalled after 60 minutes without output or
 after three acknowledgement-only or empty turns in a row: push it once with an
@@ -254,8 +245,7 @@ shortages, "in the queue", the change class from the PR file list. A stale draft
 ownership. Record one entry: the outcome and its current condition, the
 obstacle, the next step with its predicted effect and check time, and at that
 check the actual result. Judge these wakes by changed next actions and shortened
-blockages; a recurring check keeps or reverts each adjustment against its
-numbers.
+blockages; each adjustment goes to the weekly retro for its verdict.
 
 **Retrospectives.** The outcome owner records a retro, in loop-zero and in
 consumers, when any of these occurs:
@@ -287,21 +277,17 @@ a deletion or a check inside an existing mechanism) with owner, observable
 result and check date, or why none remains. Workflow health still governs
 any change.
 
-Close the loop on a schedule that host policy sets. A recurring check rules on
-every action whose check date has arrived: keep, revert or extend once with a
-reason. It also pushes the owner of any trigger event still missing its retro.
-An action more than a day overdue counts as an occurrence under trigger 6. A
-broader audit covers every dimension of the fleet against its sources, rechecks
-whether earlier actions were shipped, used and effective, and names at least one
-mechanism to delete, or why none qualifies.
-
-For the weekly workflow review, use the [retro skill](../core/skills/retro/SKILL.md).
+Close the loop on a schedule that host policy sets: the weekly
+[retro skill](../core/skills/retro/SKILL.md) rules on every retro action whose
+check date has arrived or passed, collected from the owning issues and PRs,
+including actions that never shipped. It also pushes the owner of any trigger event still missing
+its retro. An action more than a day overdue counts as an occurrence under
+trigger 6.
 
 **Goal first.** Each owner holds its commissioned outcome (for example
 "ordinary changes reach users") and treats its plan as replaceable; finishing
 a step, package or subtask never redefines success. Within the human owner's
-explicit priorities, recorded by the decisions owner in the live decision
-record, work on whatever most limits that outcome now: implementation,
+explicit priorities, work on whatever most limits that outcome now: implementation,
 readiness, CI, review recovery or deployment. Separate constraints (owner
 authority, a demonstrated hazard) from assumptions (an inherited sequence, a
 preferred tool, an estimated start time); repetition does not make an
@@ -387,9 +373,8 @@ profile. Avoid blind retries or repeating successful work for reassurance.
 
 ## Author lineage and independent review
 
-The contract's [review budget](../core/CONTRACT.md#review-budget) and
-[owner-approved exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
-govern authorship and reviewer selection. When applying a supplied patch
+The contract's [review budget](../core/CONTRACT.md#review-budget) governs
+authorship and reviewer selection. When applying a supplied patch
 verbatim, credit the patch's writer.
 Formal delivery review is `loopzero review`.
 
@@ -419,10 +404,10 @@ Integration executor: <named executor for returned heads and one owner of any re
 Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
 Follow-ups: <ordered list of 1–2 already commissioned, bounded items, or none; assign only to delegates that can both write Git and post to GitHub themselves>
 Return: <authorized finish: evidence, readiness, or merge; deployment needs its own commission>. Continue until that boundary or a named blocker needs the parent; then follow only the preassigned list, otherwise return. Delegates that cannot do both: write Git and post to GitHub themselves (including sandboxed delegates, delegates without GitHub access, or delegates unable to write the shared Git directory) get no preassigned follow-ups and return after one item via their final Report. A progress summary is not completion.
-Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Message the parent mid-task only for a blocker.
+Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Send no mid-task messages to the parent; report a blocker at once in this final message (see Worker).
 ```
 
-Follow the [Worker role](#team-roles) for blockers. An owner continues the
+Follow the [Worker role](#worker) for blockers. An owner continues the
 work a pending decision does not block and reports the blocker and next owner;
 silence is not approval.
 
@@ -490,7 +475,7 @@ again before concluding "still waiting".
 
 Split oversized scope in the plan rather than imposing brief line limits. Resume
 unfinished delegate sessions instead of restarting; reassess repeated repairs as
-in [Goal first](#team-roles). A repair brief lists every unresolved review
+in [Goal first](#team-practices). A repair brief lists every unresolved review
 finding and deterministic test failure on the failed head; an unrelated repair
 does not fix one.
 
@@ -509,7 +494,7 @@ Read-only work may share stable source. Sequence overlapping writers or
 integrate deliberately; never run them in one checkout. Do not pre-clear file
 overlap by message. Ask once, on the PR, only when both change the same function.
 Respect concurrency limits and avoid competing suites whose temporary-directory cleanup
-can interfere. Heavy commands take a test slot as in [Team roles](#team-roles).
+can interfere. Heavy commands take a test slot as in [Team practices](#team-practices).
 When the host is saturated, shed out-of-slot CPU
 commands before shedding agents; preserve their work. Grant only a needed cache
 directory (`--add-dir ~/.cache/uv`);
@@ -540,13 +525,16 @@ loopzero --config .loopzero/stack-workflow.toml review
 
 `--config` uses explicitly supplied settings instead of trusted-base pinning;
 the coordinator must verify the copy and its one-field difference. Keep the
-producer as the base through primary review. Retarget the consumer to main
-before running the producer's `loopzero merge`, which deletes its branch. After
+producer as the base through primary review and any delta covering a merge
+of the producer. Retarget to main before the producer's `loopzero merge`
+deletes its branch. After retargeting, take producer updates by merging main. After
 the producer lands, confirm the consumer is open against main, return to the
 canonical configuration, and use the supported CI trigger. Verify that all
 required checks pass on the current head against main before readiness.
-Follow the [local check receipt rules](../core/CONTRACT.md#gate-execution-and-delivery-priority)
+Follow the [local check receipt rules](../core/CONTRACT.md#check-reuse-and-delivery-priority)
 and [review budget](../core/CONTRACT.md#review-budget).
+
+### Integration and acceptance
 
 Nested background results may reach the top-level session instead of their
 owner: run nested reviewers in the foreground or forward results promptly.
@@ -555,7 +543,7 @@ The parent owns integration and acceptance, and may name an integration executor
 in the brief: inspect returned diffs and evidence; worker success claims are not
 proof. Route returned heads to that executor. Run decisive tests unavailable to
 the delegate before review, and required broad verification and `loopzero check`
-under the [receipt reuse rule](../core/CONTRACT.md#gate-execution-and-delivery-priority). If declared checks do not isolate host tools, run a
+under the [receipt reuse rule](../core/CONTRACT.md#check-reuse-and-delivery-priority). If declared checks do not isolate host tools, run a
 focused restricted-PATH probe and report the limitation. Only sandboxed
 `loopzero check` counts as delivery evidence; continue under the
 [contract](../core/CONTRACT.md).

@@ -15,10 +15,10 @@ from .types import Config, LoopZeroError, ResourceLimits, ReviewConfig
 
 MERGE_STRATEGIES = ("squash", "merge", "rebase", "queue", "mergify")
 REVIEWER_FAMILIES = ("claude", "codex")
-# Host locations that must never be exposed to the sandbox, even read-only, because they
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
+# Host locations never exposed to the sandbox, read-only or writable, because they
 # hold credentials or live sockets (docker, ssh-agent, gpg-agent, dbus). Subpaths of /home
 # are allowed so tool caches such as ~/.local/bin can be listed explicitly.
-_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 FORBIDDEN_RO_TREES = ("/run", "/var/run", "/proc", "/dev", "/sys", "/root")
 
 _SECTIONS: dict[str, dict[str, type]] = {
@@ -173,7 +173,7 @@ def _require_ci(checks: dict[str, Any]) -> None:
         )
 
 
-def _build(data: dict[str, Any]) -> Config:
+def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every workflow.toml section in one pass
     _reject_unknown("top level", data, _SECTIONS)
     sections = {
         section: _check_table(section, data.get(section, {}), schema)

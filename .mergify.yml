@@ -1,4 +1,4 @@
-# Admission is explicit: @mergifyio queue main. No automatic queue rules.
+# Admission is explicit: @mergifyio queue. No automatic queue rules.
 # Requires Loop-zero Eligibility on originals AND attested temporary candidates.
 merge_queue:
   mode: serial
@@ -11,7 +11,7 @@ queue_rules:
   - name: main
     batch_size: 1
     branch_protection_injection_mode: queue
-    max_checks_retries: 0
+    max_checks_retries: 1
     merge_method: squash
     queue_conditions:
       - base = main

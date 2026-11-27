@@ -1,4 +1,4 @@
-"""Command line: composes the modules into start, check, pr, review, ready, merge, status."""
+"""Command line: composes the modules into start, check, pr, review, ready, merge, resolve, status."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ import random
 import re
 import shlex
 import sys
-import tempfile
 import time
+import traceback
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, suppress
 from functools import partial, wraps
@@ -32,7 +32,7 @@ from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroEr
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
-HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
+HANDLED = (LoopZeroError, OSError, ValueError)
 UNEXPECTED = (KeyError, TypeError)
 # --wait: poll interval, default timeout, and how long a required check may stay
 # missing before GitHub is assumed to have dropped the event for this head.
@@ -66,13 +66,7 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 # --------------------------------------------------------------------------- git / context
 
 
-def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False,
-         extra_env: dict[str, str] | None = None) -> str:
-    run = _proc.run_git_paths if paths else _proc.run
-    done = run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout, extra_env=extra_env)
-    if done.exit_code != 0:
-        raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
-    return done.stdout if paths else done.stdout.strip()
+_git = partial(worktree.git, timeout=GIT_TIMEOUT)
 
 
 def _require_push_target(wt: Path, repo: str) -> None:
@@ -102,6 +96,10 @@ def _toplevel() -> Path:
     return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel", paths=True))
 
 
+class PrimaryCheckout(CliError):
+    """The command runs in the primary checkout, which has no task worktree to remove."""
+
+
 def _repo_root(wt: Path) -> None:
     """Verify the primary checkout or bare repository owns this linked worktree."""
     first = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0]
@@ -109,7 +107,9 @@ def _repo_root(wt: Path) -> None:
         raise CliError("Git did not identify the primary worktree; refusing cleanup")
     root = Path(first.removeprefix("worktree "))
     common = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)).resolve()
-    if root.resolve() == wt.resolve() or common not in (root.resolve(), (root / ".git").resolve()):
+    if root.resolve() == wt.resolve():
+        raise PrimaryCheckout("this is the primary checkout, nothing to clean up")
+    if common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
 
 
@@ -139,7 +139,7 @@ def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
     if done.exit_code not in (0, 1):
         detail = _proc.tail(done.stderr or done.stdout, 1)
         raise CliError(f"git merge-base --is-ancestor failed (exit {done.exit_code}): "
-                       f"{detail or 'retry the ancestry check'}")
+                       f"{detail or 'retry the ancestry check'}. If the commit is missing, run `git fetch origin {sha}` and retry.")
     return done.exit_code == 0
 
 
@@ -186,21 +186,8 @@ def _require_pushed(pr: github.PR, head: str) -> None:
 # --------------------------------------------------------------------------- review markers
 
 
-def _rest_rows(endpoint: str, what: str, **kwargs) -> list[dict]:
-    """Every row of a REST list, oldest first, following pages until a short one."""
-    rows: list[dict] = []
-    for page in range(1, 101):
-        batch = github.api_get(f"{endpoint}?per_page={github.PAGE}&page={page}", **kwargs)
-        if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
-            raise CliError(f"invalid GitHub {what} response")
-        rows += batch
-        if len(batch) < github.PAGE:
-            return rows
-    raise CliError(f"GitHub {what} pagination limit exceeded")
-
-
 def _pr_reviews(repo: str, number: int, **kwargs) -> list[dict]:
-    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews", **kwargs)
+    return github.paged(f"repos/{repo}/pulls/{number}/reviews", **kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,7 +212,7 @@ def _pr_markers(reviews: list[dict], head: str,
             continue
         if not trusted:
             trusted = {github.login().casefold()}
-        if (review.get("user") or {}).get("login", "").casefold() not in trusted:
+        if eligibility.review_login(review) not in trusted:
             continue
         found.append(Marker(match.group(1), match.group(2), review.get("state") or ""))
     return found
@@ -237,6 +224,10 @@ def _review_cap_spent(markers: list[Marker]) -> bool:
 
 def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     """Return (kind, reviewed_head) or raise when the PR's review budget is spent."""
+    current = next((m for m in reversed(markers) if m.head == head), None)
+    if current and current.state == "DISMISSED":
+        raise CliError("review for the current head was dismissed. Push fixes for a remaining delta "
+                       "or open a replacement PR if the review budget is spent.")
     if _review_cap_spent(markers):
         raise CliError(
             "review cap reached: fix or reject the findings "
@@ -300,9 +291,10 @@ def _readiness(
     review_age = now - review_at[0].timestamp() if review_at else None
     if server and review_age is not None and -1 < review_age < 0:
         review_age = 0  # HTTP Date rounds down to the second.
+    review_blocker = eligibility.body_blocker(review)
     result = github.readiness(
         config.repo, pr, config.base_branch, config.required_ci,
-        head if review else None, review_at=review_at,
+        head if review else None, review_at=review_at, review_blocker=review_blocker,
         ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
@@ -321,23 +313,26 @@ def _readiness(
         else:
             reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
         result = dataclasses.replace(result, ready=not reasons, reasons=reasons)
-    if github.MISSING_REVIEW_REASON in result.reasons:
+    review_reason = review_blocker or github.MISSING_REVIEW_REASON
+    if review_reason in result.reasons:
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
-        if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
+        if _review_cap_spent(markers) and (review_blocker or all(marker.head != head for marker in markers)):
             if _conflict_delta_base(config, pr, head, reviews, markers, publishers):
                 exhausted = f"Run `loopzero review` for the available conflict-resolution delta on {head[:12]}."
             else:
+                context = (f"{review_blocker.capitalize()}. The review budget is exhausted." if review_blocker
+                           else f"The review budget is exhausted and {head[:12]} has no eligible review.")
                 exhausted = (
-                    f"The review budget is exhausted and {head[:12]} has no eligible review. "
+                    f"{context} "
                     "Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused."
                 )
             result = dataclasses.replace(result, reasons=tuple(
-                exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
+                exhausted if reason == review_reason else reason for reason in result.reasons
             ))
-    report = _load_report(wt)
+    report = _load_report(wt)  # deliberate re-read: a check can land during the GitHub reads
     receipt_problem = _check_report_problem(report, config, head)
     if receipt_problem:
-        return github.Readiness(False, (*result.reasons, receipt_problem))
+        return github.Readiness(False, (*result.reasons, receipt_problem), checks=result.checks)
     if announce_receipt:
         _print_receipt(wt, report, "accepted")
     return result
@@ -389,8 +384,8 @@ def _require_receipt(wt: Path, config: Config, head: str) -> None:
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
     """Best-effort transcript identity; never authority or environment attestation."""
-    with suppress(Exception):
-        content = _git(wt, "rev-parse", f"{report.head}^{{tree}}").strip()
+    with suppress(LoopZeroError, OSError):
+        content = _git(wt, "rev-parse", f"{report.head}^{{tree}}")
         commands = json.dumps([r.command for r in report.results], separators=(",", ":"))
         digest = hashlib.sha256(commands.encode()).hexdigest()
         print(f"receipt {action}: head={report.head} content={content} "
@@ -455,19 +450,13 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
 
 _CHECKS_START = "<!-- loopzero:checks:start -->"
 _CHECKS_END = "<!-- loopzero:checks:end -->"
-_LEGACY_CHECKS = re.compile(
-    r"^Recorded for `[0-9a-f]+`(?: \(not current head\))?\n"
-    r"(?:- `[^\n]+`: exit -?\d+ \(\d+\.\d+s\)\n|"
-    r"- \(no check commands configured\)\n)*",
-    re.MULTILINE,
-)
 
 
 def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = (existing if existing is not None else worktree.task_text(wt)).replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(r"^## (?:Validation|Checks)\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = match.group(1)
@@ -475,11 +464,10 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -
     if start or _CHECKS_END in content:
         _, end, suffix = after.partition(_CHECKS_END)
         if not end or _CHECKS_END in before or _CHECKS_END in suffix or _CHECKS_START in after:
-            raise CliError("malformed loopzero checks block in PR Validation; repair its markers")
+            raise CliError("malformed loopzero checks block: fix the marker pair in Validation in the PR description on GitHub")
         content = before + block + suffix
     else:
-        # Migrate our old report/placeholder only, retaining behavioral evidence.
-        content = _LEGACY_CHECKS.sub("", content)
+        # Replace only our placeholder, retaining behavioral evidence.
         content = re.sub(
             r"^\((?:filled by `loopzero check`|no `loopzero check` run recorded)\)\n?",
             "", content, flags=re.MULTILINE,
@@ -504,7 +492,7 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
     task = worktree.task_text(wt).replace("\r\n", "\n")
     existing = existing.replace("\r\n", "\n")
     owned = {m.group(1): m.group() for m in pattern.finditer(task)
-             if m.group(1) not in {"Validation", "Checks", "Review"}}
+             if m.group(1) not in {"Validation", "Review"}}
     content = existing[first.start():] if (first := pattern.search(existing)) else ""
     prefix = task[:first.start()] if (first := pattern.search(task)) else task
 
@@ -568,8 +556,8 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
             body = _pr_body(wt, head, config, live.body)
             if body != live.body.replace("\r\n", "\n"):
                 github.update_body(config.repo, pr.number, body)
-    except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError, worktree.WorktreeError) as exc:
-        print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
+    except (LoopZeroError, OSError, ValueError) as exc:
+        print(f"warning: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
 _SECTIONS = {
@@ -587,12 +575,17 @@ def _pr_title(wt: Path, branch: str) -> str:
 def cmd_start(args: argparse.Namespace) -> int:
     root = _toplevel()
     current = config_mod.run_git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
-    if current.stdout.strip().startswith("lz/") or (
-        current.exit_code == 1 and worktree.is_linked_checkout(root)
-    ):
-        raise CliError(f"already inside task worktree {root}; run start from the main checkout")
+    # Nest task worktrees in the primary checkout, so removing a harness worktree cannot delete them.
+    listing = _git(root, "worktree", "list", "--porcelain", "-z", paths=True)
+    primary = Path(listing.split("\0", 1)[0].removeprefix("worktree "))
+    # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
+    branch = current.stdout.strip()
+    if branch.startswith("lz/") and root == primary:
+        raise CliError(f"primary checkout {root} is on task branch {branch}; switch it to another branch first")
+    if branch.startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
+        raise CliError(f"already inside task worktree {root}; run start from {primary}")
     config = _load_config(args, root)
-    print(worktree.start(root, args.slug, config.base_branch))
+    print(worktree.start(primary, args.slug, config.base_branch))
     return 0
 
 
@@ -778,7 +771,7 @@ def _lock_review(run_review: Callable[[argparse.Namespace, Path, Config], int]):
 
 
 @_lock_review
-def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
+def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # noqa: C901 - PR guard, publish, repost and recovery paths
     runtime_source = (
         "reviewer paths are unpinned because --config was provided" if args.config
         else f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}"
@@ -799,7 +792,9 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     if config.review_publishers and publisher.casefold() not in {
         login.casefold() for login in config.review_publishers
     }:
-        raise CliError("current GitHub login is not a configured review publisher")
+        helper = f" The App token helper {github.APP_TOKEN_HELPER} did not supply a token." if not token else ""
+        raise CliError(f"GitHub login {publisher!r} is not a configured review publisher. "
+                       f"Configured publishers: {', '.join(config.review_publishers)}.{helper}")
     saved = [kind for kind, exists in zip(kinds, saved_files, strict=True) if exists] if args.repost else []
     if len(saved) > 1:
         raise CliError("multiple saved reviews for HEAD; publication is ambiguous")
@@ -843,7 +838,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             )
     try:
         if not _matches_publication(result, publication_context):
-            raise CliError("native publication context changed during review; rerun loopzero review")
+            raise CliError("native publication context changed. To recover, run loopzero review from the intended PR worktree with its configured publisher.")
     except runners.RunnerBadOutput:
         _save_review(wt, result)
         raise
@@ -874,7 +869,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             live = github.pr_view(config.repo, pr.number)
             github.update_body(config.repo, pr.number, _append_review(live.body, result))
         except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
-            print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
+            print(f"warning: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
 
 
@@ -966,14 +961,10 @@ def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettin
     codex = runners.codex_evidence(result)
     if codex is None:
         formats.append(("current", True))
-        if old_settings:
-            formats.append(("summary", True))
     if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
         formats.append(("requested-reported", True))
     if codex is not None and all("configured" not in call for call in codex["calls"]):
         formats.append(("requested-reported", False))
-    if result.family == "codex" and old_settings:
-        formats.append(("summary", False))
     return [(prefix, settings, display)
             for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
             for settings, display in formats]
@@ -1000,15 +991,15 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
         review_id = review.get("id")
         if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
-                or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
+                or eligibility.review_login(review) != publisher.casefold()
                 or type(review_id) is not int or review_id <= 0):
             hint = ("; for a publication format mismatch, use the publishing CLI revision or upgrade the recovery CLI"
                     if expected is None else "")
             raise CliError(f"conflicting or ambiguous review publication{hint}")
-        comments = _rest_rows(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
+        comments = github.paged(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
-                or (c.get("user") or {}).get("login", "").casefold() != publisher.casefold()
+                or eligibility.review_login(c) != publisher.casefold()
                 for c in comments)
                 or sorted((c.get("path"), c.get("body")) for c in comments)
                 != sorted((c.get("path"), c.get("body")) for c in expected["comments"])
@@ -1035,21 +1026,36 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
             "Back up your branch, reset to that tip and replay later fixes. To publish the restored head, "
             f"run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR"
         )
-    if not worktree.merges_since(wt, since):
-        return worktree.diff_since(wt, since)
-    patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
-             if number is not None else None)
-    if patch is None:
-        raise CliError(
-            f"could not verify merge history: {since[:12]} must be on the first-parent history and "
-            f"merged parents must come from {config.base_branch}. Save your work, then replay the fixes "
-            f"on the reviewed head {since[:12]}, including resolution edits. Push with `loopzero pr` "
-            "and run `loopzero review`, or open a new PR"
-        )
+    merged = worktree.merges_since(wt, since)
+    if not merged:
+        patch = worktree.diff_since(wt, since)  # Empty after an empty commit or a reverted change.
+    else:
+        patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
+                 if number is not None else None)
+        if patch is None:
+            raise CliError(
+                f"could not verify merge history: {since[:12]} must be on the first-parent history and "
+                f"merged parents must come from {config.base_branch}. Check the first-parent log and merged "
+                "parents. If the history is correct, GitHub objects may be unavailable or exceed verification "
+                "limits. Open a new PR from the current base for a fresh review if verification still fails."
+            )
+    if not patch and number is not None:
+        publishers = config.review_publishers or (github.login(),)
+        if github.open_blocking_findings(config.repo, number, None, publishers):
+            raise CliError("empty delta leaves blocking findings open. Run `loopzero resolve` "
+                           "to list them, then address them before readiness.")
+        prior = eligibility.eligible_review(_pr_reviews(config.repo, number), since, publishers,
+                                            repo=config.repo, number=number)
+        if eligibility.body_blocker(prior):
+            raise CliError("empty delta leaves blocking findings in the review body. Push fixes before another review.")
+        if merged and eligibility.base_merge_material(
+            config.repo, number, since, head, config.base_branch, clean=True,
+        ) is not None:
+            raise CliError(f"nothing to review since {since[:12]}; run `loopzero ready` or push the fixes first")
     return patch
 
 
-def _run_review(
+def _run_review(  # noqa: C901 - reviewer fallback across families
     wt: Path, config: Config, head: str, kind: str, reviewed: str | None,
     model: str | None = None, effort: str | None = None, *, runtime_source: str = "",
     publication: tuple[str, int, str] | None = None,
@@ -1139,7 +1145,8 @@ def _save_review_failure_output(wt: Path, head: str, kind: str, errors: dict[str
 
 def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
     lines = str(exc).splitlines()
-    detail = "\n".join(lines[:1 if isinstance(exc, runners.RunnerMalformedOutput) else 3])
+    # The cause of a failed reviewer is at the end of its output tail.
+    detail = "\n".join(lines[:1] + ([] if isinstance(exc, runners.RunnerMalformedOutput) else lines[1:][-2:]))
     if isinstance(exc, runners.RunnerAuthFailed):
         login = "claude auth login" if family == "claude" else "codex login"
         fix = f"run `{login}`"
@@ -1165,8 +1172,8 @@ def _independence_message(
     detail = ("\n\nFailures:\n" + "\n\n".join(failures)) if failures else ""
     return (
         f"no configured reviewer can run (author family: {identity}; excluded families: "
-        f"{excluded_text}). Fix the reviewer failures below and rerun; wait for the owner "
-        f"if none can run. Do not remove truthful Co-authored-by attribution.{detail}"
+        f"{excluded_text}). Fix the reviewer failures below and rerun. "
+        f"Do not remove truthful Co-authored-by attribution.{detail}"
     )
 
 
@@ -1233,93 +1240,28 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         _repo_root(wt)
         name = worktree.branch(wt)
         worktree.cleanup(wt, pr.head_sha)
-    except (worktree.WorktreeError, CliError, OSError, _proc.ProcTimeout) as exc:
+    except PrimaryCheckout as exc:
+        print(f"note: merged; {exc}", file=sys.stderr)
+    except (LoopZeroError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
             retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
-_SIZE_BUDGET = "scripts/size_budget.sh"
-
-
-def _prequeue_size_budget(
-    wt: Path, config: Config, pr: github.PR, readiness: github.Readiness, *, project: bool = True,
-) -> None:
-    if not readiness.ready or config.merge_strategy != "mergify" or _SIZE_BUDGET not in config.checks:
-        return
-    origin = _git(wt, "remote", "get-url", "origin")
-    with tempfile.TemporaryDirectory(prefix="loopzero-size-") as directory:
-        root = Path(directory)
-        env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-               "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1",
-               "PYTHON": sys.executable, "PYTHONSAFEPATH": "1"}
-        git = partial(_git, root, extra_env=env)
-        git("clone", "--shared", "--no-checkout", "--template=", str(wt), ".")
-        # Fetch with the user's credential configuration for private origins.
-        fetched = _proc.run(
-            ["git", "fetch", "--no-tags", "--no-recurse-submodules", "--",
-             origin, f"refs/heads/{config.base_branch}"],
-            cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
-        )
-        if fetched.exit_code != 0:
-            reason = github.redact_credentials(_proc.tail(fetched.stderr or fetched.stdout, 1))
-            raise CliError(f"could not fetch {config.base_branch} from origin for the size budget check: "
-                           f"{reason or f'git exited {fetched.exit_code}'}")
-        base = git("rev-parse", "FETCH_HEAD^{commit}")
-        script = git("show", f"{base}:{_SIZE_BUDGET}")
-
-        def evaluate(target: str) -> _proc.Completed:
-            tree = git("merge-tree", "--write-tree", target, pr.head_sha)
-            # A candidate symlink must not read files outside the temporary checkout.
-            git("-c", "core.symlinks=false", "read-tree", "--reset", "-u", tree)
-            return _proc.run(["bash", "-s", "--", base], input=script + "\n", cwd=root,
-                             env_allowlist=("PATH",), extra_env=env, timeout=GIT_TIMEOUT,
-                             merge_output=True)
-
-        result = evaluate(base)
-        if result.exit_code:
-            raise CliError("current target size budget failed:\n" + result.stdout.rstrip())
-        if project:
-            _warn_queue_size(config, pr, root, origin, base, git, evaluate)
-
-
-def _warn_queue_size(
-    config: Config, pr: github.PR, root: Path, origin: str, base: str,
-    git: Callable[..., str], evaluate: Callable[[str], _proc.Completed],
-) -> None:
-    assert config.mergify_queue is not None
-    try:
-        numbers = mergify.queue_predecessors(config.repo, config.base_branch, config.mergify_queue, pr.number)
-        if not numbers:
-            return
-        refs = [f"refs/pull/{number}/head:refs/loopzero/{number}" for number in numbers]
-        _git(root, "fetch", "--no-tags", "--no-recurse-submodules", "--", origin, *refs)
-        integrated = base
-        for number in numbers:
-            source = git("rev-parse", f"refs/loopzero/{number}^{{commit}}")
-            if git("merge-base", integrated, source) == source:
-                return  # A queued PR may already have landed or be represented by another head.
-            tree = git("merge-tree", "--write-tree", integrated, source)
-            integrated = git("-c", "user.name=loopzero", "-c", "user.email=loopzero@localhost",
-                             "commit-tree", tree, "-p", integrated, "-p", source, "-m", "Queue size projection")
-        result = evaluate(integrated)
-    except (LoopZeroError, OSError):
-        return
-    if result.exit_code and "size budget: FAIL" in result.stdout:
-        predecessors = ", ".join(f"#{number}" for number in numbers)
-        print(f"warning: projected size budget after {predecessors}:\n{result.stdout.rstrip()}")
+OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its one reason on the PR before taking it out of draft."
 
 
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
-    _require_receipt(wt, config, head)
+    if problem := _check_report_problem(_load_report(wt), config, head):
+        raise CliError(f"{problem}. {OWNER_ROUTE}")
     try:
         github.mark_ready(config.repo, number)
     except github.GhUnavailable as exc:
-        raise CliError(f"{exc}\nThe PR is still a draft; rerun the same command once GitHub recovers.") from exc
+        raise CliError(f"{exc}\nRerun the same command once GitHub recovers.") from exc
 
 
-def cmd_ready(args: argparse.Namespace) -> int:
+def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-kick paths share one readiness flow
     wt, config = _context(args)
     read_started = time.monotonic()
     pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None)
@@ -1337,13 +1279,12 @@ def cmd_ready(args: argparse.Namespace) -> int:
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (
-        waiting or _pending_checks(config, pr, readiness, allow_skipped=not pr.is_draft)
+        waiting or _pending_checks(readiness, allow_skipped=not pr.is_draft)
     ):
-        if (waited := wait(pr, kicked=kicked, shown=readiness.reasons if kicked else (),
+        if (waited := wait(pr, kicked=kicked, shown=_by_check(readiness, readiness.reasons) if kicked else (),
                            initial=None if kicked else readiness)) is None:
             return 3
         pr, readiness, kicked = waited
-    _prequeue_size_budget(wt, config, pr, readiness)
     if readiness.ready and pr.is_draft and not kicked:
         _mark_ready(wt, config, pr.number, pr.head_sha)
         if args.wait is not None:
@@ -1353,16 +1294,22 @@ def cmd_ready(args: argparse.Namespace) -> int:
     for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
     if not readiness.ready:
-        if args.wait is None and _pending_checks(config, pr, readiness):
+        _print_owner_route(pr, readiness)
+        if args.wait is None and _pending_checks(readiness):
             print(NEXT_WAIT)
-            return 3  # Only waitable blockers remain; CONTRACT exit 3 means waiting.
+            return 3
         return 1
     print(f"ready: {pr.url}")
     return 0
 
 
-def _required_check_reasons(names: tuple[str, ...], *states: str) -> dict[str, str]:
-    return {f"required check '{name}' {state}": name for name in names for state in states}
+def _print_owner_route(pr: github.PR, readiness: github.Readiness) -> None:
+    if pr.is_draft and any(reason.startswith(("run loopzero check", "check receipt")) for reason in readiness.reasons):
+        print(OWNER_ROUTE)
+
+
+def _check_reasons(readiness: github.Readiness, *states: str) -> dict[str, str]:
+    return {reason: name for reason, (name, state) in readiness.checks.items() if state in states}
 
 
 def _draft_checks_waiting(
@@ -1371,32 +1318,27 @@ def _draft_checks_waiting(
     reasons = set(readiness.reasons) - {github.MERGEABILITY_PENDING}
     if not pr.is_draft or not reasons:
         return ()
-    expected = _required_check_reasons(config.required_ci, f"missing on {pr.head_sha[:12]}", "is skipped")
-    if not reasons <= expected.keys():
+    if not reasons <= (expected := _check_reasons(readiness, "missing", "skipped")).keys():
         return ()
     blocked = {expected[reason] for reason in reasons}
     return tuple(name for name in config.required_ci if name in blocked)
 
 
-def _pending_checks(
-    config: Config, pr: github.PR, readiness: github.Readiness, *, allow_skipped: bool = False
-) -> tuple[str, ...]:
+def _pending_checks(readiness: github.Readiness, *, allow_skipped: bool = False) -> tuple[str, ...]:
     """Reasons worth waiting on: mergeability or required checks can still settle.
 
     An explicit ready wait can observe a skipped result left over from draft CI.
     """
-    states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if allow_skipped else [])]
-    waitable = {*_required_check_reasons(config.required_ci, *states),
-                *readiness.waitable_failures, github.MERGEABILITY_PENDING}
+    states = ["missing", "pending", *(["skipped"] if allow_skipped else [])]
+    waitable = {*_check_reasons(readiness, *states), *readiness.waitable_failures, github.MERGEABILITY_PENDING}
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
 
 def _readiness_messages(pr: github.PR, readiness: github.Readiness) -> Iterator[str]:
     for reason in readiness.reasons:
-        check, separator, conclusion = reason.rpartition("' is ")
-        if (separator and check.startswith("required check '") and conclusion not in {"pending", "skipped"}
-                and reason not in readiness.waitable_failures):
+        _, state = readiness.checks.get(reason, ("", "missing"))
+        if state not in {"missing", "capped", "pending", "skipped"} and reason not in readiness.waitable_failures:
             yield (f"{reason}. Inspect {pr.url}/checks. Fix reproducible failures before retrying. "
                    "Rerun the failed job only for a transient failure. Once green, run `loopzero ready --wait`.")
         else:
@@ -1404,7 +1346,7 @@ def _readiness_messages(pr: github.PR, readiness: github.Readiness) -> Iterator[
 
 
 def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness) -> str:
-    if _pending_checks(config, pr, readiness):
+    if _pending_checks(readiness):
         return "; next: loopzero merge --wait"
     if _draft_checks_waiting(config, pr, readiness):
         return "; next: loopzero ready --wait"
@@ -1445,7 +1387,7 @@ def _poll_until(
 
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float, shown: tuple[str, ...] = (), args: argparse.Namespace,
+    started: float, shown: tuple = (), args: argparse.Namespace,
     allow_merged: bool = False, allow_skipped: bool = False, initial: github.Readiness | None = None,
     initial_read_time: float = 0.0,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
@@ -1493,13 +1435,16 @@ def _verify_wait_snapshot(
     raise CliError(f"workflow settings changed while waiting; {retry}")
 
 
-def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> None:
-    def by_check(reasons: tuple[str, ...]) -> dict[str, str]:
-        return {reason.rpartition("' ")[0] or reason: reason for reason in reasons}
-    previous, current = by_check(shown), by_check(pending)
+def _by_check(readiness: github.Readiness, reasons: tuple[str, ...]) -> tuple:
+    """((is a required check, its name or the reason), reason) for each reason."""
+    return tuple(((r in readiness.checks, readiness.checks.get(r, (r,))[0]), r) for r in reasons)
+
+
+def _print_wait_changes(shown: tuple, pending: tuple) -> None:
+    previous, current = dict(shown), dict(pending)
     if changed := [reason for key, reason in current.items() if previous.get(key) != reason]:
         print("waiting: " + "; ".join(changed))
-    if cleared := [key.removeprefix("required check '") for key in previous if key not in current]:
+    if cleared := [key[1] for key in previous if key not in current]:
         print("cleared: " + "; ".join(cleared))
 
 
@@ -1536,7 +1481,7 @@ def _check_wait_poll(
 
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float, args: argparse.Namespace, shown: tuple[str, ...] = (),
+    started: float, args: argparse.Namespace, shown: tuple = (),
     bounded: bool = False, allow_merged: bool = False,
     allow_skipped: bool = False, initial: github.Readiness | None = None,
     initial_read_time: float = 0.0,
@@ -1560,18 +1505,16 @@ def _wait_for_checks(
             _mark_ready(wt, config, pr.number, current.head_sha)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
-                                    shown=readiness.reasons, args=args, bounded=bounded,
+                                    shown=_by_check(readiness, readiness.reasons), args=args, bounded=bounded,
                                     allow_merged=allow_merged)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
-        pending = _pending_checks(
-            config, current, readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft),
-        )
+        pending = _pending_checks(readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft))
         if pending or readiness.ready:
-            _print_wait_changes(shown, pending)
+            _print_wait_changes(shown, _by_check(readiness, pending))
         if not pending:
             return current, readiness, kicked
-        shown = pending
+        shown = _by_check(readiness, pending)
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
             print(
@@ -1579,14 +1522,14 @@ def _wait_for_checks(
                 + ", ".join(readiness.stale_verdicts)
             )
             stale_notice = True
-        # Missing check runs do not prove that no workflow was scheduled. Diagnose only
-        # when no visible pending check explains why the required jobs have not appeared.
+        # An active workflow may not have created its check runs yet.
         if (
             elapsed >= MISSING_RUN_GRACE
-            and all(" missing on " in r or r.endswith(" is skipped") for r in pending)
-            and not readiness.has_pending_checks
-            and not _read_wait_poll(partial(github.has_active_workflow, config.repo, pr.head_sha),
-                                    started + timeout)
+            and set(pending) <= _check_reasons(readiness, "missing", "skipped").keys()
+            and not _read_wait_poll(
+                partial(github.has_check_activity, config.repo, pr.head_sha, readiness),
+                started + timeout,
+            )
         ):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "
@@ -1616,8 +1559,13 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
     held = 0
     for _ in _poll_until(started, timeout):
+        was_closed = bool(closed)
         if sha := _landed(config, pr, closed):
             return sha
+        if closed:
+            if was_closed:
+                raise closed[0]
+            continue
         if not github.merge_pending(config.repo, pr.number, pr.head_sha):
             if sha := _landed(config, pr, closed):
                 return sha
@@ -1658,31 +1606,31 @@ def _mergify_timeout_detail(
 
 
 MERGIFY_REQUEUE = (
-    "To requeue, post `@mergifyio queue` as the whole PR comment "
-    "(same login), then rerun `loopzero merge --wait`."
+    "To requeue an unchanged head, post `@mergifyio queue` as the whole PR comment (same login); a new head is "
+    "requested by `loopzero merge` or readmitted by a repository queue rule; Mergify's \"already queued\" reply "
+    "to a request means a rule queued it first and is harmless. Then rerun `loopzero merge --wait`."
 )
-MERGIFY_DEQUEUE_HINT = (
-    'Read Mergify\'s "Left the queue" comment on the PR for the reason. Address it before requeueing.'
-)
+MERGIFY_DEQUEUE_HINT = 'Read Mergify\'s "Left the queue" comment on the PR for the reason. Address it before requeueing.'
 
 
 def _mergify_departure(
     config: Config, pr: github.PR, queue: str, closed: list[github.GhError], confirmed: bool,
+    report: mergify.Departure | None,
 ) -> str | None:
-    report = mergify.departure_report(config.repo, pr.number, pr.head_sha, queue)
     if not confirmed and report is None:
         return None
     sha = _landed(config, pr, closed)
     if sha or closed:
         return sha
-    detail = MERGIFY_DEQUEUE_HINT
+    detail, requeue = MERGIFY_DEQUEUE_HINT, MERGIFY_REQUEUE
     if report is not None:
         detail = f"Mergify report: {report.url}."
         if report.attribution == "base_conflict":
             base = pr.base_ref
             detail = (f"The PR conflicts with {base}. Run `git fetch origin {base}` and resolve the base "
-                      f"integration according to the PR's review state. Requeue only after resolving the "
-                      f"conflict. {detail}")
+                      f"integration according to the PR's review state. {detail}")
+            requeue = ("After resolving the conflict, run `loopzero check`, `loopzero pr`, "
+                       "`loopzero review`, `loopzero ready --wait` and `loopzero merge --wait`.")
         else:
             if report.checks:
                 detail += " Failing checks: " + ", ".join(repr(check) for check in report.checks) + "."
@@ -1691,21 +1639,27 @@ def _mergify_departure(
                 "isolated": "Mergify tested this PR alone. Inspect or fix the failed check before requeueing unless it is a known flake.",
             }
             detail += " " + guidance.get(report.attribution, MERGIFY_DEQUEUE_HINT)
-    raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {MERGIFY_REQUEUE}")
+    raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {requeue}")
 
 
 def _mergify_wait_poll(
     config: Config, pr: github.PR, queue: str, deadline: float, closed: list[github.GhError], confirmed: bool,
 ) -> tuple[str | None, mergify.Membership | None, bool]:
+    was_closed = bool(closed)
     if sha := _landed(config, pr, closed):
         return sha, None, False
+    if closed:
+        if was_closed:
+            raise closed[0]
+        return None, None, False
     if not mergify.configured(config.repo, config.base_branch, queue, deadline):
         raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
     state = mergify.membership(config.repo, pr.number, queue, deadline)
     deferred = confirmed and state is not None and not closed
     sha = None if deferred else _landed(config, pr, closed)
     if state is None and sha is None:
-        sha = _mergify_departure(config, pr, queue, closed, confirmed)
+        report = mergify.departure_report(config.repo, pr.number, pr.head_sha, queue)
+        sha = _mergify_departure(config, pr, queue, closed, confirmed, report)
     return sha, state, deferred
 
 
@@ -1754,14 +1708,17 @@ def _follow_blocked_mergify(
     config: Config, pr: github.PR, readiness: github.Readiness, queue: str, deadline: float | None,
 ) -> str | None:
     hint = _merge_check_hint(config, pr, readiness)
-    try:
-        confirmed = (deadline is not None and pr.base_ref == config.base_branch
-                     and mergify.membership(config.repo, pr.number, queue) is not None)
-    except mergify.MergifyError as exc:
-        confirmed = False
-        hint += f"; Mergify membership unverified: {exc}"
-    if confirmed:
-        return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), True)
+    if deadline is not None and pr.base_ref == config.base_branch:
+        try:
+            state = mergify.membership(config.repo, pr.number, queue, deadline)
+        except mergify.MergifyError as exc:
+            hint += f"; Mergify membership unverified: {exc}"
+        else:
+            if state is not None:
+                return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), True)
+            report = mergify.departure_report(config.repo, pr.number, pr.head_sha, queue)
+            if sha := _mergify_departure(config, pr, queue, [], confirmed=False, report=report):
+                return sha
     raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
 
 
@@ -1774,26 +1731,26 @@ def _merge_with_mergify(
     assert queue is not None
     if not readiness.ready:
         return _follow_blocked_mergify(config, pr, readiness, queue, deadline)
+    if pr.is_draft:
+        raise CliError(f"PR #{pr.number} is still a draft; next: loopzero ready --wait")
     with worktree.lock_local_state(wt):
-        requested, confirmed_marker = mergify.markers(
-            config.repo, pr.number, pr.head_sha, queue
-        )
+        attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
         state = mergify.membership(config.repo, pr.number, queue, deadline)
         if sha := github.merged_sha(
-            config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
+            config.repo, pr.number, expected_head=pr.head_sha, check_hold=not attempt.requested and state is None,
         ):
             return sha
         confirmed = state is not None
-        if confirmed and not confirmed_marker:
+        if confirmed and not attempt.confirmed:
             _require_receipt(wt, config, pr.head_sha)
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
-        if not confirmed and confirmed_marker:
+        # A repository rule may have queued and ejected the PR before any loopzero request.
+        if not confirmed and (attempt.confirmed or attempt.departure):
             closed: list[github.GhError] = []
-            if sha := _mergify_departure(config, pr, queue, closed, confirmed=True):
+            if sha := _mergify_departure(config, pr, queue, closed, attempt.confirmed, attempt.departure):
                 return sha
             raise closed[0]
-        if not confirmed and not requested:
-            _prequeue_size_budget(wt, config, pr, readiness, project=admit_by is None)
+        if not confirmed and not attempt.requested:
             if admit_by is not None and time.monotonic() > admit_by:
                 raise _AdmissionDeadline
             _require_receipt(wt, config, pr.head_sha)
@@ -1805,7 +1762,7 @@ def _merge_with_mergify(
     return None
 
 
-def cmd_merge(args: argparse.Namespace) -> int:
+def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and per-strategy merge paths
     wt, config = _context(args)
     branch = worktree.branch(wt)
     if args.cancel:
@@ -1822,7 +1779,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     pr, readiness = _read_wait_poll(read, deadline) if args.wait else read()  # A blip retries within --wait.
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
     admit_by = deadline if args.wait else None
-    if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
+    if readiness is not None and args.wait is not None and _pending_checks(readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
@@ -1890,7 +1847,7 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
         current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref, paths=True).rstrip(" ")
         if current == f"{expected_head} {ref}":
             _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
-    except (CliError, OSError, _proc.ProcTimeout) as exc:
+    except (LoopZeroError, OSError) as exc:
         print(f"warning: merged but tracking ref cleanup failed for {ref}: {exc}", file=sys.stderr)
 
 
@@ -1926,8 +1883,11 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             f"Then, if no findings remain, run `{retry}`."
         ) from exc
     if not remaining:
-        github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers)
-        print(f"requested refresh of Loop-zero Eligibility for PR #{pr.number}")
+        if github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers,
+                                      required=eligibility.CONTEXT in config.required_ci):
+            print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
+        else:
+            print("Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete.")
     return 0
 
 
@@ -1990,7 +1950,10 @@ def _run(args: argparse.Namespace) -> int:
         if isinstance(exc, sandbox.SandboxUnavailable) and args.command in {"check", "review"}:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
-        prefix = "unexpected response: " if isinstance(exc, UNEXPECTED) else ""
+        prefix = ""
+        if isinstance(exc, UNEXPECTED):
+            where = traceback.extract_tb(exc.__traceback__)[-1]
+            prefix = f"unexpected response ({type(exc).__name__} at {Path(where.filename).name}:{where.lineno}): "
         print(f"loopzero {args.command}: {prefix}{_one_line(exc)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

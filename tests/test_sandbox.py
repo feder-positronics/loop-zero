@@ -19,6 +19,7 @@ from pathlib import Path
 from select import select
 from threading import Event, current_thread
 from unittest.mock import Mock
+from urllib.parse import quote
 
 import pytest
 
@@ -116,14 +117,25 @@ def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
     assert before in drift.tail and after in drift.tail
 
 
+SERVICE_KEY = 'p@ss/w0rd+1&"x\\9'
+
+
 @pytest.mark.parametrize("command,exit_code,line_count,start,end", [
     ("for i in $(seq 1 50); do echo $i; done; echo err >&2", 0, 40, "12", "err"),
     ("""python3 -c 'print("x" * 20000 + " Ω end")'""", 0, 1, "x", " Ω end"),
     ("""python3 -c 'print("terminal line" + "\\n" * 20_000)'""", 0, 1, "terminal line", "terminal line"),
     ("./" * 8_200 + "absent/file", 1, 1, "", "otherwise restore the required file."),
-], ids=["lines", "oversized-line", "trailing-newlines", "missing-file"])
-def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, command, exit_code, line_count, start, end):
-    (result,) = sandbox.run_checks(make_config(checks=(command,)), git_repo).results
+    ('for i in $(seq 1 1000); do printf "%s----------" "$SERVICE_KEY"; done', 0, 1, "", "----------"),
+    (f"printf %s {shlex.quote(json.dumps(SERVICE_KEY) + ' ' + quote(SERVICE_KEY, safe='') + ' ' + SERVICE_KEY)}", 0, 1,
+     '"[REDACTED]"', "[REDACTED]"),
+], ids=["lines", "oversized-line", "trailing-newlines", "missing-file", "split-key", "padded-and-encoded-key"])
+def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, monkeypatch, command, exit_code, line_count, start, end):
+    monkeypatch.setenv("SERVICE_KEY", f" {SERVICE_KEY}\n" if end == "[REDACTED]" else SERVICE_KEY)
+    (result,) = sandbox.run_checks(make_config(checks=(command,), env_allowlist=("PATH", "SERVICE_KEY")), git_repo).results
+    if end == "----------":
+        assert "[REDACTED]" in result.tail and all(piece in "[REDACTED]" for piece in result.tail.split("----------"))
+    elif end == "[REDACTED]":
+        assert result.tail == '"[REDACTED]" [REDACTED] [REDACTED]'
     lines = result.tail.splitlines()
     assert (result.exit_code, len(lines)) == (exit_code, line_count)
     assert lines[0].startswith(start) and lines[-1].endswith(end)
@@ -292,10 +304,16 @@ def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
 @pytest.mark.parametrize("entry,diagnostic", [
     (".", "unsafe"), (".git", "Git metadata"), (".git/cache", "Git metadata"),
     ("linked/cache", "symlink component"), (None, "private check directories"),
+    ("TMP/cache", "unsafe"), ("../cache", "unsafe"),
 ])
-def test_scratch_rejects_protected_paths(git_repo, bwrap_log, tmp_path, entry, diagnostic):
+def test_scratch_rejects_protected_paths(git_repo, bwrap_log, tmp_path, monkeypatch, entry, diagnostic):
     if entry == "linked/cache":
         (git_repo / "linked").symlink_to(tmp_path, target_is_directory=True)
+    if entry == "TMP/cache":
+        entry = str(tmp_path / "cache")
+    elif entry == "../cache":  # A refused-guard run must create paths only inside this test's directory.
+        (tmp_path / "tmp").mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     config = make_config(writable=(tempfile.gettempdir(),)) if entry is None else make_config(scratch=(entry,))
     with pytest.raises(sandbox.SandboxUnavailable, match=diagnostic):
         sandbox.run_checks(config, git_repo)
@@ -341,7 +359,8 @@ def test_alternate_probe_skips_default_inventory_and_honors_override(git_repo, m
     with pytest.raises(sandbox.SandboxUnavailable, match="Git alternate visibility probe timed out") as info:
         sandbox._preflight_alternates(cfg, git_repo, prefix, common)
     rendered = "".join(traceback.format_exception(info.value))
-    assert "private alternate probe diagnostic" not in rendered and "Create a standalone clone" in rendered
+    assert "private alternate probe diagnostic" not in rendered
+    assert "Transfer this task branch" in rendered
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):
@@ -395,7 +414,8 @@ class TestRealSandbox:
         message = str(failure.value)
         assert str(objects) in message
         assert "alternate" in message.lower() and "sandbox" in message.lower()
-        assert "standalone clone" in message.lower() and "loopzero start" in message
+        assert "transfer this task branch" in message.lower() and "standalone clone" in message.lower()
+        assert "rerun loopzero check at the same commit" in message.lower()
 
     @pytest.mark.parametrize("visibility", ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured"))
     def test_real_sandbox_allows_visible_git_alternates(self, git_repo, tmp_path, visibility):
@@ -533,13 +553,14 @@ def test_silent_stage_reports_live_metadata_then_completion(
 
     events, _, status, wait_for_heartbeat = heartbeat_log
     monkeypatch.setenv("LZ_KEEP", "credential-value")
-    monkeypatch.setenv("AUDIT_TOKEN", "p1n")
+    monkeypatch.setenv("AUDIT_TOKEN", "p1n-secret")
+    monkeypatch.setenv("AUTH_ENABLED", "1")
     monkeypatch.setenv("RUST_BACKTRACE", "1")
     command = ('test -z "$LZ_KEEP" || echo "$LZ_KEEP"; echo "$AUDIT_TOKEN"; '
-               'echo "tests/test_example.py:12: $RUST_BACKTRACE $NODE_ENV $DJANGO_DEBUG" >&2; '
+               'echo "tests/test_example.py:12: $RUST_BACKTRACE $NODE_ENV $DJANGO_DEBUG $CHECK_PYTHON $AUTH_ENABLED" >&2; '
                f'exit {exit_code}')
-    cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN", "RUST_BACKTRACE"),
-                      env=(("NODE_ENV", "test"), ("DJANGO_DEBUG", "true")))
+    cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN", "AUTH_ENABLED", "RUST_BACKTRACE"),
+                      env=(("NODE_ENV", "test"), ("DJANGO_DEBUG", "true"), ("CHECK_PYTHON", "/opt/cpython-3.14/bin/python3.14")))
     run_one = sandbox._run_one
 
     def run_stage(config, worktree, prefix, stage_command, timeout):
@@ -550,7 +571,7 @@ def test_silent_stage_reports_live_metadata_then_completion(
     monkeypatch.setattr(sandbox, "_run_one", run_stage)
     report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
     assert report.results[0].exit_code == exit_code
-    assert report.results[0].tail == "[REDACTED]\ntests/test_example.py:12: 1 test true"
+    assert report.results[0].tail == "[REDACTED]\ntests/test_example.py:12: 1 test true /opt/cpython-3.14/bin/python3.14 1"
     statuses = [event for event in events if event not in cfg.checks]
     heartbeats = [event for event in statuses if "running" in event]
     assert heartbeats and all(re.fullmatch(
@@ -721,7 +742,8 @@ def cache_check(git_repo, receipt_path):
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy', 'grant'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change, cache_check, receipt_path):
-    cfg = make_config(checks=('echo one', 'echo two'), env=(('AUDIT_TOKEN', 'fake-cached-token'), ('NODE_ENV', 'test')),
+    monkeypatch.setenv('AUDIT_TOKEN', 'fake-cached-token')
+    cfg = make_config(checks=('echo one', 'echo two'), env=(('NODE_ENV', 'test'),), env_allowlist=('PATH', 'HOME', 'LZ_KEEP', 'AUDIT_TOKEN'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     if change == 'grant':
         cfg = replace(cfg, env_allowlist=(*cfg.env_allowlist, "HEAVY_SLOT_GRANTED_CORES"))
@@ -783,6 +805,39 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
+@pytest.mark.parametrize("swap", ["committed_symlink", "symlinked_directory", "fifo"])
+def test_input_key_reads_only_committed_regular_files_in_place(git_repo, fetched_base, monkeypatch, swap):
+    command = "true"
+    config = make_config(checks=(command,), inputs={command: ("inputs",)})
+    value = git_repo / "inputs/value"
+    value.parent.mkdir()
+    value.write_text("v\n")
+    git(git_repo, "add", "inputs")
+    git(git_repo, "commit", "-qm", "inputs")
+    assert sandbox._input_key(config, git_repo, command, fetched_base)
+    if swap == "committed_symlink":
+        value.unlink()
+        value.symlink_to("elsewhere")
+        git(git_repo, "commit", "-qam", "link")
+        value.unlink()
+        value.write_text("v\n")
+    elif swap == "symlinked_directory":
+        value.parent.rename(git_repo / "real")
+        value.parent.symlink_to("real", target_is_directory=True)
+    else:
+        value.unlink()
+        os.mkfifo(value)
+        fifo, real_open = str(value.resolve()), Path.open
+
+        def never_the_fifo(path, *args, **kwargs):
+            if str(path) == fifo:
+                pytest.fail("hashing opened a FIFO, which blocks until a writer appears")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", never_the_fifo)
+    assert sandbox._input_key(config, git_repo, command, fetched_base) is None
+
+
 @pytest.mark.parametrize("case", ["typo", "empty", "dirty", "no_base"])
 def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case, cache_check):
     command = 'test "$(cat README.md)" = hello'
@@ -838,7 +893,7 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, c
     base_ref = "refs/remotes/origin/main"
     if base == "recorded":
         (git_repo / ".loopzero").mkdir()
-        (git_repo / ".loopzero/task.md").write_text(f"Base: {head}\n")
+        (git_repo / ".loopzero/task.md").write_text(f"## Base\nmain @ {head}\n")
     elif base == "tracked":
         git(git_repo, "update-ref", base_ref, head)
 
@@ -875,6 +930,16 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
 
+def test_input_blobs_keep_git_output_byte_for_byte(git_repo):
+    # Input keys hash diff-tree output; stripping would invalidate saved receipts.
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=git_repo, capture_output=True, text=True, check=True).stdout
+    empty = git("hash-object", "-t", "tree", "/dev/null").strip()
+    raw = git("-c", "core.quotePath=true", "diff-tree", "--no-commit-id", "--raw", "-r", "--no-abbrev",
+              empty, "HEAD", "--", "README.md")
+    assert raw.endswith("\n") and sandbox._input_blobs(make_config(), git_repo, ("README.md",)) == raw
+
+
 @pytest.mark.parametrize("error", [errno.E2BIG, errno.ENOENT])
 def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkeypatch, error, cache_check):
     command = "echo stage ran"
@@ -889,7 +954,7 @@ def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkey
             raise OSError(error, os.strerror(error))
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(sandbox._proc, "run", fail_fingerprint)
+    monkeypatch.setattr("loopzero.worktree.run", fail_fingerprint)
     if error != errno.E2BIG:
         with pytest.raises(OSError) as exc:
             sandbox.run_checks(config, git_repo)

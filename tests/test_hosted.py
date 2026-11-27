@@ -1,5 +1,6 @@
 """Trusted publisher behavior against GitHub metadata, without candidate execution."""
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -66,7 +67,7 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     gh.respond_pr_view(pr_json(), branch="lz/task")
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
-    gh.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [])
+    gh.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [])
     return gh
 
 
@@ -98,7 +99,7 @@ def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case
         "untrusted": [review | {"user": {"login": "attacker"}}], "stale": [approval("b" * 40)],
         "malformed": [review | {"body": "<!-- loopzero:review invalid -->\n**approve**"}],
     }.get(case, [review])
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", reviews)
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", reviews)
     delays = []
     monkeypatch.setattr(hosted.eligibility, "sleep", delays.append)
     if blocker in {"conflict", "unknown", "settles"}:
@@ -125,7 +126,7 @@ def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case
 def test_live_eligibility_rejects_changes_during_refresh(publisher, change, reason):
     publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json()),
                       fixtures.rest_pr_json(pr_json(**change)))
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [approval()])
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [approval()])
     readiness = hosted.eligibility.evaluate(REPO, 7, HEAD, "main", ("trusted-publisher",))
     assert not readiness.ready
     assert readiness.reasons == (reason,)
@@ -183,7 +184,7 @@ def test_hosted_review_coverage_after_source_head_changes(
     source["base"]["sha"] = base
     publisher.respond(f"api repos/{REPO}/pulls/7", source)
     verdict = "loopzero primary review by claude: **approve** (0 critical, 0 important, 0 suggestion)"
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1",
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET",
                       [approval(reviewed, state="COMMENTED", verdict=verdict)])
     publisher.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": "ahead"})
     monkeypatch.setattr(hosted.candidate_mod, "fetched_git",
@@ -204,8 +205,9 @@ def test_hosted_review_coverage_after_source_head_changes(
 
     ordinary = change == "ordinary"
     state = ("failure" if candidate else "pending") if ordinary else "success"
-    check_source(publisher, ["pending", state], error=hosted.LoopZeroError if state == "failure" else None,
-                 match="no review recorded")
+    statuses = check_source(publisher, ["pending", state], exit_code=int(state == "failure"))
+    if state == "failure":
+        assert "source #7: no review recorded" in statuses[-1]["description"]
 
 
 def test_merged_source_refresh_publishes_nothing(publisher):
@@ -262,11 +264,11 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     sleeps = []
     monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
     pr = f"api repos/{REPO}/pulls/7"
-    reviews = f"{pr}/reviews?per_page={github.PAGE}"
+    reviews = f"{pr}/reviews"
     if error in {"api", "recover", "before"}:
         fault = {"stdout": "HTTP/2.0 503 Service Unavailable\r\nX-GitHub-Request-Id: GHREQ-8774\r\n\r\n"
                            '{"message":"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ"}', "exit": 1}
-        endpoint = pr if error == "before" else f"{reviews}&page=1"
+        endpoint = pr if error == "before" else f"{reviews} --method GET"
         publisher.respond(endpoint, fault, [approval()] if error == "recover" else fault)
         check_source(publisher, states, exit_code=int(error != "recover"))
         assert sleeps == [5]
@@ -278,7 +280,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
         changes = {"head": {"headRefOid": "b" * 40}, "metadata": {"labels": [{"name": "hold"}]},
                    "merged": {"state": "MERGED"}}
         publisher.respond_pr_view(pr_json(**changes[error]))
-        publisher.respond(f"{reviews}&page=1", [approval()])
+        publisher.respond(f"{reviews} --method GET", [approval()])
     elif error == "publication":
         message = "invalid description"
         publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {}, {"stdout": "", "exit": 1, "stderr": f"{message} (HTTP 422)"})
@@ -286,7 +288,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     elif error == "pages":
         page = [{"id": i, "state": "COMMENTED"} for i in range(github.PAGE)]
         for number in (1, 2):
-            publisher.respond(f"{reviews}&page={number}", page)
+            publisher.respond(f"{reviews} " + ("--method GET" if number == 1 else f"page={number}"), page)
         exception, message = github.GhError, "GitHub repeated a full page"
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
@@ -296,8 +298,10 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
 
 
 @pytest.mark.parametrize("case,error,message", [
-    ("valid", None, ""), ("trunk", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
-    ("hold", hosted.LoopZeroError, "source #101: PR #101 has a merge-authority hold"),
+    ("valid", None, ""), ("trunk", None, ""), ("policy", None, "source #101: no review recorded"),
+    ("settled_mergeability", None, ""), ("pending_mergeability", None, ""),
+    ("poll_drift", CandidateRaceError, "changed during mergeability polling"),
+    ("hold", None, "source #101: PR #101 has a merge-authority hold"),
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
@@ -307,23 +311,26 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     ("stale", hosted.LoopZeroError, "head is no longer current"),
     ("untrusted", CandidateError, "head event was not sent"),
 ])
-def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatch, case, error, message):
+def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatch, capsys, case, error, message):
     event = candidate_event()
     event["action"], event["sender"]["id"] = (
         "edited" if case == "metadata" else event["action"], 1 if case == "untrusted" else event["sender"]["id"])
     branch = "trunk" if case == "trunk" else "main"
     values = candidate_payloads(event)
-    if case in {"valid", "trunk", "hold"}:
+    polling = case in {"settled_mergeability", "pending_mergeability", "poll_drift"}
+    if polling or case in {"valid", "trunk", "hold"}:
         gh = FakeGh(fake_bin, tmp_path)
         gh.respond("api graphql", threads_json())
     for number, sha in [(101, "1" * 40), (102, "2" * 40), (900, "c" * 40)]:
         path = f"/repos/owner/repo/pulls/{number}"
         values[path] = fixtures.rest_pr_json(pr_json(
             number=number, headRefOid=sha, isDraft=False,
-            labels=[{"name": "hold"}] if case == "hold" and number == 101 else [],
+            labels=[{"name": "hold"}] if case in {"hold", "poll_drift"} and number == 101 else [],
         )) | values[path]
         values[path]["base"]["ref"] = branch
-        values[f"{path}/reviews?per_page=100&page=1"] = [approval(sha)]
+        values[f"{path}/reviews"] = [approval(sha)]
+    if polling:
+        values["/repos/owner/repo/pulls/101"]["mergeable"] = None
     if case == "stale":
         values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
     if case == "malformed":
@@ -337,7 +344,12 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
             values["/" + path]["labels"].append({"name": "changed"})
         return event["repository"] if path == "repos/owner/repo" else values["/" + path]
     monkeypatch.setattr(github, "api_get", api_get)
-    monkeypatch.setattr("loopzero.candidate._retry_sleep", sleeps.append)
+    monkeypatch.setattr(github, "paged", api_get)
+    now = [0.0]
+    monkeypatch.setattr("loopzero.candidate._retry_clock", lambda: now[0])
+    monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda s: (sleeps.append(s), now.__setitem__(0, now[0] + s)))
+    mergeability_sleeps = []
+    monkeypatch.setattr(hosted.eligibility, "sleep", mergeability_sleeps.append)
     published = []
     def publish(*args):
         published.append(args)
@@ -350,13 +362,25 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
 
     def evaluate(repo, number, head, base, publishers, *, snapshot):
         evaluated.append((repo, number, head, base, publishers))
-        if case in {"valid", "trunk", "hold"}:
+        if polling or case in {"valid", "trunk", "hold"}:
             return real_evaluate(repo, number, head, base, publishers, snapshot=snapshot)
         if fault := {"interrupt": KeyboardInterrupt(), "api": github.GhUnavailable(("gh",), "HTTP 503")}.get(case):
             raise fault
         reasons = (github.MISSING_REVIEW_REASON,) if case == "policy" else ()
         return github.Readiness(not reasons, reasons)
-    if case not in {"valid", "trunk", "hold"}:
+    if polling:
+        pr_view = github.pr_view
+
+        def poll(repo, number):
+            if number == 101:
+                source = values[f"/repos/{repo}/pulls/{number}"]
+                if case == "poll_drift":
+                    source = source | {"labels": []}
+                return github.pr_from_rest(source | {"mergeable": None if case == "pending_mergeability" else True})
+            return pr_view(repo, number)
+
+        monkeypatch.setattr(github, "pr_view", poll)
+    elif case not in {"valid", "trunk", "hold"}:
         monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
     http_codes = {"mergify": 503, "mergify_auth": 401}
@@ -371,19 +395,25 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         monkeypatch.setattr(hosted.mergify, "api_get", lambda repo, suffix: candidate_status()
                             if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     with pytest.raises(error, match=message or None) if error else nullcontext():
-        assert hosted.main() == int(case in {"api", "mergify"})
+        assert hosted.main() == int(case in {"api", "mergify", "pending_mergeability", "policy", "hold"})
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
               "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
+    states |= {"settled_mergeability": ["pending", "success"], "pending_mergeability": ["pending"]}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
+    if case in {"settled_mergeability", "pending_mergeability"}:
+        assert mergeability_sleeps == ([2] if case == "settled_mergeability" else [2, 4, 8])
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":
-        assert rest_calls.count("apps/mergify") == 3 and sleeps == [2, 2] and len(evaluated) == 6
+        assert rest_calls.count("apps/mergify") == 8 and sleeps == [4] * 7 and len(evaluated) == 16
     if case == "valid":
         assert len(rest_calls) + len(published) <= 16
         assert evaluated == [("owner/repo", n, str(n - 100) * 40, "main", ("trusted-publisher",))
                              for n in (101, 102)]
         assert [call[-1] for call in published] == [
             "Refreshing live source review evidence", "All attested candidate sources are reviewed"]
+    elif case in {"hold", "policy"}:
+        assert message in published[-1][-1]
+        assert message in capsys.readouterr().out
     elif case not in states:
         assert published[-1][-1] == "Eligibility refresh failed; inspect workflow logs"
 
@@ -401,13 +431,15 @@ def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
     assert "github.event.label.name == 'hold'" in source
     assert "environment:\n      name: mergify-metadata\n      deployment: false" in candidate
     assert f"MERGIFY_API_KEY: {secret}" in candidate
+    assert re.search(r"LOOPZERO_PUBLISHER: .*github.repository == 'feder-positronics/loop-zero' && '\.' \|\| "
+                     r"'git\+https://github.com/feder-positronics/loop-zero@[0-9a-f]{40}'", workflow)
     for job in (source, candidate):
         assert "ref: ${{ github.event.repository.default_branch }}" in job
         assert "ref: ${{ github.event.pull_request.head" not in job
         assert "persist-credentials: false" in job
         assert "permissions:\n      contents: read\n      pull-requests: read\n      statuses: write" in job
-        assert "PYTHONPATH: src" in job
-        assert "python -m loopzero.hosted" in job
+        assert "PYTHONPATH" not in job and "uv run --no-project" in job and '--with "$LOOPZERO_PUBLISHER"' in job
+        assert "python -P -m loopzero.hosted" in job
     ruleset = json.loads((Path(__file__).parents[1] / ".github/rulesets/main.json").read_text())
     status_rule = next(rule for rule in ruleset["rules"] if rule["type"] == "required_status_checks")
     assert [check["context"] for check in status_rule["parameters"]["required_status_checks"]] == [
@@ -434,7 +466,7 @@ def test_source_status_limit(publisher, capsys, prior):
         pages = [statuses[i:i + 100] for i in range(0, 1001, 100)]
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *pages, *pages)
 
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [approval()])
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [approval()])
     if prior == 998:
         check_source(publisher, ["pending", "success"])
         assert not any("/commits/" in " ".join(call["argv"]) for call in publisher.calls)

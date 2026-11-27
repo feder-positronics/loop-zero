@@ -6,9 +6,8 @@ Copyright (c) 2026 TypeSafe AI. The upstream MIT license is preserved in
 [integrations/typesafe-ai/LICENSE](integrations/typesafe-ai/LICENSE).
 
 loop-zero's `grill-me` skill is adapted from Matt Pocock's
-[skills collection](https://github.com/mattpocock/skills) (`grill-me`/`grilling`);
-consumers may also carry verbatim copies of his `grill-with-docs` and `tdd`
-skills. These skills are not bundled in this checkout. loop-zero's own MIT
+[skills collection](https://github.com/mattpocock/skills) (`grill-me`/`grilling`).
+loop-zero's own MIT
 licence does not replace this notice. The collection's licence is reproduced
 verbatim below.
 

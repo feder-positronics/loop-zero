@@ -30,11 +30,11 @@ or evidence in Acceptance. Observe required UI and runtime behavior under actual
 permissions, with visual proof for UI changes per [Reporting](../../CONTRACT.md#reporting).
 Leave unobserved acceptance open with a next-action owner. Record revision,
 observations, trade-offs and limits in Notes or human Validation.
-Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
+Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../../CONTRACT.md#check-reuse-and-delivery-priority).
 
 Run commands expected to exceed about two minutes as [long-running jobs](../../../docs/DELEGATION.md#long-running-jobs)
 and follow the brief's [waiting and output rules](../../../docs/DELEGATION.md#briefs-and-ownership).
-Do not end the turn or report done before the job's `LOG.exit` exists, unless you report it killed and failed.
+Do not report done before the job's `LOG.exit` exists, unless you report it killed and failed.
 
 Keep receipts, evidence, review artifacts and handoffs on the PR, issue or named durable scratch;
 reserve `/tmp` for running-command logs, builds and browser runs. At task finish, leave leftover

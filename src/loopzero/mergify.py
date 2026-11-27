@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-from . import candidate, github
-from .types import LoopZeroError
+from . import github
+from .types import LoopZeroError, is_sha
 
 API = "https://api.mergify.com/v1"
 REQUEST = "loopzero:mergify-request"
@@ -40,6 +40,9 @@ class Membership:
     unmet_conditions: tuple[str, ...] = ()
 
 
+_MODES = " (need directory 0700 and file 0600; see SETUP.md)"
+
+
 def _credential(path: Path | None = None) -> str:
     supplied = os.environ.get("MERGIFY_API_KEY", "").strip()
     if supplied:
@@ -54,16 +57,16 @@ def _credential(path: Path | None = None) -> str:
         ) from exc
     if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
             or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
-        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}")
+        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}; expected mode 0700 and user ownership{_MODES}")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
-        raise MergifyError(f"unable to open Mergify credential file: {path}") from exc
+        raise MergifyError(f"unable to open Mergify credential file: {path}{_MODES}") from exc
     info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600):
         os.close(fd)
-        raise MergifyError(f"unsafe Mergify credential file permissions: {path}")
+        raise MergifyError(f"unsafe Mergify credential file permissions: {path}; expected mode 0600 and user ownership{_MODES}")
     with os.fdopen(fd, encoding="utf-8") as handle:
         token = handle.read().strip()
     if not token:
@@ -158,7 +161,8 @@ def _unmet_conditions(node: object) -> tuple[str, ...]:
         return ()
     children = node.get("subconditions")
     if isinstance(children, list) and children:
-        return tuple(label for child in children for label in _unmet_conditions(child))
+        labels = tuple(label for child in children for label in _unmet_conditions(child))
+        return (" | ".join(labels),) if labels and node.get("label") == "any of" else labels
     label = node.get("label")
     return (label,) if isinstance(label, str) and label.isprintable() else ()
 
@@ -170,9 +174,11 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
     try:
         if type(data["number"]) is not int or data["number"] != number:
             raise ValueError("pull request number mismatch")
-        actual = str(data["queue_rule_name"])
+        actual = data["queue_rule_name"]
+        if not isinstance(actual, str) or not actual:
+            raise ValueError("invalid queue name")
         if actual != queue:
-            raise ValueError(f"expected queue {queue!r}, got {actual!r}")
+            raise MergifyError(f"PR #{number} is in Mergify queue {actual!r}, expected {queue!r}")
         if (not isinstance(data["queued_at"], str) or not data["queued_at"]
                 or type(data["position"]) is not int or data["position"] < 0):
             raise ValueError("invalid queue position or admission time")
@@ -185,44 +191,8 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
             _unmet_conditions(check.get("conditions_evaluation")),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise MergifyError("invalid Mergify queue membership response") from exc
-
-
-def queue_predecessors(repo: str, branch: str, queue: str, number: int) -> tuple[int, ...]:
-    """Identify a single chain of one-PR batches ahead of a new request."""
-    status = api_get(repo, f"/merge-queue/status?branch={quote(branch, safe='')}")
-    if (not isinstance(status, dict) or status.get("mode") != "serial"
-            or status.get("waiting_pull_requests") != [] or status.get("forming_batches") != []):
-        return ()
-    try:
-        batches = candidate.flatten_batches(status)
-        successors: dict[str | None, tuple[str, int]] = {}
-        for batch_id, batch in batches.items():
-            pulls, parents = batch["pull_requests"], batch["parent_ids"]
-            if pulls == [] and batch.get("sub_batches"):
-                continue  # Container batches carry no direct source.
-            if (batch.get("queue_rule_name") != queue or not isinstance(pulls, list)
-                    or len(pulls) != 1 or not isinstance(parents, list) or len(parents) > 1):
-                return ()
-            source = pulls[0]["number"]
-            parent = next(iter(parents), None)
-            if type(source) is not int or source <= 0 or source == number or parent in successors:
-                return ()
-            successors[parent] = batch_id, source
-        return _ordered_sources(successors)
-    except (candidate.CandidateError, KeyError, TypeError, RecursionError):
-        return ()
-
-
-def _ordered_sources(successors: dict[str | None, tuple[str, int]]) -> tuple[int, ...]:
-    if len(successors) > 32:
-        return ()
-    sources = []
-    cursor = None
-    while cursor in successors:
-        cursor, source = successors.pop(cursor)
-        sources.append(source)
-    return tuple(sources) if not successors and len(sources) == len(set(sources)) else ()
+        detail = f": {exc}" if type(exc) is ValueError else ""
+        raise MergifyError(f"invalid Mergify queue membership response{detail}") from exc
 
 
 def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
@@ -245,7 +215,7 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
     blob = github.api_get(path)
     try:
         if (blob["type"] != "file" or blob["encoding"] != "base64"
-                or not isinstance(blob["sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", blob["sha"])
+                or not is_sha(blob["sha"])
                 or not isinstance(blob["content"], str) or len(blob["content"]) > 90000):
             return False
         document = yaml.load(base64.b64decode("".join(blob["content"].split()), validate=True),
@@ -345,12 +315,10 @@ def _departure_payload(body: str, queue: str) -> dict:
     return {}
 
 
-def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
-    """Use a bot report only when it identifies the latest command and current head."""
-    try:
-        comments = github._paged(f"repos/{repo}/issues/{number}/comments")
-    except github.GhError:
-        return None
+def _departure(
+    comments: list[dict], repo: str, number: int, head: str, queue: str,
+) -> tuple[Departure | None, dict]:
+    """Return the current departure or the later command that superseded it."""
     comments = [item for item in comments if type(item.get("id")) is int and item["id"] > 0]
     command = max(
         (item for item in comments if _queue_command(str(item.get("body") or ""), queue)),
@@ -359,45 +327,69 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
     latest = max(_comments_by(comments, "mergify[bot]"), key=lambda item: (_updated_at(item), item["id"]), default={})
     body = str(latest.get("body") or "")
     payload = _departure_payload(body, queue)
-    if not command or not payload:
-        return None
-
     url = f"https://github.com/{repo}/pull/{number}#issuecomment-"
     lines = body.splitlines()
     entered = next((line for line in lines if line.startswith("- ✅ **Entered the queue** ")), "")
     source = re.search(r"^- 🚫 \*\*Left the queue\*\* [^\n]+ · `([0-9a-f]{7,40})`$", body, re.M)
-    if f"]({url}{command['id']})" not in entered or not source or not head.startswith(source[1]):
-        return None
-    markers = [line for line in str(command.get("body") or "").splitlines()
-               if line.startswith(f"<!-- {REQUEST} ")]
-    if markers and _marker(REQUEST, head, queue) not in markers:
-        return None
+    if not payload or not entered or not source or not head.startswith(source[1]):
+        return None, {}
+    linked = re.search(rf"\]\({re.escape(url)}(\d+)\)", entered)  # absent when a rule or unlinked command admitted
+    admitted = next((item for item in comments if linked and item["id"] == int(linked[1])), {})
+    markers = [line for line in str(admitted.get("body") or "").splitlines() if line.startswith(f"<!-- {REQUEST} ")]
+    if linked and (not admitted or (markers and _marker(REQUEST, head, queue) not in markers)):
+        return None, {}
+    # Second-precision timestamps: a command in the departure's second may be a new attempt.
+    if command and command is not admitted and str(command.get("created_at") or "") >= _updated_at(latest):
+        return None, command
 
-    reason = payload.get("dequeue_reason")
-    checks = reason.get("checks") if isinstance(reason, dict) else None
+    reason = payload["dequeue_reason"] if isinstance(payload.get("dequeue_reason"), dict) else {}
+    checks = reason.get("checks")
     names = tuple(name for name in checks if isinstance(name, str) and name) if isinstance(checks, list) else ()
     attribution = next((kind for prefix, kind in (
-        ("**The failure is in this pull request.** It failed tested alone on top of ", "isolated"),
-        ("**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.", "stacked"),
+        ("**The failure is in this pull request.** ", "isolated"),
+        ("**Not proven to be this pull request's failure.** ", "stacked"),
     ) if any(line.startswith(prefix) for line in lines)), "")
-    if isinstance(reason, dict) and reason.get("code") == "CONFLICT_WITH_BASE_BRANCH":
+    if reason.get("code") == "CONFLICT_WITH_BASE_BRANCH" or "> - [ ] `-conflict`" in body:
         attribution = "base_conflict"
-    return Departure(f"{url}{latest['id']}", names, attribution)
+    return Departure(f"{url}{latest['id']}", names, attribution), {}
 
 
-def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
+def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
+    try:
+        comments = github.paged(f"repos/{repo}/issues/{number}/comments")
+    except github.GhError:
+        return None
+    return _departure(comments, repo, number, head, queue)[0]
+
+
+@dataclass(frozen=True)
+class QueueAttempt:
+    requested: bool = False
+    confirmed: bool = False
+    departure: Departure | None = None
+    admission: str | None = None
+
+
+def queue_attempt(repo: str, number: int, head: str, queue: str) -> QueueAttempt:
     login, requested, confirmed = github.login(token=""), False, False
     requested_at = ""
-    comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+    comments = github.paged(f"repos/{repo}/issues/{number}/comments")
+    departure, retry = _departure(comments, repo, number, head, queue)
     for item in _comments_by(comments, login):
         body = str(item.get("body") or "")
         lines, requeue = body.splitlines(), _queue_command(body, queue)
-        if _marker(REQUEST, head, queue) in lines or (requeue and confirmed):
+        marked = any(line.startswith(f"<!-- {REQUEST} ") for line in lines)
+        if _marker(REQUEST, head, queue) in lines or (not marked and requeue and (confirmed or item is retry)):
             requested, requested_at = True, str(item.get("created_at") or "")
         confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)
     report_id = _admission_report(comments, requested_at)
     report = f"https://github.com/{repo}/pull/{number}#issuecomment-{report_id}" if report_id else None
-    return requested, confirmed, report
+    return QueueAttempt(requested, confirmed, departure, report)
+
+
+def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
+    attempt = queue_attempt(repo, number, head, queue)
+    return attempt.requested, attempt.confirmed, attempt.admission
 
 
 def markers(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool]:

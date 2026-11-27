@@ -5,9 +5,7 @@
 - `git` 2.40+, Python 3.14, [uv](https://docs.astral.sh/uv/).
 - `gh` from GitHub's [package repository](https://github.com/cli/cli/blob/trunk/docs/install_linux.md)
   (tested with 2.101.0), logged in with `repo` scope, so system updates keep it
-  current. Distribution packages lag: Ubuntu's 2.46.0 lacks
-  `gh pr checks --json`, so scripts written for a current `gh` fail on it. Do
-  not use the snap: its confinement cannot reach the keyring. Without root,
+  current. Distribution packages lag (Ubuntu ships 2.46.0). Do not use the snap: its confinement cannot reach the keyring. Without root,
   unpack the [release](https://github.com/cli/cli/releases) tarball and put
   `bin/gh` in `~/.local/bin` ahead of `/usr/bin`; that copy does not update.
 - Keep `gh`, `claude` and `codex` current. Tools that shape the build (`uv`,
@@ -23,19 +21,19 @@
 ## Install
 
 Pin to a full commit SHA from `main` and upgrade by re-running with a new SHA.
+An unknown `workflow.toml` key blocks every command and hosted eligibility, so
+order upgrades: before adding a key to the base `workflow.toml`, advance every
+pin that reads it (host CLI and CI); before upgrading past a release that
+removes a key, delete the key from the base with the old CLI.
 The `v0.4.x` tags refer to the retired tool.
-`loopzero --version` prints the installed revision. Never edit the installed
-package: a hotfix is a branch, a PR, and a reinstall from the merged SHA.
+`loopzero --version` prints the revision of a Git-URL install; the verified
+install below prints `unknown revision`, so record its checked-out SHA. Never
+edit the installed package: a hotfix is a branch, a PR, and a reinstall from
+the merged SHA.
 User-wide:
 
 ```sh
 uv tool install "git+https://github.com/feder-positronics/loop-zero@<sha>"
-```
-
-As a dev dependency of your repository:
-
-```sh
-uv add --dev "loopzero @ git+https://github.com/feder-positronics/loop-zero@<sha>"
 ```
 
 For a verified CI install, check out the full commit SHA and run these commands
@@ -66,20 +64,13 @@ contract, credential guidance, and supporting references.
 
 Install the skills once per machine, not per repository: link each directory
 under the checkout's `core/skills` into `~/.agents/skills` (Codex) and
-`~/.claude/skills` (Claude Code). Link through one stable path that you repoint
-when you upgrade the CLI, so skills and CLI move together, and keep the previous
-revision for rollback. Never edit the linked checkout. Both harnesses follow a
+`~/.claude/skills` (Claude Code), through one stable path. Rerun the block
+below with the new checkout to upgrade, or the previous one to roll back: it
+repoints the stable path, links added skills and removes links to removed ones.
+Keep the previous revision for rollback. Never edit the linked checkout. Both harnesses follow a
 symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
-
-Before resuming automated PR check refreshes or explicit PR resyncs after an
-upgrade, advance every PR-body writer to the selected CLI revision. For
-unverified receipt warnings, use a revision containing
-[3ff80bd9 (#1160)](https://github.com/feder-positronics/loop-zero/commit/3ff80bd91c92f12d557cead31776df40d4328097).
-Once the writers are updated, run `loopzero check` for the current head to
-replace old receipts. If you roll back across that fix, pause those writes before
-switching the CLI and resume them once the writers support the warning again.
 
 If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
 after GitHub may have accepted a Claude review, run `loopzero review --repost`
@@ -94,7 +85,7 @@ directory, move it aside before linking that skill.
 
 ```sh
 CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
-SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
+SRC=~/.local/share/loopzero/source    # stable path; rerun this block to upgrade or roll back
 mkdir -p ~/.local/share/loopzero ~/.agents/skills ~/.claude/skills
 python3 - "$CHECKOUT" "$SRC" <<'PYTHON' &&
 import os
@@ -113,6 +104,12 @@ PYTHON
     n=$(basename "$d")
     ln -sfnT "$SRC/core/skills/$n" ~/.agents/skills/"$n" || exit
     ln -sfnT "$SRC/core/skills/$n" ~/.claude/skills/"$n" || exit
+  done
+  for l in ~/.agents/skills/* ~/.claude/skills/*; do
+    if [ -L "$l" ] && [ "$(readlink "$l")" = "$SRC/core/skills/${l##*/}" ] &&
+      [ ! -d "$l" ]; then
+      rm "$l" || exit
+    fi
   done
 )
 ```
@@ -165,11 +162,12 @@ to the base branch before starting your first task. If the base has a
   machine-specific workflow with `--config` on check, ready and merge when paths differ.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
-- Check, review, ready, merge, and status load the workflow from the
+- Check, pr, review, ready, merge, resolve, and status load the workflow from the
   remote-tracking delivery branch selected by `[repo] base` in the workflow
   at `origin/HEAD`. Missing trusted policy blocks these commands. Fetch and
   run `git remote set-head origin --auto` if the local default-branch pointer
-  is missing. Supply `--config <path>` during bootstrap or to override policy.
+  is missing. Upgrade delivery pins before adding workflow keys they need to
+  recognize. Supply `--config <path>` during bootstrap or to override policy.
 - For offline checks, warm the configured writable uv cache on the host with
   `UV_CACHE_DIR=<configured-cache> uv sync --group dev` (use the groups your
   checks require). This also fetches build backends such as hatchling.
@@ -292,16 +290,16 @@ PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
   pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
   `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
   then log in as it prints; the monitor refreshes standby Codex logins before they expire.
-- Every 5 minutes the monitor probes each account and keeps the best one active:
-  Claude prefers Fable and Opus, then Opus only; Codex prefers every model
-  available. At 95% of any limit an account counts as spent. `ai-accounts status`
-  shows accounts, emails, tiers and resets.
-- Claude probes retain each window's utilization (`util`) and reset (`resets`, null
-  when absent), including healthy windows. Legacy `reset` and `next_reset` are
-  aggregate availability estimates; status labels 7d and 5h resets separately.
-  `weekly_used_percent` is the overall 7d usage, null when unknown.
+- The monitor checks accounts every five minutes. Claude prefers Fable and Opus,
+  then Opus only. Codex keeps the current usable account until it is spent at 95%
+  of any limit by default, then prefers an account with every model available.
+  Claude reads the OAuth usage API at most every 30 minutes and uses one-token
+  header probes between reads. `ai-accounts status` shows accounts, tiers and
+  per-window utilization and resets. `weekly_used_percent` is the overall 7d
+  usage, null when unknown.
 - Only `exec` (including `--identity`) refuses non-owner Claude launches with exit 3
-  at >=85% overall weekly or five-hour utilization, or when that account's cached
+  at 85% utilization in any reported window, including the Fable weekly
+  window, or when that account's cached
   status is missing, unreadable or older than 20 minutes. The last 15 weekly points
   are reserved for required reviews and essential decisions; use
   `AI_ACCOUNTS_CLAUDE_OWNER=1` for that work to bypass the guard. No hysteresis is
@@ -352,10 +350,12 @@ that base and creates the task worktree from it.
 
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
-$EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
+$EDITOR .loopzero/task.md             # fill Goal, Problem, Context and Acceptance
 ```
 
-Make and commit a change in the task worktree, then run `loopzero check` there.
+Make and commit a change in the task worktree, then run `loopzero check` there;
+for a long check suite, run `loopzero pr` first so the draft exists
+([step 2](core/CONTRACT.md#the-six-steps)).
 Afterward, `loopzero status` shows the next step and requires authenticated
 access to the configured GitHub repository even before a PR exists. See the
 [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) and
@@ -373,12 +373,16 @@ requires one. If you used the isolated install, run these from the task
 worktree with the `install_dir` from that recipe.
 Make a scratch clone standalone before queueing, for example with
 `git clone --no-local`. If a Git object alternate is outside the check sandbox,
-`loopzero check` refuses it after the slot wait and before any stage runs.
+`loopzero check` refuses it before any stage runs. Move the task branch and
+`.loopzero/task.md` to the standalone clone, then recheck the same commit.
+To repair the original clone, run `git repack -a -d`, remove
+`objects/info/alternates`, and rerun the check.
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"
+loopzero pr      # open the draft before a long check
 loopzero check
-# After opening and reviewing the PR, keep this PATH for delivery.
+# After reviewing the PR, keep this PATH for delivery.
 loopzero ready --wait
 loopzero merge --wait
 ```
@@ -386,10 +390,21 @@ loopzero merge --wait
 A whole-job remote worker writes its own receipt. Ready can use it only if it
 passes the existing checks for a clean, passing receipt at the exact head,
 with the current ordered commands and matching settings fingerprint. An older
-worker can omit the fingerprint. A current worker can produce a different
-fingerprint, for example when its inherited `PATH` differs. GitHub required
+worker can omit the fingerprint. Explicit check settings must match. GitHub required
 CI supplies separate evidence. The [owner queue route](core/CONTRACT.md#blockers)
 applies only under its documented conditions.
+
+### Shared test hosts
+
+A consumer that runs checks on shared SSH test hosts reads their connection,
+capability and capacity from its own config. Jobs use disposable checkouts with
+no production checkout access and follow the
+[credential rules for test hosts](core/CREDENTIALS.md#resolve-only-when-needed).
+Dependency setup comes from the checked-out repository (its preparation script,
+otherwise its lock files). Hosts run jobs under the repository-pinned interpreter,
+never the system Python, and take no jobs while their toolchain differs from the
+pin; install that interpreter with umask 022, because a group- or world-writable
+install fails interpreter checks.
 
 ## Removing an abandoned task worktree
 
@@ -446,15 +461,18 @@ Mergify queue-rule name. `loopzero merge` posts the unnamed `@mergifyio queue`
 command (Mergify deprecates naming a queue and picks the first whose conditions
 match) once for the current source head, then confirms membership in the
 configured queue through `https://api.mergify.com/v1`. A command comment is only a
-request; a behind branch is treated as queued only after that API confirms it.
+request; a behind branch is treated as queued only after that API confirms it. A
+repository queue rule may admit the PR instead; Mergify's "already queued" reply
+to the command is then harmless.
 
-Use draft-PR integration checks: set `merge_queue.max_parallel_checks` greater
+Set `merge_queue.mode: serial`. For draft-PR integration checks, set
+`merge_queue.max_parallel_checks` greater
 than one, or to one only when the matching queue rule sets an explicit integer
 `batch_size` greater than one. In-place updates (one parallel check and batch size
 one) rewrite the reviewed source head and are unsupported. Admission checks the
 live serial queue's identity and reads `.mergify.yml` from GitHub's default
-branch, requiring that explicit integer parallelism and batch size and the
-matching queue name. The configuration blob
+branch, requiring explicit `mode: serial`, integer parallelism (and batch size
+when parallelism is one) and the matching queue name. The configuration blob
 must stay unchanged across verification. Local/PR files, `extends`, scopes,
 duplicate YAML keys and ambiguous or missing values do not establish this proof.
 
@@ -472,6 +490,9 @@ below deployed first. Preserve that condition on candidates (omit
 `merge_conditions` to inherit it, or include the same check explicitly). For example:
 
 ```yaml
+merge_queue:
+  mode: serial
+  max_parallel_checks: 2
 queue_rules:
   - name: main
     queue_conditions:
@@ -486,7 +507,7 @@ error refuses further delivery and cleanup; it cannot revoke an asynchronous
 command atomically. A newly pushed head must lack eligibility until its own
 review passes. Never deploy the adapter with only product-CI queue conditions.
 Before pushing to a requested or queued PR, withdraw it, confirm removal, then
-push, review the new head and explicitly admit it again. Do not interpret a CLI
+push, review the new head and admit it again. Do not interpret a CLI
 failure as proof that Mergify has removed an outstanding request.
 
 Provide an admin-scope Mergify application key in `MERGIFY_API_KEY`, or store it
@@ -509,23 +530,11 @@ Local readiness reads that list from the base configuration (legacy installation
 without it use the local GitHub login). Hosted evaluation requires an explicit list;
 its CI token's login is never a reviewer identity.
 
-Codex evidence v1 can include configured settings. For that shape the hosted
-reader needs [07ad5643 (#344)](https://github.com/feder-positronics/loop-zero/commit/07ad5643b3fc32541eee3c9f88ff5f4e917b7de7)
-or a newer compatible revision. An older reader can report `no review recorded
-for the current head` even when the publisher recorded a valid approval. Advance
-the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
-(the loop-zero checkout ref or installed package revision). Dispatch the
-eligibility workflow for the existing PR, or run the command below with its
-unchanged source SHA. The refreshed reader can use the approval already on GitHub.
-
-For inherited review coverage, advance both source and candidate workflow pins to
-a revision containing [23219dd3 (#1081)](https://github.com/feder-positronics/loop-zero/commit/23219dd39e641549164c346e137f4e09718115f6).
-The updated reader accepts an ancestor approval only across verified clean merges
-from the configured base. After deploying both pins, refresh eligibility for open
-sources judged by the older reader so their statuses reflect the updated policy.
-
-From a trusted base checkout, replace the placeholders with the trusted
-Loop-zero pin and the source PR head SHA:
+Advance the consumer CI pin that supplies `loopzero.hosted` or
+`loopzero.eligibility` (the loop-zero checkout ref or installed package revision)
+before relying on a new reader or writer behaviour. To refresh an open PR judged
+by an older reader, dispatch the eligibility workflow for it, or run this from a
+trusted base checkout with the trusted Loop-zero pin and the source PR head SHA:
 
 ```sh
 uv run --no-project --with "git+https://github.com/feder-positronics/loop-zero@<sha>" \
@@ -544,7 +553,11 @@ PR configuration. A source push needs a status on its new SHA; base-only movemen
 does not invalidate an unchanged source review. This status does not replace
 integration CI or a local `loopzero check` receipt.
 
-For the supplied Actions publisher, create an environment named
+Copy the [Actions publisher workflow](.github/workflows/eligibility.yml)
+to `.github/workflows/eligibility.yml` in the consumer repository. Both jobs
+install the revision pinned by `LOOPZERO_PUBLISHER` and run from the trusted
+default branch checkout. Update that pin when adopting a newer publisher.
+Create an environment named
 `mergify-metadata`, restrict its deployment branches to the protected default
 branch, and store `MERGIFY_API_KEY` as an environment secret rather than a
 repository secret. Use the narrowest Mergify credential that can read queue status.
@@ -552,7 +565,14 @@ Only the candidate job uses this environment and credential. The source job runs
 without either. Restricting the environment to the protected default branch limits
 credential access, while commit-status publishers still share a context namespace.
 
-GitHub and Mergify match `Loop-zero Eligibility` by context name. A repository
+Publishing the status alone gates nothing. First land the publisher and its
+configuration on the base and confirm the status appears on a PR (a publisher
+added by a PR cannot publish for that PR's own head). Then require
+`Loop-zero Eligibility` and every other `[checks].required_ci` context on the
+base branch in GitHub (branch protection or a ruleset), add it to
+`[checks].required_ci` on the trusted base, and refresh open PRs that lack it.
+[MERGIFY.md](docs/MERGIFY.md#protection-and-credentials) shows loop-zero's own
+rulesets as a worked example. GitHub and Mergify match it by context name. A repository
 writer who can add an Actions workflow can publish the same context with its
 `GITHUB_TOKEN`. Before cutover, either explicitly accept that cooperative writer
 boundary or replace this publisher with a dedicated GitHub App and bind the
@@ -573,8 +593,10 @@ existing cooperative trust policy, not instantaneous invalidation: metadata can
 change after the last read and before landing. Do not claim atomic review/merge
 validation or enable unattended landing without accepting this boundary.
 
-After cancellation or ejection, repair the cause and explicitly requeue with
-`@mergifyio queue` as the whole PR comment, then
-resume `loopzero merge --wait`.
+### Requeue after cancellation or ejection
+
+After cancellation or ejection, repair the cause and requeue: an unchanged head
+needs `@mergifyio queue` as the whole PR comment; `loopzero merge` requests a new
+head, or a repository queue rule readmits it. Then resume `loopzero merge --wait`.
 The CLI never retries a failed admission automatically. Resume request markers
 are scoped to the publishing GitHub login; use the same account across sessions.

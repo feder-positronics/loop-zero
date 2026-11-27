@@ -7,7 +7,7 @@ base = "main"
 [checks]
 # Omit scratch to use the built-in default directories.
 commands = [
-  "uv run --group dev ruff check src tests",
+  "uv run --group dev ruff check src tests scripts scripts/ai-accounts/ai-accounts",
   "uv run --group dev tach check",
   "uv run --python 3.14 python scripts/check_architecture_docs.py",
   "scripts/size_budget.sh", # Same script and caps as CI; base is the merge-base with origin/main.
@@ -16,7 +16,8 @@ commands = [
 required_ci = ["checks", "Loop-zero Eligibility"]
 ro_paths = ["/home/marcin/.local/bin", "/home/marcin/.local/share/uv"]
 writable = ["/home/marcin/.cache/uv"]
-env = { UV_CACHE_DIR = "/home/marcin/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/marcin/.local/share/uv/python" }
+# UV_PYTHON/UV_LOCKED match CI's --python 3.14 --locked and keep the offline sync stage.
+env = { UV_PYTHON = "3.14", UV_LOCKED = "1", UV_CACHE_DIR = "/home/marcin/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/marcin/.local/share/uv/python" }
 network = false
 
 [delivery]
@@ -27,8 +28,7 @@ reviewers = ["claude", "codex"]
 review_publishers = ["loopzero-feder-positronics[bot]"]
 
 # Owner policy (2026-09-19): Opus at medium; use high exceptionally, with a concrete
-# reason in the PR; max is forbidden (the Luna exception is not enabled here because the
-# allow-list is per family). Codex follows models.toml `review = "deep"`.
+# reason in the PR. Codex follows models.toml `review = "deep"`.
 [delivery.review.claude]
 model = "claude-opus-5-5"
 effort = "medium"

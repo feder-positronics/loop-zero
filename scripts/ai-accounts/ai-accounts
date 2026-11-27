@@ -5,7 +5,7 @@ Store: ~/.local/state/ai-accounts (0700). Never prints secrets.
 
   ai-accounts status [--json]            show accounts, tiers and the active ones
   ai-accounts check [--quiet]            probe every account, switch if a better tier exists
-  ai-accounts use <provider> <name>      activate an account by hand (kept while it stays best tier)
+  ai-accounts use <provider> <name>      activate an account by hand
   ai-accounts add claude <name>          store a `claude setup-token` token read from stdin
   ai-accounts add codex <name>           create a CODEX_HOME for another ChatGPT login
   ai-accounts label claude <name> <email>
@@ -30,11 +30,11 @@ Claude tiers: 2 = Fable + Opus usable, 1 = Opus only, 0 = none. Codex tiers: 2 =
 model usable, 1 = some models restricted, 0 = none. -1 = unknown (probe failed).
 An account is usable below AI_ACCOUNTS_MARGIN (default 0.95) of every limit window.
 Claude accounts authenticate with CLAUDE_CODE_OAUTH_TOKEN; Codex accounts with CODEX_HOME
-("main" is ~/.codex). The monitor keeps the current account while it is in the best
-available tier and switches otherwise, preferring the least-used account.
+("main" is ~/.codex). The monitor prefers the best available tier when choosing a Codex account
+and keeps the current one while it remains usable.
 
-Status reports each window's usage, reset, source and data age. Claude prefers the
-OAuth usage API, falling back to the existing one-token model probes.
+Status reports each window's usage, reset, source and data age. Claude reads the
+OAuth usage API at most every 30 minutes and uses one-token model probes between reads.
 JSON weekly_used_percent remains the overall 7d window (null if unknown).
 Only exec (including --identity) refuses non-owner Claude launches at >=85% of any
 reported cached limit (including the Fable sub-cap), or with missing/unreadable
@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import ctypes
 import datetime as dt
 import errno
@@ -253,10 +254,8 @@ def _sync_codex_home(home: Path) -> None:
     for src in CODEX_MAIN.iterdir():
         dst = home / src.name
         if shared(src) and not dst.exists() and not dst.is_symlink():
-            try:
+            with contextlib.suppress(FileExistsError):
                 dst.symlink_to(src)
-            except FileExistsError:
-                pass
 
 
 def identity(provider: str, name: str) -> str:
@@ -385,7 +384,7 @@ def binding_reset(windows: list[dict]) -> float | None:
 
 
 def claude_windows(result: dict, fetched_at: float) -> list[dict]:
-    """Normalize legacy model headers without conflating their reset times."""
+    """Normalize model headers without conflating their reset times."""
     found = {}
     for model in result.get("models", {}).values():
         if not isinstance(model, dict):
@@ -471,16 +470,10 @@ def probe_claude_model(token: str, model: str) -> dict:
     statuses = {k: v["status"] for k, v in fields.items() if "status" in v}
     rejected = [k for k, v in statuses.items() if v == "rejected"]
     ok = code == 200 and not rejected and all(u < MARGIN for u in util.values())
-    # The binding claims are the rejected or over-margin ones; usable again after the last resets.
-    binding = set(rejected) | {k for k, u in util.items() if u >= MARGIN}
     window_resets = {k: reset_timestamp(v.get("reset")) for k, v in fields.items()}
-    # Legacy aggregate stays unknown if any binding window's reset is missing.
-    reset = binding_reset([{"used_pct": util[k] * 100 if k in util else None,
-                            "status": statuses.get(k), "resets_at": window_resets[k]}
-                           for k in binding])
     return {"http": code, "ok": ok, "util": util, "rejected": rejected, "window_status": statuses,
             "org": headers.get("anthropic-organization-id"),
-            "resets": window_resets, "reset": reset if not ok else None}
+            "resets": window_resets}
 
 
 def check_claude(name: str) -> dict:
@@ -493,7 +486,7 @@ def check_claude(name: str) -> dict:
         next_allowed = 0
     try:
         if now() < next_allowed:
-            raise ValueError(f"usage API backoff until {dt.datetime.fromtimestamp(next_allowed, dt.timezone.utc).isoformat()}")
+            raise ValueError(f"next usage API read at {iso(next_allowed)}")
         token = claude_token(name)
         req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
             "Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
@@ -519,7 +512,7 @@ def check_claude(name: str) -> dict:
             next_allowed = max(next_allowed, min(retry_at, now() + MAX_BACKOFF))
             write_private(next_file, str(next_allowed) + "\n")
         if code != 200:
-            log(f"claude {name}: usage API HTTP {code}; backoff until {dt.datetime.fromtimestamp(next_allowed, dt.timezone.utc).isoformat()}")
+            log(f"claude {name}: usage API HTTP {code}; backoff until {iso(next_allowed)}")
             raise ValueError(f"usage API HTTP {code}")
         data = json.loads(raw)
         if not isinstance(data, dict):
@@ -566,11 +559,8 @@ def check_claude_headers(name: str) -> dict:
     tier = next((t for t, _, needed in CLAUDE_TIERS if all(models[m]["ok"] for m in needed)), 0)
     usable = next((needed for t, _, needed in CLAUDE_TIERS if t == tier), tuple(models))
     util = max((u for m in usable for u in models[m]["util"].values()), default=0.0)
-    # Legacy aggregate next_reset: when the best tier can come back.
-    resets = [models[m]["reset"] for m in CLAUDE_TIERS[0][2] if models[m]["reset"]]
     org = next((m["org"] for m in models.values() if m.get("org")), None)
-    return {"tier": tier, "util": util, "models": models, "email": claude_email(name, org),
-            "next_reset": min(resets) if resets else None}
+    return {"tier": tier, "util": util, "models": models, "email": claude_email(name, org)}
 
 
 def claude_email(name: str, org: str | None) -> str | None:
@@ -740,13 +730,10 @@ def select(provider: str, results: dict[str, dict], current: str | None) -> str 
     if not known:
         return current
     best = max(r["tier"] for r in known.values())
-    if current in known and known[current]["tier"] == best:
-        if provider == "codex" and known[current].get("util", 1.0) >= CLAUDE_NON_OWNER_LIMIT / 100:
-            below_reserve = [n for n, r in known.items()
-                             if r["tier"] == best and r.get("util", 1.0) < CLAUDE_NON_OWNER_LIMIT / 100]
-            if below_reserve:
-                return min(below_reserve, key=lambda n: known[n]["util"])
-        return current
+    if current in known:
+        tier = known[current]["tier"]
+        if tier == best or (provider == "codex" and tier > 0):
+            return current
     if best == 0 and current in results:
         return current  # nothing usable anywhere; do not churn
     return min((n for n, r in known.items() if r["tier"] == best),
@@ -755,11 +742,7 @@ def select(provider: str, results: dict[str, dict], current: str | None) -> str 
 
 def claude_weekly_used_percent(result: dict) -> float | None:
     """Overall weekly window; short and model-specific windows are separate limits."""
-    if "windows" in result:
-        return next((w.get("used_pct", w.get("used_percent")) for w in result["windows"] if w["window"] == "7d"), None)
-    values = [m["util"]["7d"] for m in result.get("models", {}).values()
-              if "7d" in m.get("util", {})]
-    return max(values) * 100 if values else None
+    return next((w["used_pct"] for w in result.get("windows", []) if w["window"] == "7d"), None)
 
 
 def claude_exec_refusal(name: str | None) -> str | None:
@@ -772,11 +755,8 @@ def claude_exec_refusal(name: str | None) -> str | None:
         if not isinstance(result, dict) or now() - status["checked_at"] > 1200:
             reason = "cached status missing or older than 20 minutes"
         else:
-            windows = result.get("windows")
-            if windows is None:
-                windows = claude_windows(result, status["checked_at"])
-            for window in windows:
-                percent = window.get("used_pct", window.get("used_percent"))
+            for window in result["windows"]:
+                percent = window["used_pct"]
                 if percent is not None and percent >= CLAUDE_NON_OWNER_LIMIT:
                     reset = window.get("resets_at")
                     return (f"{window['window']} window {percent:g}% used (limit 85%); " +
@@ -795,14 +775,12 @@ def claude_exec_allowed(name: str | None) -> bool:
 
 def snapshot_fields(result: dict, instance: str, checked_at: float) -> None:
     """One status-file schema for the CLI, guard and status page; no extra state."""
-    if "windows" not in result:
-        result["windows"] = claude_windows(result, checked_at)
-    windows = result["windows"]
+    windows = result.setdefault("windows", [])
     result["instance"] = instance
     result["unknown_reason"] = None if windows else result.get("error", "no rate-limit snapshot cached")
     for window in windows:
         reset = reset_timestamp(window.get("resets_at"))
-        window.update(instance=instance, used_pct=window.pop("used_percent", window.get("used_pct")),
+        window.update(instance=instance,
                       resets_at=dt.datetime.fromtimestamp(reset, dt.timezone.utc).isoformat().replace("+00:00", "Z") if reset is not None else None,
                       resets_local=iso(reset) if reset is not None else None,
                       snapshot_age_s=max(0, int(now() - window.get("fetched_at", checked_at))),
@@ -1157,13 +1135,13 @@ def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None,
         proc = subprocess.Popen(argv, env=env, stderr=subprocess.PIPE)
         seen: list[bytes] = []
 
-        def pump() -> None:
-            for chunk in iter(lambda: proc.stderr.read1(4096), b""):
+        def pump(stream, seen: list[bytes]) -> None:
+            for chunk in iter(lambda: stream.read1(4096), b""):
                 sys.stderr.buffer.write(chunk)
                 sys.stderr.buffer.flush()
                 seen.append(chunk)
 
-        t = threading.Thread(target=pump, daemon=True)
+        t = threading.Thread(target=pump, args=(proc.stderr, seen), daemon=True)
         t.start()
         code = proc.wait()
         t.join(timeout=1)

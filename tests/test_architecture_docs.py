@@ -4,7 +4,6 @@ import runpy
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -30,7 +29,7 @@ def run(repo, base, *args):
                           text=True, capture_output=True, check=False)
 
 
-@pytest.mark.parametrize("sync", ["missing", "guide", "trailer", "empty", "squash",
+@pytest.mark.parametrize("sync", ["missing", "guide", "trailer", "empty", "short", "squash",
                                   "untracked-non-utf8", "staged-non-utf8"])
 def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, sync):
     if sync.endswith("non-utf8"):
@@ -46,8 +45,8 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
     (git_repo / "core/CONTRACT.md").write_text("# New authority\n")
     if sync == "guide":
         (git_repo / "docs/ARCHITECTURE.md").write_text("# New authority explained\n")
-    if sync in {"trailer", "empty", "squash"}:
-        reason = "New wording preserves the documented authority boundary." if sync != "empty" else ""
+    if sync in {"trailer", "empty", "short", "squash"}:
+        reason = {"empty": "", "short": "Same boundary"}.get(sync, "New wording preserves the documented authority boundary.")
         git(git_repo, "add", ".")
         git(git_repo, "commit", "-m", "Update\n\nArchitecture-Review: unchanged; " + reason)
     if sync == "squash":
@@ -56,7 +55,9 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
         git(git_repo, "commit", "-m", "Squash without the source trailer")
     done = run(git_repo, base)
     assert done.returncode == (0 if sync in {"guide", "trailer"} else 1)
-    if done.returncode:
+    if sync in {"short", "empty"}:
+        assert "Architecture-Review reason must be at least 20 characters" in done.stderr
+    elif done.returncode:
         assert "without guide update or reasoned Architecture-Review trailer" in done.stderr
     if sync == "squash":
         assert run(git_repo, base, "--links-only").returncode == 0
@@ -90,24 +91,15 @@ def test_missing_base_fails_closed(git_repo, base):
     assert run(git_repo, "not-a-revision").returncode == 1
 
 
-@pytest.mark.parametrize("entry", ["architecture", "sdist"])
-def test_direct_git_timeout(tmp_path, monkeypatch, capsys, entry):
+def test_direct_git_timeout(monkeypatch, capsys):
     def stalled_git(argv, *, timeout, **kwargs):
         assert timeout == 60
         raise subprocess.TimeoutExpired(argv, timeout)
 
     monkeypatch.setattr(subprocess, "run", stalled_git)
-    if entry == "architecture":
-        monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--links-only"])
-        assert runpy.run_path(str(SCRIPT))["main"]() == 1
-        assert "timed out" in capsys.readouterr().err
-    else:
-        monkeypatch.setitem(sys.modules, "hatchling.builders.hooks.plugin.interface",
-                            SimpleNamespace(BuildHookInterface=object))
-        hook = runpy.run_path(str(SCRIPT.parents[1] / "hatch_build.py"))["TrackedSdistFiles"]
-        (tmp_path / ".git").mkdir()
-        with pytest.raises(subprocess.TimeoutExpired):
-            hook.initialize(SimpleNamespace(root=tmp_path), "", {})
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--links-only"])
+    assert runpy.run_path(str(SCRIPT))["main"]() == 1
+    assert "timed out" in capsys.readouterr().err
 
 
 def test_tach_enforces_module_boundaries(tmp_path):

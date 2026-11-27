@@ -45,7 +45,8 @@ and the live attestation inputs are reread before success. Squashed parents can
 pass; unavailable live predecessors behind a missing batch and unrelated main
 advances may still reject. The fallback requires POSIX file-size limits and Git with
 `merge-tree --write-tree`; it is bounded to 32 sources, 100,000 reachable objects,
-256 MiB on disk, 8 MiB command output, history depth 200 and 120 seconds of Git work.
+256 MiB on disk, 8 MiB command output and 120 seconds of Git work. Fetches start at
+depth 200 and deepen within those bounds when merge history is incomplete.
 
 ## Protection and credentials
 
@@ -61,8 +62,6 @@ workflow applies them.
   grant and ruleset bypasses are separate; never replace this with a blanket
   bypass on the guardrail set, and prepare any broader authority as a concrete
   change for review.
-- `main-before-mergify.json` is the pre-cutover rollback payload. Capture a fresh
-  live snapshot before applying anything; never overwrite unrelated live changes.
 
 The Mergify admin application key is needed because queue read endpoints offer no
 narrower scope; a CI-scoped key or an Actions installation token cannot read queue

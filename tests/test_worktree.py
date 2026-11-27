@@ -5,6 +5,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,10 +18,7 @@ from tests.test_setup import SETUP, setup_commands
 @pytest.fixture
 def repo(git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """`git_repo` wired to a bare origin that already holds `main`."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     origin = tmp_path / "origin.git"
     git(git_repo, "init", "-q", "--bare", "-b", "main", str(origin))
     git(git_repo, "remote", "add", "origin", str(origin))
@@ -84,7 +82,29 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     prompts = [ln.split(":**", 1)[0] for ln in text.splitlines() if ln.startswith("- **")]
     assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
-    assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
+    assert base_section.strip().splitlines() == [f"main @ {upstream}"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_start_rejects_origin_response_for_another_ref(repo, monkeypatch, legacy):
+    commit_on_origin(repo, "feature.txt")
+    actual_run = worktree.run
+
+    def wrong_ref(argv, **kwargs):
+        if argv[:3] == ("git", "fetch", "--porcelain"):
+            if legacy:
+                return actual_run(("git", "fetch", "--loopzero-unsupported"), **kwargs)
+            output = actual_run(argv, **kwargs)
+            return replace(output, stdout=output.stdout.replace("/origin/main", "/origin/unrelated"))
+        output = actual_run(argv, **kwargs)
+        if argv[:2] == ("git", "ls-remote"):
+            return replace(output, stdout=output.stdout.replace("/heads/main", "/heads/unrelated"))
+        return output
+
+    monkeypatch.setattr(worktree, "run", wrong_ref)
+    with pytest.raises(worktree.GitError, match=r"origin did not report|refs/remotes/origin/unrelated"):
+        worktree.start(repo, "wrong-ref", "main")
+    assert not (repo / ".worktrees" / "wrong-ref").exists()
 
 
 @pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base", "detached"])
@@ -92,7 +112,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     repo = repo.rename(repo.with_name("repo\rreturn"))
     base = commit_on_origin(repo, "base-change")
     wt = repo / ".worktrees" / "my-task"
-    run_git = worktree._git
+    run_git = worktree.git
 
     def interrupt_after_add(cwd, *args, **kwargs):
         output = run_git(cwd, *args, **kwargs)
@@ -102,7 +122,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         return output
 
     with monkeypatch.context() as patch:
-        patch.setattr(worktree, "_git", interrupt_after_add)
+        patch.setattr(worktree, "git", interrupt_after_add)
         with pytest.raises(KeyboardInterrupt):
             worktree.start(repo, "my-task", "main")
     task = worktree.task_file(wt)
@@ -239,7 +259,12 @@ def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path)
 def test_task_helpers_errors(repo: Path) -> None:
     wt = worktree.start(repo, "tk", "main")
     worktree.task_file(wt).write_text("# no base line\n")
-    with pytest.raises(worktree.WorktreeError, match="Base:"):
+    with pytest.raises(worktree.WorktreeError, match="Base section"):
+        worktree.base_sha(wt)
+    worktree.task_file(wt).write_text("## Base\nmain @ " + "a" * 40 + "\n")
+    assert worktree.base_sha(wt) == "a" * 40
+    worktree.task_file(wt).write_text("Base: " + "b" * 40 + "\n")  # retired single-line form
+    with pytest.raises(worktree.WorktreeError, match="Base section"):
         worktree.base_sha(wt)
     worktree.task_file(wt).unlink()
     with pytest.raises(worktree.WorktreeError, match="missing"):
@@ -247,22 +272,15 @@ def test_task_helpers_errors(repo: Path) -> None:
 
 
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
-    wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
-    monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
+    (repo / ".git/info/exclude").write_text(".venv/\n")
+    wt, calls, real = worktree.start(repo, "done", "main"), [], worktree.git
+    monkeypatch.setattr(worktree, "git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
     (wt / f".loopzero/reviewer-output-{worktree.head(wt)[:12]}-primary.json").write_text("{}")
+    (wt / ".venv").mkdir()
+    (wt / ".venv/dependency").write_text("generated")
     worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
-
-
-def test_cleanup_removes_ignored_artifacts(repo: Path) -> None:
-    (repo / ".git/info/exclude").write_text(".venv/\n")
-    wt = worktree.start(repo, "cached", "main")
-    (wt / ".venv").mkdir()
-    (wt / ".venv/dependency").write_text("generated")
-    worktree.cleanup(wt, worktree.head(wt))
-    assert not wt.exists()
-    assert not git(repo, "branch", "--list", "lz/cached")
 
 
 def test_cleanup_preserves_untracked_work_with_ignored_artifacts(repo: Path) -> None:

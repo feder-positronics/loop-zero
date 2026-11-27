@@ -1,6 +1,6 @@
 """Attest a live Mergify candidate around a caller-owned source policy.
 
-The caller owns API transport and source eligibility. This module only binds an
+The caller owns API reads and source eligibility. This module only binds an
 authenticated temporary candidate to stable, current source PR heads without
 checking out or executing candidate code.
 """
@@ -17,9 +17,13 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import quote
+
+from loopzero import github
+from loopzero.types import LoopZeroError, is_sha
 
 MERGIFY_APP_ID = 10562
 MERGIFY_APP_OWNER = "Mergifyio"
@@ -29,10 +33,8 @@ MERGIFY_BOT_LOGIN = "mergify[bot]"
 QUEUE_BRANCH_PREFIX = "mergify/merge-queue/"
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_SHA = re.compile(r"^[0-9a-f]{40}$")
-_ATTEST_ATTEMPTS = 3
 _ATTEST_SECONDS = 30
-_ATTEST_DELAY = 2
+_ATTEST_DELAY = 4
 _BATCH_SECONDS = 90
 _retry_sleep = time.sleep
 _retry_clock = time.monotonic
@@ -63,7 +65,7 @@ MergifyStatus = Callable[[str, str, str], JsonObject]
 SourcePolicy = Callable[[int, JsonObject], None]
 
 
-class CandidateError(RuntimeError):
+class CandidateError(LoopZeroError):
     """Candidate identity, membership, history, or source policy failed closed."""
 
 
@@ -227,7 +229,7 @@ def _attest_source(
         f"source PR #{number} does not target this repository's {base_branch} branch",
     )
     source_sha = head.get("sha")
-    _require(_matches(_SHA, source_sha), f"source PR #{number} has an invalid head")
+    _require(is_sha(source_sha), f"source PR #{number} has an invalid head")
     comparison = _object(
         github_get(f"/repos/{repository['full_name']}/compare/{source_sha}...{candidate_sha}"),
         "GitHub compare returned an invalid payload",
@@ -238,10 +240,14 @@ def _attest_source(
     return source_sha
 
 
-def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None:
-    if operation == "fetch" and returncode:
-        from loopzero import github
+class _MissingMergeHistory(CandidateError):
+    """Merge evidence is missing or incomplete in the current Git store."""
 
+
+def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None:
+    if operation == "merge-base" and returncode == 1:
+        raise _MissingMergeHistory("Git history does not prove the requested merge base or ancestry")
+    if operation == "fetch" and returncode:
         output.seek(0)
         diagnostic = output.read(_TREE_OUTPUT).decode(errors="replace")
         if github._transient_error(diagnostic, False) or re.search(r"returned error: (?:429|5\d\d)", diagnostic):
@@ -251,8 +257,6 @@ def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None
 
 
 def _fetch_token() -> str:
-    from loopzero import github
-
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         try:
@@ -263,6 +267,39 @@ def _fetch_token() -> str:
             raise CandidateError("GitHub fetch authentication unavailable") from None
     _require(bool(token), "GitHub fetch authentication unavailable")
     return token
+
+
+def _fetch_history(run: Callable[..., str], repo: str, heads: list[str],
+                   env: dict[str, str], depth: str) -> None:
+    run("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+        depth, f"https://github.com/{repo}.git", *heads, command_env=env)
+    objects = run("rev-list", "--objects", "--no-object-names", *heads).splitlines()
+    _require(len(objects) <= _TREE_OBJECTS, "Git object count bound exceeded")
+
+
+def _merge_history_git(run: Callable[..., str], fetch: Callable[[str], None], shallow: Path) -> Callable[..., str]:
+    increment = _TREE_DEPTH
+
+    def git(*args: str, **kwargs: Any) -> str:
+        nonlocal increment
+        while True:
+            try:
+                result = run(*args, **kwargs)
+                if args[:2] == ("merge-base", "--all") and shallow.exists() and run(
+                    "rev-list", "--max-parents=0", *args[2:], "--not", *result.splitlines(),
+                ):
+                    raise _MissingMergeHistory("shallow history may hide other merge bases")
+                return result
+            except _MissingMergeHistory:
+                if not shallow.exists():
+                    raise
+                boundary = set(shallow.read_bytes().splitlines())
+                fetch(f"--deepen={increment}")
+                if shallow.exists() and set(shallow.read_bytes().splitlines()) == boundary:
+                    raise
+                increment *= 2
+
+    return git
 
 
 @contextlib.contextmanager
@@ -286,7 +323,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         }
         deadline = time.monotonic() + _TREE_SECONDS
 
-        def git(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False,
+        def run(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False,
                 merge_conflict_status: bool = False) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
@@ -328,13 +365,10 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                         os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
 
-        git("init", "--bare", "--template=", ".")
-        git("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
-            f"--depth={_TREE_DEPTH}",
-            f"https://github.com/{repo}.git", *heads, command_env=fetch_env)
-        objects = git("rev-list", "--objects", "--no-object-names", *heads).splitlines()
-        _require(len(objects) <= _TREE_OBJECTS, "Git object count bound exceeded")
-        yield git
+        fetch = partial(_fetch_history, run, repo, heads, fetch_env)
+        run("init", "--bare", "--template=", ".")
+        fetch(f"--depth={_TREE_DEPTH}")
+        yield _merge_history_git(run, fetch, root / "shallow")
 
 
 def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> None:
@@ -357,8 +391,9 @@ def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> No
         _require(not pending, "ambiguous source order in candidate topology")
         integrated = main
         for source in reversed(reverse_order):
+            git("merge-base", "--all", integrated, source)
             tree = git("merge-tree", "--write-tree", integrated, source)
-            _require(_SHA.fullmatch(tree) is not None, "invalid integration tree")
+            _require(is_sha(tree), "invalid integration tree")
             integrated = git("commit-tree", tree, "-p", integrated, "-p", source,
                              "-m", "Candidate tree attestation")
         _require(git("rev-parse", f"{integrated}^{{tree}}") ==
@@ -380,7 +415,7 @@ def attest_candidate(
     batch_wait = [0.0]
     batch_deadline = _retry_clock() + _BATCH_SECONDS
     deadline = _retry_clock() + _ATTEST_SECONDS
-    for attempt in range(_ATTEST_ATTEMPTS):
+    while True:
         try:
             return _attest_candidate_once(
                 event, base_branch,
@@ -392,15 +427,14 @@ def attest_candidate(
             )
         except CandidateRaceError:
             race_deadline = min(batch_deadline, deadline + batch_wait[0])
-            if attempt + 1 == _ATTEST_ATTEMPTS or _retry_clock() + _ATTEST_DELAY >= race_deadline:
+            if _retry_clock() + _ATTEST_DELAY >= race_deadline:
                 raise
             _retry_sleep(_ATTEST_DELAY)
             if _retry_clock() >= race_deadline:
                 raise
-    raise AssertionError("unreachable")
 
 
-def _attest_candidate_once(
+def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcome per error
     event: JsonObject, base_branch: str,
     *,
     github_get: GitHubGet,
@@ -437,7 +471,7 @@ def _attest_candidate_once(
     candidate_number = event_pr.get("number")
     candidate_sha = event_head.get("sha")
     _require(isinstance(candidate_number, int) and candidate_number > 0, "Candidate PR number is invalid")
-    _require(_matches(_SHA, candidate_sha), "Candidate head SHA is invalid")
+    _require(is_sha(candidate_sha), "Candidate head SHA is invalid")
     candidate_path = f"/repos/{full_name}/pulls/{candidate_number}"
     def recheck_candidate(message: str = "GitHub candidate lookup returned an invalid payload") -> None:
         candidate = _object(github_get(candidate_path), message)
@@ -492,7 +526,7 @@ def _attest_candidate_once(
         try:
             base_ref = _object(base_before, f"{base_branch} ref unavailable")
             base_sha = _object(base_ref.get("object"), f"{base_branch} object unavailable").get("sha")
-            _require(_matches(_SHA, base_sha), f"invalid {base_branch} head")
+            _require(is_sha(base_sha), f"invalid {base_branch} head")
             _verify_tree(full_name, base_sha, candidate_sha,
                          [snapshot[0] for snapshot in source_snapshots.values()])
             _require(
