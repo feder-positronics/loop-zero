@@ -34,7 +34,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    (with or without pending mergeability) also leaves draft but is not ready
    yet; without a wait that exits 3. Both waiters use `--wait[=SECONDS]` (default 5400) on the same
    head. Zero can take a PR out of draft or enqueue. Mergeability can time out (exit 3)
-   with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`.
+   with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`; run it before pushing to a queued PR.
    Green can precede CI scheduling. After two minutes of missing checks with
    none pending, inspect scheduling, triggers and permissions, then retry.
 6. After step 5 exits 0, run from a durable directory such as `/tmp`
@@ -63,7 +63,9 @@ coordinator once it adopts it). Post on first yield; update the existing comment
 with the full replacement Markdown from `body_file` on later yields:
 `gh api --method PATCH "repos/$owner/$repo/issues/comments/$comment_id" -f "body=$(cat "$body_file")"`.
 Post separately only for a human request, blocker, stall or final
-result. End delivery responses with complete, blocked (exact
+result. A delegate working under a brief does not yield: it ends its turn only
+with a final result, a blocker or a question
+([Briefs and ownership](../docs/DELEGATION.md#briefs-and-ownership)). End delivery responses with complete, blocked (exact
 dependency/decision), or waiting (event, next action, automatic resume or
 requester needed).
 
@@ -233,6 +235,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   Preserve the approved head; optional suggestions do not justify edits.
 - After an approved ordinary delta with blocking findings resolved, one more delta can review a suffix of verified
   base merges containing a conflict. Otherwise, merge with readiness passing or open a replacement PR for changes that need more review.
+  To open a replacement PR, close the exhausted PR and run `loopzero pr` on
+  the same branch.
 - When a base update is needed after a published review, merge the configured
   base into the existing branch to preserve reviewed ancestry. Readiness and
   hosted eligibility can inherit coverage only across proven clean base merges.
