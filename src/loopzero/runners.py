@@ -705,6 +705,18 @@ def _codex_header(value):
     return header
 
 
+def retire_inspection(body):
+    """A published body whose Codex header records inspection the way new evidence does."""
+    block, _ = leading_review_block(body)
+    try:
+        value = decode_codex_evidence(block[1] if len(block) > 1 else None)
+    except ValueError:
+        return body
+    calls = [{key: item for key, item in call.items() if key not in ("head_event", "diff_event")}
+             | {"inspection": "unknown"} for call in value["calls"]]
+    return body.replace(block[1], _codex_header(value | {"calls": calls}), 1)
+
+
 def decode_codex_evidence(header):
     """Only one canonical ASCII field; its leading placement is checked by eligibility."""
     if not isinstance(header, str) or not header.isascii() or len(header) > CODEX_HEADER_LIMIT:

@@ -378,7 +378,8 @@ def test_retired_pair_marker_cannot_pass_eligibility(published_native, source, i
     assert eligible(review) is None
 
 
-@pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_legacy"])
+@pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_legacy",
+                                  "verified_inspection"])
 def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, gh, fake_bin, monkeypatch, kind):
     from tests.test_github import pr_json, rest_pr_json, threads_json
 
@@ -430,6 +431,9 @@ def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, 
         review["body"] = rendered.replace(line, packed(value))
     if kind == "changed_raw":
         result = dataclasses.replace(result, raw=json.dumps(json.loads(result.raw), indent=2))
+    if kind == "verified_inspection":  # published before inspection was retired
+        line = rendered.splitlines()[1]
+        review["body"] = rendered.replace(line, packed(legacy_inspection(runners.decode_codex_evidence(line))))
     gh.respond(f"api repos/{repo}/pulls/7",
                rest_pr_json(pr_json(headRefOid=head, mergeStateStatus="CLEAN")))
     gh.respond(f"api repos/{repo}/pulls/7/reviews --method GET", [review])

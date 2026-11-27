@@ -984,7 +984,8 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     payloads = github.review_payloads(config.repo, pr.number, result.head, result, _review_formats(result))
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
     for review in evidence:
-        expected = next((p for p in payloads if p["body"] == review.get("body")), None)
+        published = runners.retire_inspection(review.get("body") or "")
+        expected = next((p for p in payloads if p["body"] == published), None)
         review_id = review.get("id")
         if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
                 or eligibility.review_login(review) != publisher.casefold()
