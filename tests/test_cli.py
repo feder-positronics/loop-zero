@@ -2686,6 +2686,37 @@ def test_pending_required_check_names_the_wait(wt, gh, capsys, head, command):
         assert out == "" and f"{reason}; next: loopzero merge --wait" in err
 
 
+def test_missing_run_grace_does_not_parse_reason_wording(wt, gh, capsys, monkeypatch, head):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_check_runs(gh, head, [])
+    monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
+    monkeypatch.setattr(cli.github, "_missing_check_reason", lambda name, *_: f"no {name} run yet")
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": []})
+    code, _out, err = run(capsys, "ready", "--wait")
+    assert code == 1 and "workflow scheduling, triggers and permissions" in err
+
+
+def test_repeated_required_check_keeps_each_reason(wt, gh, capsys, head):
+    publish_workflow(wt, WORKFLOW.replace('["checks"]', '["checks", "checks"]'))
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_check_runs(gh, head, [])
+    _code, out, _err = run(capsys, "ready")
+    assert out.count(f"not ready: required check 'checks' missing on {head[:12]}") == 2
+
+
+def test_check_state_drives_failure_hints_and_wait_keys(capsys):
+    unknown, capped = "required check 'a' is unknown", "cannot determine required check 'b'"
+    readiness = github.Readiness(False, (unknown, capped), checks={unknown: ("a", "unknown"), capped: ("b", "capped")})
+    hinted, plain = cli._readiness_messages(github.PR(7, URL, "a" * 40, "main", False, "OPEN", "MERGEABLE"), readiness)
+    assert "Inspect" in hinted and plain == capped
+    name = check = github.MERGEABILITY_PENDING  # a required check may share a non-check reason's text
+    check = f"required check '{name}' is pending"
+    both = github.Readiness(False, (check, name), checks={check: (name, "pending")})
+    only_check = github.Readiness(False, (check,), checks=both.checks)
+    cli._print_wait_changes(cli._by_check(both, both.reasons), cli._by_check(only_check, only_check.reasons))
+    assert capsys.readouterr().out == f"cleared: {name}\n"
+
+
 def test_check_wait_does_not_parse_reason_wording(wt, gh, capsys, head, monkeypatch):
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     arm_check_runs(gh, head, [])

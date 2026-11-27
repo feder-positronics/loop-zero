@@ -1401,11 +1401,9 @@ def readiness(
     }
     check_reasons = {}
     for name in required_ci:
-        if name not in checks:
-            check_reasons[_missing_check_reason(name, pr.head_sha, capped)] = (name, "unknown" if capped else "missing")
-        elif name in failures:
-            check_reasons[failures[name]] = (name, checks[name])
-    reasons.extend(check_reasons)
+        if name not in checks or name in failures:
+            reasons.append(reason := failures.get(name) or _missing_check_reason(name, pr.head_sha, capped))
+            check_reasons[reason] = (name, checks.get(name) or ("capped" if capped else "missing"))
     return Readiness(
         ready=not reasons, reasons=tuple(reasons), checks=check_reasons,
         waitable_failures=tuple(failures[name] for name in required_ci if name in stale

@@ -1284,7 +1284,8 @@ def _draft_checks_waiting(
         return ()
     if not reasons <= (expected := _check_reasons(readiness, "missing", "skipped")).keys():
         return ()
-    return tuple(name for name in config.required_ci if name in {expected[reason] for reason in reasons})
+    blocked = {expected[reason] for reason in reasons}
+    return tuple(name for name in config.required_ci if name in blocked)
 
 
 def _pending_checks(readiness: github.Readiness, *, allow_skipped: bool = False) -> tuple[str, ...]:
@@ -1301,7 +1302,7 @@ def _pending_checks(readiness: github.Readiness, *, allow_skipped: bool = False)
 def _readiness_messages(pr: github.PR, readiness: github.Readiness) -> Iterator[str]:
     for reason in readiness.reasons:
         _, state = readiness.checks.get(reason, ("", "missing"))
-        if state not in {"missing", "unknown", "pending", "skipped"} and reason not in readiness.waitable_failures:
+        if state not in {"missing", "capped", "pending", "skipped"} and reason not in readiness.waitable_failures:
             yield (f"{reason}. Inspect {pr.url}/checks. Fix reproducible failures before retrying. "
                    "Rerun the failed job only for a transient failure. Once green, run `loopzero ready --wait`.")
         else:
@@ -1350,7 +1351,7 @@ def _poll_until(
 
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float, shown: tuple[tuple[str, str], ...] = (), args: argparse.Namespace,
+    started: float, shown: tuple = (), args: argparse.Namespace,
     allow_merged: bool = False, allow_skipped: bool = False, initial: github.Readiness | None = None,
     initial_read_time: float = 0.0,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
@@ -1398,15 +1399,16 @@ def _verify_wait_snapshot(
     raise CliError(f"workflow settings changed while waiting; {retry}")
 
 
-def _by_check(readiness: github.Readiness, reasons: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
-    return tuple((readiness.checks.get(reason, (reason,))[0], reason) for reason in reasons)
+def _by_check(readiness: github.Readiness, reasons: tuple[str, ...]) -> tuple:
+    """((is a required check, its name or the reason), reason) for each reason."""
+    return tuple(((r in readiness.checks, readiness.checks.get(r, (r,))[0]), r) for r in reasons)
 
 
-def _print_wait_changes(shown: tuple[tuple[str, str], ...], pending: tuple[tuple[str, str], ...]) -> None:
+def _print_wait_changes(shown: tuple, pending: tuple) -> None:
     previous, current = dict(shown), dict(pending)
     if changed := [reason for key, reason in current.items() if previous.get(key) != reason]:
         print("waiting: " + "; ".join(changed))
-    if cleared := [key for key in previous if key not in current]:
+    if cleared := [key[1] for key in previous if key not in current]:
         print("cleared: " + "; ".join(cleared))
 
 
@@ -1439,7 +1441,7 @@ def _check_wait_poll(
 
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float, args: argparse.Namespace, shown: tuple[tuple[str, str], ...] = (),
+    started: float, args: argparse.Namespace, shown: tuple = (),
     bounded: bool = False, allow_merged: bool = False,
     allow_skipped: bool = False, initial: github.Readiness | None = None,
     initial_read_time: float = 0.0,
@@ -1483,7 +1485,7 @@ def _wait_for_checks(
         # An active workflow may not have created its check runs yet.
         if (
             elapsed >= MISSING_RUN_GRACE
-            and all(" missing on " in r for r in pending)
+            and all(readiness.checks.get(r, ("", ""))[1] == "missing" for r in pending)
             and not _read_wait_poll(
                 partial(github.has_check_activity, config.repo, pr.head_sha, readiness),
                 started + timeout,
