@@ -123,7 +123,7 @@ def test_invalid_content(tmp_path, text, message):
     assert str(info.value).startswith(str(tmp_path / "workflow.toml"))
 
 
-@pytest.mark.parametrize("path", ["/home/me/.local/bin", "/opt/tool", "/tmp/x"])
+@pytest.mark.parametrize("path", ["/home/me/.local/bin", "/opt/tool", "/srv/cache<2026>/uv"])
 def test_ro_path_boundary(tmp_path, path):
     assert config.load(write(tmp_path, MINIMAL + table("checks", ro_paths=[path]))).sandbox_ro == (path,)
 
