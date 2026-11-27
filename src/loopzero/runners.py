@@ -1018,6 +1018,7 @@ def _review_codex(
             # Nested bwrap can fail on restricted hosts. The outer bwrap keeps the tree
             # read-only and HOME private.
             "--sandbox", "danger-full-access", "--cd", str(cwd), "--skip-git-repo-check",
+            "-c", "mcp_servers={}",  # system config (/etc/codex) is visible in the sandbox
             # The reviewed head controls AGENTS.md and its skills; keep both out of context.
             "-c", "project_doc_max_bytes=0", *skill_overrides,
             "--output-schema", f"{sandbox.SANDBOX_HOME}/schema.json",

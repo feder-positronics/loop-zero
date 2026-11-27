@@ -1021,6 +1021,7 @@ def test_codex_approve(repo, fake_bin, tmp_path, fake_bwrap, monkeypatch):
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
     assert "--ignore-user-config" not in argv
     assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" not in argv
+    assert "mcp_servers={}" in argv
     assert "project_doc_max_bytes=0" in argv and not any(a.startswith("skills.") for a in argv)
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()

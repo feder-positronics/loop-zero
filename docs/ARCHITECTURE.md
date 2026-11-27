@@ -239,7 +239,7 @@ instructions from the reviewed head, which the PR controls: Claude runs with
 `--setting-sources ""`, `--restricted` (file tools confined to the checkout, so
 host files and auto-memory stay out) and `includeGitInstructions` off (no
 PR-controlled branch names or commit subjects in its context), and Codex runs
-with a private HOME and `project_doc_max_bytes=0` (no
+with a private HOME, no MCP servers and `project_doc_max_bytes=0` (no
 AGENTS.md or AGENTS.override.md) and a `skills.config` entry disabling every
 skill under the checkout's `.agents/skills` and `.codex/skills`; a skill
 directory linking outside the checkout, or more skills than one argument can
