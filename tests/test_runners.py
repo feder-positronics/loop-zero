@@ -133,8 +133,8 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0, capture_e
     )
 
 
-def _codex_probes(version, version_exit=0):
-    return f'''if [ "$1" = --version ]; then printf '%s\\n' {shlex.quote(version)}; exit {version_exit}; fi
+def _codex_probes(version):
+    return f'''if [ "$1" = --version ]; then printf '%s\\n' {shlex.quote(version)}; exit 0; fi
 '''
 
 
@@ -155,10 +155,7 @@ def _fake_codex(
     *,
     exit_code: int = 0,
     stderr: str = "",
-    session_id: str = "codex-session-123",
-    tokens: int = 123,
     version: str = "codex-cli 0.161.0",
-    version_exit: int = 0,
     rollout: str | None = None,
 ) -> Path:
     """Fake ``codex`` that checks argv shape and writes ``last_message`` to -o file."""
@@ -172,7 +169,7 @@ def _fake_codex(
         bin_dir,
         "codex",
         f"""
-        {textwrap.indent(_codex_probes(version, version_exit), '        ').lstrip()}
+        {textwrap.indent(_codex_probes(version), '        ').lstrip()}
         codex_home="${{CODEX_HOME:-$HOME/.codex}}"
         printf '%s\\0' "$@" > "{bin_dir}/codex.argv"
         printf '%s' "$codex_home" > "{bin_dir}/codex.home"
@@ -198,11 +195,11 @@ def _fake_codex(
         count_file="{bin_dir}/codex.calls"
         count=1; [ ! -f "$count_file" ] || count=$(( $(cat "$count_file") + 1 ))
         printf '%s' "$count" > "$count_file"
-        sid="{session_id}"; [ "$count" -eq 1 ] || sid="$sid-$count"
+        sid="codex-session-123"; [ "$count" -eq 1 ] || sid="$sid-$count"
         {rollout_script.replace(chr(10), chr(10) + '        ')}
         echo '{{"type":"thread.started","thread_id":"'"$sid"'"}}'
         printf '%s\\n' {shlex.quote(json.dumps({"type":"item.completed","item":{"id":"final","type":"agent_message","text":last_message}}))}
-        echo '{{"type":"turn.completed","usage":{{"input_tokens":{tokens},"output_tokens":2}}}}'
+        echo '{{"type":"turn.completed","usage":{{"input_tokens":123,"output_tokens":2}}}}'
         exit {exit_code}
         """,
     )

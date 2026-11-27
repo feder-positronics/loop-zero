@@ -1488,18 +1488,6 @@ def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(monkeypat
     assert not any(part.startswith("If-None-Match") for part in sent[-1])
 
 
-def test_ambient_credential_is_never_cached(monkeypatch):
-    sent = []
-    def run(argv, **_):
-        sent.append(argv)
-        if "graphql" in argv:
-            return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"a"}}}', "stderr": ""})
-        return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{}', "stderr": ""})
-    monkeypatch.setattr(github, "run", run)
-    github.login(), github.login(), github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
-    assert len(sent) == 4 and not any(part.startswith("If-None-Match") for argv in sent for part in argv)
-
-
 def test_oversized_response_does_not_evict_other_reads(monkeypatch, app_token_helper):
     app_token_helper()
     monkeypatch.setattr(github, "_ETAG_CACHE_BYTES", 100)
@@ -1515,7 +1503,7 @@ def test_oversized_response_does_not_evict_other_reads(monkeypatch, app_token_he
     assert [key[0][1] for key in github._etag_cache] == ["repos/a/b/small"]
 
 
-def test_login_is_cached_under_the_credential_that_answered(monkeypatch, tmp_path, fake_tool):
+def test_login_is_cached_under_the_credential_that_answered(monkeypatch, fake_tool):
     helper = fake_tool("app-token", "echo app-a\n")
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     real_run = github.run
@@ -1528,13 +1516,10 @@ def test_login_is_cached_under_the_credential_that_answered(monkeypatch, tmp_pat
     monkeypatch.setattr(github, "run", run)
     assert github.login() == "bot" and tokens == ["app-a"]
     assert github._logins == {"app-a": "bot"}
-    monkeypatch.setattr(github, "_select_token", lambda *_: "")  # ambient: nothing to key a cached login on
-    github._logins.clear()
-    github.login(), github.login()
-    assert github._logins == {}
 
 
-def test_environment_token_is_cached_but_stored_account_is_not(monkeypatch):
+@pytest.mark.parametrize("token", [None, "env-a"], ids=["stored-account", "environment-token"])
+def test_login_and_etag_cache_depend_on_token(monkeypatch, token):
     sent = []
     def run(argv, **_):
         sent.append(argv)
@@ -1542,12 +1527,17 @@ def test_environment_token_is_cached_but_stored_account_is_not(monkeypatch):
             return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\n\r\n{"data":{"viewer":{"login":"a"}}}', "stderr": ""})
         return type("Done", (), {"exit_code": 0, "stdout": 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n{}', "stderr": ""})
     monkeypatch.setattr(github, "run", run)
-    monkeypatch.setenv("GH_TOKEN", "env-a")
+    if token:
+        monkeypatch.setenv("GH_TOKEN", token)
     assert github.login() == github.login() == "a"
     github.api_get("repos/a/b/pulls/1"), github.api_get("repos/a/b/pulls/1")
-    assert len(sent) == 3 and "If-None-Match: \"v1\"" in sent[-1]
-    monkeypatch.setenv("GH_TOKEN", "env-b")  # a different account does not reuse the first one's answers
-    assert github.login() == "a" and len(sent) == 4
+    conditional = [arg for argv in sent for arg in argv if arg.startswith("If-None-Match")]
+    assert (len(sent), conditional) == ((3, ['If-None-Match: "v1"']) if token else (4, []))
+    assert github._logins == ({token: "a"} if token else {})
+    if token:
+        monkeypatch.setenv("GH_TOKEN", "env-b")
+        assert github.login() == "a" and len(sent) == 4
+
 
 @pytest.mark.parametrize("repo", ["acme/123", "acme/true", "acme/@etc-passwd"])
 def test_graphql_string_variables_are_raw_fields(repo: str) -> None:

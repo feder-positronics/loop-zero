@@ -358,12 +358,6 @@ def test_stalled_fetch_is_transient_but_other_time_bounds_are_not():
         candidate._require_time(("merge-tree",), 0)
 
 
-def test_tree_mismatch_while_main_lands_is_a_race(tree_candidate, monkeypatch):
-    monkeypatch.setattr(candidate, "_verify_tree", Mock(side_effect=CandidateError("candidate tree mismatch")))
-    with pytest.raises(CandidateRaceError, match="main changed"):
-        tree_candidate[0](main_after=tree_candidate[3])
-
-
 @pytest.mark.parametrize("bound", ["_TREE_BYTES", "_TREE_OBJECTS", "_TREE_SECONDS", "_TREE_OUTPUT"])
 def test_vanished_parent_fails_closed_at_resource_bounds(tree_candidate, monkeypatch, bound):
     monkeypatch.setattr(candidate, bound, 1 if bound != "_TREE_SECONDS" else 0)
@@ -371,11 +365,16 @@ def test_vanished_parent_fails_closed_at_resource_bounds(tree_candidate, monkeyp
         tree_candidate[0]()
 
 
-def test_vanished_parent_rejects_main_change(tree_candidate):
+@pytest.mark.parametrize("tree_mismatch", [False, True])
+def test_vanished_parent_rejects_main_change(tree_candidate, monkeypatch, tree_mismatch):
+    attest, _, _, main, *_ = tree_candidate
+    if tree_mismatch:
+        monkeypatch.setattr(candidate, "_verify_tree", Mock(side_effect=CandidateError("candidate tree mismatch")))
     seen = []
     with pytest.raises(CandidateRaceError, match="main changed"):
-        tree_candidate[0](main_after=tree_candidate[3], policy=lambda n, _: seen.append(n))
-    assert set(seen) == {102} and len(seen) == 8
+        attest(main_after=main, policy=lambda n, _: seen.append(n))
+    if not tree_mismatch:
+        assert seen == [102] * 8
 
 
 @pytest.mark.parametrize("case", [
