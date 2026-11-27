@@ -254,10 +254,21 @@ That result led to the R3 instruction transport compared below.
 ### Code audit outcome — October 7, 2026
 
 The audit of `origin/main@b980669971d372f3ff1e31160ab10772379a7cd5` proposed four
-slices, all since merged: R1 [#281](https://github.com/feder-positronics/loop-zero/pull/281),
-R4 [#282](https://github.com/feder-positronics/loop-zero/pull/282),
-R2 [#283](https://github.com/feder-positronics/loop-zero/pull/283) and
-R3 [#284](https://github.com/feder-positronics/loop-zero/pull/284). Two limits stayed
+slices, all since merged:
+
+- R1 [#281](https://github.com/feder-positronics/loop-zero/pull/281) pins reviewer
+  runtime authority and protects native state mounts, so a reviewer cannot read or
+  alter host CLI state it does not need.
+- R4 [#282](https://github.com/feder-positronics/loop-zero/pull/282) separates
+  requested from CLI-reported reviewer settings, so publication never claims an
+  unobserved model or effort.
+- R2 [#283](https://github.com/feder-positronics/loop-zero/pull/283) adds the
+  environment-auth route that omits host state binds (see below).
+- R3 [#284](https://github.com/feder-positronics/loop-zero/pull/284) moves fixed
+  reviewer policy into the native instruction channels and keeps task text and diff
+  as review material, answering the override-associated suppression above.
+
+Two limits stayed
 open: a file-backed Claude bind still exposes the whole configuration directory,
 and readiness still matches rendered blocker strings (D5 below). The
 [architecture guide](../ARCHITECTURE.md) describes the code as it is now.
@@ -349,17 +360,21 @@ attestation. Missing optional observations introduce no eligibility gate.
 The sample is small, synthetic and drawn from convenience cases. It supports the
 declared permission detection improvement and Codex no-regression gate only;
 it does not prove general injection immunity, real-world mergeability or an
-end-to-end delivery bypass boundary. R3 merged as
-[#284](https://github.com/feder-positronics/loop-zero/pull/284); reviewers no longer load
-instruction files from the reviewed head. D5–D7 remain deferred.
+end-to-end delivery bypass boundary. The candidate arm moved fixed reviewer
+policy into native instruction channels; instruction files from the reviewed head
+stayed enabled in both arms. R3 merged as
+[#284](https://github.com/feder-positronics/loop-zero/pull/284); disabling reviewed-head
+instruction files and skills came later as separate hardening. D5–D7 remain deferred.
 
 
 ## T3 verification snapshot — October 5, 2026
 
 The pinned T3 sources showed two boundaries that still shape delivery. The
-notification mailbox permits at-least-once delivery, so act only after rereading
-Git, GitHub and the current head, and keep repeated execution idempotent. A PR
-watch is only a hint (terminal merged/closed observations end it without a wake),
+[notification mailbox](https://github.com/pingdotgg/t3code/blob/37de6cbde65c7cf9ba90a2557c232e63b7e16988/apps/server/src/orchestration-v2/NotificationMailbox.ts)
+permits at-least-once delivery, so act only after rereading
+Git, GitHub and the current head, and keep repeated execution idempotent. A
+[PR watch](https://github.com/pingdotgg/t3code/blob/37de6cbde65c7cf9ba90a2557c232e63b7e16988/apps/server/src/orchestration-v2/PullRequestWatchReactor.ts)
+is only a hint (terminal merged/closed observations end it without a wake),
 so one `loopzero merge --wait` owns landing verification and cleanup, and a watch
 never replaces rerunning the waiter. Version-specific T3 facts belong to the
 [T3 upstream review](../T3-UPSTREAM.md).
