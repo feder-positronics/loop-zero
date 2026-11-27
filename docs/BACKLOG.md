@@ -51,5 +51,5 @@ limit on the backlog.
 ## Consumer choices
 
 Each repository names its three labels and the script or sweep step that
-writes the summary in its own `AGENTS.md`. loop-zero ships no labels and no
-summary script.
+writes the summary in its own `AGENTS.md`. Loop-zero uses a separate PR
+`hold` label for merge authority.

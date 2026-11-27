@@ -363,6 +363,10 @@ def assert_one_workflow_read(calls):
     assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in calls) == 1
 
 
+def test_config_help_identifies_explicit_policy_override():
+    assert "explicit workflow.toml override" in cli.build_parser().format_help()
+
+
 def run(capsys, *argv: str) -> tuple[int, str, str]:
     code = cli.main(list(argv))
     captured = capsys.readouterr()
@@ -2350,7 +2354,7 @@ def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monke
     code, out, err = run(capsys, "review")
     size = len((out + err).encode())
     assert size < 650, size
-    assert code == 4 and "rerun" in err and "wait for the owner" in err
+    assert code == 4 and "Fix the reviewer failures below and rerun." in err
     for family in envelopes:
         assert f"{family}: review has unexpected or missing keys" in err
         assert family * 10 not in err

@@ -30,7 +30,7 @@ or evidence in Acceptance. Observe required UI and runtime behavior under actual
 permissions, with visual proof for UI changes per [Reporting](../../CONTRACT.md#reporting).
 Leave unobserved acceptance open with a next-action owner. Record revision,
 observations, trade-offs and limits in Notes or human Validation.
-Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
+Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../../CONTRACT.md#check-reuse-and-delivery-priority).
 
 Run commands expected to exceed about two minutes as [long-running jobs](../../../docs/DELEGATION.md#long-running-jobs)
 and follow the brief's [waiting and output rules](../../../docs/DELEGATION.md#briefs-and-ownership).

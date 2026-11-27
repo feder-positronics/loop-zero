@@ -34,7 +34,7 @@ User-wide:
 uv tool install "git+https://github.com/feder-positronics/loop-zero@<sha>"
 ```
 
-As a dev dependency of your repository:
+As a dev dependency when your project requires Python 3.14 or newer:
 
 ```sh
 uv add --dev "loopzero @ git+https://github.com/feder-positronics/loop-zero@<sha>"
@@ -69,8 +69,8 @@ contract, credential guidance, and supporting references.
 Install the skills once per machine, not per repository: link each directory
 under the checkout's `core/skills` into `~/.agents/skills` (Codex) and
 `~/.claude/skills` (Claude Code). Link through one stable path that you repoint
-when you upgrade the CLI, so skills and CLI move together, and keep the previous
-revision for rollback. Never edit the linked checkout. Both harnesses follow a
+when you upgrade the CLI. Reconcile the skill links for added or removed
+directories and keep the previous revision for rollback. Never edit the linked checkout. Both harnesses follow a
 symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
@@ -159,11 +159,12 @@ to the base branch before starting your first task. If the base has a
   machine-specific workflow with `--config` on check, ready and merge when paths differ.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
-- Check, review, ready, merge, and status load the workflow from the
+- Check, pr, review, ready, merge, resolve, and status load the workflow from the
   remote-tracking delivery branch selected by `[repo] base` in the workflow
   at `origin/HEAD`. Missing trusted policy blocks these commands. Fetch and
   run `git remote set-head origin --auto` if the local default-branch pointer
-  is missing. Supply `--config <path>` during bootstrap or to override policy.
+  is missing. Upgrade delivery pins before adding workflow keys they need to
+  recognize. Supply `--config <path>` during bootstrap or to override policy.
 - For offline checks, warm the configured writable uv cache on the host with
   `UV_CACHE_DIR=<configured-cache> uv sync --group dev` (use the groups your
   checks require). This also fetches build backends such as hatchling.
@@ -294,7 +295,8 @@ PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
   per-window utilization and resets. `weekly_used_percent` is the overall 7d
   usage, null when unknown.
 - Only `exec` (including `--identity`) refuses non-owner Claude launches with exit 3
-  at >=85% overall weekly or five-hour utilization, or when that account's cached
+  at 85% utilization in any reported window, including the Fable weekly
+  window, or when that account's cached
   status is missing, unreadable or older than 20 minutes. The last 15 weekly points
   are reserved for required reviews and essential decisions; use
   `AI_ACCOUNTS_CLAUDE_OWNER=1` for that work to bypass the guard. No hysteresis is
@@ -383,8 +385,7 @@ loopzero merge --wait
 A whole-job remote worker writes its own receipt. Ready can use it only if it
 passes the existing checks for a clean, passing receipt at the exact head,
 with the current ordered commands and matching settings fingerprint. An older
-worker can omit the fingerprint. A current worker can produce a different
-fingerprint, for example when its inherited `PATH` differs. GitHub required
+worker can omit the fingerprint. Explicit check settings must match. GitHub required
 CI supplies separate evidence. The [owner queue route](core/CONTRACT.md#blockers)
 applies only under its documented conditions.
 
@@ -447,7 +448,8 @@ request; a behind branch is treated as queued only after that API confirms it. A
 repository queue rule may admit the PR instead; Mergify's "already queued" reply
 to the command is then harmless.
 
-Use draft-PR integration checks: set `merge_queue.max_parallel_checks` greater
+Set `merge_queue.mode: serial`. For draft-PR integration checks, set
+`merge_queue.max_parallel_checks` greater
 than one, or to one only when the matching queue rule sets an explicit integer
 `batch_size` greater than one. In-place updates (one parallel check and batch size
 one) rewrite the reviewed source head and are unsupported. Admission checks the
@@ -531,7 +533,10 @@ PR configuration. A source push needs a status on its new SHA; base-only movemen
 does not invalidate an unchanged source review. This status does not replace
 integration CI or a local `loopzero check` receipt.
 
-For the supplied Actions publisher, create an environment named
+Use the [Actions publisher workflow](.github/workflows/eligibility.yml) as a
+reference. In a consumer, install the pinned loop-zero package for both jobs
+and remove the repository-specific `PYTHONPATH: src`. Run from the consumer
+checkout at its trusted default branch. Create an environment named
 `mergify-metadata`, restrict its deployment branches to the protected default
 branch, and store `MERGIFY_API_KEY` as an environment secret rather than a
 repository secret. Use the narrowest Mergify credential that can read queue status.
@@ -539,7 +544,9 @@ Only the candidate job uses this environment and credential. The source job runs
 without either. Restricting the environment to the protected default branch limits
 credential access, while commit-status publishers still share a context namespace.
 
-GitHub and Mergify match `Loop-zero Eligibility` by context name. A repository
+Require `Loop-zero Eligibility` in GitHub branch protection and in
+`[checks].required_ci` on the trusted base. GitHub and Mergify match it by
+context name. A repository
 writer who can add an Actions workflow can publish the same context with its
 `GITHUB_TOKEN`. Before cutover, either explicitly accept that cooperative writer
 boundary or replace this publisher with a dedicated GitHub App and bind the

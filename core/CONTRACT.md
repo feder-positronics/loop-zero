@@ -157,16 +157,18 @@ required proof still blocks the affected operation. These failure policies
 preserve exact-SHA review, receipt requirements, the owner queue route and
 merge-authority holds.
 
-## Gate execution and delivery priority
+<a id="gate-execution-and-delivery-priority"></a>
+
+## Check reuse and delivery priority
 
 **Expensive suites run where the change is.** Browser and slow integration
 suites run on a PR or queue candidate only when the change touches their area.
 Their full run happens on main after merge; a red main from it follows the
 main-regression rule above. Never make a path-filtered job a required check.
 
-**Delivery fixes go first.** Fixes to the delivery system itself (CI, queue and
-runner reliability or speed) go to the front of the merge queue, ahead of feature
-work, through the repository's queue priority if it has one.
+**Delivery fixes and critical reverts go first.** Critical reverts and fixes to
+CI, queue and runner reliability or speed go ahead of feature work. Use the
+repository's queue priority where available.
 
 Finish planned base updates before starting checks. Reuse an identical check
 already queued or running at the same head and settings fingerprint. A second local
@@ -237,8 +239,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   configured family and reports reasons/nonzero if all fail. Only
   runner-produced reviews count. If no independent reviewer can run, try the
   preferred configured family in a fresh session and publish a visible same-family
-  fallback line. When no configured reviewer can run (exit 4), wait for the PR
-  owner.
+  fallback line. When no configured reviewer can run (exit 4), the PR owner
+  restores a configured reviewer and retries.
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.
