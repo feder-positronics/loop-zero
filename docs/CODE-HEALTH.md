@@ -54,8 +54,9 @@ or a collector failure. A missing or failed run is never a quiet one.
   Without authority to publish, hand the report to the owner.
 - **Clean up:** discovery grants no implementation authority. Cleanup uses the
   [refine-code](../core/skills/refine-code/SKILL.md) skill only when
-  commissioned, in small batches with a rollback point, and merges only with
-  its own authorization ([CONTRACT.md](../core/CONTRACT.md)).
+  commissioned, in small batches with a rollback point; it merges under the
+  contract's [merge authority](../core/CONTRACT.md#merge-authority) like any
+  other change.
 
 Keep each report to about one page: status and revisions, new and resolved
 findings, failed or skipped collectors, links to existing issues, and the next
