@@ -1464,7 +1464,6 @@ def merged_sha(
     state = view.get("state")
     if merged and state == "closed":
         if is_sha(sha := view.get("merge_commit_sha")):
-            read_timeout(0)
             return sha
     elif not merged and state == "open":
         if check_hold and (hold := merge_hold(number, _pr_labels(view))):
@@ -1527,6 +1526,8 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
     try:
         sha, queued, queue_error = _merge_evidence(repo, number, head_sha)
+        if strategy == "queue":
+            read_timeout(0)  # Queue evidence read after the wait budget is a timeout.
     except (GhError, ProcTimeout) as exc:
         if strategy == "queue" or isinstance(exc, (MergeFailed, ClosedUnmerged)):
             raise

@@ -1552,8 +1552,8 @@ def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str 
         github.read_timeout(0)  # A late observation is a timeout, not evidence.
         closed[:] = [exc]
         return None
+    closed.clear()  # Even a late read contradicts earlier lagging closed evidence.
     github.read_timeout(0)
-    closed.clear()
     return sha
 
 
@@ -1592,7 +1592,9 @@ def _merge_and_follow(
     if deadline is None:
         return merge()
     with suppress(github.ReadDeadline):
-        return _queue_wait(deadline, lambda remaining: merge() or _wait_for_merge(config, pr, remaining),
+        # Measure the follow budget after the merge write, which may take most of it.
+        return _queue_wait(deadline, lambda remaining: merge() or _wait_for_merge(
+            config, pr, remaining and max(0.0, deadline - time.monotonic())),
                            bounded=admit_by is not None)
     return None
 

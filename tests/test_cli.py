@@ -5075,8 +5075,7 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
 
 def merge_wait(monkeypatch, capsys, wait, fake):
     run_gh, cleaned = github.run, []
-    monkeypatch.setattr(github, "run", lambda argv, *, timeout, **kwargs: (
-        fake(argv, timeout) or run_gh(argv, timeout=timeout, **kwargs)))
+    monkeypatch.setattr(github, "run", lambda argv, *, timeout, **kw: fake(argv, timeout) or run_gh(argv, timeout=timeout, **kw))
     monkeypatch.setattr(cli, "_cleanup_remote_refs", lambda *_: None)
     monkeypatch.setattr(cli, "_cleanup", lambda *_: cleaned.append(True))
     return (*run(capsys, "merge", f"--wait={wait}"), cleaned)
@@ -5102,8 +5101,7 @@ def test_merge_queue_landing_within_budget(
         if len(budgets) == 1:
             return Completed(0, json.dumps(merge_json(state="OPEN", head=head)), "", 0.0)
         clock.now += latency
-        sha = "e" * 40 if state == "MERGED" else None
-        return Completed(0, json.dumps(merge_json(state=state, head=head, sha=sha)), "", latency)
+        return Completed(0, json.dumps(merge_json(state=state, head=head, sha="e" * 40 if state == "MERGED" else None)), "", latency)
     code, out, err, cleaned = merge_wait(monkeypatch, capsys, wait, landing)
     assert (code, bool(cleaned), write_timeouts) == (expected, expected == 0, [300])
     assert budgets == ([1.0, 1.0, 0.5] if state == "CLOSED" else [1.0 if wait else 120.0] * 2)
@@ -5119,23 +5117,29 @@ def test_direct_merge_verifies_after_queue_wait_deadline(wt, gh, capsys, monkeyp
         if argv[1:3] != ["pr", "merge"]:
             return None
         clock.now += 2
-        gh.respond(f"api repos/{REPO}/pulls/7", merge_json(
-            state="MERGED", head=head if verified else "f" * 40, sha="e" * 40))
+        gh.respond(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head if verified else "f" * 40, sha="e" * 40))
         return Completed(0, "", "", 2)
     code, out, err, cleaned = merge_wait(monkeypatch, capsys, 1, slow_merge)
-    if verified:
-        assert (code, err, cleaned, out.splitlines()[-1]) == (0, "", [True], "e" * 40)
-    else:
-        assert (code, cleaned) == (1, []) and "merge could not be verified" in err and "timed out" not in out + err
+    assert ((code, err, cleaned, out.splitlines()[-1]) == (0, "", [True], "e" * 40)) if verified else (
+        (code, cleaned) == (1, []) and "merge could not be verified" in err and "timed out" not in out + err)
 
 
-def test_queue_wait_keeps_landing_verified_before_scope_exit(monkeypatch):
-    clock = poll_clock(monkeypatch)
+def test_queue_wait_budget_boundaries(monkeypatch):
+    clock, budgets, pr = poll_clock(monkeypatch), [], SimpleNamespace(number=7, head_sha="a" * 40)
     def poll(_remaining):
         github.read_timeout(0)
         clock.now = 1
         return "e" * 40
-    assert cli._queue_wait(1, poll, bounded=True) == "e" * 40
+    assert cli._queue_wait(1, poll, bounded=True) == "e" * 40  # a landing verified in time survives scope exit
+    monkeypatch.setattr(github, "merge", lambda *_: setattr(clock, "now", 50))
+    monkeypatch.setattr(cli, "_wait_for_merge", lambda _config, _pr, timeout: budgets.append(timeout))
+    cli._merge_and_follow(SimpleNamespace(repo=REPO, merge_strategy="queue"), pr, 60, 60)
+    assert budgets == [10]  # the follow budget is what the merge write left
+    closed = [github.ClosedUnmerged(("gh",), "closed")]
+    monkeypatch.setattr(github, "merged_sha", lambda *_args, **_kwargs: "e" * 40)
+    with github.bounded_reads(0, token=None, check_on_exit=False), pytest.raises(github.ReadDeadline):
+        cli._landed(SimpleNamespace(repo=REPO), pr, closed)
+    assert closed == []  # a late merged read still clears lagging closed evidence
 
 
 def test_mergify_resume_bounds_first_membership_read(monkeypatch, capsys):
@@ -5149,14 +5153,12 @@ def test_mergify_resume_bounds_first_membership_read(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_merge_check_hint", lambda *_: "")
     monkeypatch.setattr(cli, "_wait_for_mergify", Mock(side_effect=AssertionError("polled after deadline")))
     pr = SimpleNamespace(number=7, base_ref="main")
-    assert cli._follow_blocked_mergify(SimpleNamespace(repo=REPO, base_branch="main"), pr, None, "main", 1,
-                                       bounded=True) is None
+    assert cli._follow_blocked_mergify(SimpleNamespace(repo=REPO, base_branch="main"), pr, None, "main", 1, bounded=True) is None
     assert budgets == [1] and "timed out" in capsys.readouterr().out
 
 
 def test_mergify_queue_retries_stop_at_merge_deadline(wt, gh, capsys, monkeypatch, replay_gh):
-    head = commit_mergify_configuration(wt)
-    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_approved_ready_pr(gh, commit_mergify_configuration(wt), wt, isDraft=False)
     clock, budgets, sleeps, admitted = poll_clock(monkeypatch, start=1000.0), [], [], []
     monkeypatch.setattr(mergify, "queue_attempt", lambda *_: mergify.QueueAttempt(True, True))
     monkeypatch.setattr(mergify, "_credential", lambda: "test-key")
@@ -5164,11 +5166,9 @@ def test_mergify_queue_retries_stop_at_merge_deadline(wt, gh, capsys, monkeypatc
         budgets.append(timeout)
         raise mergify.urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, None)
     monkeypatch.setattr(mergify, "membership", lambda *_: admitted.append(True) or mergify.Membership())
-    monkeypatch.setattr(mergify, "configured", lambda repo, *_: (
-        not admitted or mergify.api_get(repo, "/merge-queue/status") is not None))
+    monkeypatch.setattr(mergify, "configured", lambda repo, *_: not admitted or mergify.api_get(repo, "/merge-queue/status") is not None)
     monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request))
-    monkeypatch.setattr(mergify, "_retry_sleep", lambda seconds: (
-        sleeps.append(seconds), setattr(clock, "now", clock.now + seconds)))
+    monkeypatch.setattr(mergify, "_retry_sleep", lambda seconds: (sleeps.append(seconds), setattr(clock, "now", clock.now + seconds)))
     code, out, err = run(capsys, "merge", "--wait=1")
     assert (code, err, budgets, sleeps) == (3, "", [1.0], [1.0])
     assert "timed out waiting for Mergify to land PR #7" in out and not any(
