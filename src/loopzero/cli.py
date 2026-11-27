@@ -1294,12 +1294,12 @@ OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its on
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
     if problem := _check_report_problem(_load_report(wt), config, head):
         raise CliError(f"{problem}. {OWNER_ROUTE}")
-    live = github.pr_view(config.repo, number)
-    seen = (live.head_sha, live.state, live.base_ref)
-    if problem := github.merge_hold(number, live.labels) or (
-            seen != (head, "OPEN", config.base_branch) and f"PR changed to {seen}"):
-        raise CliError(f"{problem}; rerun loopzero ready")
     try:
+        live = github.pr_view(config.repo, number)
+        seen = (live.head_sha, live.state, live.base_ref)
+        if problem := github.merge_hold(number, live.labels) or (
+                seen != (head, "OPEN", config.base_branch) and f"PR changed to {seen}"):
+            raise CliError(f"{problem}; rerun loopzero ready")
         github.mark_ready(config.repo, number)
     except github.GhUnavailable as exc:
         raise CliError(f"{exc}\nRerun the same command once GitHub recovers.") from exc
