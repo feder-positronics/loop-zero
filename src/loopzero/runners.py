@@ -221,7 +221,7 @@ def _claude_payload(envelope: dict) -> object:
     return _extract_json_object(str(envelope.get("result", ""))) if payload is None else payload
 
 
-def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:
+def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:  # noqa: C901 - one check per review JSON field
     """Validate a decoded review object against the findings schema."""
     diagnostic = _tail(raw if excerpt is None else excerpt)
     if not isinstance(payload, dict):
@@ -627,7 +627,7 @@ def _hex(value, length):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{" + str(length) + "}", value)
 
 
-def _valid_codex_evidence(value):
+def _valid_codex_evidence(value):  # noqa: C901 - one check per evidence field
     """Strict closed schema, including exact context/order/offset bounds; no coercion."""
     fields = {
         "version", "family", "repo", "pr", "head", "kind", "publisher", "receipt",
@@ -722,7 +722,7 @@ def decode_codex_evidence(header):
     return value
 
 
-def _inspection_commands(command, cwd):
+def _inspection_commands(command, cwd):  # noqa: C901 - parses each allowed git inspection form
     """Conservative shell grammar: explicit repo anchor, immutable range, no echo/expansion."""
     try:
         words = shlex.split(command)
@@ -771,7 +771,7 @@ def _inspection_commands(command, cwd):
         return []
 
 
-def _native_inspection(envelope, context):
+def _native_inspection(envelope, context):  # noqa: C901 - matches each Codex command event to expected output
     started, completed, found = {}, set(), {}
     for event in envelope["events"]:
         item = event.get("item")
@@ -815,7 +815,7 @@ def _native_inspection(envelope, context):
     return found if set(found) == {"head_event", "diff_event"} else {}
 
 
-def _codex_evidence(result):
+def _codex_evidence(result):  # noqa: C901 - one check per Codex evidence field
     """Pure extraction from complete normalized raw; caller/model summaries are never inputs."""
     try:
         envelopes = _read_envelopes(result.raw, _evidence_json)

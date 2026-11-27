@@ -436,7 +436,7 @@ def attest_candidate(
     raise AssertionError("unreachable")
 
 
-def _attest_candidate_once(
+def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcome per error
     event: JsonObject, base_branch: str,
     *,
     github_get: GitHubGet,
