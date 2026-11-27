@@ -3020,6 +3020,40 @@ def ready_wait_tail(head, status, resume="loopzero ready --wait"):
     return f"timed out waiting for required checks on {head[:12]}. Run `{resume}` to resume on this head.\n"
 
 
+@pytest.mark.parametrize("rerun", [False, True])
+def test_ready_keeps_required_check_signals_from_both_apps(wt, gh, capsys, head, rerun):
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False)
+    runs = [
+        {"id": 1, "app": {"id": 10}, "name": "checks", "conclusion": "failure"},
+        {"id": 2, "app": {"id": 20}, "name": "checks", "conclusion": "success"},
+    ]
+    if rerun:
+        runs.append({**runs[0], "id": 3, "conclusion": "success"})
+    arm_check_runs(gh, head, runs)
+    out, _ = expect_cli(capsys, 0 if rerun else 1, "ready", stderr="")
+    assert ("required check 'checks' is failure" in out) is not rerun
+
+
+@pytest.mark.parametrize("budget", [0, 1])
+def test_ready_bounds_the_first_read_only_for_a_positive_budget(wt, gh, capsys, monkeypatch, head, budget):
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=bool(budget))
+    clock = poll_clock(monkeypatch)
+    read = github.pr_for_branch
+    limits = []
+
+    def slow_read(*args, **kwargs):
+        limits.append(github.read_timeout(120))
+        pr = read(*args, **kwargs)
+        clock.now = 1.0
+        return pr
+
+    monkeypatch.setattr(github, "pr_for_branch", slow_read)
+    out, _ = expect_cli(capsys, 3 if budget else 0, "ready", f"--wait={budget}", stderr="")
+    assert limits == [budget or 120]
+    assert ("timed out" in out) is bool(budget)
+    assert not any(c["argv"][:2] == ["pr", "ready"] for c in gh.calls)
+
+
 @pytest.mark.parametrize("replacement,expected", [("success", 0), ("failure", 1), ("pending", 3)])
 def test_ready_wait_tracks_the_replacement_workflow(
     wt: Path, gh: FakeGh, capsys, monkeypatch, replacement: str, expected: int, head

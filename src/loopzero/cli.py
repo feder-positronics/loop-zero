@@ -21,7 +21,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from functools import partial, wraps
 from pathlib import Path
 from urllib.parse import quote
@@ -1309,14 +1309,20 @@ def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
 
 def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-kick paths share one readiness flow
     wt, config = _context(args)
-    read_started = time.monotonic()
-    pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None)
+    started = time.monotonic()
+    deadline = started + args.wait if args.wait else None
+    try:
+        with github.bounded_reads(deadline, token=None, retry=True) if deadline else nullcontext():
+            pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None,
+                                          mergify_deadline=deadline)
+    except github.ReadDeadline:
+        print(f"timed out while checking readiness. {_wait_resume(args)}")
+        return 3
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
     kicked = bool(waiting)
-    started = time.monotonic()
     wait = partial(_wait_with_deadline, wt, config, timeout=args.wait, started=started,
-                   args=args, allow_skipped=True, initial_read_time=started - read_started)
+                   args=args, allow_skipped=True, initial_read_time=time.monotonic() - started)
     if waiting:
         _mark_ready(wt, config, pr.number, pr.head_sha)
         if args.wait is None:
@@ -1437,18 +1443,16 @@ def _wait_with_deadline(
     if timeout == 0:
         return wait()
     deadline = started + timeout
-    reported_timeout = False
     try:
-        if time.monotonic() < deadline:
-            with github.bounded_reads(deadline, token=None, retry=True):
-                waited = wait(bounded=True, initial_read_time=initial_read_time)
-                reported_timeout = waited is None
+        with github.bounded_reads(deadline, token=None, retry=True, check_on_exit=False):
+            waited = wait(bounded=True, initial_read_time=initial_read_time)
+            if waited is not None:
+                github.read_timeout(0)
             return waited
     except (github.ReadDeadline, _proc.ProcTimeout) as exc:
         if isinstance(exc, _proc.ProcTimeout) and time.monotonic() < deadline:
             raise
-    if not reported_timeout:
-        _print_check_wait_timeout(pr, args)
+    _print_check_wait_timeout(pr, args)
     return None
 
 
@@ -1459,10 +1463,8 @@ def _print_check_wait_timeout(pr: github.PR, args: argparse.Namespace) -> None:
 
 
 def _wait_resume(args: argparse.Namespace) -> str:
-    command = ["loopzero", args.command, "--wait"]
-    if args.config:
-        command.insert(1, f"--config={args.config}")
-    return f"Run `{shlex.join(command)}` to resume on this head."
+    config = [f"--config={args.config}"] if args.config else []
+    return f"Run `{shlex.join(['loopzero', *config, args.command, '--wait'])}` to resume on this head."
 
 def _verify_wait_snapshot(
     args: argparse.Namespace, wt: Path, config: Config, head: str, current_head: str,
@@ -1538,16 +1540,16 @@ def _wait_for_checks(
             poll = partial(_check_wait_poll, wt, config, pr, previous, args, allow_merged,
                            deadline if bounded else None)
             current, previous, readiness = _read_wait_poll(poll, deadline)
-            if readiness is None:
-                return current, None, kicked
+        if readiness is None:
+            return current, None, kicked
         if not kicked and _draft_checks_waiting(config, current, readiness):
+            if bounded:
+                github.read_timeout(0)
             _mark_ready(wt, config, pr.number, current.head_sha)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
                                     shown=_by_check(readiness, readiness.reasons), args=args, bounded=bounded,
                                     allow_merged=allow_merged)
-        if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
-            break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft))
         if pending or readiness.ready:
             _print_wait_changes(shown, _by_check(readiness, pending))

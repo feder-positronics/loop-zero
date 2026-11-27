@@ -1255,16 +1255,15 @@ def _check_signals(
     stale_verdict_grace: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
-    latest_runs: dict[str, dict] = {}
+    latest_runs: dict[tuple[str, int | None], dict] = {}
     runs = paged(f"repos/{repo}/commits/{head_sha}/check-runs", "check_runs")
     for cr in runs:
-        previous = latest_runs.get(cr["name"])
-        if previous is None or _check_run_order(cr) > _check_run_order(previous):
-            latest_runs[cr["name"]] = cr
-    for name, cr in latest_runs.items():
+        key = cr["name"], (cr.get("app") or {}).get("id")
+        latest_runs[key] = max(latest_runs.get(key, cr), cr, key=_check_run_order)
+    for (name, _), cr in latest_runs.items():
         state = cr.get("conclusion") or cr.get("status") or "unknown"
         timestamp = cr.get("started_at" if state in _PENDING_CHECKS else "completed_at")
-        signals[name] = [(state, readiness_timestamp(timestamp))]
+        signals.setdefault(name, []).append((state, readiness_timestamp(timestamp)))
     latest_status: dict[str, dict] = {}
     for status in paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status)
@@ -1281,12 +1280,11 @@ def _check_signals(
     stale += stale_verdicts
     superseded: list[str] = []
     workflows: list[dict] | None = None
-    for name in required_ci:
-        cr = latest_runs.get(name)
-        if (name in stale or cr is None or states.get(name) in _NONFAILING_CHECKS
+    for (name, _), cr in latest_runs.items():
+        if (name not in required_ci or name in stale
                 or cr.get("conclusion") not in {"failure", "cancelled", "timed_out"}
                 or cr.get("status") != "completed" or not (cr.get("check_suite") or {}).get("id")
-                or any(state not in _NONFAILING_CHECKS for state, _ in signals[name][1:])):
+                or sum(state not in _NONFAILING_CHECKS for state, _ in signals[name]) != 1):
             continue
         if workflows is None:
             workflows = paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
@@ -1294,10 +1292,10 @@ def _check_signals(
             superseded.append(name)
     capped = _check_suites_at_limit(runs)
     # A status-only success may hide a failed run outside the returned suites.
-    verified = {
-        name: state for name, state in states.items() if state != "success" or name in latest_runs
-    } if capped else states
-    return verified, (*stale, *superseded), stale_verdicts, capped
+    if capped:
+        run_names = {name for name, _ in latest_runs}
+        states = {name: state for name, state in states.items() if state != "success" or name in run_names}
+    return states, (*stale, *superseded), stale_verdicts, capped
 
 
 def _check_suites_at_limit(runs: list[dict]) -> bool:
