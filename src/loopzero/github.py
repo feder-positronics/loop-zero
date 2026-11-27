@@ -1639,8 +1639,5 @@ def context_statuses(repo: str, head: str, context: str) -> Iterator[dict]:
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:
     # A validation error alone does not prove exhaustion.
     with suppress(GhError, ProcTimeout, OSError):
-        return sum(
-            str(status.get("context", "")).casefold() == context.casefold()
-            for status in paged(f"repos/{repo}/commits/{head}/statuses")
-        ) >= 1_000
+        return sum(1 for _ in context_statuses(repo, head, context)) >= 1_000
     return False
