@@ -575,7 +575,10 @@ def cmd_start(args: argparse.Namespace) -> int:
     listing = _git(root, "worktree", "list", "--porcelain", "-z", paths=True)
     primary = Path(listing.split("\0", 1)[0].removeprefix("worktree "))
     # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
-    if current.stdout.strip().startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
+    branch = current.stdout.strip()
+    if branch.startswith("lz/") and root == primary:
+        raise CliError(f"primary checkout {root} is on task branch {branch}; switch it to another branch first")
+    if branch.startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
         raise CliError(f"already inside task worktree {root}; run start from {primary}")
     config = _load_config(args, root)
     print(worktree.start(primary, args.slug, config.base_branch))
@@ -1241,8 +1244,12 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
+OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its one reason on the PR before taking it out of draft."
+
+
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
-    _require_receipt(wt, config, head)
+    if problem := _check_report_problem(_load_report(wt), config, head):
+        raise CliError(f"{problem}. {OWNER_ROUTE}")
     github.mark_ready(config.repo, number)
 
 
@@ -1279,12 +1286,18 @@ def cmd_ready(args: argparse.Namespace) -> int:
     for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
     if not readiness.ready:
+        _print_owner_route(pr, readiness)
         if args.wait is None and _pending_checks(config, pr, readiness):
             print(NEXT_WAIT)
             return 3
         return 1
     print(f"ready: {pr.url}")
     return 0
+
+
+def _print_owner_route(pr: github.PR, readiness: github.Readiness) -> None:
+    if pr.is_draft and any(reason.startswith(("run loopzero check", "check receipt")) for reason in readiness.reasons):
+        print(OWNER_ROUTE)
 
 
 def _required_check_reasons(names: tuple[str, ...], *states: str) -> dict[str, str]:
@@ -1582,12 +1595,11 @@ def _mergify_timeout_detail(
 
 
 MERGIFY_REQUEUE = (
-    "To requeue, post `@mergifyio queue` as the whole PR comment "
-    "(same login), then rerun `loopzero merge --wait`."
+    "To requeue an unchanged head, post `@mergifyio queue` as the whole PR comment (same login); a new head is "
+    "requested by `loopzero merge` or readmitted by a repository queue rule; Mergify's \"already queued\" reply "
+    "to a request means a rule queued it first and is harmless. Then rerun `loopzero merge --wait`."
 )
-MERGIFY_DEQUEUE_HINT = (
-    'Read Mergify\'s "Left the queue" comment on the PR for the reason. Address it before requeueing.'
-)
+MERGIFY_DEQUEUE_HINT = 'Read Mergify\'s "Left the queue" comment on the PR for the reason. Address it before requeueing.'
 
 
 def _mergify_departure(
@@ -1690,6 +1702,8 @@ def _follow_blocked_mergify(
         hint += f"; Mergify membership unverified: {exc}"
     if confirmed:
         return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), True)
+    if sha := _mergify_departure(config, pr, queue, [], confirmed=False):  # a rule may have queued and ejected it
+        return sha
     raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
 
 
@@ -1717,7 +1731,9 @@ def _merge_with_mergify(
         if confirmed and not confirmed_marker:
             _require_receipt(wt, config, pr.head_sha)
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
-        if not confirmed and confirmed_marker:
+        # A repository rule may have queued and ejected the PR before any loopzero request.
+        if not confirmed and (confirmed_marker or (not requested and mergify.departure_report(
+                config.repo, pr.number, pr.head_sha, queue))):
             closed: list[github.GhError] = []
             if sha := _mergify_departure(config, pr, queue, closed, confirmed=True):
                 return sha
