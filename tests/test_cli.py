@@ -1521,7 +1521,7 @@ def publish_workflow(wt: Path, policy: str, message: str = "configure delivery")
 def stub_mergify_admission(monkeypatch, *, configured=True, markers=(False, False)):
     if configured is not None:
         monkeypatch.setattr(mergify, "configured", lambda *_: configured)
-    monkeypatch.setattr(mergify, "markers", lambda *_: markers)
+    monkeypatch.setattr(mergify, "queue_attempt", lambda *_: mergify.QueueAttempt(*markers))
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
 
 
@@ -1535,7 +1535,7 @@ def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> str:
 
 def arm_mergify_pr(wt, gh, conclusion="success", **overrides):
     head = commit_mergify_configuration(wt)
-    arm_approved_pr_with_check_result(gh, head, wt, conclusion, isDraft=False, **overrides)
+    arm_approved_pr_with_check_result(gh, head, wt, conclusion, **({"isDraft": False} | overrides))
     return head
 
 
@@ -3307,8 +3307,7 @@ def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, co
     assert all(github._read_only(tuple(c["argv"])) for c in gh.calls)
     if condition != "during-gates":
         expected = [commit_lookup.split()[:2]] * (2 if condition == "transient" else 1) + [LOOKUP_CALLS[-1]]
-        departure = [["api", f"repos/{REPO}/issues/7/comments"]] if command == "merge" else []
-        assert [c["argv"][:2] for c in gh.calls] == expected + departure
+        assert [c["argv"][:2] for c in gh.calls] == expected
 
 
 @pytest.fixture
@@ -3609,7 +3608,6 @@ def test_merge_wait_rejects_verdicts_after_deadline(wt, gh, capsys, monkeypatch,
         commit_mergify_configuration(wt)
         monkeypatch.setattr(mergify, "configured", lambda *_: True)
         if ready:
-            monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
             monkeypatch.setattr(mergify, "membership", lambda *_: None)
         monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("queued after the deadline"))
     arm_approved_pr_with_check_result(gh, head_of(wt), wt, "pending", isDraft=False)
@@ -3678,7 +3676,7 @@ def test_mergify_admission_rechecks_only_the_selected_pr(wt, gh, capsys, monkeyp
         "merged": merge_json(state="MERGED", head=head, sha=merged_sha),
     }
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (True, outcome == "open"))
+    monkeypatch.setattr(mergify, "queue_attempt", lambda *_: mergify.QueueAttempt(True, outcome == "open"))
 
     def membership(*_):
         gh.append(detail, snapshots[outcome])
@@ -4069,22 +4067,27 @@ def test_merge_queued_prints_and_keeps_worktree(wt, gh, capsys, head, monkeypatc
     assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
 
 
-@pytest.mark.parametrize("attested", [True, False])
-@pytest.mark.parametrize("merge_state", ["BEHIND", "CLEAN"])
+@pytest.mark.parametrize("attested,merge_state", [
+    *itertools.product((True, False), ("BEHIND", "CLEAN")), (True, "DRAFT"),
+])
 def test_mergify_merge_requests_once_for_behind_head(
     wt: Path, gh: FakeGh, capsys, monkeypatch, queue_requests, attested, merge_state, git_calls
 ) -> None:
-    head = arm_mergify_pr(wt, gh, mergeStateStatus=merge_state)
+    draft = merge_state == "DRAFT"
+    head = arm_mergify_pr(wt, gh, mergeStateStatus="CLEAN" if draft else merge_state, isDraft=draft)
     stub_mergify_admission(monkeypatch, configured=attested)
 
     git_calls.clear()
-    out, err = expect_cli(capsys, int(not attested), "merge")
+    admits = attested and not draft
+    out, err = expect_cli(capsys, int(not admits), "merge", *(["--wait=0"] if draft else []))
     assert git_calls.count(["branch", "--show-current"]) == 1
-    assert queue_requests == ([(REPO, 7, head, "main")] if attested else [])
-    if attested:
+    assert queue_requests == ([(REPO, 7, head, "main")] if admits else [])
+    if admits:
         assert err == "" and "requested from Mergify queue main" in out
     else:
-        assert "queue configuration is unverified" in err
+        message = "PR #7 is still a draft; next: loopzero ready --wait" if draft else "queue configuration is unverified"
+        assert message in err
+
 
 @pytest.mark.parametrize(("accepted", "transient"), [(True, False), (False, False), (True, True)])
 def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accepted, transient):
@@ -4176,9 +4179,11 @@ def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
     ejected = outcome in {"ejected", "landed-on-ejection"}
     gh.respond("api graphql", threads_json(), native_queue(True, head), native_queue(not ejected, head))
     gh.respond("api -X", "")
-    poll_clock(monkeypatch, jitter=1.0)
+    clock = poll_clock(monkeypatch, jitter=1.0)
     wait = 0 if ejected else 60
     code, out, err = run(capsys, "merge", f"--wait={wait}")
+    if outcome in {"closed-then-merged", "still-closed"}:
+        assert clock.sleeps == [30]
     if changed:
         assert code == 1 and "PR head changed" in err
         assert wt.exists(), "no cleanup after an unreviewed head"
@@ -4576,50 +4581,6 @@ def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
         assert not clock.sleeps
 
 
-def test_merge_wait_refuses_a_green_draft(wt, gh, capsys, monkeypatch, queue_requests):
-    stub_mergify_admission(monkeypatch)
-    head = commit_mergify_configuration(wt, "mergify delivery")
-    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=True)
-    _, err = expect_cli(capsys, 1, "merge", "--wait=0")
-    assert "PR #7 is still a draft; next: loopzero ready --wait" in err
-    assert not queue_requests
-
-
-@pytest.mark.parametrize("mergify_queue", [False, True])
-@pytest.mark.parametrize("lands", [False, True])
-def test_merge_wait_rechecks_closed_pr_once(monkeypatch, mergify_queue, lands):
-    pr = github.pr_from_rest(open_pr_snapshot("a" * 40))
-    config = SimpleNamespace(repo=REPO, base_branch="main", mergify_queue="main")
-    calls = []
-
-    def merged_sha(*_args, **_kwargs):
-        calls.append(None)
-        if lands and len(calls) >= 2:
-            return "b" * 40
-        raise github.ClosedUnmerged(("gh",), "PR closed without a verified merge")
-
-    monkeypatch.setattr(github, "merged_sha", merged_sha)
-    monkeypatch.setattr(github, "merge_pending", lambda *_: True)
-    monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "membership", lambda *_: mergify.Membership())
-    polls = []
-
-    def poll(*_args, **_kwargs):
-        for tick in range(4):
-            polls.append(tick)
-            yield
-
-    monkeypatch.setattr(cli, "_poll_until", poll)
-    wait = cli._wait_for_mergify if mergify_queue else cli._wait_for_merge
-    args = (config, pr, 5400, True) if mergify_queue else (config, pr, 5400)
-    if lands:
-        assert wait(*args) == "b" * 40
-    else:
-        with pytest.raises(github.ClosedUnmerged):
-            wait(*args)
-        assert polls == [0, 1]
-
-
 @pytest.mark.parametrize("confirmed", [True, False])
 def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatch, confirmed):
     head = commit_mergify_configuration(wt)
@@ -4655,7 +4616,7 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
     ("merged", 1.0),
     ("worktree_removed", 0.9),
     ("worktree_removed", 1.0),
-    ("ejected", 1.0),
+    ("ejected", 1.0), ("closed_then_merged", 1.0), ("still_closed", 1.0),
     ("head_changed", 1.0),
     ("timeout", 0.9),
     ("timeout", 1.0),
@@ -4694,6 +4655,10 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
                                 head="f" * 40 if changed else head))
     if outcome == "ejection_head_changed":
         snapshots.extend((merge_json(head=head), merge_json(state="MERGED", head="f" * 40, sha="e" * 40)))
+    if outcome in {"closed_then_merged", "still_closed"}:
+        closed = merge_json(state="CLOSED", head=head)
+        snapshots[-1:] = [closed, merge_json(state="MERGED", head=head, sha="e" * 40)
+                      if outcome == "closed_then_merged" else closed]
     gh.append(f"api repos/{REPO}/pulls/7", *snapshots)
     configurations = []
     def configured(*args):
@@ -4705,8 +4670,8 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
                 return False
         return True
     monkeypatch.setattr(mergify, "configured", configured)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (outcome != "requested_head_changed",
-                                                        outcome not in {"unsafe_pending", "requested_head_changed"}))
+    monkeypatch.setattr(mergify, "queue_attempt", lambda *_: mergify.QueueAttempt(
+        outcome != "requested_head_changed", outcome not in {"unsafe_pending", "requested_head_changed"}))
     monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: pytest.fail("unsafe confirmation"))
     reads = []
     def membership(*_):
@@ -4733,8 +4698,9 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
             return poll_until(*args, **kwargs)
 
         monkeypatch.setattr(cli, "_poll_until", remove_worktree_then_poll)
+    wait = {"timeout": 250, "closed_then_merged": 60, "still_closed": 60}.get(outcome, 0)
     try:
-        code, out, err = run(capsys, "merge", "--wait=250" if outcome == "timeout" else "--wait=0")
+        code, out, err = run(capsys, "merge", f"--wait={wait}")
     finally:
         if outcome == "worktree_removed":
             monkeypatch.chdir(repo)
@@ -4744,12 +4710,14 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert queue_requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
-    assert all(deadline == (250 if outcome == "timeout" else 0) for deadline in configurations)
+    assert all(deadline == wait for deadline in configurations)
+    if outcome in {"closed_then_merged", "still_closed"}:
+        assert clock.sleeps == [30] and reads == [True]
     if outcome.startswith("incompatible_"):
         assert reads == [True] * (2 if landed else 1)
         if not landed:
             assert "incompatible settings fingerprint" in err
-    if outcome in {"merged", "incompatible_landed", "already_merged", "worktree_removed"}:
+    if outcome in {"merged", "incompatible_landed", "already_merged", "worktree_removed", "closed_then_merged"}:
         assert code == 0 and "e" * 40 in out and not wt.exists(), err
         if outcome == "worktree_removed":
             assert "warning: merged but worktree cleanup failed" in err
@@ -4759,24 +4727,29 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         if outcome == "ejected":
             assert err.index('"Left the queue" comment') < err.index("post `@mergifyio queue`")
         message = {"ejected": "post `@mergifyio queue` as the whole PR comment (same login); a new head", "head_changed": "head changed",
-                   "timeout": "timed out", "api_error": "HTTP 503",
+                   "timeout": "timed out", "api_error": "HTTP 503", "still_closed": "closed without a verified merge",
                    "incompatible_absent": "incompatible settings fingerprint", "incompatible_unverified": "HTTP 503",
                    "unsafe_config": "unsafe or unavailable", "unsafe_pending": "unsafe or unavailable", "config_error": "HTTP 503",
                    "requested_head_changed": "head changed", "merged_head_changed": "head changed", "already_merged_changed": "head changed", "ejection_head_changed": "head changed"}[outcome]
         assert message in out + err
 
 
-@pytest.mark.parametrize("confirmed,kind", [
-    (False, "current"), (False, "stale"), (False, "missing"),
-    (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"), (True, "conflict"),
-    (False, "head"), (False, "requeue"), (False, "author"), (False, "landed"),
-    (False, "rule"), (False, "rule_requeue"), (True, "batch"), (True, "dequeued"),
-    (False, "rule_same"), (False, "rule_unrequested"), (False, "rule_blocked"), (False, "linked_already"),
+@pytest.mark.parametrize("confirmed,kind,mode", [
+    *((confirmed, kind, "wait") for confirmed, kind in [
+        (False, "current"), (False, "stale"), (False, "missing"),
+        (False, "stacked"), (True, "stacked"), (True, "isolated"), (True, "unknown"), (True, "conflict"),
+        (False, "head"), (False, "requeue"), (False, "author"), (False, "landed"),
+        (False, "rule"), (False, "rule_requeue"), (True, "batch"), (True, "dequeued"),
+        (False, "rule_same"), (False, "rule_unrequested"), (False, "rule_blocked"), (False, "linked_already"),
+    ]),
+    *((False, kind, "no_wait") for kind in ("rule", "rule_requeue", "rule_blocked")),
+    (False, "rule_blocked", "unverified"),
 ])
-def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, confirmed, kind):
-    head = arm_mergify_pr(wt, gh, "failure" if kind == "rule_blocked" else "success")
+def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, confirmed, kind, mode):
+    blocked = kind == "rule_blocked"
+    head = arm_mergify_pr(wt, gh, "failure" if blocked else "success")
     admission = kind in MERGIFY_QUEUE_FIXTURE["admission"]
-    comments = [] if kind in {"rule_unrequested", "rule_blocked"} else [
+    comments = [] if kind in {"rule_unrequested", "rule_blocked", "rule_requeue"} else [
         {"id": 42, "user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
          "body": MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)}]
     if kind != "missing":
@@ -4791,23 +4764,39 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         at = requeued[kind]
         comments.append({"id": 44, "user": {"login": LOGIN}, "body": "@mergifyio queue",
                          "created_at": f"2026-11-25T{at}{':00' if at.count(':') == 1 else ''}Z"})
-    gh.respond(f"api repos/{REPO}/issues/7/comments", comments)
+    endpoint = f"api repos/{REPO}/issues/7/comments"
+    gh.respond(endpoint, comments)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     membership = iter([mergify.Membership()] if confirmed else [])
-    monkeypatch.setattr(mergify, "membership", lambda *_: next(membership, None))
+
+    def lookup(*_):
+        if mode == "unverified":
+            raise mergify.MergifyError("HTTP 503")
+        assert not (blocked and mode == "no_wait")
+        return next(membership, None)
+
+    monkeypatch.setattr(mergify, "membership", lookup)
     monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
     monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("already requested"))
     if kind == "landed":
         opened = open_pr_snapshot(head)
-        gh.append(f"api repos/{REPO}/pulls/7", *([opened] * 3), merge_json(state="MERGED", head=head, sha="e" * 40))
+        gh.append(f"api repos/{REPO}/pulls/7", opened, merge_json(state="MERGED", head=head, sha="e" * 40))
         gh.respond("api -X", "")
     if admission:
         summary, _ = expect_cli(capsys, 0, "status", stdout_contains=("waiting for admission",), stderr="")
         assert (f"{URL}#issuecomment-43" in summary) is (kind == "current")
-    code, out, err = run(capsys, "merge", "--wait=0")
-    if kind == "landed":
+    code, out, err = run(capsys, "merge", *(["--wait=0"] if mode != "no_wait" else []))
+    if blocked and mode != "wait":
+        assert code == 1 and "not ready to request Mergify" in err and "requeue" not in err
+        assert ("HTTP 503" in err) == (mode == "unverified")
+        assert not any(c["argv"][:2] == endpoint.split() for c in gh.calls)
+    elif kind == "rule_requeue" and mode == "no_wait":
+        assert code == 0 and "requested from Mergify" in out
+    elif kind == "landed":
         assert (code, err) == (0, "") and not wt.exists() and out.splitlines()[-1] == "e" * 40
     elif kind in MERGIFY_QUEUE_FIXTURE["expected"]:
+        if kind == "rule":
+            assert sum(c["argv"][:2] == endpoint.split() for c in gh.calls) == 1
         assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and ("'checks'" in err) == (kind not in {"conflict", "dequeued"})
         assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["expected"][kind])
         assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["requeue_guidance"]) is (kind not in {"conflict", "dequeued"})
@@ -4820,7 +4809,7 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
 def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result):
     arm_mergify_pr(wt, gh)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
+    monkeypatch.setattr(mergify, "queue_attempt", lambda *_: mergify.QueueAttempt(True, True))
     blocking = result in {"long", "many", "any_of"}
     payload = MERGIFY_QUEUE_FIXTURE["candidate_responses"]["blocking" if blocking else result or "missing"]
     conditions = payload["mergeability_check"]["conditions_evaluation"]

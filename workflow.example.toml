@@ -14,7 +14,12 @@ base = "main"
 # .loopzero/checks.json. These uv commands need Ruff and pytest in the dev
 # dependency group, a committed uv.lock, and actual host paths in the settings
 # below with a warmed uv cache for offline execution.
-commands = ["uv run --group dev ruff check .", "uv run --group dev pytest -q"]
+commands = [
+  'test -d "$UV_CACHE_DIR" && test -d "$UV_PYTHON_INSTALL_DIR" || { echo "Set [checks].env, ro_paths and writable to the actual uv cache and Python paths on this host." >&2; exit 1; }',
+  'command -v uv >/dev/null || { echo "uv is missing in the check sandbox. Set [checks].ro_paths to include the host directory containing uv." >&2; exit 1; }',
+  "command uv run --locked --group dev ruff check .",
+  "command uv run --locked --group dev pytest -q",
+]
 
 # Worktree-relative paths that get a fresh writable scratch mount per run.
 # This is the default list; checks cannot write anywhere else in the tree.
@@ -32,7 +37,7 @@ env = { UV_CACHE_DIR = "/home/<you>/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/<
 # decision: a check can write to these paths.
 writable = ["/home/<you>/.cache/uv"]
 
-# Exact names of GitHub check runs that must be green on the PR head before
+# Exact names of GitHub check runs or commit statuses that must be green on the PR head before
 # `loopzero ready` and `loopzero merge` proceed. Match your branch protection.
 # Require always-run aggregate gates when test jobs are path-conditional.
 # A skipped required check does not satisfy readiness.
@@ -54,7 +59,8 @@ merge = "squash"
 # Required with merge = "mergify"; the exact Mergify queue rule name.
 # mergify_queue = "main"
 # Reviewer preference, in order. `loopzero review` picks the first family
-# that is installed and differs from the author's family when that is known.
+# that is installed and absent from the author lineage. If no independent
+# configured reviewer can run, it discloses a same-family fallback.
 # Hosted eligibility requires explicit GitHub publisher logins from trusted base config.
 # review_publishers = ["your-github-login"]
 reviewers = ["claude", "codex"]
@@ -75,13 +81,13 @@ reviewers = ["claude", "codex"]
 # allowed_efforts = ["medium", "high"]
 
 # [delivery.review.codex]
-# model = "gpt-6-luna"
+# model = "gpt-6.2-astra"
 # effort = "medium"
-# allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+# allowed_efforts = ["low", "medium", "high", "xhigh"]
 
 # Optional local passing-result reuse. Declare every input, including shared tooling.
 # Unlisted commands reuse only when "*" includes "." (the whole tree).
 # A partial "*" adds shared tooling only to listed commands. CI/merge-queue runs fresh.
 # [checks.inputs]
-# "uv run --group dev pytest -q" = ["src/**", "tests/**"]
+# "command uv run --locked --group dev pytest -q" = ["src/**", "tests/**"]
 # "*" = ["uv.lock", "pyproject.toml"]
