@@ -489,9 +489,8 @@ error still forces earlier stages to run. Lookup errors surface in stage order.
 Receipts that use saved stage results bind the current head and check settings.
 
 A worker running the entire check is itself the coordinator and writes a
-receipt with its own effective settings. Transferring it preserves the
-fingerprint, if present. Local readiness applies the same receipt predicate
-as for any other coordinator. See [check receipts with remote execution](../SETUP.md#check-receipts-with-remote-execution)
-for the operator route.
+receipt with its own effective settings. Transferred receipts require the same
+matching settings fingerprint for local readiness. See
+[check receipts with remote execution](../SETUP.md#check-receipts-with-remote-execution).
 
 CI and merge-queue candidates run fresh without a local worktree receipt.

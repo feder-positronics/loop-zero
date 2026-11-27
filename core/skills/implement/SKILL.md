@@ -46,11 +46,11 @@ Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head, including base updates after review.
 Keep review suggestions within scope. Finish planned test, documentation and
 generated-file edits before primary review.
-Before the check and draft push for primary review, rebase your own commits onto `origin/<base>` using
-`[repo].base` (default `main`). For a stack, follow
-[stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
-Leave base merges out of a branch awaiting its delta unless it needs a conflict refresh;
-then merge the base before checking and reviewing the resolved head.
+Before the first draft push and check, rebase onto `origin/<base>` (`[repo].base`,
+default `main`). Keep unrelated base updates out of a pending delta. After review,
+take a required base update by merging it to preserve reviewed ancestry. Check
+the resolved head after a conflict and use the review budget above to review it.
+For a stack, follow [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
 
 Never bypass the sandbox, change the check list or enable `[checks].network` to pass checks.
 Report base failures without working around them.

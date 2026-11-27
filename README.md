@@ -26,19 +26,17 @@ ownership and the contributor routine that keeps documentation current.
 | `loopzero check` | Run trusted-base checks with local bwrap. Before a long check, open the draft with `loopzero pr` first. |
 | `loopzero pr` | Push and open a draft PR from the task file, with its Validation section rendered. |
 | `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. Exits 0 on approval, 5 on changes requested. |
-| `loopzero ready [--wait[=SECONDS]]` | Verify head, findings and CI; optionally wait for required checks on that head. |
-| `loopzero merge [--wait[=SECONDS]]` | Recheck readiness and merge; optionally wait for required checks and landing before cleanup. |
+| `loopzero ready [--wait[=SECONDS]]` | Verify readiness and take the PR out of draft. Wait for required checks and mergeability on that head with `--wait`. |
+| `loopzero merge [--wait[=SECONDS]]` | Recheck readiness and merge. With `--wait`, wait for source checks, mergeability and verified landing before cleanup. |
 | `loopzero status` | Show task, PR, check and readiness state (details below). |
 | `loopzero resolve [<id> "<what changed>"]` | List open blocking findings, or reply to one and resolve its thread. |
 
 For a picture of the whole flow, see the [workflow diagrams](docs/WORKFLOW.md).
 
-`loopzero status` shows GitHub's draft state on its `pr:` line and, when a PR
-exists, the local readiness verdict that `loopzero merge` uses on its `ready:`
-line; it can exit 0 with `ready: no`. Queueing directly in GitHub with a red
-local check receipt is covered only by the contract's
-[owner queue route](core/CONTRACT.md#blockers).
-It requires authenticated GitHub access even before a PR exists.
+`loopzero status` requires GitHub access and shows draft state and a readiness
+snapshot using local remote-tracking policy. It can exit 0 with `ready: no`.
+Ready and merge refresh that policy. The contract's
+[owner queue route](core/CONTRACT.md#blockers) covers direct queueing with a red receipt.
 
 For agent delegation, follow [model selection](docs/DELEGATION.md) using the
 task repository's [models.toml](models.toml).
@@ -64,7 +62,8 @@ permission. Wait, REST/GraphQL and quota rules live in the contract's
 1. Set `sha` to the pinned commit SHA and run
    `uv tool install "git+https://github.com/feder-positronics/loop-zero@$sha"`.
 2. Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` at
-   your repo root and set `repo.name`, `checks.commands` and `required_ci`.
+   your repo root and set `repo.name`, `checks.commands`, `checks.required_ci`,
+   and `delivery.review_publishers`.
    Commit and push `workflow.toml` to the configured remote base
    (`origin/main` by default) before starting your first task.
 3. Verify `git`, `gh auth status`, and your `claude` or `codex` CLI. Run
@@ -96,7 +95,7 @@ Settings and semantics the example does not spell out:
 
 | Key | Meaning |
 | --- | --- |
-| `checks.required_ci` | Names may be check runs or commit statuses; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
+| `checks.required_ci` | For each required name, the latest check run per GitHub App and latest commit status, whichever exist, must succeed. |
 | `checks.writable` | The forbidden-path rules from `checks.ro_paths` apply. |
 | `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers. |
 | `checks.env_allowlist` | Host variables allowed for checks; an explicit list replaces the default. The default and sandbox forwarding are in the [contract](core/CONTRACT.md#sandbox-rules-for-checks). To forward another launcher variable, append its name to `[checks].env_allowlist` in the base branch’s `workflow.toml`. |
