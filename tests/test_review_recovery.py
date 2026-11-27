@@ -454,6 +454,9 @@ def test_repost_confirms_pre_configured_codex_publication(replay_gh, wt, gh, cap
 
 def test_old_notice_heading_is_normalized_only_for_the_trailing_notice():
     quoted = raw_details("Native Codex transcript quoted")
-    notice = raw_details("Native Codex transcript retained")
+    notice = raw_details("Native Codex transcript retained in the restricted local review receipt; "
+                         "public evidence is publisher-derived, not backend attestation. "
+                         "Exact raw SHA256: " + "a" * 64)
     new = notice.replace("Raw reviewer output", "Review evidence notice")
     assert cli._comparable_body("x" + quoted + notice) == "x" + quoted + new
+    assert cli._comparable_body("x" + notice + quoted) == "x" + notice + quoted
