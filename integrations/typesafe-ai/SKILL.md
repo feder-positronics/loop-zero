@@ -6,10 +6,9 @@ license: MIT
 
 # TypeSafe
 
-Use TypeSafe's System One models to turn application state into typed judgments
-and probabilities. Keep rules, calculations, authorization, and execution in code.
-Preserve the requested stack and scope; use TypeSafe where semantic understanding
-serves the task's acceptance criteria.
+Use TypeSafe where semantic understanding serves the task's acceptance criteria;
+the [building reference](reference.md#find-the-useful-shape) says when it fits.
+Preserve the requested stack and scope.
 
 ## Ground
 
@@ -44,17 +43,14 @@ does not change the SDK's credential lookup behavior.
 
 ## Build And Verify
 
-1. Work backward from observable application behavior to narrow judgments.
-   Choose Choice for one option, Noul for a yes/no probability, or Score for a
-   graded dimension. Supply enough evidence and a no-match path when needed.
-2. Batch independent questions over shared state. Chain requests only when
-   later state or options depend on earlier answers. Handle uncertainty on the
-   branches actually used; model confidence is not permission to act.
-3. Prove application behavior at its public boundary with deterministic service
+1. Design the judgments and compose them as the reference's
+   [Design the judgments](reference.md#design-the-judgments) and
+   [Compose and verify](reference.md#compose-and-verify) sections describe.
+2. Prove application behavior at its public boundary with deterministic service
    responses covering success, uncertainty, and service failures. Evaluate model
    quality separately on representative labeled cases; fake responses do not
    establish model accuracy or calibrate thresholds.
-4. Run repository checks through `loopzero check`. Keep required checks offline
+3. Run repository checks through `loopzero check`. Keep required checks offline
    under the existing sandbox configuration. Fetch docs during development;
    do not add live model calls, credentials, or network access to required checks
    merely to validate an integration. Report separately any live evaluation

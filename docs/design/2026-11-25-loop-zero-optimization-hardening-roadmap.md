@@ -47,9 +47,9 @@ Moving PR CI off Blacksmith (`#14186`) while adding Vitest/ESLint/Prettier to th
 
 ---
 
-## 2. Settled Operating & Governance Rules
+## 2. Operating rules agreed on 2026-11-25
 
-These rules represent Owner + cross-model (Neon + Fable) consensus and govern ongoing co-development of `loop-zero` and consumer repositories:
+These rules record the Owner + cross-model (Neon + Fable) consensus of 2026-11-25. Current obligations come from `core/CONTRACT.md` and `docs/DELEGATION.md`; a rule below binds only where one of them carries it:
 
 1. **Two-Lane Rollout (Merge-Gated, Non-Retroactive):**
    - *Fast lane (backward-compatible fixes, speedups, relaxations, deletions):* merge to `loop-zero` `main` and refresh hosts/pins **ASAP (same hour)**.
