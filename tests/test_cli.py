@@ -615,9 +615,9 @@ def test_initial_pr_keeps_human_validation(wt: Path, gh: FakeGh, capsys) -> None
     ))
     gh.respond_pr_list([])
     gh.respond_pr_create(pr_json(headRefOid=head_of(wt)))
+    arm_draft_validation(gh, wt, head_of(wt))
     assert run(capsys, "pr")[0] == 0
-    body = next(json.loads(c["--input"])["body"] for c in gh.calls
-                if c["argv"][:2] == ["api", f"repos/{REPO}/pulls"])
+    body = next(json.loads(c["--input"])["body"] for c in gh.calls if "PATCH" in c["argv"])
     assert "- Regression failed before the fix." in body
     assert "- Browser verified." in body
     assert "(no `loopzero check` run recorded)" in body
@@ -1171,6 +1171,7 @@ def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, 
         gh.respond(branch_history_key(), [])
         gh.respond_pr_list([])
         gh.respond_pr_create(pr_json(headRefOid=head))
+        arm_draft_validation(gh, wt, head)
         assert run(capsys, "--config", str(private), "pr")[0] == 0
 
     body = json.loads(gh.calls[-1]["--input"])["body"]
@@ -1195,6 +1196,7 @@ def test_pr_requires_proven_branch_history(wt, gh, fake_tool, tmp_path, capsys, 
         closed = pr_json(state="CLOSED", headRefOid=head)
         gh.respond(branch_history_key(), [closed_history_row(closed)])
         gh.respond_pr_list([closed])
+        arm_draft_validation(gh, wt, head)
         expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
         return
     completed = failure in {"merged", "CLOSED", "OPEN"}
@@ -1225,6 +1227,7 @@ def test_pr_pushes_the_captured_commit_not_the_moved_branch(wt, gh, fake_tool, t
     gh.respond(branch_history_key(), [])
     gh.respond_pr_list([])
     gh.respond_pr_create(pr_json(headRefOid=head))
+    arm_draft_validation(gh, wt, head)
     git(wt, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")  # single-branch clone
     pushes = tmp_path / "pushes"  # another writer moves the branch name just before the push
     fake_tool("git", f'''if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; /usr/bin/git commit -q --allow-empty -m moved; fi
@@ -1513,6 +1516,13 @@ def test_merge_cancel_and_wait_conflict_is_a_usage_error(capsys):
 # --- review ---------------------------------------------------------------------------
 
 
+def arm_draft_validation(gh: FakeGh, wt: Path, head: str) -> None:
+    """The created draft is reread, then receives its validation by PATCH."""
+    gh.respond(f"api repos/{REPO}/pulls/7",
+               rest_pr_json(pr_json(headRefOid=head, body=(wt / ".loopzero" / "task.md").read_text())))
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+
+
 def arm_pr_body_patch(gh: FakeGh, head: str, *, branch: str = "lz/t1", **fields) -> None:
     gh.respond_pr_list([pr_json(headRefOid=head, **fields)], branch=branch)
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
@@ -1698,9 +1708,9 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
 
     def change_body_during_review(*args, **kwargs):
         result = run_review(*args, **kwargs)
-        if body_case == "read-fails":  # the pre-post head check reads the PR before the summary does
+        if body_case == "read-fails":  # the pre-post checks read the PR twice before the summary does
             done = sum(call["argv"][:2] == detail_key.split() for call in gh.calls)
-            gh.respond(detail_key, *[rest_pr_json(pr_json(headRefOid=head))] * (done + 1),
+            gh.respond(detail_key, *[rest_pr_json(pr_json(headRefOid=head))] * (done + 2),
                        {"stdout": "", "stderr": "body read failed", "exit": 1})
         else:
             gh.respond(detail_key, rest_pr_json(pr_json(headRefOid=head, body=live)))
@@ -5255,6 +5265,7 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         gh.respond(branch_history_key(), [])
         gh.respond_pr_list([])
         gh.respond_pr_create(pr_json(headRefOid=head))
+        arm_draft_validation(gh, wt, head)
         _, err = expect_cli(capsys, int(bool(extra)), "pr")
         if extra:
             assert not git(wt, "ls-remote", "origin", "refs/heads/lz/t1").strip()
@@ -5269,8 +5280,8 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert not writes
     else:
         assert err == ""
-        assert len(writes) == 1
-        assert json.loads(writes[0]["--input"])["body"] == prose + suffix
+        assert len(writes) == 1 + create  # the draft, then its validation
+        assert json.loads(writes[-1]["--input"])["body"] == prose + suffix
 
 
 def merge_wait(monkeypatch, capsys, wait, fake):
