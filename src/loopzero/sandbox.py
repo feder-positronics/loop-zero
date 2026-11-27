@@ -124,13 +124,14 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
         current = _current_commands(config, worktree, commands, settings_sha256)
-        keys = [_input_key(config, worktree, c, "" if dirty else base, status=status, workflow=workflow)
-                for c in commands]
-        last_run = max((i for i, k in enumerate(keys, 1) if config.scratch and not k), default=0)
+        last_run = max((i for i, c in enumerate(commands, 1)
+                        if config.scratch and not _has_inputs(config, c)), default=0)
         for ordinal, command in enumerate(current, 1):
             if progress:
                 progress(command)
-            key, old = keys[ordinal - 1], previous.get(command)
+            key = _input_key(config, worktree, command, "" if dirty else base,
+                             status=status, workflow=workflow)
+            old = previous.get(command)
             if key and old and old.input_key == key and ordinal > last_run:
                 result = old
                 status and status(f"reused {(old.reused_from or head)[:8]}")
