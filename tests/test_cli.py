@@ -2923,7 +2923,7 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, queue_request
     if settled == "CONFLICTING":
         assert code == 1 and "has merge conflicts" in out + err
     elif settled == "UNKNOWN":
-        assert code == 3 and out.endswith(f"timed out waiting for GitHub to compute mergeability on {head[:12]}. Run `loopzero {command} --wait` to resume on this head.\n")
+        assert code == 3 and " ".join(out.splitlines()).endswith(f"timed out waiting for GitHub to compute mergeability on {head[:12]}. Run `loopzero {command} --wait` to resume on this head.")
     else:
         assert code == (0 if command == "ready" else 3)
     assert queue_requests == ([(REPO, 7, head, "main")]
@@ -3176,12 +3176,11 @@ def test_ready_wait_review_failure_freshness(
     replay_gh,
 ) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
-    refresh = name == "Loop-zero Eligibility" and new_failure == "server-old-review"
-    if refresh:
-        expected, waited = 0, True
-        endpoint = ELIGIBILITY_DISPATCH.replace("/dispatches", "/runs?event=workflow_dispatch&branch=main&per_page=100")
-        gh.respond(f"api {endpoint}", {"workflow_runs": [{"display_title": "Refresh eligibility for PR #7", "status": "queued"}]})
     current, earlier = "12:00:00Z", "11:59:59Z"
+    refresh = name == "Loop-zero Eligibility" and new_failure == "server-old-review"
+    expected, waited = (0, True) if refresh else (expected, waited)
+    if refresh:
+        gh.respond(f"api {ELIGIBILITY_DISPATCH.removesuffix('/dispatches')}/runs?event=workflow_dispatch&branch=main&per_page=100", {"workflow_runs": [{"display_title": "Refresh eligibility for PR #7", "status": "queued"}]})
     review_time, failure_time = {
         True: (current, "12:00:10Z"), "tie": (current, current), "missing": (current, None),
         "fractional-review": ("12:00:00.1234569Z", "12:00:00.1234561Z"),
@@ -4237,6 +4236,7 @@ def finding_pr(wt, gh, head):
 
 
 ELIGIBILITY_DISPATCH = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
+ELIGIBILITY_REQUESTED = "Requested a Loop-zero Eligibility refresh for PR #7. Run `loopzero ready --wait` to follow the verdict."
 REPLY_ACCEPTED = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
 THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
 
@@ -4278,7 +4278,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
     else:
         assert (code, err) == (0, "")
         status = {"remaining": [], "missing": ["Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete."]}
-        assert out.splitlines()[1:] == status.get(outcome, ["Requested a Loop-zero Eligibility refresh for PR #7. Run `loopzero ready --wait` to follow the verdict."])
+        assert out.splitlines()[1:] == status.get(outcome, [ELIGIBILITY_REQUESTED])
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
@@ -4339,7 +4339,7 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
     assert run(capsys, "resolve", "0b9b59e7", reply)[0] == 130
     out, _err = expect_cli(capsys, 0, "resolve", "0b9b59e7", reply, stderr="")
     assert accepted == {"reply": 1, "resolution": 1}
-    assert "refreshed Loop-zero Eligibility for PR #7" in out
+    assert ELIGIBILITY_REQUESTED in out
     assert sum("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls) == 1
     assert run(capsys, "resolve") == (0, "", "")
 
@@ -4405,7 +4405,7 @@ def test_resolve_retries_only_thread_resolution(finding_pr, gh: FakeGh, capsys, 
     if recovers:
         assert (code, err) == (0, "")
         assert out.splitlines() == [
-            "resolved 0b9b59e7: Off by one", "refreshed Loop-zero Eligibility for PR #7",
+            "resolved 0b9b59e7: Off by one", ELIGIBILITY_REQUESTED,
         ]
     else:
         assert code == 1
