@@ -1266,14 +1266,18 @@ def cmd_ready(args: argparse.Namespace) -> int:
     for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
     if not readiness.ready:
-        if pr.is_draft and any(reason.startswith(("run loopzero check", "check receipt")) for reason in readiness.reasons):
-            print("If the delivery contract's owner queue route applies, post its one reason on the PR before taking it out of draft.")
+        _print_owner_route(pr, readiness)
         if args.wait is None and _pending_checks(config, pr, readiness):
             print(NEXT_WAIT)
             return 3
         return 1
     print(f"ready: {pr.url}")
     return 0
+
+
+def _print_owner_route(pr: github.PR, readiness: github.Readiness) -> None:
+    if pr.is_draft and any(reason.startswith(("run loopzero check", "check receipt")) for reason in readiness.reasons):
+        print("If the delivery contract's owner queue route applies, post its one reason on the PR before taking it out of draft.")
 
 
 def _required_check_reasons(names: tuple[str, ...], *states: str) -> dict[str, str]:
