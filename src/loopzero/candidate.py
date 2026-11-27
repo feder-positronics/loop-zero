@@ -256,8 +256,10 @@ def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None
         diagnostic = output.read(_TREE_OUTPUT).decode(errors="replace")
         if github._transient_error(diagnostic, False) or re.search(r"returned error: (?:429|5\d\d)", diagnostic):
             raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
-    _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
-             "resource bound hit, or integration conflict", FetchFailed if operation == "fetch" else CandidateError)
+    cause = ("objects unavailable or a resource bound was hit" if operation == "fetch"
+             else "objects unavailable, resource bound hit, or integration conflict")
+    _require(returncode == 0, f"git {operation} exited {returncode}: {cause}",
+             FetchFailed if operation == "fetch" else CandidateError)
 
 
 def _fetch_token() -> str:

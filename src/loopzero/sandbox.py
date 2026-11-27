@@ -476,10 +476,13 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
     try:
         probe = _run_bwrap(config, worktree, prefix, ("true",), timeout=GIT_TIMEOUT)
     except _proc.ToolMissing as exc:
+        if "PATH" not in config.env_allowlist:
+            raise SandboxUnavailable(
+                "bwrap was found but cannot be started: PATH is not in checks.env_allowlist; add PATH to it"
+            ) from exc
         raise SandboxUnavailable(
             f"bwrap binary missing while starting the namespace probe: {exc}\n"
-            + ("sudo apt install bubblewrap" if "PATH" in config.env_allowlist
-               else "PATH is not in checks.env_allowlist, so the sandbox cannot find an installed bwrap")
+            "sudo apt install bubblewrap"
         ) from exc
     except _proc.ProcTimeout:
         raise SandboxUnavailable(f"bwrap namespace creation timed out after {GIT_TIMEOUT:g}s") from None
@@ -582,6 +585,8 @@ def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str
 
 
 def _git_reason(tail: str) -> str:
+    if "ambiguous argument 'HEAD'" in tail:
+        return "this branch has no commit yet; make the first commit before running checks"
     return next((line for line in tail.splitlines() if line.startswith("fatal:")), _proc.tail(tail, 1))
 
 

@@ -370,7 +370,7 @@ def test_not_a_git_repo(tmp_path, bwrap_log):
 
 def test_unborn_branch_names_its_cause(tmp_path, bwrap_log):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    with pytest.raises(sandbox.SandboxUnavailable, match="fatal: ambiguous argument 'HEAD'"):
+    with pytest.raises(sandbox.SandboxUnavailable, match="no commit yet; make the first commit"):
         sandbox.run_checks(make_config(), tmp_path)
 
 
