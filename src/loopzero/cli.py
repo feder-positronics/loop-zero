@@ -121,9 +121,12 @@ def _load_config(
     if not pin_checks or args.config:
         if pin_checks:
             print("checks are unpinned because --config was provided")
-        return config_mod.load(args.config or root / "workflow.toml", require_ci=require_ci)
-    config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
-                                     require_ci=require_ci, read_timeout=github.read_timeout)
+        config = config_mod.load(args.config or root / "workflow.toml", require_ci=require_ci)
+    else:
+        config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
+                                         require_ci=require_ci, read_timeout=github.read_timeout)
+    if require_ci and (problem := _publisher_problem(config)):
+        raise config_mod.ConfigError(problem)
     if args.command == "check":
         print(f"checks pinned to origin/{config.base_branch}@{config.trusted_base_revision}")
     return config
