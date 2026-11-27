@@ -1338,18 +1338,14 @@ def cmd_ready(args: argparse.Namespace) -> int:  # noqa: C901 - wait and draft-k
     for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
     if not readiness.ready:
-        _print_owner_route(pr, readiness)
+        if pr.is_draft and any(reason.startswith(("run loopzero check", "check receipt")) for reason in readiness.reasons):
+            print(OWNER_ROUTE)
         if args.wait is None and _pending_checks(readiness):
             print(NEXT_WAIT)
             return 3
         return 1
     print(f"ready: {pr.url}")
     return 0
-
-
-def _print_owner_route(pr: github.PR, readiness: github.Readiness) -> None:
-    if pr.is_draft and any(reason.startswith(("run loopzero check", "check receipt")) for reason in readiness.reasons):
-        print(OWNER_ROUTE)
 
 
 def _check_reasons(readiness: github.Readiness, *states: str) -> dict[str, str]:
@@ -1629,13 +1625,9 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
                     return sha
                 if not closed:
                     raise CliError(f"PR #{pr.number} left the merge queue unmerged")
-    _report_closed_observation(closed)
-    return None
-
-
-def _report_closed_observation(closed: list[github.GhError]) -> None:
     if closed:  # Recorded only from reads that finished inside the budget.
         raise closed[0]
+    return None
 
 
 def _merge_and_follow(
@@ -1659,7 +1651,7 @@ def _mergify_timeout_detail(
         report = None
         with suppress(github.GhError):
             github.read_timeout(0)
-            _, _, report = mergify.request_status(config.repo, pr.number, pr.head_sha, queue)
+            report = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue).admission
         return f"waiting for admission to Mergify queue {queue}. " + (
             f"Mergify report: {report}" if report else "Check the PR for Mergify's admission report."
         )
@@ -1701,8 +1693,7 @@ def _mergify_departure(
     if report is not None:
         detail = f"Mergify report: {report.url}."
         if report.attribution == "base_conflict":
-            base = pr.base_ref
-            detail = (f"The PR conflicts with {base}. Run `git fetch origin {base}` and resolve the base "
+            detail = (f"The PR conflicts with {pr.base_ref}. Run `git fetch origin {pr.base_ref}` and resolve the base "
                       f"integration according to the PR's review state. {detail}")
             requeue = ("After resolving the conflict, run `loopzero check`, `loopzero pr`, "
                        "`loopzero review`, `loopzero ready --wait` and `loopzero merge --wait`.")
@@ -1714,6 +1705,7 @@ def _mergify_departure(
                 "isolated": "Mergify tested this PR alone. Inspect or fix the failed check before requeueing unless it is a known flake.",
             }
             detail += " " + guidance.get(report.attribution, MERGIFY_DEQUEUE_HINT)
+            detail += report.jobs(config.repo)
     raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {detail} {requeue}")
 
 
@@ -1768,17 +1760,14 @@ def _wait_for_mergify(
         # A queued, open PR normally gets its next landing read on the next tick.
         if deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
-    _report_closed_observation(closed)
+    if closed:  # Recorded only from reads that finished inside the budget.
+        raise closed[0]
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
     print(_mergify_timeout_detail(config, pr, queue, state))
     return None
 
 
 _FOLLOW_QUEUE = "next: loopzero merge --wait follows the queue, verifies and cleans up"
-
-
-class _AdmissionDeadline(Exception):
-    """The --wait budget expired before a new merge or queue request."""
 
 
 def _follow_blocked_mergify(
@@ -1788,9 +1777,6 @@ def _follow_blocked_mergify(
     if deadline is not None and pr.base_ref == config.base_branch:
         try:
             state = mergify.membership(config.repo, pr.number, queue, deadline if bounded else None)
-        except github.ReadDeadline:
-            print(f"timed out waiting for Mergify to land PR #{pr.number}")
-            return None
         except mergify.MergifyError as exc:
             hint += f"; Mergify membership unverified: {exc}"
         else:
@@ -1832,7 +1818,8 @@ def _merge_with_mergify(
             raise closed[0]
         if not confirmed and not attempt.requested:
             if admit_by is not None and time.monotonic() > admit_by:
-                raise _AdmissionDeadline
+                print(f"timed out before requesting Mergify for PR #{pr.number}")
+                return None
             _require_receipt(wt, config, pr.head_sha)
             mergify.request(config.repo, pr.number, pr.head_sha, queue)
     if deadline is not None:
@@ -1896,9 +1883,8 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
     elif config.merge_strategy == "mergify":
         try:
             sha = _merge_with_mergify(wt, config, pr, readiness, deadline, admit_by)
-        except (_AdmissionDeadline, github.ReadDeadline) as exc:
-            action = "before requesting Mergify for" if isinstance(exc, _AdmissionDeadline) else "waiting for Mergify to land"
-            print(f"timed out {action} PR #{pr.number}")
+        except github.ReadDeadline:
+            print(f"timed out waiting for Mergify to land PR #{pr.number}")
             return 3
         if sha is None:
             return 3 if args.wait is not None else 0
@@ -2021,18 +2007,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readiness) -> None:
     queue = config.mergify_queue
     assert queue is not None
-    requested, confirmed, report = mergify.request_status(config.repo, pr.number, pr.head_sha, queue)
+    attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
     state = mergify.membership(config.repo, pr.number, queue)
     label = "not admitted"
     if state:
         label = "confirmed"
-    elif confirmed:
+    elif attempt.confirmed:
         label = "ejected"
-    elif requested or (readiness.ready and report):
+    elif attempt.requested or (readiness.ready and attempt.admission):
         label = "waiting for admission"
     _print_display(f"mergify:  {label} ({queue})")
-    if label == "waiting for admission" and report:
-        _print_display(f"  Mergify report: {report}")
+    if label == "waiting for admission" and attempt.admission:
+        _print_display(f"  Mergify report: {attempt.admission}")
 
 
 def main(argv: list[str] | None = None) -> int:

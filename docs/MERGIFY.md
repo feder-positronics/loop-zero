@@ -73,6 +73,14 @@ back, verify that a default-branch publisher run can read queue status and that 
 non-main run is rejected, and only then delete the repository-scoped copy. A token
 that cannot inventory organization secrets gives no basis to delete them.
 
+## Failed candidate checks
+
+After a failed-check dequeue, `loopzero merge --wait` shows the failed
+GitHub Actions jobs linked by Mergify. It reads up to three job logs, preferring
+jobs within reusable workflows, and shows up to ten test identifiers per log.
+It scans the last 256 Ki characters of each log. If a log is unavailable or its
+tail contains no recognized test failures, open the job URL for the full log.
+
 ## Recovery
 
 If the queue misbehaves, stop admission and prevent Mergify landing, restore the

@@ -4812,6 +4812,16 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         template = MERGIFY_QUEUE_FIXTURE.get(
             "admission_report" if admission else f"{kind.partition('_')[0]}_report", MERGIFY_QUEUE_FIXTURE["report"])
         body = template.replace("@url@", URL).replace("@sha@", "f" * 7 if kind == "head" else head[:7])
+        if kind in {"isolated", "stacked"}:
+            job = 139880043495 if kind == "isolated" else 139939028086
+            job_url = f"https://github.com/{REPO}/actions/runs/99/job/{job}"
+            node = ("tests/unit/research_protocol/test_research_protocol_export.py"
+                    "::TestCheckedInArtifact::test_main_check_exit_code_is_zero" if kind == "isolated"
+                    else "tests/unit/infrastructure/test_final_qa_capabilities.py"
+                         "::test_role_and_catalog_capability_failures_are_advisory[CREATE ROLE isolated NOLOGIN]")
+            body += f"\n- ❌ [`Backend static checks and unit lane / Backend validation`]({job_url})"
+            log = f"2026-11-26T11:47:24.4155165Z FAILED {node} - detail from the test\n"
+            gh.respond(f"api --hostname github.com --allow-escape-sequences repos/{REPO}/actions/jobs/{job}/logs", log)
         comments.append({"id": 43, "user": {"login": "someone-else" if kind == "author" else "mergify[bot]"},
                          "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind, "2026-11-25T19:01:00Z"),
                          "body": body + MERGIFY_QUEUE_FIXTURE["attribution"].get(kind, "")})
@@ -4855,6 +4865,10 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
             assert sum(c["argv"][:2] == endpoint.split() for c in gh.calls) == 1
         assert code == 1 and wt.exists() and f"{URL}#issuecomment-43" in err and ("'checks'" in err) == (kind not in {"conflict", "dequeued"})
         assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["expected"][kind])
+        if kind in {"isolated", "stacked"}:
+            assert job_url in err and node in err and "detail from the test" not in err
+        else:
+            assert not any("--allow-escape-sequences" in call["argv"] for call in gh.calls)
         assert all(part in err for part in MERGIFY_QUEUE_FIXTURE["requeue_guidance"]) is (kind not in {"conflict", "dequeued"})
     else:
         assert code == 3 and wt.exists() and "waiting for admission" in out

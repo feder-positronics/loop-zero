@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import github
+from ._proc import ProcTimeout, ToolMissing, run
 from .types import LoopZeroError, is_sha
 
 API = "https://api.mergify.com/v1"
@@ -280,22 +281,12 @@ def _marker(kind: str, head: str, queue: str) -> str:
 
 
 def _comments_by(comments: list[dict], login: str):
-    for comment in comments:
-        if isinstance(user := comment.get("user"), dict) and user.get("login") == login:
-            yield comment
+    return (comment for comment in comments
+            if isinstance(user := comment.get("user"), dict) and user.get("login") == login)
 
 
 def _updated_at(comment: dict) -> str:
     return str(comment.get("updated_at") or "")
-
-
-def _admission_report(comments: list[dict], requested_at: str) -> int | None:
-    latest = max(_comments_by(comments, "mergify[bot]"), key=_updated_at, default={})
-    if (_updated_at(latest) >= requested_at
-            and "### ⏳ Waiting for queue conditions" in str(latest.get("body") or "").splitlines()):
-        report_id = latest.get("id")
-        return report_id if type(report_id) is int and report_id > 0 else None
-    return None
 
 
 def _queue_command(body: str, queue: str) -> bool:
@@ -309,12 +300,41 @@ class Departure:
     url: str
     checks: tuple[str, ...]
     attribution: str
+    failure_report: str | None = None
+
+    def jobs(self, repo: str) -> str:
+        if self.failure_report is None:
+            return ""
+        base = f"https://github.com/{repo}/actions/runs/"
+        links = re.findall(rf"^- ❌ \[`([^`\n]+)`\]\({re.escape(base)}([0-9]+/job/([0-9]+))\)",
+                           self.failure_report, re.M)
+        jobs = sorted(dict.fromkeys(links), key=lambda job: " / " not in job[0])
+        return " " + " ".join(
+            f"{name!r} ({base}{path}): " + (_job_failure(repo, job_id) if index < 3 else "log limit reached") + "."
+            for index, (name, path, job_id) in enumerate(jobs)
+        ) if jobs else " Candidate jobs unavailable: the Mergify report has no failed job links."
+
+
+def _job_failure(repo: str, job_id: str) -> str:
+    try:
+        result = run(["gh", "api", "--hostname", "github.com", "--allow-escape-sequences",
+                      f"repos/{repo}/actions/jobs/{job_id}/logs"],
+                     cwd=Path.cwd(), env_allowlist=github.GH_ENV, timeout=github.read_timeout(5),
+                     encoding="utf-8", merge_output=True, tail_chars=256 * 1024)
+        if result.exit_code:
+            return f"GitHub log request failed (exit {result.exit_code})"
+    except (ProcTimeout, ToolMissing, OSError, github.ReadDeadline) as exc:
+        return f"log unavailable ({type(exc).__name__})"
+    log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.stdout)
+    headers = re.findall(r"^(?:\d{4}-\d\d-\d\dT\S+Z )? *(?:(FAILED |ERROR )(?=\S+(?:::|\.py\b))|(FAIL +|\d+\) +(?=[^\r\n]*\u203a)))([^\r\n]+)", log, re.M)
+    names = (github._redact_tokens(line.partition(" - ")[0] if pytest_header else line)[:500]
+             for pytest_header, _, line in headers)
+    return ", ".join(repr(name) for name in tuple(dict.fromkeys(names))[:10]) or "no test failures in log tail"
 
 
 def _departure_payload(body: str, queue: str) -> dict:
-    _, _, text = body.partition("-*- Mergify Payload -*-\n")
     with suppress(json.JSONDecodeError):
-        payload = json.loads(text.partition("\n-*- Mergify Payload End -*-")[0])
+        payload = json.loads(body.partition("-*- Mergify Payload -*-\n")[2].partition("\n-*- Mergify Payload End -*-")[0])
         if (isinstance(payload, dict) and payload.get("version") == 1
                 and payload.get("state") == "dequeued" and payload.get("queue_rule_name") == queue):
             return payload
@@ -357,7 +377,8 @@ def _departure(
     ) if any(line.startswith(prefix) for line in lines)), "")
     if reason.get("code") == "CONFLICT_WITH_BASE_BRANCH" or "> - [ ] `-conflict`" in body:
         attribution = "base_conflict"
-    return Departure(f"{url}{latest['id']}", names, attribution), {}
+    failures = body if reason.get("code") == "CHECKS_FAILED" and attribution in {"isolated", "stacked"} else None
+    return Departure(f"{url}{latest['id']}", names, attribution, failures), {}
 
 
 def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
@@ -388,14 +409,12 @@ def queue_attempt(repo: str, number: int, head: str, queue: str) -> QueueAttempt
         if _marker(REQUEST, head, queue) in lines or (not marked and requeue and (confirmed or item is retry)):
             requested, requested_at = True, str(item.get("created_at") or "")
         confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)
-    report_id = _admission_report(comments, requested_at)
-    report = f"https://github.com/{repo}/pull/{number}#issuecomment-{report_id}" if report_id else None
+    latest = max(_comments_by(comments, "mergify[bot]"), key=_updated_at, default={})
+    report = None
+    if (_updated_at(latest) >= requested_at and type(report_id := latest.get("id")) is int and report_id > 0
+            and "### ⏳ Waiting for queue conditions" in str(latest.get("body") or "").splitlines()):
+        report = f"https://github.com/{repo}/pull/{number}#issuecomment-{report_id}"
     return QueueAttempt(requested, confirmed, departure, report)
-
-
-def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
-    attempt = queue_attempt(repo, number, head, queue)
-    return attempt.requested, attempt.confirmed, attempt.admission
 
 
 def request(repo: str, number: int, head: str, queue: str) -> None:
