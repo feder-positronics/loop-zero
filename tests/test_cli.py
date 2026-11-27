@@ -2653,6 +2653,14 @@ def test_pending_required_check_names_the_wait(wt, gh, capsys, head, command):
         assert out == "" and f"{reason}; next: loopzero merge --wait" in err
 
 
+def test_check_wait_does_not_parse_reason_wording(wt, gh, capsys, head, monkeypatch):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    arm_check_runs(gh, head, [])
+    monkeypatch.setattr(cli.github, "_missing_check_reason", lambda name, *_: f"no {name} run yet")
+    out, err = expect_cli(capsys, 3, "ready")  # 3: still waitable despite the new wording
+    assert without_accepted_receipt(out) == "not ready: no checks run yet\nnext: loopzero ready --wait\n" and err == ""
+
+
 @pytest.mark.parametrize("draft", [True, False])
 @pytest.mark.parametrize("command", ["ready", "merge"])
 def test_skipped_required_check_activates_only_on_ready(wt, gh, capsys, head, draft, command):
