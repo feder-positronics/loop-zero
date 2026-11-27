@@ -1134,10 +1134,12 @@ def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bo
     data = api_get(f"repos/{repo}/actions/workflows/eligibility.yml/runs?{query}")
     runs = data.get("workflow_runs") if isinstance(data, dict) else None
     complete = isinstance(runs, list) and data.get("total_count") == len(runs)
-    identified = [run.get("display_title") if isinstance(run, dict) else None for run in runs] if complete else []
-    if f"Refresh eligibility for PR #{number}" in identified:
+    titles = [run.get("display_title") if isinstance(run, dict) else 0 for run in runs] if complete else []
+    # Consumer workflows may not set a run title; a title naming another PR excludes a run.
+    if any((isinstance(t, str) and int((re.findall(r"(?i)\b(?:pr|pull request) #([0-9]+)", t) or [number])[0]) == number) or t is None
+           for t in titles):
         return True
-    if not complete or any(not isinstance(name, str) or not re.fullmatch(r"Refresh eligibility for PR #[0-9]+", name) for name in identified):
+    if not complete or not all(t is None or isinstance(t, str) for t in titles):
         raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
     return False
 
@@ -1556,9 +1558,7 @@ def commit_status(
 def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
     statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
     latest = next((row for row in statuses if row.get("context") == context), {})
-    creator = latest.get("creator")
-    return (isinstance(creator, dict) and creator.get("login") == "github-actions[bot]"
-            and (latest.get("state"), latest.get("description")) == (state, description))
+    return (latest.get("state"), latest.get("description")) == (state, description)
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:

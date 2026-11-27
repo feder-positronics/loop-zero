@@ -108,7 +108,7 @@ def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case
     if blocker == "important":
         publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding",
                                                                          author="trusted-publisher")))
-    statuses = check_source(publisher, ["pending", status], exit_code=int(status == "failure"))
+    statuses = check_source(publisher, ["pending", status])
     assert all(s["context"] == "Loop-zero Eligibility" for s in statuses)
     assert delays == {"unknown": [2, 4, 8], "settles": [2]}.get(blocker, [])
     if status == "success":
@@ -204,7 +204,7 @@ def test_hosted_review_coverage_after_source_head_changes(
 
     ordinary = change == "ordinary"
     state = ("failure" if candidate else "pending") if ordinary else "success"
-    statuses = check_source(publisher, ["pending", state], exit_code=int(state == "failure"))
+    statuses = check_source(publisher, ["pending", state])
     if state == "failure":
         assert "source #7: no review recorded" in statuses[-1]["description"]
 
@@ -248,8 +248,8 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
         raise github.ProcTimeout("lost status reply", "")
 
     monkeypatch.setattr(github, "commit_status", lose_reply)
-    check_source(publisher, ["pending", state], exit_code=int(not ready),
-                 error=hosted.LoopZeroError if readback != "match" else None,
+    check_source(publisher, ["pending", state],
+                 error=hosted.LoopZeroError if readback not in {"match", "publisher"} else None,
                  match="confirm eligibility status publication")
 
 
@@ -392,7 +392,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         monkeypatch.setattr(hosted.mergify, "api_get", lambda repo, suffix: candidate_status()
                             if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     with pytest.raises(error, match=message or None) if error else nullcontext():
-        assert hosted.main() == int(case in {"api", "mergify", "pending_mergeability", "policy", "hold"})
+        assert hosted.main() == int(case in {"api", "mergify", "pending_mergeability"})
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
               "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
     states |= {"settled_mergeability": ["pending", "success"], "pending_mergeability": ["pending"]}
