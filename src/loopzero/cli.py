@@ -2004,20 +2004,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     branch, head = worktree.branch(wt), worktree.head(wt)
     _print_display(f"worktree: {wt}\nbranch:   {branch}\nhead:     {head}\nbase:     {config.base_branch}")
     _print_display(f"dirty:    {'yes' if worktree.is_dirty(wt) else 'no'}")
+    if problem := _publisher_problem(args, config):
+        _print_display(f"config:   {problem}")
     pr = github.pr_for_branch(config.repo, branch)
     if pr is None:
         _print_display("pr:       none (commit changes, then open with `loopzero pr` before a long check)")
         return 0
     _print_display(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
-    problem = _publisher_problem(args, config)
-    reviews = _pr_reviews(config.repo, pr.number, dates=(dates := []))
+    reviews = [] if problem else _pr_reviews(config.repo, pr.number, dates=(dates := []))
     markers = [] if problem else _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
         _print_display(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         _print_display("review:   none on this PR")
-    readiness = (github.Readiness(False, (problem,)) if problem else
+    readiness = (github.Readiness(False, ()) if problem else
                  _readiness(wt, config, pr, head, reviews, diagnostics=True, dates=tuple(dates)))
     _print_display(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:

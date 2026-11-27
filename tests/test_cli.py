@@ -5468,5 +5468,5 @@ def test_status_reports_missing_review_publishers(wt, gh, capsys, tmp_path, head
     else:
         publish_workflow(wt, WORKFLOW_BASE)
     code, out, _ = run(capsys, *options, "status")
-    assert code == 0 and "pr:       #7" in out and "ready:    no" in out
+    assert code == 0 and "pr:       #7" in out and "ready:    no" in out and "config:   " in out
     assert (str(path) if override else "origin/main:workflow.toml") in out and "delivery.review_publishers must list" in out
