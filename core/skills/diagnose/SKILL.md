@@ -30,7 +30,8 @@ failure. Diagnosis-only commissions stop before implementation.
 
 For bulk GitHub REST reads on App-covered repositories, run
 `audit_token=$("$HOME/.config/loopzero/app-token")` once per batch, only if
-`namei -l` shows it and its directory owned by you, no symlink, and no ancestor that others can replace. Require a
+`namei -l` shows it and its directory owned by you and not world-writable, no symlink, and no
+ancestor that others can replace. Require a
 successful, nonempty token and use `GH_HOST=github.com GH_TOKEN="$audit_token" gh api ...`.
 Keep the token out of arguments, logs, and the parent environment. Check
 `/rate_limit` with that credential. Start with one page and lookups for at most

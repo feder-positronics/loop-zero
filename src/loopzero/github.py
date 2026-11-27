@@ -298,20 +298,21 @@ def _trusted_helper(path: Path) -> bool:
 
     The helper runs with the publisher's credentials, so a symlink, a world-writable file or
     directory, or an ancestor another user could rename or replace would let that user run code
-    as that identity. Ancestors may belong to root or this user; a world-writable ancestor needs
-    the sticky bit. Group write stays allowed: user-private groups with umask 002 are the default.
-    A race between this check and the exec by a user already allowed to write there is not covered.
+    as that identity. Ancestors are examined as written and after resolving links; they may
+    belong to root or this user, and a world-writable one needs the sticky bit. Group write stays
+    allowed: user-private groups with umask 002 are the default. A race between this check and
+    the exec by a user already allowed to write there is not covered.
     """
     uid = os.getuid()
     try:
         info, parent = path.lstat(), path.parent.lstat()
-        ancestors = [item.stat() for item in path.parent.parents]
-    except OSError:
+        ancestors = [item.lstat() for item in (*path.parent.parents, *path.parent.resolve(strict=True).parents)]
+    except (OSError, RuntimeError):
         return False
     return (stat.S_ISREG(info.st_mode) and stat.S_ISDIR(parent.st_mode) and os.access(path, os.X_OK)
             and all(item.st_uid == uid and not item.st_mode & 0o002 for item in (info, parent))
-            and all(item.st_uid in (0, uid) and not (item.st_mode & 0o002 and not item.st_mode & stat.S_ISVTX)
-                    for item in ancestors))
+            and all(item.st_uid in (0, uid) and (stat.S_ISLNK(item.st_mode)  # a link's own mode is always 0777
+                    or not (item.st_mode & 0o002 and not item.st_mode & stat.S_ISVTX)) for item in ancestors))
 
 
 def app_token() -> str:

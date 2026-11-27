@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from dataclasses import replace
@@ -1499,6 +1500,19 @@ def test_app_token_helper_must_not_be_world_writable_or_foreign_owned(tmp_path: 
         assert github.app_token() == "", oct(mode)
         target.chmod(original)
     monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    open_dir = tmp_path / "open"
+    (open_dir / "mid" / "loopzero").mkdir(parents=True)
+    (open_dir / "mid" / "loopzero" / "app-token").symlink_to(helper)
+    shutil.copy(helper, open_dir / "mid" / "loopzero" / "real-token")
+    open_dir.chmod(0o777)  # a replaceable ancestor reached only through a link
+    (tmp_path / "cfg").symlink_to(open_dir / "mid")
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", tmp_path / "cfg" / "loopzero" / "real-token")
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    assert github.app_token() == ""
+    open_dir.chmod(0o700)
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
+    assert github.app_token() == "synthetic-app-token"
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     tmp_path.chmod(0o777)  # a replaceable ancestor without the sticky bit
     monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
     assert github.app_token() == ""
