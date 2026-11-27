@@ -884,7 +884,8 @@ def _review_transcript(result: ReviewResult, legacy_display: bool) -> str:
         tail = encoded[-30_000:].decode("utf-8", errors="ignore")
         raw = ("[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
                "Full output remains in the saved local review artifact.]\n" + tail)
-    return f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
+    heading = "Raw reviewer output" if legacy_display else "Review evidence notice"
+    return f"\n\n<details><summary>{heading}</summary>\n\n```\n{raw}\n```\n</details>"
 
 
 def _right_lines(patch: str) -> tuple[set[int], int | None]:
