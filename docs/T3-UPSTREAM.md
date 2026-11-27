@@ -2,21 +2,17 @@
 
 Keep loop-zero's use of T3 current without turning upstream release notes into
 delivery policy. T3 owns execution, workspaces, notifications and interaction;
-loop-zero retains its [delivery contract](../core/CONTRACT.md). The dated
-[workflow exploration](design/2026-10-28-t3-orchestration-workflow-adaptations.md)
-records the initial research; its open proposals are R3, R6 and R7.
+loop-zero retains its [delivery contract](../core/CONTRACT.md).
 
-## Owner and cadence
+## Owner and triggers
 
 The repository's delivery coordinator owns this review. Without a coordinator,
 the maintainer responsible for the repository's T3 integration owns it.
 
-- During active T3 use, review developments once a week as part of existing
-  maintenance work. When inactive, review before the next T3-dependent task.
-- Review before a T3 or provider-harness upgrade, adoption of an orchestration
+- Review before the next T3-dependent task after idle time, and before a T3 or provider-harness upgrade, adoption of an orchestration
   capability, or repair of a compatibility, delegation, wakeup or workspace fault.
-- This is a reading and triage routine. It creates no timer, service, reminder
-  issue or new scheduler. An unattended recurring job requires a separate request.
+- There is no fixed cadence: this is an event-triggered reading and triage
+  routine and creates no timer, service, reminder issue or new scheduler. An unattended recurring job requires a separate request.
 
 ## Sources to read
 
