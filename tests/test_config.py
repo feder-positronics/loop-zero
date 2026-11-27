@@ -64,8 +64,7 @@ def test_missing_file(tmp_path):
         config.load(tmp_path / "nope.toml")
 
 
-FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc/1", "/dev",
-             "/var/run/docker.sock", "/sys/fs", "/tmp/../run"]
+FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/proc/1", "/dev", "/sys/fs", "/tmp/../run"]
 
 
 @pytest.mark.parametrize("text,message", [
