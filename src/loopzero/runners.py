@@ -291,7 +291,6 @@ def _run(
     return done
 
 
-_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
 
 
 def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Config:
@@ -926,9 +925,10 @@ def _codex_evidence(result):  # noqa: C901 - one check per Codex evidence field
 def codex_evidence(result):
     if result.family != "codex":
         return None
-    if not validate_runner_result(result):
+    valid, evidence = _validated_evidence(result)
+    if not valid:
         raise RunnerBadOutput("codex: invalid complete native result")
-    return _codex_evidence(result)
+    return evidence
 
 
 def _codex_rollout_settings(home: Path, session_id: str) -> dict:
@@ -1309,6 +1309,10 @@ def _valid_claude_envelopes(envelopes, provenance):
 
 def validate_runner_result(result: ReviewResult) -> bool:
     """Return whether saved provenance agrees with the provider envelope(s)."""
+    return _validated_evidence(result)[0]
+
+
+def _validated_evidence(result: ReviewResult) -> tuple[bool, dict | None]:
     provenance = result.provenance
     if (not isinstance(provenance, dict)
             or provenance.get("family") != result.family
@@ -1316,34 +1320,32 @@ def validate_runner_result(result: ReviewResult) -> bool:
             or isinstance(result.chunk_count, bool)
             or not isinstance(result.chunk_count, int)
             or result.chunk_count <= 0):
-        return False
+        return False, None
     sessions = provenance.get("session_ids")
     if (not isinstance(sessions, list) or len(sessions) != result.chunk_count
             or not all(isinstance(item, str) and item for item in sessions)
             or provenance.get("session_id") != sessions[0]):
-        return False
+        return False, None
     try:
         envelopes = _read_envelopes(result.raw)
     except (json.JSONDecodeError, TypeError):
-        return False
+        return False, None
     if len(envelopes) != result.chunk_count or not all(isinstance(item, dict) for item in envelopes):
-        return False
+        return False, None
     payloads = _validated_payloads(result.family, envelopes, provenance, sessions)
     if payloads is None:
-        return False
+        return False, None
     try:
         parsed = [parse_review(payload, family=result.family, head=result.head, kind=result.kind,
                                raw=result.raw) for payload in payloads]
     except RunnerBadOutput:
-        return False
+        return False, None
     if (result.findings, result.verdict) != _review_outcome(parsed):
-        return False
+        return False, None
     try:
-        if result.family == "codex":
-            _codex_evidence(result)
+        return True, _codex_evidence(result) if result.family == "codex" else None
     except (RunnerBadOutput, ValueError, KeyError, TypeError, AttributeError):
-        return False
-    return True
+        return False, None
 
 
 def family_from_trailer(value: str) -> str | None:
@@ -1363,6 +1365,6 @@ def author_families(cwd: Path, head: str, base: str) -> set[str]:
     use the PR merge-base, including for delta reviews of a narrower diff.
     """
     revision = f"{base}..{head}"
-    trailers = _review_git(cwd, _ALLOWLIST, f"log {revision}",
+    trailers = _review_git(cwd, Config.env_allowlist, f"log {revision}",
                            "log", "--format=%(trailers:key=Co-Authored-By,valueonly)", revision)
     return {family for line in trailers.splitlines() if (family := family_from_trailer(line))}
