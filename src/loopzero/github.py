@@ -13,7 +13,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from itertools import chain, islice, pairwise
@@ -125,6 +125,7 @@ class Readiness:
     waitable_failures: tuple[str, ...] = ()
     stale_verdicts: tuple[str, ...] = ()
     has_pending_checks: bool = False
+    checks: dict[str, tuple[str, str]] = field(default_factory=dict)  # reason -> (check name, state)
 
 
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
@@ -1376,7 +1377,7 @@ def mergeability_blocker(pr: PR) -> str | None:
     return None
 
 
-def readiness(  # noqa: C901 - one branch per readiness condition
+def readiness(
     repo: str,
     pr: PR,
     base_branch: str,
@@ -1415,13 +1416,13 @@ def readiness(  # noqa: C901 - one branch per readiness condition
         name: f"required check '{name}' is {checks[name]}" for name in required_ci
         if name in checks and checks[name] != "success"
     }
+    check_reasons = {}
     for name in required_ci:
-        if name not in checks:
-            reasons.append(_missing_check_reason(name, pr.head_sha, capped))
-        elif name in failures:
-            reasons.append(failures[name])
+        if name not in checks or name in failures:
+            reasons.append(reason := failures.get(name) or _missing_check_reason(name, pr.head_sha, capped))
+            check_reasons[reason] = (name, checks.get(name) or ("capped" if capped else "missing"))
     return Readiness(
-        ready=not reasons, reasons=tuple(reasons),
+        ready=not reasons, reasons=tuple(reasons), checks=check_reasons,
         waitable_failures=tuple(failures[name] for name in required_ci if name in stale
                                or (workflow_wait and review_grace and checks.get(name) in _FAILED_VERDICTS)),
         stale_verdicts=tuple(name for name in required_ci if name in stale_verdicts),

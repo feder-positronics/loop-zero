@@ -98,8 +98,8 @@ def _run(cfg: Config) -> int:
     number = event_number(event)
     pr = github.api_get(f"repos/{cfg.repo}/pulls/{number}")
     head = pr["head"]["sha"]
-    candidate = (pr["head"]["ref"].startswith("mergify/merge-queue/")
-                 or pr["user"]["login"] == "mergify[bot]")
+    candidate = (pr["head"]["ref"].startswith(candidate_mod.QUEUE_BRANCH_PREFIX)
+                 or pr["user"]["login"] == candidate_mod.MERGIFY_BOT_LOGIN)
     active = _candidate_event(event, head) if candidate else pr.get("merged") is not True
     if not active:
         return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
