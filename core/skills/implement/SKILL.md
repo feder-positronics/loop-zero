@@ -65,3 +65,4 @@ or wait for the consuming change to land. Prove the affected job on the changed 
 run before enabling it for all runners. Before parking a PR, verify it does not wait on yours. Never park both on each other.
 Immediately hand failures outside the contract's owner queue route and their last-green comparison
 to [diagnose](../diagnose/SKILL.md). A log entry alone does not hand over the failure.
+Before requeueing, reproduce the failures named in the dequeue report at the new head. If they also fail on main, follow the [main-failure route](../../CONTRACT.md#blockers).

@@ -16,6 +16,7 @@ Rank competing hypotheses from evidence. Use discriminating experiments and
 predicted observations to establish cause; correlation or symptom disappearance
 is insufficient. For intermittent failures, use enough observations to distinguish
 improvement from chance. Aggregate available logs before adding instrumentation.
+Before requeueing, reproduce the failures named in the dequeue report at the new head. If they also fail on main, follow the [main-failure route](../../CONTRACT.md#blockers).
 When the same check fails twice, before any requeue or rerun, diff the last
 green run against the first red one: runner or host, environment (ports, env
 vars, services, labels) and code. A host or runner change that is live ahead of

@@ -75,11 +75,13 @@ that cannot inventory organization secrets gives no basis to delete them.
 
 ## Failed candidate checks
 
-After a failed-check dequeue, `loopzero merge --wait` shows the failed
-GitHub Actions jobs linked by Mergify. It reads up to three job logs, preferring
-jobs within reusable workflows, and shows up to ten test identifiers per log.
-It scans the last 256 Ki characters of each log. If a log is unavailable or its
-tail contains no recognized test failures, open the job URL for the full log.
+After a failed-check dequeue, `loopzero merge --wait` links the Mergify report,
+lists failed checks, and says whether Mergify tested the PR alone or could not
+attribute the failure in a stack. It names and links failed GitHub Actions jobs,
+looking up the candidate's checks if Mergify only links the candidate. It scans
+the last 256 Ki characters of up to three job logs, preferring jobs in reusable
+workflows, and shows up to ten distinct test IDs per log, including pytest
+parameters. Open the job link for the full log if the report has no test IDs.
 
 ## Recovery
 
