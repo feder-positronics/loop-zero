@@ -13,13 +13,12 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    sure it is on a task branch (not a detached HEAD) and that `.loopzero/` is in
    the repository's local Git excludes (`info/exclude`), as `start` would do;
    then write `.loopzero/task.md` from the template.
-2. Implement, commit, then `loopzero check`: run each `workflow.toml`
-   `[checks].commands` entry (a stage) in the sandbox; the result is the
-   head's check receipt. A stage running over one hour is stopped with exit
-   code 124. Before a long check, push and open the draft (`loopzero pr`) and
-   start the check as a [long-running job](../docs/DELEGATION.md#long-running-jobs)
-   so the work survives a lost session; on resume, read the PR's Validation or
-   the saved receipt.
+2. Implement, commit, then run `loopzero check`. It records the sandboxed
+   `[checks].commands` stages in the head's check receipt. A stage timeout
+   after an hour records 124 in the receipt and `check` exits 1. For a long
+   check, open the draft first (step 3) and use a
+   [long-running job](../docs/DELEGATION.md#long-running-jobs). On resume, read
+   the PR's Validation or the saved receipt.
 3. `loopzero pr` pushes and opens a **draft** PR from the task text plus
    generated Validation checks. Later calls sync narrative, preserving live
    Validation, Review and extra sections; `check` refreshes only its checks
@@ -30,11 +29,10 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    blocking findings go in the review body and need a reviewed fix. Approval
    exits 0, changes requested 5.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
-   passes. A PR whose only blockers are missing or skipped required checks (even
-   while GitHub still computes mergeability) also leaves draft but is not ready
-   yet; without a wait that exits 3, and `--wait=0` can take the PR out of draft.
-   `ready` and `merge` take `--wait[=SECONDS]` (default 5400) on the same head.
-   Mergeability can time out (exit 3) with green checks.
+   passes. A draft blocked only by missing or skipped required checks, possibly
+   with unknown mergeability, leaves draft early to trigger CI. This can happen
+   with `--wait=0` or without `--wait`. The wait follows required checks and
+   mergeability on the same head. Both waiters take `--wait[=SECONDS]` (default 5400).
    Green can precede CI scheduling. After two minutes of missing checks with
    none pending, inspect scheduling, triggers and permissions, then retry.
 6. After step 5 exits 0, run from outside the task worktree
@@ -44,11 +42,12 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    (cd "/absolute/path/to/task-worktree" && loopzero merge --wait)
    ```
 
-   Merge rechecks readiness, uses the configured strategy, verifies the landed
-   SHA and deletes the branch and worktree. A cleanup warning follows a verified
-   merge. Follow its recovery step. Queueing without `--wait` exits 0 without
-   cleanup. With `--wait`, source checks and landing share one budget;
-   `merge --wait=0` can enqueue.
+   Merge rechecks readiness. After verifying landing, it attempts branch and
+   worktree cleanup and prints the full merge SHA. Follow any cleanup warning.
+   Without `--wait`, a queue request or entry can exit 0 before landing. With
+   `--wait`, source checks, mergeability and landing share one budget.
+   `merge --wait=0` can enqueue. A Mergify departure without a merge exits 1
+   and prints available [departure details](../docs/MERGIFY.md#failed-candidate-checks).
    `loopzero merge --cancel` requests Mergify removal without `--wait`. Before
    pushing to a requested or queued PR, withdraw it, confirm the removal on the PR,
    then push, review the new head and admit it again; a CLI failure does not prove
@@ -114,7 +113,9 @@ No separate per-PR go-ahead to merge, take out of draft or queue; no hold renewa
 
 ## Blockers
 
-`loopzero ready` succeeds only if none of these blockers apply:
+`loopzero ready` and normal `loopzero merge` require explicit `[checks].required_ci`
+and nonempty `[delivery].review_publishers` in the effective workflow. Readiness
+blocks when any of these apply:
 
 - A check stage failed on this head (no passing check receipt).
 - An unresolved `critical`/`important` review thread, unless GitHub marks it
@@ -300,9 +301,11 @@ a command error. Read the diagnostic and verify the receipt before classifying
 the failure. Exit 2 covers usage errors and sandbox unavailability in
 `check` or fresh `review`.
 
-Exit 3 means waiting or timeout. Review exits 4 when no configured
-reviewer produces a verdict and 5 when changes are requested. SIGINT exits 130. SIGTERM is
-re-raised, yielding shell status 143 and subprocess return code `-15`.
+Exit 3 means a wait timed out or `ready` without `--wait` found only waitable
+blockers. `merge` without `--wait` exits 1 for waitable source check blockers.
+Review exits 4 when no configured reviewer returns a verdict or a saved
+review fails the contributor-independence check. Changes requested exits 5.
+SIGINT exits 130. SIGTERM is re-raised (shell status 143, subprocess code `-15`).
 
 **Never pipe `loopzero`, even with pipefail**, because it can hide the verdict.
 Redirect stdout and stderr (e.g. `loopzero check >check.log 2>&1`) and read the

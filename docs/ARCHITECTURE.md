@@ -170,7 +170,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    that requested changes also requires resolved findings at the reviewed head.
    Readiness keeps the latest run ID for each GitHub App and check name, then
    combines the current verdicts for each required name. A positive `ready --wait`
-   budget covers the first readiness read and revalidation after taking a PR out of draft.
+   budget covers the first readiness read, the live PR reread before draft activation,
+   and revalidation after taking a PR out of draft.
    Before the first draft activation it rereads the PR and refuses a moved head, changed target, closed state or hold.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in
@@ -489,9 +490,8 @@ error still forces earlier stages to run. Lookup errors surface in stage order.
 Receipts that use saved stage results bind the current head and check settings.
 
 A worker running the entire check is itself the coordinator and writes a
-receipt with its own effective settings. Transferring it preserves the
-fingerprint, if present. Local readiness applies the same receipt predicate
-as for any other coordinator. See [check receipts with remote execution](../SETUP.md#check-receipts-with-remote-execution)
-for the operator route.
+receipt with its own effective settings. Transferred receipts require the same
+matching settings fingerprint for local readiness. See
+[check receipts with remote execution](../SETUP.md#check-receipts-with-remote-execution).
 
 CI and merge-queue candidates run fresh without a local worktree receipt.
