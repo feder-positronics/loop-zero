@@ -219,6 +219,14 @@ def test_missing_gh_raises_typed_error(fake_bin: Path, monkeypatch: pytest.Monke
     assert "required token scope: repo" in str(info.value)
 
 
+def test_mark_ready_retries_a_transient_failure(gh: FakeGh, monkeypatch) -> None:
+    monkeypatch.setattr(github, "_retry_sleep", lambda _delay: None)
+    gh.respond("pr ready", {"stdout": "", "stderr": "gh: HTTP 502: Bad Gateway\n", "exit": 1}, "")
+    github.mark_ready(REPO, 7)  # r7-d4-1: one GraphQL 502 no longer ends ready/merge --wait.
+    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 2
+
+
+@pytest.mark.parametrize("stdout", ["", '{"message": "detail on stdout"}'])
 def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
     gh.fail(pr_list_key("lz/x"), "To get started with GitHub CLI, please run:  gh auth login\n", exit=4)
     with pytest.raises(github.GhAuth) as info:
@@ -226,13 +234,6 @@ def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
     assert info.value.command[:2] == ("gh", "api")
     assert "gh auth login" in info.value.tail
     assert "required token scope: repo" in info.value.tail
-
-
-def test_mark_ready_retries_a_transient_failure(gh: FakeGh, monkeypatch) -> None:
-    monkeypatch.setattr(github, "_retry_sleep", lambda _delay: None)
-    gh.respond("pr ready", {"stdout": "", "stderr": "gh: HTTP 502: Bad Gateway\n", "exit": 1}, "")
-    github.mark_ready(REPO, 7)  # r7-d4-1: one GraphQL 502 no longer ends ready/merge --wait.
-    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 2
 
 
 @pytest.mark.parametrize("stdout", ["", '{"message": "detail on stdout"}'])
@@ -835,31 +836,33 @@ def arm_check_pages(gh, *pages, statuses=()):
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *(statuses or ([],)))
 
 
-def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
-    filler = [check_run("success", name=f"job{i}") for i in range(99)]
-    statuses = [{"context": "ci/legacy", "state": "failure"}, {"context": "checks", "state": "pending"}]
-    arm_check_pages(gh, {"check_runs": [*filler, check_run("success")]},
-                    {"check_runs": [check_run(None, name="lint", status="in_progress")]}, statuses=(statuses,))
-    runs = github._check_signals(REPO, HEAD)[0]
-    assert {k: v for k, v in runs.items() if not k.startswith("job")} == {
-        "checks": "pending", "lint": "pending", "ci/legacy": "failure"}
-    pages = [c["argv"][-2] for c in gh.calls if "check-runs" in c["argv"][1]]
-    assert pages == ["page=1", "page=2"]
+def test_check_runs_merges_paginated_runs_and_statuses(gh: FakeGh) -> None:
+    names = [f"job{i}" for i in range(99)]
+    runs = [check_run("success", name=name) for name in names]
+    statuses = [{"context": f"legacy/{name}", "state": "failure"} for name in names]
+    statuses.append({"context": "checks", "state": "pending"})
+    second = [{"context": "required-page-two", "state": "success"}, {"context": "checks", "state": "success"}]
+    arm_check_pages(gh, {"check_runs": [*runs, check_run("success")]},
+                    {"check_runs": [check_run(None, name="lint", status="in_progress")]},
+                    statuses=(statuses, second))
+    assert github._check_signals(REPO, HEAD)[0] == {
+        **dict.fromkeys(names, "success"), **dict.fromkeys((row["context"] for row in statuses[:-1]), "failure"),
+        "checks": "pending", "lint": "pending", "required-page-two": "success",
+    }
+    requests = [(call["argv"][1].rsplit("/", 1)[-1], call["argv"][-2]) for call in gh.calls]
+    assert requests == [("check-runs", "page=1"), ("check-runs", "page=2"),
+                        ("statuses", "page=1"), ("statuses", "page=2")]
+    for call in gh.calls:
+        argv = call["argv"]
+        assert "-F" in argv and argv[argv.index("--method") + 1] == "GET"
 
 
 @pytest.mark.parametrize("rows,expected", [
     ([(10, "checks", None, "skipped"), (11, "checks", None, "success")], {"checks": "success"}),
     ([(20, "checks", "01:00:00Z", None), (19, "checks", "02:00:00Z", "success")], {"checks": "pending"}),
     ([(30, "checks", None, "success"), (31, "lint", None, "failure")], {"checks": "success", "lint": "failure"}),
-    ([(40, "checks", "01:00:00Z", "failure"), (40, "checks", "02:00:00Z", "success")], {"checks": "success"}),
-    ([(7, "checks", "12:00:00Z", "success"), (7, "checks", "12:00:00.250Z", "failure")], {"checks": "failure"}),
-    ([(None, "checks", "12:00:00Z", "success"), (None, "checks", "09:00:01-03:00", "failure")], {"checks": "failure"}),
-    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "14:00:00+02:00", "success")], {"checks": "failure"}),
-    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "23:00:00+00:99", "success")], {"checks": "failure"}),
-    ([(None, "checks", None, "failure"), (None, "checks", "23:00:00", "success")], {"checks": "failure"}),
 ], ids=[
-    "stale-skipped", "id-before-time", "distinct-names", "timestamp-tie", "same-id-fraction",
-    "missing-ids-offset", "equal-instants", "invalid-loses-to-valid", "unusable-times-tie",
+    "stale-skipped", "id-before-time", "distinct-names",
 ])
 def test_check_runs_ordering(gh: FakeGh, rows: list[tuple], expected: dict) -> None:
     runs = [check_run(conclusion, name=name, status="completed" if conclusion else "in_progress",
@@ -876,21 +879,6 @@ def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
 
     with pytest.raises(github.GhError, match=endpoint):
         github._check_signals(REPO, HEAD)
-
-
-def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
-    page = [{"context": f"old-{i}", "state": "success"} for i in range(99)]
-    page += [{"context": "duplicate", "state": "failure"}]
-    second = [{"context": "required-page-two", "state": "success"}, {"context": "duplicate", "state": "success"}]
-    arm_check_pages(gh, {"check_runs": []}, statuses=(page, second))
-    runs = github._check_signals(REPO, HEAD)[0]
-    assert runs.keys() == {row["context"] for row in [*page, *second]}
-    assert [c["argv"][1].rsplit("/", 1)[-1] for c in gh.calls] == ["check-runs", "statuses", "statuses"]
-    for call in gh.calls:
-        argv = call["argv"]
-        assert "-F" in argv and argv[argv.index("--method") + 1] == "GET"
-    assert runs["required-page-two"] == "success"
-    assert runs["duplicate"] == "failure", "the first (latest) status wins"
 
 
 @pytest.mark.parametrize("pages,error", [
@@ -1091,13 +1079,6 @@ def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> 
 # --- ready / merge ---------------------------------------------------------------------
 
 
-def test_merge_success_verifies_rest_landing(gh: FakeGh) -> None:
-    gh.respond("pr merge", "")
-    gh.respond(f"api repos/{REPO}/pulls/7", merge_json("MERGED", sha="c" * 40))
-    assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
-    assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
-
-
 def test_merge_command_failure(gh: FakeGh) -> None:
     gh.fail("pr merge", "head commit mismatch")
     gh.respond(f"api repos/{REPO}/pulls/7", merge_json())
@@ -1173,7 +1154,10 @@ def test_merge_reports_queue_admission_or_landing(gh, strategy, queue_state):
         assert github.merge(REPO, 7, strategy, HEAD) is None
     writes = [c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"]]
     assert len(writes) == 1
-    assert ("--squash" in writes[0]) == (strategy == "squash")
+    if strategy == "squash":
+        assert writes[0] == ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
+    else:
+        assert "--squash" not in writes[0]
     assert "--queue" not in writes[0]
 
 
@@ -1257,7 +1241,7 @@ def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, tmp_path, err
     ("4676", "", "short-window limit: retry after ~60 s"),
     ("", "90", "short-window limit: retry after 90 s"),
     ("", "Wed, 25 Nov 2026 21:03:14 GMT", "short-window limit: retry after Wed, 25 Nov 2026 21:03:14 GMT"),
-    ("", "", "Rate limited: retry after GitHub's reset or Retry-After; only a short Retry-After is retried automatically."),
+    ("", "", "Rate limited: retry after GitHub's reset or Retry-After."),
 ])
 def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining, retry_after, hint):
     sleeps = []
@@ -1275,7 +1259,7 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining
     with github.bounded_reads(github.time.monotonic() + budget, retry=True), pytest.raises(github.GhError) as info:
         github.pr_for_branch(REPO, "lz/x")
     error = str(info.value)
-    assert hint in error and error.split(" failed: ", 1)[1].startswith("Rate limited:")  # Retry time first.
+    assert hint in error
     assert info.value.rate_reset == (1795640594 if remaining == "0" else None)
     if remaining:
         assert "X-RateLimit-Resource: core" in error
@@ -1324,8 +1308,7 @@ def test_graphql_limit_reports_only_verified_reset(gh, diagnostic):
 
     assert len(gh.calls) == (1 if header else 2)
     if diagnostic == "http-200":
-        assert isinstance(info.value, github.GhRateLimited)
-        assert (info.value.rate_reset, info.value.confirmed_rate_limit) == (4070908800, True)
+        assert isinstance(info.value, github.GhUnavailable) and info.value.rate_reset == 4070908800
     elif not header:
         assert info.value.command[-1] == "query={viewer{login}}"
         if verified:

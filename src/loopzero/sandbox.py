@@ -112,7 +112,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         for exposed in (*config.sandbox_ro, *config.writable):
             if private_parent.is_relative_to(Path(exposed).resolve()):
                 raise SandboxUnavailable(
-                    f"sandbox path {exposed!r} would expose private check directories"
+                    f"sandbox path {exposed!r} would expose private check directories; set TMPDIR outside it"
                 )
         scratch = {entry: scratch_root / entry for entry in config.scratch}
         for entry, source in scratch.items():
@@ -476,6 +476,10 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
     try:
         probe = _run_bwrap(config, worktree, prefix, ("true",), timeout=GIT_TIMEOUT)
     except _proc.ToolMissing as exc:
+        if "PATH" not in config.env_allowlist:
+            raise SandboxUnavailable(
+                "bwrap was found but cannot be started: PATH is not in checks.env_allowlist; add PATH to it"
+            ) from exc
         raise SandboxUnavailable(
             f"bwrap binary missing while starting the namespace probe: {exc}\n"
             "sudo apt install bubblewrap"
@@ -577,7 +581,13 @@ def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str
     try:
         return git(worktree, *args, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT, paths=paths, raw=True)
     except GitError as exc:
-        raise SandboxUnavailable(f"{' '.join(exc.command)} failed in {worktree}: {_proc.tail(exc.tail, 1)}") from None
+        raise SandboxUnavailable(f"{' '.join(exc.command)} failed in {worktree}: {_git_reason(exc.tail)}") from None
+
+
+def _git_reason(tail: str) -> str:
+    if "ambiguous argument 'HEAD'" in tail:
+        return "this branch has no commit yet; make the first commit before running checks"
+    return next((line for line in tail.splitlines() if line.startswith("fatal:")), _proc.tail(tail, 1))
 
 
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:

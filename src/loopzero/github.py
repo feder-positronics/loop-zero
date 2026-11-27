@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -16,6 +17,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from functools import partial
 from itertools import chain, islice, pairwise
 from pathlib import Path
 from typing import Literal
@@ -41,8 +43,7 @@ MARKER_RE = re.compile(
 PAGE = 100
 PR_FILE_LIMIT = 3_000
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
-RATE_LIMIT_GUIDANCE = ("\nRate limited: retry after GitHub's reset or Retry-After; "
-                       "only a short Retry-After is retried automatically.")
+RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After."
 CHECK_SUITE_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -73,22 +74,15 @@ class GhError(LoopZeroError):
                  token: str = "", guidance: str = "", confirmed_rate_limit: bool = False,
                  rate_reset: int | None = None) -> None:
         self.command = tuple(_redact_tokens(arg, token) for arg in command)
-        body = _redact_tokens(tail, token)
-        self.tail = body + guidance
+        self.tail = _redact_tokens(tail, token) + guidance
         self.confirmed_rate_limit = confirmed_rate_limit
         self.rate_reset = rate_reset
         command_text = _redact_tokens(" ".join(command), token)
-        # A rate limit leads with its retry time, ahead of the cut response body.
-        shown = f"{guidance.strip()}\n{body.strip()[-600:]}" if "Rate limited:" in guidance else self.tail.strip()[-600:]
-        super().__init__(f"{command_text} failed: {shown.strip()}")
+        super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
 
 
 class GhUnavailable(GhError):
     """GitHub could not supply a result because of a transient fault or limit."""
-
-
-class GhRateLimited(GhUnavailable):
-    """GitHub refused the request under a rate limit; `rate_reset` is set when verified."""
 
 
 class ReadDeadline(GhUnavailable):
@@ -151,19 +145,20 @@ _CREDENTIAL_TOKEN_RE = re.compile("|".join(SECRET_PATTERNS))
 
 
 @contextmanager
-def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False):
+def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False, check_on_exit: bool = True):
     """Share a monotonic budget across reads, including any retries."""
     previous = _read_scope.get()
     deadline = min(previous[0], deadline) if previous else deadline
     scope = _read_scope.set((deadline, token, retry))
     try:
         yield
-        _read_timeout(0)
+        if check_on_exit:
+            read_timeout(0)
     finally:
         _read_scope.reset(scope)
 
 
-def _read_timeout(limit: float, *, scoped: bool = True) -> float:
+def read_timeout(limit: float = math.inf, *, scoped: bool = True) -> float:
     scope = _read_scope.get() if scoped else None
     if scope is None:
         return limit
@@ -305,7 +300,7 @@ def app_token() -> str:
         return ""
     minted = _app_token_clock()  # before minting so a suspend mid-call ages the token
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_BASE_ENV, timeout=_read_timeout(10))
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_BASE_ENV, timeout=read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
@@ -322,10 +317,8 @@ def _select_token(token: str | None, scope: tuple[float, str | None, bool] | Non
     return selected if selected is not None else (app_token() if read_only else "")
 
 
-def _transient_error(tail: str, retry_idempotent: bool, status: str | None = None) -> bool:
-    return (status or "").startswith("5") or bool(TRANSIENT_RE.search(tail)) or (
-        retry_idempotent and "something went wrong while executing your query" in tail.lower()
-    )
+def _transient_error(tail: str, status: str | None = None) -> bool:
+    return (status or "").startswith("5") or bool(TRANSIENT_RE.search(tail))
 
 
 def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> bool:
@@ -335,7 +328,7 @@ def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> boo
 
 
 def _retry_pause(delay: float | None, limit: float, *, scoped: bool = True) -> bool:
-    if delay is None or delay >= _read_timeout(limit, scoped=scoped):
+    if delay is None or delay >= read_timeout(limit, scoped=scoped):
         return False
     _retry_sleep(delay)
     return True
@@ -385,12 +378,12 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout, scoped=read_only), encoding="utf-8")
+                       timeout=read_timeout(timeout, scoped=read_only), encoding="utf-8")
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
-            _read_timeout(timeout, scoped=bool(scope and scope[2]))
+            read_timeout(timeout, scoped=bool(scope and scope[2]))
             if not _retry_pause(delay, timeout, scoped=read_only):
                 raise ProcTimeout(
                     _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
@@ -404,7 +397,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             dates[:] = [headers.get("date", "")]
             return body
         rate_limited = _rate_limited(status, headers, tail)
-        transient = rate_limited or _transient_error(tail, retry_idempotent, status)
+        transient = rate_limited or _transient_error(tail, status)
         pause = _rate_limit_delay(headers, delay) if rate_limited else delay
         if not transient or not _retry_pause(pause, timeout, scoped=read_only):
             break
@@ -421,11 +414,11 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
-    error = GhRateLimited if rate_limited else GhUnavailable if transient else GhError
-    exhausted = rate_limited and headers.get("x-ratelimit-remaining") == "0"
-    confirmed_limit = exhausted or (rate_limited and status in {"200", "403", "429"})
+    error = GhUnavailable if transient else GhError
+    confirmed_limit = rate_limited and status in {"200", "403", "429"}
     reset = headers.get("x-ratelimit-reset", "")
-    rate_reset = int(reset) if exhausted and re.fullmatch(r"[0-9]{1,18}", reset) else None
+    rate_reset = int(reset) if (confirmed_limit and headers.get("x-ratelimit-remaining") == "0"
+                                and re.fullmatch(r"[0-9]{1,18}", reset)) else None
     raise error(error_command, detail, token=selected, guidance=guidance,
                 confirmed_rate_limit=confirmed_limit, rate_reset=rate_reset)
 
@@ -450,12 +443,11 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     }
     guidance = RATE_LIMIT_GUIDANCE
     if remaining == 0:
-        guidance = (f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}; "
-                    "only a --wait whose deadline reaches a verified reset resumes by itself.")
+        guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}."
     elif remaining is not None or retry_seconds or retry_date:
         delay = f"{retry_after} s" if retry_seconds else retry_after if retry_date else "~60 s"
         guidance = f"\nRate limited: short-window limit: retry after {delay}."
-    return guidance + "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None)
+    return "".join(f"\n{name}: {value}" for name, value in evidence.items() if value is not None) + guidance
 
 
 def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:  # noqa: C901 - best-effort parse of each rate-limit evidence source
@@ -480,7 +472,7 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         query = "query { rateLimit { remaining resetAt } }"
         result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=cwd,
                      env_allowlist=GH_ENV, extra_env={"GH_TOKEN": token} if token else None,
-                     timeout=_read_timeout(10))
+                     timeout=read_timeout(10))
         if result.exit_code:
             return ""
         data = json.loads(result.stdout)
@@ -561,10 +553,6 @@ def login(token: str | None = None) -> str:
     if isinstance(content, dict) and isinstance(viewer := content.get("viewer"), dict) and (name := viewer.get("login")):
         return str(name)
     raise GhError(("gh", "api", "graphql"), "no login in viewer response")
-
-
-def _not_found(number: int, exc: Exception) -> GhError:
-    return GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})")
 
 
 def _api(endpoint: str, payload: dict, method: str = "POST",
@@ -986,9 +974,9 @@ def post_review(
 ) -> None:
     """Post `result` as a PR review on `head_sha`, one inline comment per finding.
 
-    `body_prefix`, when given, becomes the first line of the review body. When the
-    token user authored the PR (`pr` is fetched if not given) the review is posted
-    as a COMMENT, since GitHub rejects self-approval and self-request-changes.
+    `body_prefix`, when given, becomes the first line of the review body. An App
+    token, or a token whose user authored the PR (`pr` is fetched if not given),
+    posts a COMMENT; only the operator identity approves or requests changes.
 
     Findings whose location is missing or outside the diff are anchored on the first
     changed file with a hunk. Without an anchor, blockers go in the review body.
@@ -1151,17 +1139,14 @@ def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, .
             "-f", f"ref={base}", "-f", f"inputs[pr]={number}")
 
 
-def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bool:
+def _eligibility_dispatched(repo: str, base: str, since: str) -> bool:
     query = f"event=workflow_dispatch&branch={quote(base, safe='')}&created={quote('>=' + since, safe='')}&per_page=100"
     data = api_get(f"repos/{repo}/actions/workflows/eligibility.yml/runs?{query}")
     runs = data.get("workflow_runs") if isinstance(data, dict) else None
     complete = isinstance(runs, list) and data.get("total_count") == len(runs)
-    identified = [run.get("display_title") if isinstance(run, dict) else None for run in runs] if complete else []
-    if f"Refresh eligibility for PR #{number}" in identified:
-        return True
-    if not complete or any(not isinstance(name, str) or not re.fullmatch(r"Refresh eligibility for PR #[0-9]+", name) for name in identified):
+    if not complete or not all(isinstance(run, dict) for run in runs):
         raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
-    return False
+    return bool(runs)  # Consumer workflows set no run title; the dispatch window identifies the run.
 
 
 def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...], *,
@@ -1172,7 +1157,7 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
         try:
             _gh(*args)
         except (GhUnavailable, ProcTimeout) as exc:
-            if isinstance(exc, GhUnavailable) and not _transient_error(exc.tail, False):
+            if isinstance(exc, GhUnavailable) and not _transient_error(exc.tail):
                 raise
             _retry_sleep(RETRY_DELAY)
             current = pr_for_branch(repo, branch, open_only=True)
@@ -1180,7 +1165,7 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
                 pr.number, pr.head_sha, pr.base_ref,
             ):
                 raise GhError(("refresh Loop-zero Eligibility",), "the PR or head changed after resolution") from exc
-            if _eligibility_dispatched(repo, pr.number, base, since):
+            if _eligibility_dispatched(repo, base, since):
                 return True
             if open_blocking_findings(repo, pr.number, None, publishers):
                 raise GhError(("refresh Loop-zero Eligibility",), "blocking findings appeared after resolution") from exc
@@ -1236,7 +1221,7 @@ def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -
                 return found
             cursor = ("-F", f"after={_next_thread_cursor(page, seen)}")
         except (KeyError, TypeError) as exc:
-            raise _not_found(number, exc) from exc
+            raise GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})") from exc
 
 
 _ACTIVE_WORKFLOWS = {"queued", "in_progress", "waiting", "pending", "requested"}
@@ -1284,9 +1269,8 @@ def _check_signals(
                   and states[name] not in _NONFAILING_CHECKS
                   and all(at and at < review_at for state, at in values if state not in _NONFAILING_CHECKS)
                   and (review_grace or any(at and at >= review_at for state, at in values if state in _PENDING_CHECKS)))
-    # Only eligibility (eligibility.CONTEXT) refreshes on a review (#259); CI verdicts stay current.
     stale_verdicts = tuple(name for name, values in signals.items() if review_at and stale_verdict_grace
-                           and name == "Loop-zero Eligibility" and name not in stale and states[name] in _FAILED_VERDICTS
+                           and name not in stale and states[name] in _FAILED_VERDICTS
                            and all(at and at < review_at for state, at in values if state != "success"))
     stale += stale_verdicts
     superseded: list[str] = []
@@ -1363,10 +1347,10 @@ def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_
     return False
 
 
-def _check_run_order(run: dict) -> tuple[int, bool, ReadinessTimestamp | None]:
+def _check_run_order(run: dict) -> int:
+    """GitHub check-run ids are unique and increase, so the highest id is the latest run."""
     run_id = run.get("id")
-    started_at = readiness_timestamp(run.get("started_at"))
-    return run_id if isinstance(run_id, int) else -1, started_at is not None, started_at
+    return run_id if isinstance(run_id, int) else -1
 
 
 def _aggregate_signal(states: list[str]) -> str:
@@ -1445,7 +1429,7 @@ def readiness(
 
 
 def mark_ready(repo: str, number: int) -> None:
-    _gh("pr", "ready", str(number), "--repo", repo, retry_idempotent=True)  # Repeating is harmless.
+    _gh("pr", "ready", str(number), "--repo", repo, retry_idempotent=True)
 
 
 _QUEUE_QUERY = (
@@ -1491,6 +1475,8 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
         auto = pr.get("autoMergeRequest")
         if type(queued) is not bool or (auto is not None and not isinstance(auto, dict)):
             raise ValueError("invalid queue fields")
+    except ReadDeadline:
+        raise
     except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
         raise MergeFailed(("gh", "api", "graphql"),
                           f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
@@ -1500,19 +1486,27 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
     return queued or bool(auto)
 
 
-def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
-    """Merge PR `number` at exactly `head_sha` and return the verified merge SHA.
+def _merge_evidence(repo: str, number: int, head_sha: str) -> tuple[str | None, bool, MergeFailed | None]:
+    """Read the merge SHA, queued state and queue error after a merge request."""
+    if sha := merged_sha(repo, number, expected_head=head_sha):
+        return sha, False, None
+    queue_error = None
+    try:
+        if merge_pending(repo, number, head_sha):
+            return None, True, None
+    except MergeFailed as exc:
+        queue_error = exc
+    # The queue may have landed the PR between the two reads.
+    return merged_sha(repo, number, expected_head=head_sha), False, queue_error
 
-    Returns None when the base branch uses a merge queue and GitHub accepted the PR
-    into it: the merge will land later, and the caller must verify on a later run.
-    """
+
+def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
+    """Merge at exactly this head, returning None if GitHub queued the PR."""
     if strategy not in ("squash", "merge", "rebase", "queue"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
     # A merge queue owns the method; gh rejects an explicit --squash/--merge/--rebase.
     method = () if strategy == "queue" else (f"--{strategy}",)
-    argv = (
-        "pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha,
-    )
+    argv = ("pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha)
     if strategy == "queue" and merge_pending(repo, number, head_sha):
         return None
     write_error = None
@@ -1520,18 +1514,20 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         _gh(*argv, timeout=300)
     except (GhError, ProcTimeout, OSError) as exc:
         write_error = exc
-    sha = merged_sha(repo, number, expected_head=head_sha)
-    if sha:
-        return sha
-    queue_error = None
+    # A direct merge already in flight still needs verification and cleanup.
+    scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
     try:
-        if merge_pending(repo, number, head_sha):
-            return None
-    except MergeFailed as exc:
-        queue_error = exc
-    # The queue may have landed the PR between the two reads; look once more.
-    sha = merged_sha(repo, number, expected_head=head_sha)
-    if sha:
+        sha, queued, queue_error = _merge_evidence(repo, number, head_sha)
+        if strategy == "queue":
+            read_timeout(0)  # Queue evidence read after the wait budget is a timeout.
+    except (GhError, ProcTimeout) as exc:
+        if strategy == "queue" or isinstance(exc, (MergeFailed, ClosedUnmerged)):
+            raise
+        # A direct merge reports its own verification failure, never a queue timeout.
+        raise MergeFailed(("gh", *argv), f"PR #{number} merge could not be verified: {exc}") from exc
+    finally:
+        _read_scope.reset(scope)
+    if sha or queued:
         return sha
     if queue_error:
         raise queue_error
@@ -1539,14 +1535,11 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued{detail}")
 
 
-def _remote_branch_head(endpoint: str) -> str | None:
-    return _branch_sha(endpoint, "object", "missing remote ref SHA")
-
-
 def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     """Return False if the remote ref moved, or True if deleted or absent."""
     endpoint = f"repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
-    current = _remote_branch_head(endpoint)
+    read_head = partial(_branch_sha, endpoint, "object", "missing remote ref SHA")
+    current = read_head()
     if current != expected_head:
         return current is None
     ref = os.fsdecode(f"refs/heads/{branch}".encode("utf-8", "surrogateescape"))
@@ -1561,7 +1554,7 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
             raise GhError(init, done.stderr or done.stdout)
         done = run(argv, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
     if done.exit_code:
-        current = _remote_branch_head(endpoint)
+        current = read_head()
         if current == expected_head:
             raise GhError(argv, done.stderr or done.stdout)
         return current is None
@@ -1588,9 +1581,7 @@ def commit_status(
 def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
     statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
     latest = next((row for row in statuses if row.get("context") == context), {})
-    creator = latest.get("creator")
-    return (isinstance(creator, dict) and creator.get("login") == "github-actions[bot]"
-            and (latest.get("state"), latest.get("description")) == (state, description))
+    return (latest.get("state"), latest.get("description")) == (state, description)
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:

@@ -40,10 +40,6 @@ class ConfigError(LoopZeroError):
     """The configuration file is missing, unreadable, or has invalid content."""
 
 
-class RefreshFailed(ConfigError):
-    """`git fetch` of the settings branch failed, usually a network or remote fault."""
-
-
 def load(path: Path | str, *, require_ci: bool = False) -> Config:
     """Load and validate a workflow file."""
     path = Path(path)
@@ -64,8 +60,11 @@ def _parse_workflow(raw: bytes, source: Path | str, hint: str = "", *,
     try:
         data = tomllib.loads(raw.decode("utf-8"))
         policy = _build(data)
-        if require_ci and (branch is None or policy.base_branch == branch):
-            _require_ci(data.get("checks", {}))
+        if (require_ci and (branch is None or policy.base_branch == branch)
+                and "required_ci" not in data.get("checks", {})):
+            raise ConfigError(
+                "checks.required_ci must list the required contexts or explicitly set required_ci = [] if none are required"
+            )
         return policy
     except UnicodeDecodeError as exc:
         raise ConfigError(f"{source}: {exc}") from exc
@@ -119,8 +118,7 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
         if fetched.exit_code != 0:
             message = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@",
                              _proc.tail(fetched.stderr or fetched.stdout, 1) or f"git exited {fetched.exit_code}")
-            raise RefreshFailed(f"could not refresh origin/{branch}: {message}. If the network or remote "
-                                f"is down, rerun later; otherwise: {hint}")
+            raise ConfigError(f"could not refresh origin/{branch}: {message}. {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
     # Stage-boundary reads reuse the existing ref without fetching absent objects.
     local_env = {"GIT_NO_LAZY_FETCH": "1"} if previous is not None and not refresh else None
@@ -164,13 +162,6 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
             return replace(policy, trusted_base_revision=revision)
         branch = policy.base_branch
     raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
-
-
-def _require_ci(checks: dict[str, Any]) -> None:
-    if "required_ci" not in checks:
-        raise ConfigError(
-            "checks.required_ci must list the required contexts or explicitly set required_ci = [] if none are required"
-        )
 
 
 def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every workflow.toml section in one pass
@@ -268,7 +259,7 @@ def _check_table(label: str, table: Any, schema: dict[str, type], *,
         if key in table:
             nonempty = nonempty_strings and kind is str
             if not isinstance(table[key], kind) or (nonempty and not table[key]):
-                expected = {dict: "a table", int: "an integer", list: "an array", str: "a string", bool: "a boolean"}
+                expected = {dict: "a table", list: "an array", str: "a string", bool: "a boolean"}
                 raise ConfigError(f"{label}.{key} must be {'a non-empty string' if nonempty else expected[kind]}")
     return table
 
@@ -289,6 +280,8 @@ def _host_paths(label: str, value: list[Any]) -> tuple[str, ...]:
     for raw in paths:
         if not raw.startswith("/"):
             raise ConfigError(f"{label} entries must be absolute, got {raw!r}")
+        if any(re.fullmatch(r"<[^/<>]+>", part) for part in Path(raw).parts):
+            raise ConfigError(f"{label} entry {raw!r} is an unreplaced example placeholder")
         path = Path(raw).resolve()
         if str(path) in ("/", "/home") or any(
             path.is_relative_to(tree) for tree in FORBIDDEN_RO_TREES

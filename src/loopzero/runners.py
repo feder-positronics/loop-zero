@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import sys
@@ -18,7 +17,7 @@ from dataclasses import replace
 from itertools import groupby
 from pathlib import Path
 
-from loopzero import _proc, sandbox
+from loopzero import _proc, sandbox, worktree
 from loopzero.config import REVIEWER_FAMILIES
 from loopzero.types import BLOCKING, Config, Finding, LoopZeroError, ReviewResult
 
@@ -221,7 +220,7 @@ def _claude_payload(envelope: dict) -> object:
     return _extract_json_object(str(envelope.get("result", ""))) if payload is None else payload
 
 
-def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:  # noqa: C901 - one check per review JSON field
+def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:
     """Validate a decoded review object against the findings schema."""
     diagnostic = _tail(raw if excerpt is None else excerpt)
     if not isinstance(payload, dict):
@@ -247,8 +246,7 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
         if not isinstance(item["title"], str) or not isinstance(item["body"], str):
             raise RunnerMalformedOutput(f"{family}: finding title/body must be strings", diagnostic)
         findings.append(Finding(**item))
-    if any(f.severity in BLOCKING for f in findings):
-        verdict = "request_changes"
+    verdict = "request_changes" if any(f.severity in BLOCKING for f in findings) else "approve"
     return ReviewResult(family=family, head=head, kind=kind, verdict=verdict,
                         findings=tuple(findings), raw=raw)
 
@@ -304,11 +302,10 @@ def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Conf
 
 
 def _review_git(cwd: Path, allowlist: tuple[str, ...], label: str, *args: str, paths: bool = False) -> str:
-    run = _proc.run_git_paths if paths else _proc.run
-    done = run(["git", *args], cwd=cwd, env_allowlist=allowlist, timeout=30)
-    if done.exit_code != 0:
-        raise RunnerBadOutput(f"git {label} exited {done.exit_code}", _tail(done.stderr))
-    return done.stdout
+    try:
+        return worktree.git(cwd, *args, env_allowlist=allowlist, timeout=30, paths=paths, raw=True)
+    except worktree.GitError as exc:
+        raise RunnerBadOutput(f"git {label} exited {exc.exit_code}", _tail(exc.stderr)) from None
 
 
 def _git_dirs(cwd: Path, env_allowlist: tuple[str, ...]) -> tuple[Path, Path]:
@@ -432,14 +429,6 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
             continue
         binds.append((source, sandbox_home / destination))
     return tuple(binds)
-
-
-def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str | None:
-    try:
-        done = _proc.run([str(binary), "--version"], cwd=cwd, env_allowlist=env_allowlist, timeout=30)
-    except (_proc.ToolMissing, _proc.ProcTimeout, OSError):
-        return None
-    return None if done.exit_code else done.stdout.rstrip("\n")
 
 
 # Linux rejects one argv element over 128 KiB (MAX_ARG_STRLEN) before the reviewer starts.
@@ -706,6 +695,22 @@ def _codex_header(value):
     return header
 
 
+def retire_inspection(body):
+    """A published body whose Codex header records inspection the way new evidence does.
+
+    Only a machine block within the published size limit is rewritten."""
+    block, span = leading_review_block(body)
+    if len(block) < 2 or len(span.encode()) > CODEX_HEADER_LIMIT:
+        return body
+    try:
+        value = decode_codex_evidence(block[1])
+    except ValueError:
+        return body
+    calls = [{key: item for key, item in call.items() if key not in ("head_event", "diff_event")}
+             | {"inspection": "unknown"} for call in value["calls"]]
+    return body.replace(block[1], _codex_header(value | {"calls": calls}), 1)
+
+
 def decode_codex_evidence(header):
     """Only one canonical ASCII field; its leading placement is checked by eligibility."""
     if not isinstance(header, str) or not header.isascii() or len(header) > CODEX_HEADER_LIMIT:
@@ -719,99 +724,6 @@ def decode_codex_evidence(header):
     if not valid_codex_evidence(value) or _codex_header(value) != header:
         raise ValueError("noncanonical or invalid evidence")
     return value
-
-
-def _inspection_commands(command, cwd):  # noqa: C901 - parses each allowed git inspection form
-    """Conservative shell grammar: explicit repo anchor, immutable range, no echo/expansion."""
-    try:
-        words = shlex.split(command)
-        if len(words) == 3 and Path(words[0]).name in {"sh", "bash"} and words[1] in {"-c", "-lc"}:
-            command = words[2]
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>`$()\n")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        groups = [[]]
-        for word in lexer:
-            if word == "&&":
-                groups.append([])
-            else:
-                groups[-1].append(word)
-        operations, anchored = [], False
-        for group in groups:
-            if len(group) == 2 and group[0] == "cd" and group[1].startswith("/"):
-                anchored = group[1] == cwd
-                continue
-            if not group or group.pop(0) != "git":
-                return []
-            local = anchored
-            if group[:1] == ["-C"] and len(group) >= 3:
-                local = group[1] == cwd
-                group = group[2:]
-            if not local:
-                return []
-            if group[:1] == ["--no-pager"]:
-                group = group[1:]
-            if group == ["rev-parse", "HEAD"]:
-                operations.append(("head",))
-            elif group[:1] == ["diff"]:
-                args = [
-                    part
-                    for part in group[1:]
-                    if part not in {"--no-color", "--no-ext-diff", "--no-textconv", "--text",
-                                    "--ignore-submodules=none", "--submodule=short"}
-                ]
-                if len(args) != 2 or not all(_hex(part, 40) for part in args):
-                    return []
-                operations.append(("diff", *args))
-            else:
-                return []
-        return operations
-    except ValueError, TypeError:
-        return []
-
-
-def _native_inspection(envelope, context):  # noqa: C901 - matches each Codex command event to expected output
-    started, completed, found = {}, set(), {}
-    for event in envelope["events"]:
-        item = event.get("item")
-        if not isinstance(item, dict) or item.get("type") != "command_execution" or not _identifier(item.get("id")):
-            continue
-        event_type = event.get("type")
-        if event_type == "item.started":
-            if item["id"] in started:
-                return {}
-            started[item["id"]] = item.get("command")
-            continue
-        if event_type != "item.completed":
-            continue
-        if item["id"] in completed:
-            return {}
-        completed.add(item["id"])
-        output, command = item.get("aggregated_output"), item.get("command")
-        if (
-            item.get("status") != "completed"
-            or type(item.get("exit_code")) is not int
-            or item["exit_code"] != 0
-            or not isinstance(output, str)
-            or not isinstance(command, str)
-            or started.get(item["id"]) != command
-        ):
-            continue
-        operations = _inspection_commands(command, context["cwd"])
-        data = output.encode("utf-8")
-        for operation in operations:
-            if operation == ("head",):
-                match = re.search(rb"(?m)^" + context["head"].encode() + rb"(?=\r?$)", data)
-                if match:
-                    found["head_event"] = {"id": item["id"], "start": match.start(), "end": match.end()}
-            elif operation == ("diff", context["base"], context["head"]):
-                match = re.search(rb"(?m)^diff --git ", data)
-                if not match:
-                    continue
-                start, end = match.start(), match.start() + context["diff_bytes"]
-                if end <= len(data) and hashlib.sha256(data[start:end]).hexdigest() == context["diff_sha256"]:
-                    found["diff_event"] = {"id": item["id"], "start": start, "end": end}
-    return found if set(found) == {"head_event", "diff_event"} else {}
 
 
 def _codex_evidence(result):  # noqa: C901 - one check per Codex evidence field
@@ -899,12 +811,10 @@ def _codex_evidence(result):  # noqa: C901 - one check per Codex evidence field
             if not isinstance(configured, dict) or configured != context.get("requested"):
                 raise RunnerBadOutput("codex: configured settings/context mismatch")
             settings["configured"] = configured
-        inspection = _native_inspection(envelope, context)
         calls.append({
             "index": index, "session": session, **settings,
             "fatal": "present" if codex_fatal_startup(envelope) else "absent",
-            "inspection": "verified" if inspection else "unknown",
-            **inspection,
+            "inspection": "unknown",  # published reviews may still carry "verified" plus event ranges
             "base": context["base"], "diff_sha256": context["diff_sha256"],
         })
     raw_bytes = result.raw.encode("utf-8")
@@ -1009,7 +919,8 @@ def _review_claude(
         *(["--effort", effort] if effort else []),
         "--output-format", "json", "--json-schema", json.dumps(REVIEW_SCHEMA, separators=(",", ":")),
         "--permission-mode", "plan", "--tools", "Read,Grep,Glob",
-        "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
+        "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config", "--restricted",
+        "--settings", '{"includeGitInstructions":false}',  # branch names and subjects are PR-controlled
         "--disallowedTools", "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
     with sandbox.private_directory("loopzero-review-home-") as home:
@@ -1098,7 +1009,6 @@ def _review_codex(
         auth_binds = _auth_binds("codex", home)
         prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
         skill_overrides = _codex_repository_skill_overrides(cwd)  # before Codex runs at all
-        cli_version = _observe_codex_version(binary, cwd, config.env_allowlist)
         argv = [
             *prefix, str(binary), "exec",
             "-c", "developer_instructions=" + json.dumps(policy, ensure_ascii=False),
@@ -1108,7 +1018,7 @@ def _review_codex(
             # Nested bwrap can fail on restricted hosts. The outer bwrap keeps the tree
             # read-only and HOME private.
             "--sandbox", "danger-full-access", "--cd", str(cwd), "--skip-git-repo-check",
-            "-c", "mcp_servers={}",
+            "-c", "mcp_servers={}",  # system config (/etc/codex) is visible in the sandbox
             # The reviewed head controls AGENTS.md and its skills; keep both out of context.
             "-c", "project_doc_max_bytes=0", *skill_overrides,
             "--output-schema", f"{sandbox.SANDBOX_HOME}/schema.json",
@@ -1137,7 +1047,6 @@ def _review_codex(
         raise RunnerMalformedOutput("codex: final message is not JSON", _tail(message)) from exc
     envelope = _evidence_json(raw)
     envelope["configured_settings"] = configured
-    envelope["cli_version"] = provenance["cli_version"] = cli_version
     if review_context is not None:
         envelope["review_context"] = review_context
     raw = json.dumps(envelope, separators=(",", ":"))
@@ -1210,7 +1119,6 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
             provenance[key] = sum(float(result.provenance[key]) for result in results)
     else:
         provenance["token_usage"] = [result.provenance["token_usage"] for result in results]
-        provenance["cli_versions"] = [result.provenance.get("cli_version") for result in results]
     return replace(
         first, fallback="", verdict=verdict, findings=findings,
         raw=json.dumps(envelopes, separators=(",", ":")),
@@ -1251,7 +1159,7 @@ def _summarize_deleted(block: str) -> str:
     path = match[2] if match else "(unknown file)"
     if match and match[1]:
         path = codecs.escape_decode(path.encode())[0].decode(errors="replace")
-    deleted = sum(line.startswith("-") and not line.startswith("---") for line in block.splitlines())
+    deleted = sum(line.startswith("-") for line in block.partition("\n@@")[2].splitlines())  # hunks only
     return f"{header}\n{path}: deleted, {deleted} lines\n"
 
 
@@ -1349,14 +1257,11 @@ def _validated_evidence(result: ReviewResult) -> tuple[bool, dict | None]:
         return False, None
 
 
-def family_from_trailer(value: str) -> str | None:
-    """Map a ``Co-Authored-By`` value to a reviewer family, if recognisable."""
+def families_from_trailer(value: str) -> set[str]:
+    """Every reviewer family a ``Co-Authored-By`` value names."""
     lowered = value.lower()
-    if "claude" in lowered or "anthropic" in lowered:
-        return "claude"
-    if any(word in lowered for word in ("codex", "gpt", "openai")):
-        return "codex"
-    return None
+    words = {"claude": ("claude", "anthropic"), "codex": ("codex", "gpt", "openai")}
+    return {family for family, names in words.items() if any(name in lowered for name in names)}
 
 
 def author_families(cwd: Path, head: str, base: str) -> set[str]:
@@ -1366,6 +1271,7 @@ def author_families(cwd: Path, head: str, base: str) -> set[str]:
     use the PR merge-base, including for delta reviews of a narrower diff.
     """
     revision = f"{base}..{head}"
-    trailers = _review_git(cwd, Config.env_allowlist, f"log {revision}",
-                           "log", "--format=%(trailers:key=Co-Authored-By,valueonly)", revision)
-    return {family for line in trailers.splitlines() if (family := family_from_trailer(line))}
+    # Writer lines count anywhere in a message, not only in Git's final trailer paragraph.
+    messages = _review_git(cwd, Config.env_allowlist, f"log {revision}", "log", "--format=%B", revision)
+    return {family for value in re.findall(r"(?im)^co-authored-by[ \t]*:(.+)$", messages)
+            for family in families_from_trailer(value)}

@@ -115,8 +115,6 @@ Settings and semantics the example does not spell out:
 ## What it deliberately does not do
 
 - No dashboard. `loopzero status` and GitHub are the UI.
-- Reviews run with network access because the model CLIs require it. The
-  sandbox limits what they can read, but cannot limit what allowed data they send.
 
 ## Layout
 

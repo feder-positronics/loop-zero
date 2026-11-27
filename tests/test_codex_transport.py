@@ -134,7 +134,7 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, git_repo
         result = changed
     assert len(result.raw.encode()) > 30000
     evidence = runners.codex_evidence(result)
-    assert evidence["complete"] and evidence["calls"][0]["inspection"] == "verified"
+    assert evidence["complete"] and evidence["calls"][0]["inspection"] == "unknown"
     assert evidence["calls"][0]["reported"] == {"model": "gpt-6.2-astra", "effort": "medium"}
     assert evidence["raw_bytes"] == len(result.raw.encode())
     assert evidence["raw_sha256"] == hashlib.sha256(result.raw.encode()).hexdigest()
@@ -257,7 +257,7 @@ def test_complete_ordered_native_chunks(native, mutation):
     if mutation == "valid":
         evidence = runners.codex_evidence(changed)
         assert [c["index"] for c in evidence["calls"]] == [1, 2]
-        assert all(c["inspection"] == "verified" for c in evidence["calls"])
+        assert all(c["inspection"] == "unknown" for c in evidence["calls"])
         assert len({c["session"] for c in evidence["calls"]}) == 2
         assert projection(changed) == (True, evidence)
     else:
@@ -266,7 +266,32 @@ def test_complete_ordered_native_chunks(native, mutation):
             runners.codex_evidence(changed)
 
 
+def legacy_inspection(value):
+    """Reviews published before inspection was retired carry verified event ranges."""
+    value["calls"][0] |= {"inspection": "verified", "head_event": {"id": "item_1", "start": 0, "end": 40},
+                          "diff_event": {"id": "item_2", "start": 40, "end": 80}}
+    return value
+
+
+def test_retire_inspection_respects_the_published_block_limit(published_native):
+    _, rendered, line = published_native
+    legacy = rendered.replace(line, packed(legacy_inspection(runners.decode_codex_evidence(line))))
+    assert legacy != rendered and runners.retire_inspection(legacy) == rendered
+    marker = legacy.split("\n", 1)[0]
+    oversized = legacy.replace(marker, marker + " " * (runners.CODEX_HEADER_LIMIT - len(line)), 1)
+    assert len(runners.leading_review_block(oversized)[1].encode()) > runners.CODEX_HEADER_LIMIT
+    assert runners.retire_inspection(oversized) == oversized  # never shortened into validity
+    assert cli._comparable_body(github.BODY_BLOCKERS + legacy) == github.BODY_BLOCKERS + rendered
+
+
+def test_published_verified_inspection_stays_valid(published_native):
+    value = runners.decode_codex_evidence(published_native[2])
+    assert runners.valid_codex_evidence(legacy_inspection(value))
+
+
 def update_evidence(value, path, replacement):
+    if "head_event" in path or "diff_event" in path:
+        legacy_inspection(value)
     for key in path[:-1]:
         value = value[key]
     value[path[-1]] = replacement
@@ -364,7 +389,8 @@ def test_retired_pair_marker_cannot_pass_eligibility(published_native, source, i
     assert eligible(review) is None
 
 
-@pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_legacy"])
+@pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_legacy",
+                                  "verified_inspection"])
 def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, gh, fake_bin, monkeypatch, kind):
     from tests.test_github import pr_json, rest_pr_json, threads_json
 
@@ -393,7 +419,7 @@ def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, 
         assert b"-hello\n+" + content in delta_diff
         if kind == "delta_legacy":
             assert "+caf\\xe9\r\n" in runners.render_patch(delta_diff)
-        assert proof["calls"][0]["inspection"] == ("verified" if kind == "delta" else "unknown")
+        assert proof["calls"][0]["inspection"] == "unknown"
         assert proof["calls"][0]["diff_sha256"] == hashlib.sha256(delta_diff).hexdigest()
     head = result.head
     prefix = (
@@ -416,6 +442,9 @@ def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, 
         review["body"] = rendered.replace(line, packed(value))
     if kind == "changed_raw":
         result = dataclasses.replace(result, raw=json.dumps(json.loads(result.raw), indent=2))
+    if kind == "verified_inspection":  # published before inspection was retired
+        line = rendered.splitlines()[1]
+        review["body"] = rendered.replace(line, packed(legacy_inspection(runners.decode_codex_evidence(line))))
     gh.respond(f"api repos/{repo}/pulls/7",
                rest_pr_json(pr_json(headRefOid=head, mergeStateStatus="CLEAN")))
     gh.respond(f"api repos/{repo}/pulls/7/reviews --method GET", [review])
@@ -566,7 +595,6 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
         tool.write_text(source.replace(" command=", f" if index != {index}: continue\n command="))
         partial.append(native[0]((index + 1, 2)))
     merged = runners.merge_reviews(partial)
-    assert merged.provenance["cli_versions"] == [result.provenance["cli_version"] for result in partial]
     proof = runners.codex_evidence(merged)
     assert proof["complete"] and len({call["session"] for call in proof["calls"]}) == 2
     assert all(call["inspection"] == "unknown" for call in proof["calls"])

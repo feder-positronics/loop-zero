@@ -16,8 +16,8 @@ copying their tables here.
 
 The [deterministic delivery design assumptions](design/2026-10-07-deterministic-delivery-design-assumptions.md)
 record the rationale, dated reviewer evidence and version-specific native
-compatibility investigation. Their proposed changes retain their recorded status;
-this guide and the delivery contract describe current behavior.
+compatibility investigation. Its delivered changes are in code; this guide and the
+delivery contract describe current behavior.
 
 ## Philosophy and authority
 
@@ -162,8 +162,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    with the actual merge tree. Unavailable history blocks inherited coverage.
    Ancestor coverage includes outdated unresolved blocking threads. A primary
    that requested changes also requires resolved findings at the reviewed head.
-   For check runs with the same name, the latest run (by run ID, then start
-   time) decides. After its own write taking the PR out of draft, `ready --wait`
+   For check runs with the same name, the latest run (by run ID) decides. After its own write taking the PR out of draft, `ready --wait`
    revalidates through the same waiter, policy refresh and original deadline.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in
@@ -196,8 +195,9 @@ The [sandbox](../src/loopzero/sandbox.py) bounds check writes, credentials,
 network access and resources. Checks and their Bubblewrap probes pass
 sandbox environment settings over a private file descriptor, keeping
 forwarded values out of process arguments. [Reviewer runners](../src/loopzero/runners.py)
-bound source access while allowing the network required by model CLIs; that
-network means the sandbox cannot prevent exfiltration of readable data.
+bound source access while allowing the network required by model CLIs; see the
+contract's [sandbox rules](../core/CONTRACT.md#sandbox-rules-for-checks) for what that
+network permits.
 For a reviewer executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable, read-only; for Codex it also
 exposes the existing sibling `codex-code-mode-host`, read-only. Neighboring history and configuration remain
@@ -229,22 +229,23 @@ commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
 that header, a newline and the Git patch, including carriage returns and the
 final newline. UTF-8 patches are supplied verbatim. For other patches, the
 prompt escapes invalid bytes and literal backslashes so the changes stay
-visible. The native inspection digest always binds the original Git bytes. Git forces
+visible. The evidence diff digest always binds the original Git bytes. Git forces
 text hunks for every file (overriding `-diff`, `binary` and NUL detection) and
 runs no external diff command or text conversion, so changed lines stay visible.
 Chunked review summarizes only files whose Git header reports a deletion.
-The runner probes the selected Codex binary with `--version` and records its
-stdout in runner provenance and the saved review receipt when available.
 Unsupported Claude options follow existing native failure handling.
 Native defaults and read-only tools remain enabled. Neither reviewer loads
 instructions from the reviewed head, which the PR controls: Claude runs with
-`--setting-sources ""`, and Codex runs with `project_doc_max_bytes=0` (no
+`--setting-sources ""`, `--restricted` (file tools confined to the checkout, so
+host files and auto-memory stay out) and `includeGitInstructions` off (no
+PR-controlled branch names or commit subjects in its context), and Codex runs
+with a private HOME, no MCP servers and `project_doc_max_bytes=0` (no
 AGENTS.md or AGENTS.override.md) and a `skills.config` entry disabling every
 skill under the checkout's `.agents/skills` and `.codex/skills`; a skill
 directory linking outside the checkout, or more skills than one argument can
-disable, fails the attempt before launch. Repository
-conventions reach reviewers only as evidence or through
-`delivery.reviewer_ro_paths` from the pinned base. Structural transport tests do
+disable, fails the attempt before launch. Repository conventions reach
+reviewers only as evidence; `delivery.reviewer_ro_paths` mounts reviewer CLI
+runtime files only. Structural transport tests do
 not prove injection immunity, reviewer quality or backend identity.
 The [dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
 owns the implementation history, native comparison results and their limits.
@@ -294,8 +295,7 @@ only if it still points at that head.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and ordering. It cannot recompute private raw output or defeat a
 coherent forgery by a trusted publisher, and native claims do not attest the
-backend. Legacy, truncated or tool-free evidence stays unknown; named recoveries
-need complete attributable evidence and hold otherwise.
+backend. Legacy, truncated or tool-free evidence stays unknown.
 Native runner failures distinguish subscription exhaustion from transient throttling:
 weekly/session-limit text and Claude's blocking-limit terminal reason identify quota;
 HTTP 429 alone does not. This classification neither switches accounts nor retries
@@ -363,9 +363,7 @@ and never replays `loopzero` commands.
 ## Direction and historical evidence
 
 The [September 24 architecture note](design/2026-09-24-delivery-system-architecture.md)
-is dated consumer evidence and its accepted principles. Its measurements, gap
-table and owners describe that window, not the current backlog; verify a gap
-against its owning code and consumer before calling it open or closed.
+is dated consumer evidence and its accepted principles.
 
 The October 5 direction keeps this guide as the current entry point, preserves
 the small delivery toolkit, and makes architecture upkeep part of contribution
@@ -379,7 +377,7 @@ deployment status when adopting or updating an external executor.
 
 The [October 5 T3 verification snapshot](design/2026-10-07-deterministic-delivery-design-assumptions.md#t3-verification-snapshot--october-5-2026)
 records the runtime evidence behind this boundary: at-least-once notifications,
-watcher limits and consumer migration constraints. A new daemon, scheduler,
+and watcher limits. A new daemon, scheduler,
 reminder issue or metrics ledger would add state without improving the current
 authority boundary and is outside this direction.
 

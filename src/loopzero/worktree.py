@@ -9,8 +9,7 @@ import re
 import stat
 import subprocess
 import time
-from collections.abc import Iterator
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from select import select
@@ -53,9 +52,11 @@ class WorktreeError(LoopZeroError):
 
 
 class GitError(WorktreeError):
-    def __init__(self, command: tuple[str, ...], tail: str) -> None:
+    def __init__(self, command: tuple[str, ...], tail: str, *, exit_code: int | None = None, stderr: str = "") -> None:
         self.command = command
         self.tail = tail
+        self.exit_code = exit_code
+        self.stderr = stderr
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
@@ -65,7 +66,7 @@ def git(cwd: Path, *args: str, env_allowlist: tuple[str, ...] = GIT_ENV, timeout
     argv = ("git", *args)
     done = (run_git_paths if paths else run)(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout, **kwargs)
     if done.exit_code != 0:
-        raise GitError(argv, done.stderr or done.stdout)
+        raise GitError(argv, done.stderr or done.stdout, exit_code=done.exit_code, stderr=done.stderr)
     return done.stdout if raw or paths or kwargs.get("preserve_newlines") else done.stdout.strip()
 
 
@@ -124,7 +125,7 @@ def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False
 
 
 def lock_local_state(wt: Path):
-    """Serialize check execution, receipt publication and PR-body updates for this worktree."""
+    """Serialize check execution, receipt publication and Mergify admission for this worktree."""
     return _local_state_directory(wt, create=True, lock=True)
 
 

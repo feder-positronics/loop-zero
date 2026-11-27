@@ -33,11 +33,12 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    passes. A PR whose only blockers are missing or skipped required checks
    (with or without pending mergeability) also leaves draft but is not ready
    yet; without a wait that exits 3. Both waiters use `--wait[=SECONDS]` (default 5400) on the same
-   head. Zero can take a PR out of draft or enqueue. `merge --wait` takes a draft out of
-   draft only when required checks are missing; it refuses an otherwise ready draft.
-   Mergeability can time out (exit 3) with green checks. `loopzero merge --cancel`
-   requests Mergify removal without `--wait`.
-   Green can precede CI scheduling. After four minutes of missing checks with
+   head. Zero can take a PR out of draft or enqueue. Mergeability can time out (exit 3)
+   with green checks. `loopzero merge --cancel` requests Mergify removal without `--wait`. Before
+   pushing to a requested or queued PR, withdraw it, confirm the removal on the PR,
+   then push, review the new head and admit it again; a CLI failure does not prove
+   the request was removed.
+   Green can precede CI scheduling. After two minutes of missing checks with
    none pending, inspect scheduling, triggers and permissions, then retry.
 6. After step 5 exits 0, run from a durable directory such as `/tmp`
    using the absolute path to the task worktree.
@@ -65,7 +66,9 @@ coordinator once it adopts it). Post on first yield; update the existing comment
 with the full replacement Markdown from `body_file` on later yields:
 `gh api --method PATCH "repos/$owner/$repo/issues/comments/$comment_id" -f "body=$(cat "$body_file")"`.
 Post separately only for a human request, blocker, stall or final
-result. End delivery responses with complete, blocked (exact
+result. A delegate working under a brief does not yield: it ends its turn only
+with a final result, a blocker or a question
+([Briefs and ownership](../docs/DELEGATION.md#briefs-and-ownership)). End delivery responses with complete, blocked (exact
 dependency/decision), or waiting (event, next action, automatic resume or
 requester needed).
 
@@ -205,8 +208,10 @@ pinned interpreter rather than altering code for an older version.
 - Blocking marker, as the first line of a thread a review publisher opened:
   `<!-- loopzero:finding v=1 severity=critical head=<sha> id=<8-hex> -->`
   (or `important`). Other threads never block.
-- `critical`: wrong or unsafe; must fix. `important`: ships a bug or breaks
-  acceptance; must fix. `suggestion`: never counted or blocking.
+- `critical`: wrong or unsafe; must fix. `important`: ships a bug, breaks
+  acceptance, or adds structural erosion (a workaround that leaves the defect,
+  duplicated decision logic, an unneeded shim) with ongoing defect or divergence
+  risk; must fix. `suggestion`: never counted or blocking.
 - Missing diff or required evidence: return one `critical` finding; never
   approve blind.
 
@@ -235,6 +240,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   Preserve the approved head; optional suggestions do not justify edits.
 - After an approved ordinary delta with blocking findings resolved, one more delta can review a suffix of verified
   base merges containing a conflict. Otherwise, merge with readiness passing or open a replacement PR for changes that need more review.
+  To open a replacement PR, withdraw the exhausted PR if it is requested or
+  queued, close it, then run `loopzero pr` on the same branch.
 - When a base update is needed after a published review, merge the configured
   base into the existing branch to preserve reviewed ancestry. Readiness and
   hosted eligibility can inherit coverage only across proven clean base merges.
@@ -248,7 +255,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   runner-produced reviews count. If no independent reviewer can run, try the
   preferred configured family in a fresh session and publish a visible same-family
   fallback line. When no configured reviewer can run (exit 4), the PR owner
-  restores a configured reviewer and retries.
+  restores a configured reviewer and retries; if it cannot, it reports the
+  blocker to whoever commissioned the PR.
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.

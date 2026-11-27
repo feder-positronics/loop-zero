@@ -368,6 +368,17 @@ def test_not_a_git_repo(tmp_path, bwrap_log):
         sandbox.run_checks(make_config(), tmp_path)
 
 
+def test_unborn_branch_names_its_cause(tmp_path, bwrap_log):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    with pytest.raises(sandbox.SandboxUnavailable, match="no commit yet; make the first commit"):
+        sandbox.run_checks(make_config(), tmp_path)
+
+
+def test_git_reason_prefers_the_fatal_line():
+    assert sandbox._git_reason("fatal: bad thing\nusage: git x") == "fatal: bad thing"
+    assert sandbox._git_reason("one\ntwo") == "two"
+
+
 def _real_bwrap_works() -> bool:
     # Hosts with AppArmor or no unprivileged user namespaces cannot run bwrap; skip there.
     if shutil.which("bwrap") is None:
