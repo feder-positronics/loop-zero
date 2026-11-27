@@ -170,7 +170,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    that requested changes also requires resolved findings at the reviewed head.
    Readiness keeps the latest run ID for each GitHub App and check name, then
    combines the current verdicts for each required name. A positive `ready --wait`
-   budget covers the first readiness read and revalidation after taking a PR out of draft.
+   budget covers the first readiness read, the live PR reread before draft activation,
+   and revalidation after taking a PR out of draft.
    Before the first draft activation it rereads the PR and refuses a moved head, changed target, closed state or hold.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in

@@ -126,8 +126,7 @@ def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | N
 
 
 def _read_queue(request: urllib.request.Request, deadline: float | None) -> object | None:
-    retry = True
-    while True:
+    for retry in (True, False):
         wait = None
         try:
             with _open(request) as response:
@@ -149,7 +148,7 @@ def _read_queue(request: urllib.request.Request, deadline: float | None) -> obje
         if not transient:
             raise MergifyError(detail)
         if not retry:
-            raise MergifyUnavailable(detail)
+            break
         delay = max(2.0, wait or 0.0)
         remaining = github.read_timeout() if deadline is not None else github.read_timeout(5.0)
         if delay >= remaining:
@@ -159,7 +158,7 @@ def _read_queue(request: urllib.request.Request, deadline: float | None) -> obje
             raise MergifyUnavailable(f"{detail}; retry delay exceeds the wait budget")
         _retry_sleep(delay)
         github.read_timeout(0)
-        retry = False
+    raise MergifyUnavailable(detail)
 
 
 def _unmet_conditions(node: object) -> tuple[str, ...]:
@@ -192,10 +191,8 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
         if not isinstance(check, dict):
             return Membership()
         candidate = check.get("queue_pull_request_number")
-        return Membership(
-            candidate if type(candidate) is int and candidate > 0 else None,
-            _unmet_conditions(check.get("conditions_evaluation")),
-        )
+        return Membership(candidate if type(candidate) is int and candidate > 0 else None,
+                          _unmet_conditions(check.get("conditions_evaluation")))
     except (KeyError, TypeError, ValueError) as exc:
         detail = f": {exc}" if type(exc) is ValueError else ""
         raise MergifyError(f"invalid Mergify queue membership response{detail}") from exc
@@ -332,10 +329,23 @@ def _job_failure(repo: str, job_id: str) -> str:
     except (github.ProcTimeout, github.ToolMissing, OSError, github.ReadDeadline) as exc:
         return f"log unavailable ({type(exc).__name__})"
     log = re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))", "", result.stdout)
-    headers = re.findall(r"^(?:\d{4}-\d\d-\d\dT\S+Z )? *(?:(?:FAILED|ERROR) ((?=[^\s\[]*(?:::|\.py\b))[^\s\[]++(?:\[[^\r\n]*?\])?)(?= - |\r?$)"
+    headers = re.findall(r"^(?:\d{4}-\d\d-\d\dT\S+Z )? *(?:(?:FAILED|ERROR) ((?=[^\s\[]*(?:::|\.py\b))[^\s\[]++)(\[[^\r\n]*)?(?= - |\r?$)"
                          r"|(?:FAIL +|\d+\) +(?=[^\r\n]*\u203a))([^\r\n]+))", log, re.M)
-    names = (github._redact_tokens(node or header)[:500] for node, header in headers)
+    names = (github._redact_tokens(name)[:500] for node, suffix, header in headers
+             if (name := _pytest_node(node, suffix) if suffix else node or header))
     return ", ".join(repr(name) for name in tuple(dict.fromkeys(names))[:10]) or "no test failures in log tail"
+
+
+def _pytest_node(node: str, suffix: str) -> str:
+    depth = fallback = 0
+    for bracket in re.finditer(r"\[|\](?P<boundary>(?= - |$))|\]", suffix):
+        depth += 1 if bracket[0] == "[" else -1
+        if bracket["boundary"] is not None:
+            if depth == 0:
+                return node + suffix[:bracket.end()]
+            fallback = fallback or bracket.end()
+    # Pytest allows literal unmatched brackets in IDs.
+    return node + suffix[:fallback] if fallback else ""
 
 
 def _departure(
@@ -343,10 +353,8 @@ def _departure(
 ) -> tuple[Departure | None, dict]:
     """Return the current departure or the later command that superseded it."""
     comments = [item for item in comments if type(item.get("id")) is int and item["id"] > 0]
-    command = max(
-        (item for item in comments if _queue_command(str(item.get("body") or ""), queue)),
-        key=lambda item: item["id"], default={},
-    )
+    commands = (item for item in comments if _queue_command(str(item.get("body") or ""), queue))
+    command = max(commands, key=lambda item: item["id"], default={})
     latest = max(_comments_by(comments, "mergify[bot]"), key=lambda item: (_updated_at(item), item["id"]), default={})
     body = str(latest.get("body") or "")
     payload = None

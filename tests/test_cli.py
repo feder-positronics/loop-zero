@@ -3066,11 +3066,12 @@ def test_ready_keeps_required_check_signals_from_both_apps(wt, gh, capsys, head,
     assert ("required check 'checks' is failure" in out) is not rerun
 
 
-@pytest.mark.parametrize("budget", [0, 1])
-def test_ready_bounds_the_first_read_only_for_a_positive_budget(wt, gh, capsys, monkeypatch, head, budget):
+@pytest.mark.parametrize("budget,activation", [(0, False), (1, False), (1, True)])
+def test_ready_bounds_reads_before_activation(wt, gh, capsys, monkeypatch, head, budget, activation):
     arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=bool(budget))
+    gh.respond("pr ready", "")
     clock = poll_clock(monkeypatch)
-    read = github.pr_for_branch
+    read = github.pr_view if activation else github.pr_for_branch
     limits = []
 
     def slow_read(*args, **kwargs):
@@ -3079,7 +3080,7 @@ def test_ready_bounds_the_first_read_only_for_a_positive_budget(wt, gh, capsys, 
         clock.now = 1.0
         return pr
 
-    monkeypatch.setattr(github, "pr_for_branch", slow_read)
+    monkeypatch.setattr(github, read.__name__, slow_read)
     out, _ = expect_cli(capsys, 3 if budget else 0, "ready", f"--wait={budget}", stderr="")
     assert limits == [budget or 120]
     assert ("timed out" in out) is bool(budget)
@@ -3957,7 +3958,7 @@ def test_merge_warns_when_remote_branch_moves(wt, repo, gh, capsys, monkeypatch,
     assert git(repo, "ls-remote", "origin", branch).split() == [newer, branch]
 
 
-@pytest.mark.parametrize("cleanup_failure", ["denied", "timeout"])
+@pytest.mark.parametrize("cleanup_failure", ["denied", "timeout", "unwritable"])
 def test_second_merge_retries_remote_branch_cleanup(wt, repo, gh, capsys, monkeypatch, head, cleanup_failure):
     arm_squash_merge(gh, head, wt, landed_snapshot(head))
     arm_landed_pr(gh, head, "e" * 40)
@@ -3965,24 +3966,22 @@ def test_second_merge_retries_remote_branch_cleanup(wt, repo, gh, capsys, monkey
     origin = repo.parent / "origin.git"
     git(wt, "push", "origin", "HEAD:refs/heads/lz/t1")
     monkeypatch.setattr(cli, "_cleanup", lambda *_: None)
+    failures = {"timeout": cli._proc.ProcTimeout("gh api timed out", ""),
+                "unwritable": PermissionError("cannot create cleanup temporary directory")}
     with monkeypatch.context() as first_merge:
-        if cleanup_failure == "timeout":
-            timeout = cli._proc.ProcTimeout("gh api timed out", "")
-            first_merge.setattr(cli.github, "delete_remote_branch", Mock(side_effect=timeout))
+        if failure := failures.get(cleanup_failure):
+            first_merge.setattr(cli.github, "delete_remote_branch", Mock(side_effect=failure))
         else:
             git(origin, "config", "receive.denyDeletes", "true")
         out, err = expect_cli(capsys, 0, "merge")
     assert "remote branch cleanup failed for lz/t1" in err
-    if cleanup_failure == "timeout":
+    if failure:
         assert without_accepted_receipt(out).splitlines()[0] == "e" * 40
-        assert "timed out" in err
+        assert str(failure) in err
         assert err.rstrip().endswith(f"; delete 'lz/t1' in {REPO} if it still points at the merged head")
     git(origin, "config", "receive.denyDeletes", "false")
-    second = run(capsys, "merge")
-
-    assert second[0] == 0 and second[2] == ""
+    expect_cli(capsys, 0, "merge", stderr="")
     assert not git(repo, "ls-remote", "origin", "refs/heads/lz/t1")
-
 
 
 def test_status_names_base_workflow_for_invalid_pinned_checks(git_repo, monkeypatch, capsys):
@@ -4939,12 +4938,13 @@ def test_candidate_job_log_summary(gh, job, count):
     assert mergify._job_failure(REPO, job) == ", ".join(repr(node) for node in nodes[:count])
 
 
-def test_candidate_job_log_failure_formats(gh):
-    log = ("\x1b[31mFAILED\x1b[0m test_example.py::test_node[two - parts] - assertion\n"
+@pytest.mark.parametrize("param_id", ["two - parts", "outer [inner] - tail"])
+def test_candidate_job_log_failure_formats(gh, param_id):
+    log = (f"\x1b[31mFAILED\x1b[0m test_example.py::test_node[{param_id}] - assertion\n"
            "FAIL  suite.test.ts > suite > test\n  1) [chromium] \u203a test.spec.ts:1 \u203a title\n"
            "\x1b]8;;https://example.com\x07ERROR test_probe.py::test_probe\x1b]8;;\x07")
     gh.respond(f"api repos/{REPO}/actions/jobs/7/logs", log)
-    assert mergify._job_failure(REPO, "7") == ("'test_example.py::test_node[two - parts]', 'suite.test.ts > suite > test', "
+    assert mergify._job_failure(REPO, "7") == (f"'test_example.py::test_node[{param_id}]', 'suite.test.ts > suite > test', "
                                             "'[chromium] \u203a test.spec.ts:1 \u203a title', 'test_probe.py::test_probe'")
 
 
