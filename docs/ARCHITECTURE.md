@@ -59,6 +59,9 @@ by one 30-second transport deadline. Recovery regenerates
 the exact review body and finding locations, checks the complete review/comment
 pages and unchanged head, and rereads review evidence before returning the saved
 verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
+When no diff line can anchor a blocker, the review body carries it behind a
+leading marker older readers reject. It blocks readiness until an eligible
+review covers the fixes.
 `review --repost` reconciles before enforcing the remaining publication budget;
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
