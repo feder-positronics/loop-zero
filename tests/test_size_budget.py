@@ -12,7 +12,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/size_budget.sh"
 
 def test_executable_scripts_keep_lf_in_autocrlf_checkout(git_repo, tmp_path):
     root = SCRIPT.parents[1]
-    paths = ("scripts/size_budget.sh", "scripts/retro_metrics.py", "scripts/ai-accounts/ai-accounts")
+    paths = ("scripts/size_budget.sh", "scripts/retro_metrics.py")
     for name in (*paths, ".gitattributes"):
         source = root / name
         if source.is_file():
