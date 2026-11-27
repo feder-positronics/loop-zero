@@ -4560,7 +4560,7 @@ def test_manual_refresh_leaves_computing_pending_and_landed_unpainted(wt, gh, he
     gh.respond(f"api repos/{REPO}/statuses/{head}", {})
     eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head, "--publish"])
     states = [json.loads(c["--input"])["state"] for c in gh.calls if "--input" in c]
-    assert states == ["pending"] + ([state] if state else [])
+    assert states == (["pending", state] if state else [])
 
 
 def test_merge_material_lets_read_timeouts_propagate(monkeypatch):

@@ -7,6 +7,7 @@ import sys
 import time
 from contextlib import suppress
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from urllib.parse import quote
 
@@ -75,7 +76,7 @@ def _source_status(result: github.Readiness, current: github.PR) -> tuple[str, s
         if github.MISSING_REVIEW_REASON in reasons:
             return "pending", "Awaiting trusted review of current source head"
         return "pending", github.MERGEABILITY_PENDING
-    return "failure", "; ".join(" ".join(reason.split())[:60] for reason in reasons)
+    return "failure", eligibility.reasons_text(reasons)
 
 
 def _check_candidate_source(cfg: Config, source_number: int, source: dict) -> None:
@@ -88,25 +89,27 @@ def _check_candidate_source(cfg: Config, source_number: int, source: dict) -> No
     if result.reasons == (github.MERGEABILITY_PENDING,):
         raise github.GhUnavailable(("GitHub API request",), f"source #{source_number}: {github.MERGEABILITY_PENDING}")
     if not result.ready:
-        raise _SourcePolicyRejection(f"source #{source_number}: " + "; ".join(result.reasons))
+        raise _SourcePolicyRejection(f"source #{source_number}: " + eligibility.reasons_text(result.reasons))
 
 
-def _attest_with_retry(cfg: Config, event: dict, policy) -> None:
-    window = candidate_mod._retry_clock() + candidate_mod._BATCH_SECONDS
+def _retrying(window: float, call):
     while True:  # A short GitHub or Mergify blip must not leave the candidate pending for good.
         try:
-            candidate_mod.attest_candidate(
-                event, base_branch=cfg.base_branch,
-                github_get=lambda path: github.api_get(path.lstrip("/")),
-                mergify_status=lambda owner, repo, branch: mergify.api_get(
-                    f"{owner}/{repo}", f"/merge-queue/status?branch={quote(branch, safe='')}"),
-                source_policy=policy,
-            )
-            return
+            return call()
         except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable):
             if candidate_mod._retry_clock() + 5 >= window:
                 raise
             candidate_mod._retry_sleep(5)
+
+
+def _attest(cfg: Config, event: dict) -> None:
+    candidate_mod.attest_candidate(
+        event, base_branch=cfg.base_branch,
+        github_get=lambda path: github.api_get(path.lstrip("/")),
+        mergify_status=lambda owner, repo, branch: mergify.api_get(
+            f"{owner}/{repo}", f"/merge-queue/status?branch={quote(branch, safe='')}"),
+        source_policy=lambda number, source: _check_candidate_source(cfg, number, source),
+    )
 
 
 def _run(cfg: Config) -> int:
@@ -114,7 +117,10 @@ def _run(cfg: Config) -> int:
         raise LoopZeroError("trusted repository configuration or review publishers missing")
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     number = event_number(event)
-    pr = github.api_get(f"repos/{cfg.repo}/pulls/{number}")
+    head_ref = (event.get("pull_request") or {}).get("head", {}).get("ref")
+    queued = isinstance(head_ref, str) and head_ref.startswith("mergify/merge-queue/")
+    retry = partial(_retrying, candidate_mod._retry_clock() + candidate_mod._BATCH_SECONDS) if queued else (lambda call: call())
+    pr = retry(lambda: github.api_get(f"repos/{cfg.repo}/pulls/{number}"))
     head = pr["head"]["sha"]
     candidate = (pr["head"]["ref"].startswith(candidate_mod.QUEUE_BRANCH_PREFIX)
                  or pr["user"]["login"] == candidate_mod.MERGIFY_BOT_LOGIN)
@@ -126,14 +132,12 @@ def _run(cfg: Config) -> int:
     snapshot = None
     try:
         if candidate:
-            def policy(source_number: int, source: dict) -> None:
-                _check_candidate_source(cfg, source_number, source)
-            _attest_with_retry(cfg, event, policy)
+            retry(lambda: _attest(cfg, event))
         else:
             snapshot = eligibility.source_snapshot(cfg.repo, number, head, github.pr_from_rest(pr))
             result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers,
                                           snapshot=snapshot)
-        current = _publication_snapshot(cfg.repo, number, head, snapshot)
+        current = retry(lambda: _publication_snapshot(cfg.repo, number, head, snapshot))
         if current is None:
             return 0
         state, message = (("success", "All attested candidate sources are reviewed") if candidate
