@@ -35,6 +35,6 @@ and setup.
 - [design/2026-10-28-t3-orchestration-workflow-adaptations.md](design/2026-10-28-t3-orchestration-workflow-adaptations.md) —
   dated video/skill/upstream research and its open proposals R3, R6 and R7.
 - [2026-11-25 loop-zero optimization and hardening roadmap](design/2026-11-25-loop-zero-optimization-hardening-roadmap.md) —
-  dated audit and trial findings, the rules agreed then, and the Horizon 2–3
-  roadmap.
+  dated audit and trial findings, the rules agreed then, and the Horizon 3
+  proposals.
 - [../models.toml](../models.toml) — current model/effort preferences and category defaults.
