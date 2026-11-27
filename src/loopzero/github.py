@@ -1567,11 +1567,11 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
 
 def commit_status(
     repo: str, head: str, context: str, state: str, description: str, *, timeout: float = 120,
-) -> None:
+) -> int | None:
     """Publish a SHA-scoped status using the caller's narrowly scoped credential."""
     endpoint = f"repos/{repo}/statuses/{head}"
     try:
-        _api(endpoint, {"state": state, "context": context, "description": description}, timeout=timeout)
+        return (_api(endpoint, {"state": state, "context": context, "description": description}, timeout=timeout) or {}).get("id")
     except GhError as exc:
         validation_error = re.search(r"\bHTTP 422\b|^method=POST endpoint=\S+ status=422\b", exc.tail)
         if validation_error and _status_limit_reached(repo, head, context):
@@ -1582,10 +1582,8 @@ def commit_status(
         raise
 
 
-def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
-    statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
-    latest = next((row for row in statuses if row.get("context") == context), {})
-    return (latest.get("state"), latest.get("description")) == (state, description)
+def context_statuses(repo: str, head: str, context: str) -> Iterator[dict]:
+    return (r for r in _iter_paged(f"repos/{repo}/commits/{head}/statuses") if str(r.get("context", "")).casefold() == context.casefold())
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:
