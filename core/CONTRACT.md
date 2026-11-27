@@ -110,8 +110,7 @@ current accounts. A reserved class carries a `hold` label on the PR (the CLI
 reads PR labels only, so copy an issue's hold to its PR) plus one issue comment
 naming the hazard and end condition for the
 [decisions owner](../docs/DELEGATION.md#team-roles) (or human owner) to resolve.
-No separate per-PR go-ahead to merge, take out of draft or queue; no hold renewal. Merge-authority
-holds also block the owner queue route below.
+No separate per-PR go-ahead to merge, take out of draft or queue; no hold renewal.
 
 ## Blockers
 

@@ -66,9 +66,8 @@ completions still go to it: `t3_thread_wait` or a one-shot wakeup), reading each
 result once; then archive the old thread. Whenever a send, schedule or delegate
 completion revives it, it ends that turn without acting or replying;
 never send through it.
-Start with read-only coordination; if the new family writes, retain every
-writer's truthful attribution and recheck independent review eligibility. A
-provider change grants no new authority or review exception.
+Start with read-only coordination. A provider change grants no new authority
+or review exception.
 
 ### Long-running jobs
 
@@ -377,7 +376,6 @@ profile. Avoid blind retries or repeating successful work for reassurance.
 The contract's [review budget](../core/CONTRACT.md#review-budget) governs
 authorship and reviewer selection. When applying a supplied patch
 verbatim, credit the patch's writer.
-Formal delivery review is `loopzero review`.
 
 ## Briefs and ownership
 
