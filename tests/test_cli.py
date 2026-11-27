@@ -1262,6 +1262,14 @@ def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, g
     assert "## Context and goal" in body
     assert not any(text in body for text in ("## Validation", "Browser verified.", "## Review", "Saved review."))
 
+    # The branch is back at the evaluated head, but the draft still has only prose.
+    arm_pr_body_patch(gh, head, body=body)
+    expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
+    patch = gh.calls[-1]
+    assert "PATCH" in patch["argv"]
+    body = json.loads(patch["--input"])["body"]
+    assert "Browser verified." in body and "Saved review." in body
+
 
 @pytest.mark.parametrize("live", [dict(headRefOid="b" * 40), dict(baseRefName="release")], ids=["head", "target"])
 def test_pr_does_not_patch_a_body_for_a_head_or_target_the_pr_moved_from(wt, gh, capsys, live):

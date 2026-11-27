@@ -501,16 +501,15 @@ def _validate_pr_body_size(body: str) -> str:
     return body
 
 
-def _sync_task_narrative(wt: Path, existing: str, draft_task: str | None = None) -> str:
-    """Seed missing evidence on a new draft or refresh task-owned prose on an existing PR."""
-    if draft_task is not None:
-        present = {section[1] for section in _TASK_EVIDENCE.finditer(existing)}
-        return existing.rstrip() + "".join(
-            "\n\n" + section[0].rstrip() for section in _TASK_EVIDENCE.finditer(draft_task) if section[1] not in present
-        ) + "\n"
+def _seed_task_evidence(task: str, body: str) -> str:
+    present = {section[1] for section in _TASK_EVIDENCE.finditer(body)}
+    missing = [section[0].rstrip() for section in _TASK_EVIDENCE.finditer(task) if section[1] not in present]
+    return "\n\n".join([body.rstrip(), *missing]) + "\n" if missing else body
 
+
+def _sync_task_narrative(task: str, existing: str) -> str:
+    """Explicit pr updates task-owned prose; live evidence stays authoritative."""
     pattern = re.compile(r"^## ([^\n]+)\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
-    task = worktree.task_text(wt).replace("\r\n", "\n")
     existing = existing.replace("\r\n", "\n")
     owned = {m.group(1): m.group() for m in pattern.finditer(task)
              if m.group(1) not in {"Validation", "Review"}}
@@ -693,8 +692,10 @@ def cmd_pr(args: argparse.Namespace) -> int:
         raise CliError(f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
                        "run `loopzero start <new-task-slug>` from the main checkout")
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
-    existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
-    _pr_body(wt, head, config, existing)  # refuse an unusable body before pushing
+    task = worktree.task_text(wt).replace("\r\n", "\n")
+    created = pr is None
+    existing = task if created else _sync_task_narrative(task, pr.body)
+    _pr_body(wt, head, config, _seed_task_evidence(task, existing))  # refuse an unusable body before pushing
     force_lease = False
     git_branch = os.fsdecode(branch.encode("utf-8", "surrogateescape"))
     push = ["push", "origin"]
@@ -711,10 +712,8 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
     _track_upstream(wt, git_branch)
-    draft_task = None
     if pr is None:
-        draft_task = worktree.task_text(wt).replace("\r\n", "\n")
-        prose = _TASK_EVIDENCE.sub("", draft_task)
+        prose = _TASK_EVIDENCE.sub("", task)
         pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), prose)
     with github.pr_lock(config.repo, pr.number):
         live = github.pr_view(config.repo, pr.number)
@@ -723,8 +722,8 @@ def cmd_pr(args: argparse.Namespace) -> int:
         if (live.head_sha, live.base_ref) != (head, config.base_branch):
             raise CliError(f"PR #{pr.number} is at {live.head_sha[:12]} on {live.base_ref}; rerun loopzero pr")
         live_body = live.body.replace("\r\n", "\n")
-        body = _sync_task_narrative(wt, live_body, draft_task)
-        if (body := _pr_body(wt, head, config, body)) != live_body:
+        body = live_body if created else _sync_task_narrative(task, live_body)
+        if (body := _pr_body(wt, head, config, _seed_task_evidence(task, body))) != live_body:
             github.update_body(config.repo, pr.number, body)
     print(pr.url)
     return 0
