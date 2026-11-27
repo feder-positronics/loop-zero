@@ -1119,7 +1119,8 @@ def test_pr_pushes_and_creates_draft(
     gh.respond_pr_create(pr_json(headRefOid=head), branch=branch)
     pushes = trace_pushes(fake_tool, tmp_path)
     expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
-    assert pushes.read_text() == f"push -u origin {branch}\n"
+    assert pushes.read_text() == f"push origin {head}:refs/heads/{branch}\n"
+    assert git(wt, "rev-parse", "--abbrev-ref", "@{upstream}").rstrip("\n") == f"origin/{branch}"
     origin = repo.parent / "origin.git"
     assert git(origin, "rev-parse", branch).strip() == head
     assert [c["argv"][:2] for c in gh.calls] == [
@@ -1213,6 +1214,52 @@ def test_pr_requires_proven_branch_history(wt, gh, fake_tool, tmp_path, capsys, 
     assert all(fragment in err for fragment in expected)
     assert not pushes.exists(), "branch was pushed"
     assert not any(map(wrote, gh.calls)), "GitHub was written"
+
+
+def test_pr_pushes_the_captured_commit_not_the_moved_branch(wt, gh, fake_tool, tmp_path, capsys):
+    head = head_of(wt)
+    gh.respond(branch_history_key(), [])
+    gh.respond_pr_list([])
+    gh.respond_pr_create(pr_json(headRefOid=head))
+    git(wt, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")  # single-branch clone
+    pushes = tmp_path / "pushes"  # another writer moves the branch name just before the push
+    fake_tool("git", f'''if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; /usr/bin/git commit -q --allow-empty -m moved; fi
+exec /usr/bin/git "$@"
+''')
+    expect_cli(capsys, 0, "pr", stdout=URL + "\n")
+    assert pushes.read_text() == f"push origin {head}:refs/heads/lz/t1\n"
+    assert git(wt.parent.parent.parent / "origin.git", "rev-parse", "lz/t1").strip() == head
+    assert git(wt, "config", "branch.lz/t1.merge").strip() == "refs/heads/lz/t1"
+
+
+@pytest.mark.parametrize("live", [dict(headRefOid="b" * 40), dict(baseRefName="release")], ids=["head", "target"])
+def test_pr_does_not_patch_a_body_for_a_head_or_target_the_pr_moved_from(wt, gh, capsys, live):
+    arm_pr_body_patch(gh, head_of(wt))
+    gh.respond_pr_view(pr_json(**{"headRefOid": head_of(wt), **live}))
+    _, err = expect_cli(capsys, 1, "pr", stdout="")
+    assert "rerun loopzero pr" in err and not any(map(wrote, gh.calls))
+
+
+def test_check_refresh_does_not_patch_a_retargeted_pr(wt, gh):
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    head = head_of(wt)
+    arm_pr_body_patch(gh, head)
+    gh.respond_pr_view(pr_json(headRefOid=head, baseRefName="release"))
+    cli._refresh_pr_checks(wt, config.load(wt / "workflow.toml"))
+    assert not any(map(wrote, gh.calls))
+
+
+def test_review_summary_is_not_patched_into_a_closed_pr(wt, gh, fake_bin, capsys, monkeypatch):
+    head = prepare_review(wt, gh, fake_bin)
+    post = github.post_review
+
+    def publish(*args, **kwargs):
+        post(*args, **kwargs)
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, state="CLOSED")))
+
+    monkeypatch.setattr(github, "post_review", publish)
+    expect_cli(capsys, 0, "review", stderr="")
+    assert posted_review(gh) and not any("PATCH" in call["argv"] for call in gh.calls)
 
 
 def arm_unproven_history(gh, failure):
@@ -1358,6 +1405,7 @@ def test_pr_uses_lease_for_rewritten_open_pr(wt, repo, gh, fake_tool, tmp_path, 
     if moved is None:
         pushes = trace_pushes(fake_tool, tmp_path)
         gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+        gh.respond_pr_view(pr_json(headRefOid=head))
     code, out, err = run(capsys, "pr")
     if moved:
         diagnostic = "absent from this task branch's history" if case == "shared-object" else "remote moved"
@@ -1374,7 +1422,7 @@ def test_pr_uses_lease_for_rewritten_open_pr(wt, repo, gh, fake_tool, tmp_path, 
         assert "remote moved" not in err and all("PATCH" not in call["argv"] for call in gh.calls)
     else:
         assert (code, out, err) == (0, URL + "\n", "")
-    assert pushes.read_text().strip() == f"push -u origin --porcelain --force-with-lease=lz/t1:{old} lz/t1"
+    assert pushes.read_text().strip() == f"push origin --porcelain --force-with-lease=lz/t1:{old} {head}:refs/heads/lz/t1"
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == (old if case == "hook-fails" else head)
 
 
@@ -1390,6 +1438,7 @@ def test_legacy_locale_status_reflog_push_and_cleanup(wt, repo, gh, monkeypatch,
     gh.respond(branch_history_key(branch=branch), [])
     arm_pr_body_patch(gh, rewritten_branch, branch=branch)
     gh.respond(reviews_key(), [])
+    gh.respond_pr_view(pr_json(headRefOid=rewritten_branch), pr_json(headRefOid=head), branch=branch)
     program = """
 from pathlib import Path
 from loopzero import cli, worktree
@@ -3334,6 +3383,16 @@ def test_ready_points_to_owner_route_when_receipt_changes_before_undraft(wt, gh,
     monkeypatch.setattr(cli, "_pr_readiness", snapshot)
     monkeypatch.setattr(github, "mark_ready", lambda *_: pytest.fail("undrafted without a receipt"))
     expect_cli(capsys, 1, "ready", stderr_contains=("run loopzero check at this head", cli.OWNER_ROUTE))
+
+
+@pytest.mark.parametrize("change", [dict(headRefOid="b" * 40), dict(labels=[{"name": "hold"}]),
+                                    dict(baseRefName="release")], ids=["head", "hold", "target"])
+def test_ready_rechecks_the_live_pr_before_the_first_activation(wt, gh, capsys, head, change):
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=True)
+    gh.respond("pr ready", "")
+    gh.respond_pr_view(pr_json(**{"headRefOid": head, "isDraft": True, **change}))
+    expect_cli(capsys, 1, "ready", stderr_contains=("rerun loopzero ready",))
+    assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
@@ -5370,6 +5429,14 @@ def test_review_is_not_posted_after_the_pr_head_moved(wt, gh, head):
     gh.respond_pr_view(pr_json(headRefOid="b" * 40))
     pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
     with pytest.raises(cli.CliError, match="PR head moved during the review"):
+        cli._require_open_review_round(config.load(wt / "workflow.toml"), pr, head, "primary")
+
+
+@pytest.mark.parametrize("live", [dict(state="CLOSED"), dict(baseRefName="release")], ids=["closed", "retargeted"])
+def test_review_is_not_posted_after_the_pr_closed_or_retargeted(wt, gh, head, live):
+    gh.respond_pr_view(pr_json(headRefOid=head, **live))
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    with pytest.raises(cli.CliError, match="not open against main"):
         cli._require_open_review_round(config.load(wt / "workflow.toml"), pr, head, "primary")
 
 

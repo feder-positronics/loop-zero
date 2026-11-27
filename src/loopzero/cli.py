@@ -82,8 +82,7 @@ def _require_push_target(wt: Path, repo: str) -> None:
 
 
 def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
-    done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV,
-                     extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
+    done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV, extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
     if done.exit_code != 0:
         detail = _proc.tail(done.stderr)[-2000:]
         if force_lease and any(line.startswith("!\t") and line.endswith("\t[rejected] (stale info)")
@@ -177,9 +176,7 @@ def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, head
 
 def _require_pushed(pr: github.PR, head: str) -> None:
     if pr.head_sha != head:
-        raise CliError(
-            f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; push or pull first"
-        )
+        raise CliError(f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; push or pull first")
 
 
 # --------------------------------------------------------------------------- review markers
@@ -228,10 +225,7 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
         raise CliError("review for the current head was dismissed. Push fixes for a remaining delta "
                        "or open a replacement PR if the review budget is spent.")
     if _review_cap_spent(markers):
-        raise CliError(
-            "review cap reached: fix or reject the findings "
-            "(resolve-findings) and run `loopzero ready`, or split the PR"
-        )
+        raise CliError("review cap reached: fix or reject the findings (resolve-findings) and run `loopzero ready`, or split the PR")
     primary = next((m for m in markers if m.kind == "primary"), None)
     if primary is None:
         return "primary", None
@@ -573,7 +567,7 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
             return
         with github.pr_lock(config.repo, pr.number):
             live = github.pr_view(config.repo, pr.number)
-            if live.state != "OPEN" or live.head_sha != head:
+            if (live.state, live.head_sha, live.base_ref) != ("OPEN", head, config.base_branch):
                 return
             body = _pr_body(wt, head, config, live.body)
             if body != live.body.replace("\r\n", "\n"):
@@ -609,10 +603,9 @@ def _check_failure_preview(tail: str, limit: int = 1536) -> str:
     if len(tail.encode()) <= limit:
         return tail
     edge = limit // 8
-    lines = (line.encode() for line in tail.splitlines())
     preview = b"\n".join(
         line if len(line) <= 2 * edge else line[:edge] + b" [...] " + line[-edge:]
-        for line in lines
+        for line in (line.encode() for line in tail.splitlines())
     )
     if len(preview) > limit:
         preview = b"[...]\n" + preview[6 - limit:]
@@ -650,24 +643,21 @@ def _receipt_inode(path: Path) -> int | None:
 
 def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int) -> int:
     shortened = False
-    for result in report.results:
-        if result.exit_code != 0:
-            heading = github.redact_credentials(result.command)
-            print(f"--- {heading} (exit {result.exit_code}) ---", file=sys.stderr)
-            tail = _proc.tail(result.tail)
-            preview = _check_failure_preview(tail)
-            shortened |= preview != tail
-            print(preview, file=sys.stderr)
-            if not config.network and (result.command.startswith("uv sync --offline --locked")
-                                       or OFFLINE_FAILURE_RE.search(tail)):
-                env = sandbox.check_environment(config)
-                print(
-                    "\nThe sandbox has no network because `[checks] network = false`; "
-                    f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
-                    f"On origin/{config.base_branch}, set `[checks] env` UV_CACHE_DIR to a host cache "
-                    "and list it in `[checks] writable`. Warm that same cache with "
-                    "UV_CACHE_DIR=<path> uv sync --group dev on the host (use the required groups).", file=sys.stderr,
-                )
+    for result in (r for r in report.results if r.exit_code != 0):
+        print(f"--- {github.redact_credentials(result.command)} (exit {result.exit_code}) ---", file=sys.stderr)
+        tail = _proc.tail(result.tail)
+        shortened |= (preview := _check_failure_preview(tail)) != tail
+        print(preview, file=sys.stderr)
+        if not config.network and (result.command.startswith("uv sync --offline --locked")
+                                   or OFFLINE_FAILURE_RE.search(tail)):
+            env = sandbox.check_environment(config)
+            print(
+                "\nThe sandbox has no network because `[checks] network = false`; "
+                f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
+                f"On origin/{config.base_branch}, set `[checks] env` UV_CACHE_DIR to a host cache "
+                "and list it in `[checks] writable`. Warm that same cache with "
+                "UV_CACHE_DIR=<path> uv sync --group dev on the host (use the required groups).", file=sys.stderr,
+            )
     if (current_head := _save_report(wt, report, locked_fd=locked_fd)) is not None:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}; rerun loopzero check",
               file=sys.stderr)
@@ -684,6 +674,11 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
     return 0 if report.ok else 1
 
 
+def _track_upstream(wt: Path, branch: str) -> None:
+    for key, value in (("remote", "origin"), ("merge", f"refs/heads/{branch}")):  # no tracking ref needed
+        _git(wt, "config", f"branch.{branch}.{key}", value)
+
+
 def cmd_pr(args: argparse.Namespace) -> int:
     wt, config = _context(args)
     branch, head = worktree.branch(wt), worktree.head(wt)
@@ -692,45 +687,38 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_pr_details(wt)
     pr = github.merged_pr_for_branch(config.repo, branch)
     if pr is not None:
-        raise CliError(
-            f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
-            "run `loopzero start <new-task-slug>` from the main checkout"
-        )
+        raise CliError(f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
+                       "run `loopzero start <new-task-slug>` from the main checkout")
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
     body = _pr_body(wt, head, config, existing)
     force_lease = False
     git_branch = os.fsdecode(branch.encode("utf-8", "surrogateescape"))
-    push = ["push", "-u", "origin"]
+    push = ["push", "origin"]
     if pr is not None:
-        known = config_mod.run_git(wt, "cat-file", "-e", f"{pr.head_sha}^{{commit}}")
-        if known.exit_code != 0:
-            raise CliError(
-                f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
-            )
+        if config_mod.run_git(wt, "cat-file", "-e", f"{pr.head_sha}^{{commit}}").exit_code != 0:
+            raise CliError(f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first")
         force_lease = pr.head_sha != head and not _is_ancestor(wt, pr.head_sha, head)
         if force_lease:
             previous_heads = _git(wt, "reflog", "show", "--format=%H", f"refs/heads/{git_branch}").splitlines()
             if not any(_is_ancestor(wt, pr.head_sha, previous) for previous in previous_heads):
-                raise CliError(
-                    f"PR head {pr.head_sha[:12]} is absent from this task branch's history; integrate it first"
-                )
+                raise CliError(f"PR head {pr.head_sha[:12]} is absent from this task branch's history; integrate it first")
             push.extend(("--porcelain", f"--force-with-lease={git_branch}:{pr.head_sha}"))
-    push.append(git_branch)
+    push.append(f"{head}:refs/heads/{git_branch}")  # the captured commit, never the mutable local name
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
+    _track_upstream(wt, git_branch)
     if pr is not None:
         with github.pr_lock(config.repo, pr.number):
             live = github.pr_view(config.repo, pr.number)
             if live.state != "OPEN":
                 raise CliError(f"PR #{pr.number} closed during publication; reopen it before retrying loopzero pr")
-            body = _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))
-            if body != live.body.replace("\r\n", "\n"):
+            if (live.head_sha, live.base_ref) != (head, config.base_branch):
+                raise CliError(f"PR #{pr.number} is at {live.head_sha[:12]} on {live.base_ref}; rerun loopzero pr")
+            if (body := _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))) != live.body.replace("\r\n", "\n"):
                 github.update_body(config.repo, pr.number, body)
     else:
-        pr = github.create_draft_pr(
-            config.repo, branch, config.base_branch, _pr_title(wt, branch), body
-        )
+        pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), body)
     print(pr.url)
     return 0
 
@@ -868,7 +856,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
         try:  # a refused token or a GitHub error here leaves the saved review to --repost
             token = _refresh_publisher_token(token, publisher)
             _require_open_review_round(config, pr, head, kind)
-        except (github.GhError, _proc.ProcTimeout) as exc:
+        except (github.GhError, _proc.ProcTimeout, CliError) as exc:
             raise CliError(f"{exc} | review saved at {_review_file(wt, head, kind)}; run `loopzero review --repost`") from exc
         try:
             github.post_review(
@@ -897,15 +885,19 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
                     body = _validate_pr_body_size(_append_review(refreshed, result))
             except (LoopZeroError, OSError, ValueError):
                 pass
-            github.update_body(config.repo, pr.number, body)
+            if (live.head_sha, live.state, live.base_ref) == (head, "OPEN", config.base_branch):
+                github.update_body(config.repo, pr.number, body)
         except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
             print(f"warning: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
 
 
 def _require_open_review_round(config: Config, pr: github.PR, head: str, kind: str) -> None:
-    if github.pr_view(config.repo, pr.number).head_sha != head:
+    pr = github.pr_view(config.repo, pr.number)
+    if pr.head_sha != head:
         raise CliError("PR head moved during the review; pull it and rerun `loopzero review`")
+    if pr.state != "OPEN" or pr.base_ref != config.base_branch:
+        raise CliError(f"PR is {pr.state.lower()} targeting {pr.base_ref}, not open against {config.base_branch}")
     reviews = _pr_reviews(config.repo, pr.number)
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if any(marker.kind == kind and marker.head == head for marker in markers):
@@ -979,9 +971,8 @@ def _has_recoverable_review(
 
 def _repost_prefix(result: ReviewResult) -> str:
     sessions = result.provenance["session_ids"]
-    label = "session" if len(sessions) == 1 else "sessions"
     ids = ", ".join(f"`{session}`" for session in sessions)
-    return f"{review_marker(result.head, result.kind, 'repost')}\nReposted from runner {label}: {ids}"
+    return f"{review_marker(result.head, result.kind, 'repost')}\nReposted from runner session{'' if len(sessions) == 1 else 's'}: {ids}"
 
 
 def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
@@ -1309,6 +1300,11 @@ def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
     if problem := _check_report_problem(_load_report(wt), config, head):
         raise CliError(f"{problem}. {OWNER_ROUTE}")
     try:
+        live = github.pr_view(config.repo, number)
+        seen = (live.head_sha, live.state, live.base_ref)
+        if problem := github.merge_hold(number, live.labels) or (
+                seen != (head, "OPEN", config.base_branch) and f"PR changed to {seen}"):
+            raise CliError(f"{problem}; rerun loopzero ready")
         github.mark_ready(config.repo, number)
     except github.GhUnavailable as exc:
         raise CliError(f"{exc}\nRerun the same command once GitHub recovers.") from exc
