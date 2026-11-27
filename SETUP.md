@@ -548,8 +548,9 @@ The hosted Actions entry point succeeds with a pending status when its sole bloc
 is missing trusted current-head review. The manual command above retains a failure
 status and nonzero exit for that blocker; both paths keep merging blocked.
 Do not check out or execute candidate code with this credential. Serialize all
-refreshes for a PR, including manual refreshes; use trusted base configuration, never
-PR configuration. A source push needs a status on its new SHA; base-only movement
+refreshes for a PR, including manual refreshes; use trusted configuration, never
+PR configuration. Hosted refreshes read the default branch's `workflow.toml`, so keep
+`[repo] base` on the default branch when this publisher is used. A source push needs a status on its new SHA; base-only movement
 does not invalidate an unchanged source review. This status does not replace
 integration CI or a local `loopzero check` receipt.
 
@@ -583,8 +584,9 @@ The evaluator preserves COMMENT model reviews with resolved blocking findings.
 See [Blockers](core/CONTRACT.md#blockers) for the outdated-thread rule. Suggestions
 do not block. Dismissing the latest review cannot restore an earlier approval.
 
-Before queue adoption, wire source pushes, review submissions/edits/dismissal,
-review-comment edits/deletions and an explicit refresh to this publisher.
+Before queue adoption, wire this publisher to every trigger in the `on:` blocks of
+[eligibility.yml](.github/workflows/eligibility.yml) and the
+[review event workflow](.github/workflows/review-event.yml) it chains from.
 Actions has no review-thread resolution/reopening trigger. Until an App webhook
 receiver exists, queue users must withdraw an item before altering findings or
 resolving/reopening threads, refresh eligibility, then explicitly request delivery

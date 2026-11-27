@@ -907,12 +907,12 @@ def _repost_reviewer_families(
         raise IndependentReviewerUnavailable(
             "saved review has no same-family fallback disclosure, but every configured family "
             "contributed to this PR lineage; run without --repost to obtain a disclosed "
-            "same-family review"
+            f"same-family review. {_REPOST_ESCALATION}"
         )
     if result.family in authors and not result.fallback:
         raise IndependentReviewerUnavailable(
             f"saved reviewer family {result.family} contributed to this PR lineage; "
-            "run without --repost to obtain an independent review"
+            f"run without --repost to obtain an independent review. {_REPOST_ESCALATION}"
         )
     return candidates, excluded
 
@@ -1166,6 +1166,12 @@ def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
             fix += " and list the npm prefix in `[delivery] reviewer_ro_paths` on the delivery branch"
         return lines[0], detail + f"\nFix: {fix}.", _FALLBACK_REASONS[2]
     return lines[0], detail, _FALLBACK_REASONS[3]
+
+
+_REPOST_ESCALATION = (
+    "If that fresh review cannot run, restore a configured reviewer and retry, or report "
+    "the blocker to whoever commissioned this PR."
+)
 
 
 def _independence_message(
