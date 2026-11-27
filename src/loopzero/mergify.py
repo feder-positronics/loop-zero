@@ -13,7 +13,7 @@ import ssl
 import time
 import urllib.error
 import urllib.request
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -88,6 +88,7 @@ class _RequestDeadline(Exception):
 
 @contextmanager
 def _open(request: urllib.request.Request, timeout: float = 30):
+    timeout = github.read_timeout(timeout)
     def expire(_signum, _frame):
         raise _RequestDeadline()
 
@@ -116,25 +117,23 @@ def _api_request(repo: str, suffix: str, method: str | None = None) -> urllib.re
     )
 
 
-def _wait_to_retry(delay: float, deadline: float | None) -> bool:
-    remaining = 5.0 if deadline is None else deadline - time.monotonic()
-    if delay >= remaining:
-        return False
-    _retry_sleep(delay)
-    return deadline is None or time.monotonic() < deadline
-
-
 def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | None:
     """GET one documented endpoint below this repository's fixed Mergify API path."""
     if not suffix.startswith("/") or "://" in suffix or ".." in suffix:
         raise ValueError("Mergify API suffix must be a repository-relative absolute path")
-    request = _api_request(repo, suffix)
+    with github.bounded_reads(deadline, token=None, retry=True) if deadline is not None else nullcontext():
+        return _read_queue(_api_request(repo, suffix), deadline)
+
+
+def _read_queue(request: urllib.request.Request, deadline: float | None) -> object | None:
     retry = True
     while True:
         wait = None
         try:
             with _open(request) as response:
-                return json.load(response)
+                payload = json.load(response)
+            github.read_timeout(0)
+            return payload
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None
@@ -151,8 +150,15 @@ def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | N
             raise MergifyError(detail)
         if not retry:
             raise MergifyUnavailable(detail)
-        if not _wait_to_retry(max(2.0, wait or 0.0), deadline):
+        delay = max(2.0, wait or 0.0)
+        remaining = github.read_timeout() if deadline is not None else github.read_timeout(5.0)
+        if delay >= remaining:
+            if wait is None:
+                _retry_sleep(remaining)
+                github.read_timeout(0)
             raise MergifyUnavailable(f"{detail}; retry delay exceeds the wait budget")
+        _retry_sleep(delay)
+        github.read_timeout(0)
         retry = False
 
 

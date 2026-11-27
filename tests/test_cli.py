@@ -445,7 +445,7 @@ def test_wait_reports_only_check_changes(wt, gh, head, capsys, monkeypatch, comm
     arm_check_runs(gh, head, *runs)
     poll_clock(monkeypatch)
     if command == "merge":
-        monkeypatch.setattr(github, "merge", lambda *a: "c" * 40)
+        monkeypatch.setattr(github, "merge", lambda *a, **k: "c" * 40)
         monkeypatch.setattr(cli, "_cleanup_remote_refs", lambda *a: None)
         monkeypatch.setattr(cli, "_cleanup", lambda *a: None)
     code, out, err = run(capsys, command, "--wait=1800")
@@ -4594,7 +4594,7 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
 
     def membership(*_):
         reads_at_membership.append(sum(c["argv"][:2] == detail for c in gh.calls))
-        if confirmed and clock.now == 60:
+        if confirmed and clock.now == 30:
             gh.respond(" ".join(detail), merge_json(state="MERGED", head=head, sha="e" * 40))
         return mergify.Membership() if confirmed or clock.now >= 210 else None
 
@@ -4603,9 +4603,9 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
         " ".join(detail), merge_json(state="MERGED", head=head, sha="e" * 40)))
     monkeypatch.setattr(mergify, "membership", membership)
 
-    assert cli._wait_for_mergify(config, pr, 60 if confirmed else 360, confirmed=confirmed) == "e" * 40
-    assert clock.sleeps == ([30, 30] if confirmed else [30, 60, 120, 30])
-    assert set(configurations) == {(REPO, "main", "main", 60 if confirmed else 360)}
+    assert cli._wait_for_mergify(config, pr, 90 if confirmed else 360, confirmed=confirmed) == "e" * 40
+    assert clock.sleeps == ([30, 55] if confirmed else [30, 60, 120, 30])
+    assert set(configurations) == {(REPO, "main", "main", 90 if confirmed else 360)}
     assert len(configurations) == len(reads_at_membership) > 1
     reads_per_poll = 1 if confirmed else 2
     assert all(current - previous == reads_per_poll for previous, current in
@@ -4706,11 +4706,11 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
             monkeypatch.chdir(repo)
     if outcome == "timeout":
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
-        assert clock.sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
+        assert clock.sleeps == ([30, 60, 120, 36, 4] if jitter == 1 else [27, 54, 108, 56, 5])
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert queue_requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
-    assert all(deadline == wait for deadline in configurations)
+    assert all(deadline == (wait or None) for deadline in configurations)
     if outcome in {"closed_then_merged", "still_closed"}:
         assert clock.sleeps == [30] and reads == [True]
     if outcome.startswith("incompatible_"):
@@ -5071,6 +5071,139 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert err == ""
         assert len(writes) == 1
         assert json.loads(writes[0]["--input"])["body"] == prose + suffix
+
+
+@pytest.mark.parametrize("wait, latency, state, expected", [
+    (1, 3.0, "MERGED", 3), (1, 0.25, "MERGED", 0), (0, 0.0, "MERGED", 0), (1, 0.0, "CLOSED", 1),
+])
+def test_merge_queue_landing_within_budget(
+    wt, gh, capsys, monkeypatch, head, replay_gh, wait, latency, state, expected,
+):
+    publish_workflow(wt, WORKFLOW.replace('merge = "squash"', 'merge = "queue"'))
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    clock = [1000.0]
+    budgets = []
+    cleaned = []
+    write_timeouts = []
+    in_queue = False
+    run_gh = github.run
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli, "_sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    gh.respond("pr merge", "")
+    gh.respond("api graphql", threads_json(), native_queue(False, head), native_queue(True, head))
+
+    def landing(argv, *, timeout, **kwargs):
+        nonlocal in_queue
+        if argv[1:3] == ["pr", "merge"]:
+            in_queue = True
+            write_timeouts.append(timeout)
+        if in_queue and argv[1:3] == ["api", f"repos/{REPO}/pulls/7"]:
+            budgets.append(timeout)
+            if len(budgets) == 1:
+                return Completed(0, json.dumps(merge_json(state="OPEN", head=head)), "", 0.0)
+            clock[0] += latency
+            sha = "e" * 40 if state == "MERGED" else None
+            return Completed(0, json.dumps(merge_json(state=state, head=head, sha=sha)), "", latency)
+        return run_gh(argv, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(github, "run", landing)
+    monkeypatch.setattr(cli, "_cleanup_remote_refs", lambda *_: None)
+    monkeypatch.setattr(cli, "_cleanup", lambda *_: cleaned.append(True))
+
+    code, out, err = run(capsys, "merge", f"--wait={wait}")
+
+    assert (code, bool(cleaned)) == (expected, expected == 0)
+    assert write_timeouts == [300]
+    assert budgets == ([1.0, 1.0, 0.5] if state == "CLOSED" else [1.0 if wait else 120.0] * 2)
+    assert ("closed without a verified merge" in err) is (state == "CLOSED")
+    assert (err == "") is (state != "CLOSED")
+    assert ("timed out waiting for the merge queue" in out) is (expected == 3)
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_direct_merge_verifies_after_queue_wait_deadline(wt, gh, capsys, monkeypatch, head, replay_gh, verified):
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    clock = poll_clock(monkeypatch)
+    run_gh = github.run
+    cleaned = []
+
+    def merge_then_verify(argv, *, timeout, **kwargs):
+        if argv[1:3] == ["pr", "merge"]:
+            clock.now += 2
+            gh.respond(f"api repos/{REPO}/pulls/7", merge_json(
+                state="MERGED", head=head if verified else "f" * 40, sha="e" * 40))
+            return Completed(0, "", "", 2)
+        return run_gh(argv, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(github, "run", merge_then_verify)
+    monkeypatch.setattr(cli, "_cleanup_remote_refs", lambda *_: None)
+    monkeypatch.setattr(cli, "_cleanup", lambda *_: cleaned.append(True))
+
+    code, out, err = run(capsys, "merge", "--wait=1")
+    if verified:
+        assert (code, err, cleaned) == (0, "", [True])
+        assert out.splitlines()[-1] == "e" * 40
+    else:
+        assert (code, cleaned) == (1, [])
+        assert "merge could not be verified" in err and "timed out" not in out + err
+
+
+def test_queue_wait_keeps_landing_verified_before_scope_exit(monkeypatch):
+    clock = poll_clock(monkeypatch)
+
+    def poll(_remaining):
+        github.read_timeout(0)
+        clock.now = 1
+        return "e" * 40
+
+    assert cli._queue_wait(1, poll, bounded=True) == "e" * 40
+
+
+def test_mergify_resume_bounds_first_membership_read(monkeypatch, capsys):
+    clock = poll_clock(monkeypatch)
+    budgets = []
+
+    def open_request(request, *, timeout):
+        budgets.append(timeout)
+        clock.now += 2
+        raise TimeoutError("membership response exceeded the budget")
+
+    monkeypatch.setattr(mergify, "_credential", lambda: "test-key")
+    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request))
+    monkeypatch.setattr(cli, "_merge_check_hint", lambda *_: "")
+    monkeypatch.setattr(cli, "_wait_for_mergify", Mock(side_effect=AssertionError("polled after deadline")))
+    cfg = SimpleNamespace(repo=REPO, base_branch="main")
+    pr = SimpleNamespace(number=7, base_ref="main")
+    assert cli._follow_blocked_mergify(cfg, pr, None, "main", 1, bounded=True) is None
+    assert budgets == [1] and "timed out" in capsys.readouterr().out
+
+
+def test_mergify_queue_retries_stop_at_merge_deadline(wt, gh, capsys, monkeypatch, replay_gh):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    clock, budgets, sleeps, admitted = [1000.0], [], [], []
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mergify, "queue_attempt", lambda *_: mergify.QueueAttempt(True, True))
+    monkeypatch.setattr(mergify, "_credential", lambda: "test-key")
+
+    def open_request(request, *, timeout):
+        budgets.append(timeout)
+        raise mergify.urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, None)
+
+    monkeypatch.setattr(mergify, "membership", lambda *_: admitted.append(True) or mergify.Membership())
+    monkeypatch.setattr(mergify, "configured", lambda repo, *_: (
+        not admitted or mergify.api_get(repo, "/merge-queue/status") is not None))
+    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request))
+    monkeypatch.setattr(mergify, "_retry_sleep", lambda seconds: (
+        sleeps.append(seconds), clock.__setitem__(0, clock[0] + seconds)))
+
+    code, out, err = run(capsys, "merge", "--wait=1")
+
+    assert (code, err) == (3, "")
+    assert budgets == [1.0] and sleeps == [1.0]
+    assert "timed out waiting for Mergify to land PR #7" in out
+    assert not any(call["argv"][:2] == ["api", f"repos/{REPO}/issues/7/comments"] for call in gh.calls)
 
 
 @pytest.mark.parametrize("refresh", ["resync", "automatic"])
