@@ -308,13 +308,12 @@ class Departure:
         if not links and (candidates := re.findall(rf"^- ❌ \*\*Checks failed\*\* [^\n]*\(/{re.escape(repo)}/pull/(\d+)\)",
                                                     self.failure_report, re.M)):
             try:
-                with github.bounded_reads(time.monotonic() + 10, check_on_exit=False):
+                with github.bounded_reads(time.monotonic() + 10, token=None, retry=True, check_on_exit=False):
                     sha = github.pr_view(repo, int(candidates[-1])).head_sha
                     runs = github.paged(f"repos/{repo}/commits/{sha}/check-runs", "check_runs")
                 for run in runs:
-                    url = str(run.get("details_url") or "")
-                    job = re.fullmatch(rf"{re.escape(base)}([0-9]+/job/([0-9]+))", url)
-                    if job and run.get("conclusion") == "failure":
+                    job = re.fullmatch(rf"{re.escape(base)}([0-9]+/job/([0-9]+))", str(run.get("details_url") or ""))
+                    if job and run.get("conclusion") in {"failure", "timed_out", "startup_failure"}:
                         links.append((str(run.get("name") or "Unnamed job"), *job.groups()))
             except (github.GhError, github.ProcTimeout, github.ToolMissing, OSError, ValueError):
                 return " Candidate jobs unavailable: GitHub could not read the candidate checks."

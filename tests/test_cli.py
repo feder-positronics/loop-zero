@@ -4868,7 +4868,7 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
                 if confirmed or kind == "stacked":
                     gh.respond(f"api repos/{REPO}/pulls/15011", open_pr_snapshot(candidate_sha) | {"number": 15011})
                     gh.respond(f"api repos/{REPO}/commits/{candidate_sha}/check-runs", {"check_runs": [
-                        {"name": "Backend validation", "conclusion": "failure", "details_url": job_url},
+                        {"name": "Backend validation", "conclusion": "failure" if confirmed else "timed_out", "details_url": job_url},
                         {"name": "Successful sibling", "conclusion": "success", "details_url": job_url},
                         {"name": "Foreign check", "conclusion": "failure", "details_url": "https://example.com/check"},
                     ]})
