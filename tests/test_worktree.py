@@ -18,10 +18,7 @@ from tests.test_setup import SETUP, setup_commands
 @pytest.fixture
 def repo(git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """`git_repo` wired to a bare origin that already holds `main`."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     origin = tmp_path / "origin.git"
     git(git_repo, "init", "-q", "--bare", "-b", "main", str(origin))
     git(git_repo, "remote", "add", "origin", str(origin))
@@ -275,22 +272,15 @@ def test_task_helpers_errors(repo: Path) -> None:
 
 
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
+    (repo / ".git/info/exclude").write_text(".venv/\n")
     wt, calls, real = worktree.start(repo, "done", "main"), [], worktree.git
     monkeypatch.setattr(worktree, "git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
     (wt / f".loopzero/reviewer-output-{worktree.head(wt)[:12]}-primary.json").write_text("{}")
+    (wt / ".venv").mkdir()
+    (wt / ".venv/dependency").write_text("generated")
     worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
-
-
-def test_cleanup_removes_ignored_artifacts(repo: Path) -> None:
-    (repo / ".git/info/exclude").write_text(".venv/\n")
-    wt = worktree.start(repo, "cached", "main")
-    (wt / ".venv").mkdir()
-    (wt / ".venv/dependency").write_text("generated")
-    worktree.cleanup(wt, worktree.head(wt))
-    assert not wt.exists()
-    assert not git(repo, "branch", "--list", "lz/cached")
 
 
 def test_cleanup_preserves_untracked_work_with_ignored_artifacts(repo: Path) -> None:
