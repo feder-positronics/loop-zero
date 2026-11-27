@@ -40,6 +40,9 @@ class Membership:
     unmet_conditions: tuple[str, ...] = ()
 
 
+_MODES = " (need directory 0700 and file 0600; see SETUP.md)"
+
+
 def _credential(path: Path | None = None) -> str:
     supplied = os.environ.get("MERGIFY_API_KEY", "").strip()
     if supplied:
@@ -54,16 +57,16 @@ def _credential(path: Path | None = None) -> str:
         ) from exc
     if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
             or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
-        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}; expected mode 0700 and user ownership")
+        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}; expected mode 0700 and user ownership{_MODES}")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
-        raise MergifyError(f"unable to open Mergify credential file: {path}") from exc
+        raise MergifyError(f"unable to open Mergify credential file: {path}{_MODES}") from exc
     info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600):
         os.close(fd)
-        raise MergifyError(f"unsafe Mergify credential file permissions: {path}; expected mode 0600 and user ownership")
+        raise MergifyError(f"unsafe Mergify credential file permissions: {path}; expected mode 0600 and user ownership{_MODES}")
     with os.fdopen(fd, encoding="utf-8") as handle:
         token = handle.read().strip()
     if not token:
@@ -188,7 +191,8 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
             _unmet_conditions(check.get("conditions_evaluation")),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise MergifyError("invalid Mergify queue membership response") from exc
+        detail = f": {exc}" if type(exc) is ValueError else ""
+        raise MergifyError(f"invalid Mergify queue membership response{detail}") from exc
 
 
 def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
