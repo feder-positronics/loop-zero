@@ -665,19 +665,21 @@ CLAUDE_EXPIRED_OAUTH = {
       for reason in ("Cannot authenticate", "OAuth failure", "Session expired", "401")),
     *(({"is_error": True, "api_error_status": status,
         "terminal_reason": "api_error", "result": "Internal server error"},
-       RunnerBadOutput, r"claude: (error|exited)") for status in (429, 500)),
+       RunnerBadOutput, r"claude: (error|exited)") for status in (429, 500, 529)),
     *(({"is_error": True, **details}, RunnerUsageLimit, None) for details in (
         {"result": "You've hit your weekly limit · resets 11pm (Europe/Warsaw)"},
         {"result": "You've hit your session limit"},
         {"terminal_reason": "blocking_limit", "result": "Please wait until reset"},
     )),
 ])
-def test_claude_classifies_error_envelopes(fake_bin, tmp_path, exit_code, output, error, diagnostic):
-    _fake_claude(fake_bin, output, exit_code=exit_code)
+def test_claude_classifies_error_envelopes(fake_bin, tmp_path, monkeypatch, exit_code, output, error, diagnostic):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", (key := "gw_FAKE0123456789abcdef") + "\n")
+    _fake_claude(fake_bin, {**output, "result": f"{output.get('result', '')} {key}"}, exit_code=exit_code)
     with pytest.raises(error, match=diagnostic) as raised:
         _review("claude", tmp_path)
     if error is RunnerBadOutput:
         assert not isinstance(raised.value, RunnerUsageLimit)
+    assert key not in f"{raised.value}{getattr(raised.value, 'tail', '')}"
     if output is CLAUDE_EXPIRED_OAUTH:
         assert "Token [REDACTED]." in str(raised.value)
 
@@ -1323,3 +1325,12 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
         assert concurrent_home.is_dir()
         assert marker.read_text() == "keep"
         terminate_review(concurrent, concurrent_home, concurrent_pid)
+
+
+@pytest.mark.parametrize(("family", "env"), [("claude", "ANTHROPIC_API_KEY"), ("codex", "OPENAI_API_KEY")])
+def test_invalid_review_diagnostic_redacts_forwarded_key(monkeypatch, family, env):
+    key = "synthetic-forwarded-key"
+    monkeypatch.setenv(env, key)
+    with pytest.raises(runners.RunnerMalformedOutput) as caught:
+        runners.parse_review({}, family=family, head="a" * 40, kind="primary", raw=key)
+    assert caught.value.tail == "[REDACTED]"
