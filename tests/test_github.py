@@ -1117,15 +1117,6 @@ def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> 
 # --- ready / merge ---------------------------------------------------------------------
 
 
-def test_merge_command_failure(gh: FakeGh) -> None:
-    gh.fail("pr merge", "head commit mismatch")
-    gh.respond(f"api repos/{REPO}/pulls/7", merge_json())
-    gh.respond("api graphql", _queue_json(False))
-    with pytest.raises(github.MergeFailed) as info:
-        github.merge(REPO, 7, "rebase", HEAD)
-    assert "--rebase" in info.value.command and "mismatch" in info.value.tail
-
-
 @pytest.mark.parametrize("remote_head", ["f" * 40, None])
 def test_delete_remote_branch_checks_encoded_ref(gh: FakeGh, remote_head: str | None) -> None:
     get = f"api repos/{REPO}/git/ref/heads/lz/fix%23516%3Fx%25"
@@ -1163,14 +1154,32 @@ def arm_merge(gh: FakeGh, queue: dict, *details: dict) -> None:
     gh.respond("api graphql", queue)
 
 
-@pytest.mark.parametrize("missing", [False, True])
-def test_merge_unverified(gh: FakeGh, missing: bool) -> None:
-    response = {"data": {"repository": {"pullRequest": None}}} if missing else _queue_json(False)
-    arm_merge(gh, response, merge_json(), merge_json())
-    message = "GitHub queue lookup for PR #7: queue status could not be verified" if missing else "neither merged nor queued"
-    with pytest.raises(github.MergeFailed, match=message):
-        github.merge(REPO, 7, "merge", HEAD)
-    assert not any(c["argv"][:2] == ["api", "-X"] for c in gh.calls), "no ref delete"
+@pytest.mark.parametrize("case,strategy,diagnostic", [
+    ("command error", "rebase", "mismatch"),
+    ("missing", "merge", "GitHub queue lookup for PR #7: queue status could not be verified"),
+    ("not queued", "merge", "neither merged nor queued"),
+    ("other head", "queue", "head changed or unavailable"),
+    ("invalid strategy", "fast-forward", "unknown merge strategy"),
+])
+def test_merge_fails_without_proof_of_admission_or_landing(gh, case, strategy, diagnostic):
+    queue = _queue_json(case == "other head")
+    if case == "missing":
+        queue["data"]["repository"]["pullRequest"] = None
+    if case == "other head":
+        queue["data"]["repository"]["pullRequest"]["headRefOid"] = "b" * 40
+        gh.respond("api graphql", queue)
+    elif case != "invalid strategy":
+        arm_merge(gh, queue, merge_json(), merge_json())
+    if case == "command error":
+        gh.fail("pr merge", "head commit mismatch")
+    with pytest.raises(github.MergeFailed, match=diagnostic) as info:
+        github.merge(REPO, 7, strategy, HEAD)
+    calls = [c["argv"][:2] for c in gh.calls]
+    assert ["api", "-X"] not in calls
+    if case == "command error":
+        assert "--rebase" in info.value.command and "mismatch" in info.value.tail
+    if case in {"invalid strategy", "other head"}:
+        assert calls == ([] if case == "invalid strategy" else [["api", "graphql"]])
 
 
 @pytest.mark.parametrize("strategy,queue_state", [
@@ -1199,16 +1208,6 @@ def test_merge_reports_queue_admission_or_landing(gh, strategy, queue_state):
     assert "--queue" not in writes[0]
 
 
-def test_merge_refuses_queue_membership_of_another_head(gh):
-    queue = _queue_json(True)
-    queue["data"]["repository"]["pullRequest"]["headRefOid"] = "b" * 40
-    gh.respond("api graphql", queue)
-
-    with pytest.raises(github.MergeFailed, match="head changed or unavailable"):
-        github.merge(REPO, 7, "queue", HEAD)
-    assert [call["argv"][:2] for call in gh.calls] == [["api", "graphql"]]
-
-
 def test_eligibility_dispatch_retry_refuses_changed_head(monkeypatch):
     pr = github.PR(7, "https://example.invalid/7", HEAD, "main", False, "OPEN", "MERGEABLE")
     def lost_reply(*_args):
@@ -1221,12 +1220,6 @@ def test_eligibility_dispatch_retry_refuses_changed_head(monkeypatch):
 
     with pytest.raises(github.GhError, match="the PR or head changed after resolution"):
         github.refresh_eligibility(REPO, pr, "lz/task", "main", PUBLISHERS)
-
-
-def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
-    with pytest.raises(github.MergeFailed):
-        github.merge(REPO, 7, "fast-forward", HEAD)
-    assert gh.calls == []
 
 
 @pytest.mark.parametrize("args, attempts, error", [

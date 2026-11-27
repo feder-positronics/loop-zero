@@ -29,10 +29,7 @@ def no_retry_delay(monkeypatch):
 
 def event(head: str = "c" * 40) -> dict:
     repo = {"id": 7, "full_name": "owner/repo"}
-    bot = {
-        "id": 37929162, "login": "mergify[bot]", "type": "Bot",
-        "html_url": "https://github.com/apps/mergify",
-    }
+    bot = dict(id=37929162, login="mergify[bot]", type="Bot", html_url="https://github.com/apps/mergify")
     return {
         "action": "synchronize", "repository": repo, "sender": deepcopy(bot),
         "pull_request": {
@@ -75,12 +72,14 @@ def tree_commit(git, tree, *parents, subject):
     return git("commit-tree", f"{tree}^{{tree}}", *parent_args, "-m", subject)
 
 
+def pull_path(number):
+    return f"/repos/owner/repo/pulls/{number}"
+
+
 def source_payloads(values, head, *sources):
     for number, sha in sources:
-        values[f"/repos/owner/repo/pulls/{number}"] = pull(number, sha)
-        values[f"/repos/owner/repo/compare/{sha}...{head}"] = {
-            "status": "ahead", "merge_base_commit": {"sha": sha},
-        }
+        values[pull_path(number)] = pull(number, sha)
+        values[f"/repos/owner/repo/compare/{sha}...{head}"] = dict(status="ahead", merge_base_commit={"sha": sha})
 
 
 def payloads(candidate_event: dict) -> dict[str, object]:
@@ -117,52 +116,44 @@ def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
     assert seen == [101, 102]
 
 
-@pytest.mark.parametrize("case,diagnostic", [
-    ("author", "Mergify GitHub App"), ("sender", "head event was not sent"),
-    ("action", "creation or head-update event"), ("ref", "unexpected head ref"),
-    ("missing status", "status is not an object"), ("missing ancestor", "not an ancestor"),
-    ("same-head policy", "source policy blocked"),
-    ("candidate ready", "must be a draft"),
-    ("candidate retargeted", "must target the real main branch"),
-    ("candidate head fork", "head repository does not match"),
-    ("candidate base fork", "base repository does not match"),
-    ("source retargeted", "source PR #102 does not target this repository"),
-])
-def test_rejects_invalid_attestation_evidence(case, diagnostic):
+@pytest.mark.parametrize("location,replacement,diagnostic", [
+    (("event", "pull_request", "user", "id"), 1, "Mergify GitHub App"),
+    (("event", "sender", "id"), 1, "head event was not sent"),
+    (("event", "action"), "edited", "creation or head-update event"),
+    (("event", "pull_request", "head", "ref"), "feature/forged", "unexpected head ref"),
+    (("status", 0), None, "status is not an object"),
+    ((f"/repos/owner/repo/compare/{'2' * 40}...{'c' * 40}", "status"), "diverged", "not an ancestor"),
+    ((pull_path(900), "draft"), False, "must be a draft"),
+    ((pull_path(900), "base", "ref"), "release", "must target the real main branch"),
+    ((pull_path(900), "head", "repo", "id"), 8, "head repository does not match"),
+    ((pull_path(900), "base", "repo", "id"), 8, "base repository does not match"),
+    ((pull_path(102), "base", "ref"), "release", "source PR #102 does not target this repository"),
+], ids=["author", "sender", "action", "ref", "status", "ancestry",
+        "candidate-ready", "candidate-retargeted", "head-fork", "base-fork", "source-retargeted"])
+def test_rejects_invalid_attestation_evidence(location, replacement, diagnostic):
     incoming = event()
+    values, status_reads = payloads(incoming), [status()]
+    target = values | {"event": incoming, "status": status_reads}
+    for key in location[:-1]:
+        target = target[key]
+    target[location[-1]] = replacement
+    with pytest.raises(CandidateError, match=diagnostic):
+        run_attestation(incoming, github_payloads=values, status_reads=status_reads)
+
+
+def test_same_head_source_still_requires_policy():
+    incoming = event()
+    head = incoming["pull_request"]["head"]["sha"]
     values = payloads(incoming)
-    status_reads = [None] if case == "missing status" else None
+    values[pull_path(102)]["head"]["sha"] = head
+    values[f"/repos/owner/repo/compare/{head}...{head}"] = dict(status="identical", merge_base_commit={"sha": head})
 
     def policy(number, _source):
-        if case == "same-head policy" and number == 102:
+        if number == 102:
             raise CandidateError("source policy blocked same-head source")
 
-    if case == "author":
-        incoming["pull_request"]["user"]["id"] = 1
-    elif case == "sender":
-        incoming["sender"]["id"] = 1
-    elif case == "action":
-        incoming["action"] = "edited"
-    elif case == "ref":
-        incoming["pull_request"]["head"]["ref"] = "feature/forged"
-    elif case == "candidate ready":
-        values["/repos/owner/repo/pulls/900"]["draft"] = False
-    elif case == "candidate retargeted":
-        values["/repos/owner/repo/pulls/900"]["base"]["ref"] = "release"
-    elif case in {"candidate head fork", "candidate base fork"}:
-        values["/repos/owner/repo/pulls/900"][case.split()[1]]["repo"]["id"] = 8
-    elif case == "source retargeted":
-        values["/repos/owner/repo/pulls/102"]["base"]["ref"] = "release"
-    elif case == "missing ancestor":
-        values[f"/repos/owner/repo/compare/{'2' * 40}...{'c' * 40}"]["status"] = "diverged"
-    elif case == "same-head policy":
-        head = "c" * 40
-        values["/repos/owner/repo/pulls/102"]["head"]["sha"] = head
-        values[f"/repos/owner/repo/compare/{head}...{head}"] = {
-            "status": "identical", "merge_base_commit": {"sha": head},
-        }
-    with pytest.raises(CandidateError, match=diagnostic):
-        run_attestation(incoming, github_payloads=values, status_reads=status_reads, source_policy=policy)
+    with pytest.raises(CandidateError, match="source policy blocked same-head source"):
+        run_attestation(incoming, github_payloads=values, source_policy=policy)
 
 
 @pytest.mark.parametrize("pr_number,diagnostic", [
@@ -175,7 +166,7 @@ def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str)
     def github_get(path: str):
         nonlocal calls
         result = deepcopy(values[path])
-        if path == f"/repos/owner/repo/pulls/{pr_number}":
+        if path == pull_path(pr_number):
             calls += 1
             if calls == 2:
                 result["head"]["sha"] = "9" * 40
@@ -261,14 +252,12 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
             source_payloads(values, head, (101, extra_source))
             queue["batches"][0]["sub_batches"][0]["pull_requests"].append({"number": 101})
         for number in (101, 102):
-            values[f"/repos/owner/repo/pulls/{number}"].update(
-                body="## Objective\nApply a reviewed source change.",
-            )
+            values[pull_path(number)].update(body="## Objective\nApply a reviewed source change.")
             for endpoint in ("commits", "files"):
                 values[f"/repos/owner/repo/pulls/{number}/{endpoint}?per_page=100&page=1"] = []
         if base_branch != "main":
             for number in (102, 900):
-                values[f"/repos/owner/repo/pulls/{number}"]["base"]["ref"] = base_branch
+                values[pull_path(number)]["base"]["ref"] = base_branch
         reads = cycle([main_head, main_after or main_head])
 
         def get(path):
@@ -319,6 +308,12 @@ def test_isolated_proofs_deepen_for_an_older_merge_base(tree_candidate, monkeypa
     assert depths[0] == "--depth=2" and any(depth.startswith("--deepen=") for depth in depths)
 
 
+def forged_tree(git, commit, original):
+    changed = commit("injected", "unreviewed\n")
+    parents = git("show", "-s", "--format=%P", original).split()
+    return tree_commit(git, changed, *parents, subject="forged merge")
+
+
 @pytest.mark.parametrize("mutation,diagnostic", [
     ("replaced", "tree mismatch"), ("withdrawn", "tree mismatch"), ("extra", "tree mismatch|objects unavailable"),
     ("tampered", "tree mismatch"), ("missing", "objects unavailable"),
@@ -339,23 +334,20 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation, di
         kwargs["head"] = tree_commit(git, candidate_sha, base, parent, source, subject="octopus")
     else:
         git("checkout", "candidate")
-        changed = commit("injected", "unreviewed\n")
-        if mutation == "tampered":
-            # A forged resolution retains the exact original merge parents.
-            parents = git("show", "-s", "--format=%P", candidate_sha).split()
-            changed = tree_commit(git, changed, *parents, subject="forged merge")
-        kwargs["head"] = changed
+        kwargs["head"] = (forged_tree(git, commit, candidate_sha) if mutation == "tampered"
+                          else commit("injected", "unreviewed\n"))
     with pytest.raises(CandidateError, match=rf"Missing Mergify parent batches parent:.*({diagnostic})"):
         attest(**kwargs)
 
 
-def test_stalled_fetch_is_transient_but_other_time_bounds_are_not():
-    with pytest.raises(github.GhUnavailable, match="temporarily unavailable"):
-        candidate._require_time(("fetch", f"--depth={candidate._TREE_DEPTH}"), 0)
-    with pytest.raises(CandidateError, match="time bound"):
-        candidate._require_time(("fetch", "--deepen=32"), 0)
-    with pytest.raises(CandidateError, match="time bound"):
-        candidate._require_time(("merge-tree",), 0)
+@pytest.mark.parametrize("argv,error,diagnostic", [
+    (("fetch", f"--depth={candidate._TREE_DEPTH}"), github.GhUnavailable, "temporarily unavailable"),
+    (("fetch", "--deepen=32"), CandidateError, "time bound"),
+    (("merge-tree",), CandidateError, "time bound"),
+])
+def test_candidate_time_bound_only_retries_initial_fetch(argv, error, diagnostic):
+    with pytest.raises(error, match=diagnostic):
+        candidate._require_time(argv, 0)
 
 
 @pytest.mark.parametrize("bound", ["_TREE_BYTES", "_TREE_OBJECTS", "_TREE_SECONDS", "_TREE_OUTPUT"])
@@ -403,9 +395,7 @@ def test_candidate_policy(tree_candidate, monkeypatch, case):
 
     kwargs = {}
     if case == "mismatch":
-        changed = commit("injected", "unreviewed\n")
-        parents = git("show", "-s", "--format=%P", head).split()
-        head = tree_commit(git, changed, *parents, subject="forged merge")
+        head = forged_tree(git, commit, head)
         diagnostic = "tree mismatch"
     elif case == "incomplete":
         kwargs["main_head"] = ""
@@ -516,9 +506,9 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
     sleeps, attempts, source_reads = [], [], []
     expected = CandidateError("source #101: missing required review")
     if failure == "closed":
-        values["/repos/owner/repo/pulls/101"].update(state="closed", merged=False)
+        values[pull_path(101)].update(state="closed", merged=False)
     if failure == "identity":
-        values["/repos/owner/repo/pulls/900"]["user"]["id"] = 1
+        values[pull_path(900)]["user"]["id"] = 1
     if failure == "tree":
         live["batches"].pop(0)
         values["/repos/owner/repo/git/ref/heads/main"] = {"object": {"sha": "b" * 40}}
@@ -591,7 +581,7 @@ def test_rebuild_wait(monkeypatch, no_retry_delay, second, stop):
         sleeps.append(delay)
         clock[0] += 100 if stop == "oversleep" else delay
         if stop == "closed":
-            values["/repos/owner/repo/pulls/900"]["state"] = "closed"
+            values[pull_path(900)]["state"] = "closed"
     def read_status(*_):
         reads.append(clock[0])
         if stop == "slow":
