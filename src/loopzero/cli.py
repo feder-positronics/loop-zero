@@ -1998,12 +1998,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     _print_display(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         _print_display(f"  - {reason}")
-    if config.merge_strategy == "mergify" and pr.state == "OPEN" and pr.head_sha == head:
-        _print_mergify_status(config, pr, readiness)
-    return 0
-
-
-def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readiness) -> None:
+    if config.merge_strategy != "mergify" or pr.state != "OPEN" or pr.head_sha != head:
+        return 0
     queue = config.mergify_queue or ""
     attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
     state = mergify.membership(config.repo, pr.number, queue)
@@ -2017,6 +2013,7 @@ def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readi
     _print_display(f"mergify:  {label} ({queue})")
     if label == "waiting for admission" and attempt.admission:
         _print_display(f"  Mergify report: {attempt.admission}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
