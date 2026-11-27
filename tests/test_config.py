@@ -97,7 +97,7 @@ FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc
      "allowed_efforts must be a list of non-empty strings"),
     (MINIMAL + '[delivery.review.codex]\nallowed_efforts = "medium"\n',
      "allowed_efforts must be an array"),
-    (MINIMAL + '[checks]\nro_paths = ["rel/path"]\n', "must be absolute"),
+    (MINIMAL + '[checks]\nro_paths = ["/home/<you>/.cache"]\n', "unreplaced example placeholder"),
     *((MINIMAL + table("checks", ro_paths=[path]), "must not expose") for path in FORBIDDEN),
     (MINIMAL + '[checks]\nwritable = ["/run/x"]\n', "writable must not expose"),
     *((MINIMAL + f'[checks]\nscratch = ["{path}"]\n', "scratch entries must be relative")
