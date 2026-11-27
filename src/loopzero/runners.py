@@ -919,7 +919,8 @@ def _review_claude(
         *(["--effort", effort] if effort else []),
         "--output-format", "json", "--json-schema", json.dumps(REVIEW_SCHEMA, separators=(",", ":")),
         "--permission-mode", "plan", "--tools", "Read,Grep,Glob",
-        "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
+        "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config", "--restricted",
+        "--settings", '{"includeGitInstructions":false}',  # branch names and subjects are PR-controlled
         "--disallowedTools", "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
     with sandbox.private_directory("loopzero-review-home-") as home:
@@ -1017,7 +1018,6 @@ def _review_codex(
             # Nested bwrap can fail on restricted hosts. The outer bwrap keeps the tree
             # read-only and HOME private.
             "--sandbox", "danger-full-access", "--cd", str(cwd), "--skip-git-repo-check",
-            "-c", "mcp_servers={}",
             # The reviewed head controls AGENTS.md and its skills; keep both out of context.
             "-c", "project_doc_max_bytes=0", *skill_overrides,
             "--output-schema", f"{sandbox.SANDBOX_HOME}/schema.json",

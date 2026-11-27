@@ -236,13 +236,16 @@ Chunked review summarizes only files whose Git header reports a deletion.
 Unsupported Claude options follow existing native failure handling.
 Native defaults and read-only tools remain enabled. Neither reviewer loads
 instructions from the reviewed head, which the PR controls: Claude runs with
-`--setting-sources ""`, and Codex runs with `project_doc_max_bytes=0` (no
+`--setting-sources ""`, `--restricted` (file tools confined to the checkout, so
+host files and auto-memory stay out) and `includeGitInstructions` off (no
+PR-controlled branch names or commit subjects in its context), and Codex runs
+with a private HOME and `project_doc_max_bytes=0` (no
 AGENTS.md or AGENTS.override.md) and a `skills.config` entry disabling every
 skill under the checkout's `.agents/skills` and `.codex/skills`; a skill
 directory linking outside the checkout, or more skills than one argument can
-disable, fails the attempt before launch. Repository
-conventions reach reviewers only as evidence or through
-`delivery.reviewer_ro_paths` from the pinned base. Structural transport tests do
+disable, fails the attempt before launch. Repository conventions reach
+reviewers only as evidence; `delivery.reviewer_ro_paths` mounts reviewer CLI
+runtime files only. Structural transport tests do
 not prove injection immunity, reviewer quality or backend identity.
 The [dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
 owns the implementation history, native comparison results and their limits.

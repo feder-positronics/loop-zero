@@ -402,7 +402,8 @@ def test_claude_approve(
     assert argv[argv.index("--effort") + 1] == "medium"
     assert "--no-session-persistence" in argv
     assert argv[argv.index("--setting-sources") + 1] == ""
-    assert "--strict-mcp-config" in argv
+    assert "--strict-mcp-config" in argv and "--restricted" in argv
+    assert argv[argv.index("--settings") + 1] == '{"includeGitInstructions":false}'
     assert argv[argv.index("--disallowedTools") + 1] == (
         "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch"
     )
@@ -1020,7 +1021,6 @@ def test_codex_approve(repo, fake_bin, tmp_path, fake_bwrap, monkeypatch):
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
     assert "--ignore-user-config" not in argv
     assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" not in argv
-    assert "mcp_servers={}" in argv
     assert "project_doc_max_bytes=0" in argv and not any(a.startswith("skills.") for a in argv)
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()
