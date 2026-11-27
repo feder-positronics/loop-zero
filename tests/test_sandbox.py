@@ -304,10 +304,16 @@ def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
 @pytest.mark.parametrize("entry,diagnostic", [
     (".", "unsafe"), (".git", "Git metadata"), (".git/cache", "Git metadata"),
     ("linked/cache", "symlink component"), (None, "private check directories"),
+    ("TMP/cache", "unsafe"), ("../cache", "unsafe"),
 ])
-def test_scratch_rejects_protected_paths(git_repo, bwrap_log, tmp_path, entry, diagnostic):
+def test_scratch_rejects_protected_paths(git_repo, bwrap_log, tmp_path, monkeypatch, entry, diagnostic):
     if entry == "linked/cache":
         (git_repo / "linked").symlink_to(tmp_path, target_is_directory=True)
+    if entry == "TMP/cache":
+        entry = str(tmp_path / "cache")
+    elif entry == "../cache":  # A refused-guard run must create paths only inside this test's directory.
+        (tmp_path / "tmp").mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     config = make_config(writable=(tempfile.gettempdir(),)) if entry is None else make_config(scratch=(entry,))
     with pytest.raises(sandbox.SandboxUnavailable, match=diagnostic):
         sandbox.run_checks(config, git_repo)
@@ -797,6 +803,39 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
         ]
     assert any('reused ' in m for m in messages) == (change == 'other')
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
+
+
+@pytest.mark.parametrize("swap", ["committed_symlink", "symlinked_directory", "fifo"])
+def test_input_key_reads_only_committed_regular_files_in_place(git_repo, fetched_base, monkeypatch, swap):
+    command = "true"
+    config = make_config(checks=(command,), inputs={command: ("inputs",)})
+    value = git_repo / "inputs/value"
+    value.parent.mkdir()
+    value.write_text("v\n")
+    git(git_repo, "add", "inputs")
+    git(git_repo, "commit", "-qm", "inputs")
+    assert sandbox._input_key(config, git_repo, command, fetched_base)
+    if swap == "committed_symlink":
+        value.unlink()
+        value.symlink_to("elsewhere")
+        git(git_repo, "commit", "-qam", "link")
+        value.unlink()
+        value.write_text("v\n")
+    elif swap == "symlinked_directory":
+        value.parent.rename(git_repo / "real")
+        value.parent.symlink_to("real", target_is_directory=True)
+    else:
+        value.unlink()
+        os.mkfifo(value)
+        fifo, real_open = str(value.resolve()), Path.open
+
+        def never_the_fifo(path, *args, **kwargs):
+            if str(path) == fifo:
+                pytest.fail("hashing opened a FIFO, which blocks until a writer appears")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", never_the_fifo)
+    assert sandbox._input_key(config, git_repo, command, fetched_base) is None
 
 
 @pytest.mark.parametrize("case", ["typo", "empty", "dirty", "no_base"])
