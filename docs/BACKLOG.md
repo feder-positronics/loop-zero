@@ -13,12 +13,12 @@ Every open issue is one of three kinds:
 - **Ongoing duty:** a standing responsibility that never finishes, such as a
   recurring check. Duties are listed but never counted as work.
 
-**One number: to do = problems + goals.** Held, blocked and waiting work still
-counts, and so does anything not yet labelled. Calling something a duty never
+**One number: to do = problems + goals + unlabelled issues.** Held, blocked and
+waiting work still counts. Calling something a duty never
 hides finite work.
 
 One pinned **"Work still to do"** issue shows that number, the split into
-problems and goals, the duties underneath, links to the live issue lists, and
+problems, goals and unlabelled issues, the duties underneath, links to the live issue lists, and
 the opened and closed totals for the last seven days. It shows when it was last
 refreshed; if a refresh fails, it says so and keeps the last dated view rather
 than showing stale numbers as current.
@@ -45,8 +45,9 @@ limit on the backlog.
   the REST API and reports any unlabelled or conflicting issues. Add no gate,
   ledger or second work state.
 - **Counting:** when asked for a count, state the repository's counting rule
-  and place every open issue as counted or ongoing duty. Unlabelled issues are
-  counted; list them by name so they get a kind (see the `backlog` skill).
+  and place every open issue as counted (problems, goals and unlabelled
+  issues, listed by name so they get a kind), ongoing duty, or unclassified
+  (conflicting kind labels only; see the `backlog` skill).
 
 ## Consumer choices
 
