@@ -93,9 +93,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     worktree = worktree.resolve()
     if shutil.which("bwrap") is None:
         raise SandboxUnavailable(
-            "bwrap binary missing: bwrap not found on PATH\n"
-            "sudo apt install bubblewrap"
-        )
+            "bwrap binary missing: bwrap not found on PATH\nsudo apt install bubblewrap")
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
     dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     base = _check_base(config, worktree)
@@ -126,16 +124,17 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
         current = _current_commands(config, worktree, commands, settings_sha256)
+        last_run = max((i for i, c in enumerate(commands, 1) if config.scratch and previous
+                        and not _input_key(config, worktree, c, "" if dirty else base)), default=0)
         for ordinal, command in enumerate(current, 1):
             if progress:
                 progress(command)
             key = _input_key(config, worktree, command, "" if dirty else base,
                              status=status, workflow=workflow)
             old = previous.get(command)
-            if key and old and old.input_key == key:
+            if key and old and old.input_key == key and ordinal > last_run:
                 result = old
-                if status:
-                    status(f"reused {(old.reused_from or head)[:8]}")
+                status and status(f"reused {(old.reused_from or head)[:8]}")
             else:
                 with _stage_status(status, ordinal, len(commands)):
                     result = _run_one(config, worktree, prefix, command, timeout)

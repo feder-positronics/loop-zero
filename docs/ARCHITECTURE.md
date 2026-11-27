@@ -76,6 +76,9 @@ runs the optional GitHub App token helper `~/.config/loopzero/app-token` (the
 identity that publishes trusted reviews) and reads the Mergify key from
 `~/.config/mergify/api-key`; setup describes the
 [token helper](../SETUP.md#hosted-review-eligibility) and [key](../SETUP.md#mergify).
+The optional token helper assumes a single-user delivery host. Its executable
+and full path, including resolved symlink paths, must be protected from writes
+by other unprivileged local users.
 
 Private agent transcripts and metrics ledgers do not belong in this guide or in
 a new persistent store.
@@ -472,6 +475,7 @@ when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them
 Consumers own complete input declarations.
 Reuse only successful keyed stages from this worktree's clean receipt or
 checkpoint. Dirty trees run fresh. A tracked receipt is never eligible for reuse.
+With scratch mounts, a stage before an unkeyed stage always runs, since scratch starts empty.
 Receipts that use saved stage results bind the current head and check settings.
 
 A worker running the entire check is itself the coordinator and writes a

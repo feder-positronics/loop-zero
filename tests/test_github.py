@@ -427,8 +427,7 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> 
         assert raw not in body
     if family == "codex":
         assert hashlib.sha256(raw.encode()).hexdigest() in body
-    else:
-        assert "Raw reviewer output" not in body
+    assert "Raw reviewer output" not in body and (family != "codex" or "<summary>Review evidence notice<" in body)
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
     assert all("subject_type" not in c for c in comments)
 
@@ -437,7 +436,7 @@ def test_legacy_transcript_truncates_on_utf8_boundary():
     tail = "x" * 29_999
     result = ReviewResult("claude", HEAD, "primary", "approve", (), "🧪" + tail)
     output = github._review_transcript(result, legacy_display=True)
-    assert "Transcript truncated" in output
+    assert "Transcript truncated" in output and "<summary>Raw reviewer output<" in output
     assert output.endswith(f"\n{tail}\n```\n</details>")
 
 
@@ -665,7 +664,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     (call,) = gh.calls
     argv = call["argv"]
     assert argv[:2] == ["api", "graphql"]
-    assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
+    assert "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
     assert any(a.startswith("query=") and "author { __typename login }" in a for a in argv)
     assert github.open_blocking_findings(REPO, 7, HEAD, ()) == []
 
@@ -804,6 +803,7 @@ def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
     found = github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
     assert [f.title for f in found] == ["A", "B"]
     assert "after=C1" not in gh.argv(0) and "after=C1" in gh.argv(1)
+    assert gh.argv(1)[gh.argv(1).index("after=C1") - 1] == "-f"
 
 
 @pytest.mark.parametrize("cursors", [(None,), ("C1", "C2", "C1")])
@@ -820,7 +820,8 @@ def test_thread_reply_read_rejects_repeated_cursor(gh: FakeGh) -> None:
     node = {"id": "T1", "comments": {"pageInfo": page}}
     with pytest.raises(github.GhError, match="missing or repeated review thread cursor"):
         github._has_thread_reply(node, "reply")
-    assert len(gh.calls) == 1 and "after=C1" in gh.argv(0)
+    argv = gh.argv(0)
+    assert len(gh.calls) == 1 and argv[argv.index("after=C1") - 1] == argv[argv.index("thread=T1") - 1] == "-f"
 
 
 # --- checks --------------------------------------------------------------------------------
@@ -1547,3 +1548,23 @@ def test_environment_token_is_cached_but_stored_account_is_not(monkeypatch):
     assert len(sent) == 3 and "If-None-Match: \"v1\"" in sent[-1]
     monkeypatch.setenv("GH_TOKEN", "env-b")  # a different account does not reuse the first one's answers
     assert github.login() == "a" and len(sent) == 4
+
+@pytest.mark.parametrize("repo", ["acme/123", "acme/true", "acme/@etc-passwd"])
+def test_graphql_string_variables_are_raw_fields(repo: str) -> None:
+    """`gh -F` coerces numbers and booleans and reads `@file`; names and ids must stay strings."""
+    argv = github._pull_query(repo, 7, "query")
+    owner, name = repo.split("/")
+    assert argv[argv.index(f"owner={owner}") - 1] == "-f" and argv[argv.index(f"name={name}") - 1] == "-f"
+    assert argv[argv.index("number=7") - 1] == "-F"
+
+
+def test_resolve_finding_sends_thread_id_as_raw_field(gh: FakeGh) -> None:
+    node = {**thread(f"{marker('important')}\nA"), "id": "T1"}
+    node["comments"]["pageInfo"] = {"hasNextPage": False, "endCursor": None}
+    gh.respond("api graphql", threads_json(node),
+               {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}},
+               {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}})
+    github.resolve_finding(REPO, 7, "0b9b59e7", "Fixed.", PUBLISHERS)
+    for call in (1, 2):
+        argv = gh.argv(call)
+        assert argv[argv.index("thread=T1") - 1] == "-f"

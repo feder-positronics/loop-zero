@@ -470,6 +470,12 @@ required: `loopzero review` stops with a message naming the login it saw, the
 configured publishers and the helper path. Other GitHub writes and git push use the operator identity. Install the app on
 every repository loop-zero delivers: reads through the app do not fall back on 404.
 
+The helper assumes a single-user delivery host. Among unprivileged local
+accounts, only the delivering user may have write access to the helper, its
+containing directory, and every ancestor directory. The same restriction
+applies to any symlinks in the path and to their resolved paths. Loop-zero
+does not defend against other local users on a shared host.
+
 Set `[delivery].review_publishers` to the GitHub logins that publish model reviews.
 Local readiness reads that list from the base configuration (legacy installations
 without it use the local GitHub login). Hosted evaluation requires an explicit list;
