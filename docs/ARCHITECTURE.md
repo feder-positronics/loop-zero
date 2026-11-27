@@ -195,8 +195,9 @@ The [sandbox](../src/loopzero/sandbox.py) bounds check writes, credentials,
 network access and resources. Checks and their Bubblewrap probes pass
 sandbox environment settings over a private file descriptor, keeping
 forwarded values out of process arguments. [Reviewer runners](../src/loopzero/runners.py)
-bound source access while allowing the network required by model CLIs (the
-contract states what that network allows).
+bound source access while allowing the network required by model CLIs; see the
+contract's [sandbox rules](../core/CONTRACT.md#sandbox-rules-for-checks) for what that
+network permits.
 For a reviewer executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable, read-only; for Codex it also
 exposes the existing sibling `codex-code-mode-host`, read-only. Neighboring history and configuration remain
@@ -291,8 +292,7 @@ only if it still points at that head.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and ordering. It cannot recompute private raw output or defeat a
 coherent forgery by a trusted publisher, and native claims do not attest the
-backend. Legacy, truncated or tool-free evidence stays unknown; named recoveries
-need complete attributable evidence and hold otherwise.
+backend. Legacy, truncated or tool-free evidence stays unknown.
 Native runner failures distinguish subscription exhaustion from transient throttling:
 weekly/session-limit text and Claude's blocking-limit terminal reason identify quota;
 HTTP 429 alone does not. This classification neither switches accounts nor retries

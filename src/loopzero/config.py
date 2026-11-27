@@ -284,6 +284,8 @@ def _host_paths(label: str, value: list[Any]) -> tuple[str, ...]:
     for raw in paths:
         if not raw.startswith("/"):
             raise ConfigError(f"{label} entries must be absolute, got {raw!r}")
+        if any(re.fullmatch(r"<[^/<>]+>", part) for part in Path(raw).parts):
+            raise ConfigError(f"{label} entry {raw!r} is an unreplaced example placeholder")
         path = Path(raw).resolve()
         if str(path) in ("/", "/home") or any(
             path.is_relative_to(tree) for tree in FORBIDDEN_RO_TREES
