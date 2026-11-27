@@ -1877,6 +1877,24 @@ def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_sta
     assert not any(map(posted, gh.calls[prior_calls:]))
 
 
+def test_review_that_splits_into_one_chunk_is_kept(wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys) -> None:
+    head = head_of(wt)
+    arm_empty_primary_review_post(gh, head, 8)
+    envelope = json.dumps(_claude_envelope(APPROVE))
+    fake_tool("claude", f"""
+        calls=$(cat "{fake_bin}/claude.count" 2>/dev/null || echo 0)
+        echo $((calls + 1)) > "{fake_bin}/claude.count"
+        cat > /dev/null
+        if [ "$calls" = 0 ]; then echo 'Prompt is too long' >&2; exit 1; fi
+        echo '{envelope}'
+    """)
+    code, out, _err = run(capsys, "review")
+    assert code == 0 and "review by claude" in out
+    assert (fake_bin / "claude.count").read_text().strip() == "2"  # full diff, then its single chunk
+    saved, _ = cli._load_review(wt, head, "primary")
+    assert saved.chunk_count == 1 and cli.runners.validate_runner_result(saved)
+
+
 @pytest.mark.parametrize("chunk_auth", [False, True])
 def test_review_chunks_oversized_diff_with_same_family(
     wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys, chunk_auth, git_calls, monkeypatch
