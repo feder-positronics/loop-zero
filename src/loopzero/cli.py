@@ -82,8 +82,7 @@ def _require_push_target(wt: Path, repo: str) -> None:
 
 
 def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
-    done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV,
-                     extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
+    done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV, extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
     if done.exit_code != 0:
         detail = _proc.tail(done.stderr)[-2000:]
         if force_lease and any(line.startswith("!\t") and line.endswith("\t[rejected] (stale info)")
@@ -177,9 +176,7 @@ def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, head
 
 def _require_pushed(pr: github.PR, head: str) -> None:
     if pr.head_sha != head:
-        raise CliError(
-            f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; push or pull first"
-        )
+        raise CliError(f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; push or pull first")
 
 
 # --------------------------------------------------------------------------- review markers
@@ -228,10 +225,7 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
         raise CliError("review for the current head was dismissed. Push fixes for a remaining delta "
                        "or open a replacement PR if the review budget is spent.")
     if _review_cap_spent(markers):
-        raise CliError(
-            "review cap reached: fix or reject the findings "
-            "(resolve-findings) and run `loopzero ready`, or split the PR"
-        )
+        raise CliError("review cap reached: fix or reject the findings (resolve-findings) and run `loopzero ready`, or split the PR")
     primary = next((m for m in markers if m.kind == "primary"), None)
     if primary is None:
         return "primary", None
@@ -708,9 +702,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
         if force_lease:
             previous_heads = _git(wt, "reflog", "show", "--format=%H", f"refs/heads/{git_branch}").splitlines()
             if not any(_is_ancestor(wt, pr.head_sha, previous) for previous in previous_heads):
-                raise CliError(
-                    f"PR head {pr.head_sha[:12]} is absent from this task branch's history; integrate it first"
-                )
+                raise CliError(f"PR head {pr.head_sha[:12]} is absent from this task branch's history; integrate it first")
             push.extend(("--porcelain", f"--force-with-lease={git_branch}:{pr.head_sha}"))
     push.append(f"{head}:refs/heads/{git_branch}")  # the captured commit, never the mutable local name
     _require_push_target(wt, config.repo)
