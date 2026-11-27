@@ -1171,7 +1171,7 @@ def _summarize_deleted(block: str) -> str:
     path = match[2] if match else "(unknown file)"
     if match and match[1]:
         path = codecs.escape_decode(path.encode())[0].decode(errors="replace")
-    deleted = sum(line.startswith("-") and not line.startswith("---") for line in block.splitlines())
+    deleted = sum(line.startswith("-") for line in block.partition("\n@@")[2].splitlines())  # hunks only
     return f"{header}\n{path}: deleted, {deleted} lines\n"
 
 
