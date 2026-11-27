@@ -906,7 +906,11 @@ def _repost_reviewer_families(
             "reviewer family that contributed to this PR lineage; run without --repost"
         )
     if not result.fallback and not candidates:
-        raise IndependentReviewerUnavailable(_independence_message(authors, excluded, []))
+        raise IndependentReviewerUnavailable(
+            "saved review has no same-family fallback disclosure, but every configured family "
+            "contributed to this PR lineage; run without --repost to obtain a disclosed "
+            "same-family review"
+        )
     if result.family in authors and not result.fallback:
         raise IndependentReviewerUnavailable(
             f"saved reviewer family {result.family} contributed to this PR lineage; "

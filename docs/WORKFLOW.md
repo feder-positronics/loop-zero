@@ -46,7 +46,7 @@ flowchart TD
     C -->|code fix needed| E["PR owner opens a replacement PR"]
     G["Reviewer gives no verdict:<br/>tool or login failure"] --> H["Costs nothing: try the next<br/>eligible model family"]
     H -->|none can run| J["Same-family review in a fresh session,<br/>disclosed on the PR"]
-    J -->|none can run| I["PR owner restores a configured reviewer,<br/>or reports the blocker to whoever commissioned the PR"]
+    J -->|none can run| I["PR owner restores a configured reviewer and retries the review,<br/>or reports the blocker to whoever commissioned the PR"]
 ```
 
 See the contract's [review budget](../core/CONTRACT.md#review-budget).
