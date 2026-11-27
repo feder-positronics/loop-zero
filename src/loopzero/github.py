@@ -16,6 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from functools import partial
 from itertools import chain, islice, pairwise
 from pathlib import Path
 from typing import Literal
@@ -550,10 +551,6 @@ def login(token: str | None = None) -> str:
     if isinstance(content, dict) and isinstance(viewer := content.get("viewer"), dict) and (name := viewer.get("login")):
         return str(name)
     raise GhError(("gh", "api", "graphql"), "no login in viewer response")
-
-
-def _not_found(number: int, exc: Exception) -> GhError:
-    return GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})")
 
 
 def _api(endpoint: str, payload: dict, method: str = "POST",
@@ -1222,7 +1219,7 @@ def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -
                 return found
             cursor = ("-F", f"after={_next_thread_cursor(page, seen)}")
         except (KeyError, TypeError) as exc:
-            raise _not_found(number, exc) from exc
+            raise GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})") from exc
 
 
 _ACTIVE_WORKFLOWS = {"queued", "in_progress", "waiting", "pending", "requested"}
@@ -1524,14 +1521,11 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued{detail}")
 
 
-def _remote_branch_head(endpoint: str) -> str | None:
-    return _branch_sha(endpoint, "object", "missing remote ref SHA")
-
-
 def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     """Return False if the remote ref moved, or True if deleted or absent."""
     endpoint = f"repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
-    current = _remote_branch_head(endpoint)
+    read_head = partial(_branch_sha, endpoint, "object", "missing remote ref SHA")
+    current = read_head()
     if current != expected_head:
         return current is None
     ref = os.fsdecode(f"refs/heads/{branch}".encode("utf-8", "surrogateescape"))
@@ -1546,7 +1540,7 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
             raise GhError(init, done.stderr or done.stdout)
         done = run(argv, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
     if done.exit_code:
-        current = _remote_branch_head(endpoint)
+        current = read_head()
         if current == expected_head:
             raise GhError(argv, done.stderr or done.stdout)
         return current is None
