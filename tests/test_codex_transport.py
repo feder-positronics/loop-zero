@@ -565,14 +565,9 @@ def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
 
 def test_legacy_truncated_transcript_remains_unknown():
     head = "a" * 40
-    legacy = {
-        "id": 1,
-        "commit_id": head,
-        "state": "COMMENTED",
-        "user": {"login": "bot"},
-        "body": cli.review_marker(head, "primary")
-        + "\n**approve**\n<details><summary>Raw reviewer output</summary>\n\n```\n[Transcript truncated] not JSON\n```\n</details>",
-    }
+    rendered = (cli.review_marker(head, "primary")
+                + "\n**approve**\n<details><summary>Raw reviewer output</summary>\n\n```\n[Transcript truncated] not JSON\n```\n</details>")
+    legacy = row(SYNTHETIC_NATIVE, rendered) | {"id": 1}
     assert eligibility.review_projection(legacy, head, "acme/widgets", 7) == (False, None)
     assert eligible(legacy) is legacy
 

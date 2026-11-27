@@ -22,7 +22,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, nullcontext, suppress
-from functools import partial, wraps
+from functools import partial
 from pathlib import Path
 from urllib.parse import quote
 
@@ -138,9 +138,9 @@ def _load_config(
     return config
 
 
-def _context(args: argparse.Namespace, *, pin_checks: bool = True) -> tuple[Path, Config]:
+def _context(args: argparse.Namespace) -> tuple[Path, Config]:
     wt = _toplevel()
-    return wt, _load_config(args, wt, pin_checks=pin_checks, refresh=args.command in {"ready", "merge"})
+    return wt, _load_config(args, wt, pin_checks=True, refresh=args.command in {"ready", "merge"})
 
 
 def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
@@ -479,9 +479,9 @@ _CHECKS_END = "<!-- loopzero:checks:end -->"
 _TASK_EVIDENCE = re.compile(r"^## (Validation|Review)[ \t]*(?:\n|\Z).*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
 
 
-def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -> str:
+def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
-    body = (existing if existing is not None else worktree.task_text(wt)).replace("\r\n", "\n")
+    body = existing.replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
     match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
     if match is None:
@@ -686,11 +686,6 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
     return 0 if report.ok else 1
 
 
-def _track_upstream(wt: Path, branch: str) -> None:
-    for key, value in (("remote", "origin"), ("merge", f"refs/heads/{branch}")):  # no tracking ref needed
-        _git(wt, "config", f"branch.{branch}.{key}", value)
-
-
 def cmd_pr(args: argparse.Namespace) -> int:
     wt, config = _context(args)
     branch, head = worktree.branch(wt), worktree.head(wt)
@@ -721,7 +716,8 @@ def cmd_pr(args: argparse.Namespace) -> int:
     push.append(f"{head}:refs/heads/{git_branch}")  # the captured commit, never the mutable local name
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
-    _track_upstream(wt, git_branch)
+    _git(wt, "config", f"branch.{git_branch}.remote", "origin")
+    _git(wt, "config", f"branch.{git_branch}.merge", f"refs/heads/{git_branch}")
     if pr is None:
         prose = _TASK_EVIDENCE.sub("", task)
         pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), prose)
@@ -772,24 +768,20 @@ def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.P
         raise
 
 
-def _lock_review(run_review: Callable[[argparse.Namespace, Path, Config], int]):
-    @wraps(run_review)
-    def locked(args: argparse.Namespace) -> int:
-        wt, config = _context(args)
-        git_dir = _git(wt, "rev-parse", "--absolute-git-dir", paths=True)
-        with ExitStack() as cleanup:
-            fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
-            cleanup.callback(os.close, fd)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise CliError("review already running in this worktree") from exc
-            return run_review(args, wt, config)
-    return locked
+def cmd_review(args: argparse.Namespace) -> int:
+    wt, config = _context(args)
+    git_dir = _git(wt, "rev-parse", "--absolute-git-dir", paths=True)
+    with ExitStack() as cleanup:
+        fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
+        cleanup.callback(os.close, fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise CliError("review already running in this worktree") from exc
+        return _review_locked(args, wt, config)
 
 
-@_lock_review
-def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # noqa: C901 - PR guard, publish, repost and recovery paths
+def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  # noqa: C901 - PR guard, publish, repost and recovery paths
     runtime_source = (
         "reviewer paths are unpinned because --config was provided" if args.config
         else f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}"
@@ -893,12 +885,10 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
         try:
             live = github.pr_view(config.repo, pr.number)
             body = _append_review(live.body, result)
-            try:  # Refresh the record only from a receipt for this head, never over a newer head or a missing receipt.
+            with suppress(LoopZeroError, OSError, ValueError):
                 refreshed = _pr_body(wt, head, config, live.body)
                 if live.head_sha == head and "(no `loopzero check` run recorded)" not in refreshed:
                     body = _validate_pr_body_size(_append_review(refreshed, result))
-            except (LoopZeroError, OSError, ValueError):
-                pass
             if (live.head_sha, live.state, live.base_ref) == (head, "OPEN", config.base_branch):
                 github.update_body(config.repo, pr.number, body)
         except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
@@ -1916,13 +1906,11 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
             return 3
         _require_receipt(wt, config, pr.head_sha)
         sha = _merge_and_follow(config, pr, deadline, admit_by)
-        if sha is None and deadline is not None:
-            print(f"timed out waiting for the merge queue to land PR #{pr.number}")
-            return 3
         if sha is None:
-            print(
-                f"PR #{pr.number} is queued for merge into {config.base_branch}; {_FOLLOW_QUEUE}"
-            )
+            if deadline is not None:
+                print(f"timed out waiting for the merge queue to land PR #{pr.number}")
+                return 3
+            print(f"PR #{pr.number} is queued for merge into {config.base_branch}; {_FOLLOW_QUEUE}")
             return 0
     _cleanup_remote_refs(wt, config, branch, pr.head_sha)
     _cleanup(wt, pr)
@@ -1961,7 +1949,7 @@ def _print_display(text: str) -> None:
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:
-    wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
+    wt, config = _context(args)
     branch = worktree.branch(wt)
     pr = _require_pr(config, branch)
     if pr.base_ref != config.base_branch:  # trusted publishers belong to the configured base
