@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, suppress
 from functools import partial, wraps
 from pathlib import Path
+from urllib.parse import quote
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
 from loopzero import config as config_mod
@@ -332,7 +333,36 @@ def _readiness(
         return github.Readiness(False, (*result.reasons, receipt_problem), checks=result.checks)
     if announce_receipt:
         _print_receipt(wt, report, "accepted")
-    return result
+    return _waitable_eligibility_refresh(config, pr, result, workflow_wait=workflow_wait)
+
+
+def _waitable_eligibility_refresh(
+    config: Config, pr: github.PR, readiness: github.Readiness, *, workflow_wait: bool,
+) -> github.Readiness:
+    if not workflow_wait:
+        return readiness
+    reason = next((r for r, check in readiness.checks.items()
+                   if check in {(eligibility.CONTEXT, "failure"), (eligibility.CONTEXT, "error")}), None)
+    if reason is None or reason in readiness.waitable_failures:
+        return readiness
+    waiting = dataclasses.replace(readiness, waitable_failures=(*readiness.waitable_failures, reason))
+    if not _pending_checks(waiting):
+        return readiness
+    branch = quote(config.base_branch, safe="")
+    endpoint = f"repos/{config.repo}/actions/workflows/eligibility.yml/runs"
+    try:
+        runs = github.api_get(f"{endpoint}?event=workflow_dispatch&branch={branch}&per_page=100")
+    except github.ReadDeadline:
+        raise
+    except github.GhError:
+        return readiness  # Unavailable workflow metadata cannot soften a failed verdict.
+    rows = runs.get("workflow_runs") if isinstance(runs, dict) else None
+    if isinstance(rows, list) and any(
+        isinstance(run, dict) and run.get("display_title") == f"Refresh eligibility for PR #{pr.number}"
+        and run.get("status") in ("requested", "queued", "waiting", "pending", "in_progress") for run in rows
+    ):
+        return waiting  # The next poll still reads required checks on the pinned PR head.
+    return readiness
 
 
 # --------------------------------------------------------------------------- checks report
@@ -786,7 +816,11 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
     if config.review_publishers and publisher.casefold() not in {
         login.casefold() for login in config.review_publishers
     }:
-        helper = f" The App token helper {github.APP_TOKEN_HELPER} did not supply a token." if not token else ""
+        helper = (
+            f" Restore the App token helper {github.APP_TOKEN_HELPER} as an executable that supplies "
+            "a fresh installation token, then rerun `loopzero review`."
+            if not token else " Use a configured publisher, then rerun `loopzero review`."
+        )
         raise CliError(f"GitHub login {publisher!r} is not a configured review publisher. "
                        f"Configured publishers: {', '.join(config.review_publishers)}.{helper}")
     saved = [kind for kind, exists in zip(kinds, saved_files, strict=True) if exists] if args.repost else []
@@ -1431,13 +1465,15 @@ def _wait_with_deadline(
 
 def _print_check_wait_timeout(pr: github.PR, args: argparse.Namespace) -> None:
     waiting_for = "GitHub to compute mergeability" if pr.mergeable == "UNKNOWN" else "required checks"
+    detail = f"timed out waiting for {waiting_for} on {pr.head_sha[:12]}."
+    print(detail if args.command == "merge" else f"{detail} {_wait_resume(args)}")
+
+
+def _wait_resume(args: argparse.Namespace) -> str:
     command = ["loopzero", args.command, "--wait"]
     if args.config:
         command.insert(1, f"--config={args.config}")
-    print(
-        f"timed out waiting for {waiting_for} on {pr.head_sha[:12]}. "
-        f"Run `{shlex.join(command)}` to resume on this head."
-    )
+    return f"Run `{shlex.join(command)}` to resume on this head."
 
 def _verify_wait_snapshot(
     args: argparse.Namespace, wt: Path, config: Config, head: str, current_head: str,
@@ -1663,7 +1699,11 @@ def _mergify_wait_poll(
             raise closed[0]
         return None, None, False
     if not mergify.configured(config.repo, config.base_branch, queue, deadline):
-        raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
+        raise CliError(
+            "Mergify queue configuration became unsafe or unavailable while waiting. "
+            f"Check queue {queue!r} for {config.base_branch!r} in `.mergify.yml` and the Mergify dashboard. "
+            "Once the queue is reachable and preserves PR heads, rerun `loopzero merge --wait`."
+        )
     state = mergify.membership(config.repo, pr.number, queue, deadline)
     deferred = confirmed and state is not None and not closed
     sha = None if deferred else _landed(config, pr, closed)
@@ -1775,9 +1815,22 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
     branch = worktree.branch(wt)
     if args.cancel:
         if config.merge_strategy != "mergify":
-            raise CliError("merge --cancel is only available with delivery.merge = 'mergify'")
-        pr = _require_pr(config, branch)
-        mergify.dequeue(config.repo, pr.number)
+            raise CliError(
+                "merge --cancel is only available with delivery.merge = 'mergify'. "
+                "For a GitHub queue entry, use Remove from queue on the pull request."
+            )
+        pr = github.pr_for_branch(config.repo, branch)
+        if pr is None:
+            raise CliError(f"No PR for branch {branch!r}. "
+                           "Run `loopzero merge --cancel` from the queued PR's worktree.")
+        if pr.state != "OPEN":
+            raise CliError(f"PR #{pr.number} is {pr.state}: {pr.url}. There is no queue entry to cancel.")
+        try:
+            mergify.dequeue(config.repo, pr.number)
+        except mergify.MergifyError as exc:
+            raise CliError(f"{exc}. Check PR #{pr.number} in the Mergify dashboard. "
+                           "If it is still queued, check the Mergify credential and rerun "
+                           "`loopzero merge --cancel`, or remove it in the dashboard.") from exc
         print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
     started = time.monotonic()
@@ -1891,7 +1944,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     if not remaining:
         if github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers,
                                       required=eligibility.CONTEXT in config.required_ci):
-            print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
+            print(f"Requested a Loop-zero Eligibility refresh for PR #{pr.number}. "
+                  "Run `loopzero ready --wait` to follow the verdict.")
         else:
             print("Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete.")
     return 0
@@ -1948,7 +2002,10 @@ def main(argv: list[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     try:
         with _proc.unwind_on_sigterm():
-            return globals()[f"cmd_{args.command}"](args)
+            code = globals()[f"cmd_{args.command}"](args)
+        if args.command == "merge" and code == 3:
+            print(_wait_resume(args))
+        return code
     except IndependentReviewerUnavailable as exc:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
         return 4
