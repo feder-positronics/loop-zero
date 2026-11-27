@@ -379,8 +379,11 @@ verbatim, credit the patch's writer.
 
 ## Briefs and ownership
 
-Give each writing delegate a worktree from `loopzero start <task-slug>`
-outside protected production checkouts and a self-contained brief:
+Give each writing delegate its own task worktree and a self-contained brief.
+`loopzero start <task-slug>` creates it under `.worktrees/` in the repository's
+primary checkout, even when run from another worktree. Where that checkout is
+a protected production checkout, use a launcher-made worktree outside it
+([step 1](../core/CONTRACT.md#the-six-steps)). The brief:
 
 The first shell command enters that task tree; repeat `cd <own-task-tree> &&`
 at the start of every shell command, including reads and background launches.
