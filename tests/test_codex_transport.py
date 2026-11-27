@@ -529,6 +529,7 @@ def test_codex_publication_rejects_inconsistent_context(rendered, publication, d
 
 @pytest.mark.parametrize("header, diagnostic", [
     ("é", "invalid evidence header"),
+    ("a" * (runners.CODEX_HEADER_LIMIT + 1), "invalid evidence header"),
     ("not a review marker", "invalid evidence encoding"),
     (packed_json('{"version":1,"version":2}'), "duplicate JSON key"),
 ])

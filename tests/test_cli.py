@@ -368,6 +368,16 @@ def test_config_help_identifies_explicit_policy_override():
     assert "override trusted-base settings" in " ".join(cli.build_parser().format_help().split())
 
 
+@pytest.mark.parametrize("command", ["ready", "merge"])
+def test_wait_defaults_to_the_documented_budget(command):
+    """CONTRACT step 5: bare `--wait` is 5400 s; `--wait=N` and `--wait N` set it."""
+    parse = cli.build_parser().parse_args
+    assert parse([command]).wait is None
+    assert parse([command, "--wait"]).wait == 5400.0
+    assert parse([command, "--wait=0"]).wait == 0.0
+    assert parse([command, "--wait", "30"]).wait == 30.0
+
+
 def run(capsys, *argv: str) -> tuple[int, str, str]:
     code = cli.main(list(argv))
     captured = capsys.readouterr()
