@@ -152,7 +152,7 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, mode):
 
 def test_retired_target_uses_ordinary_eligibility_and_budget():
     target = "a" * 40
-    repository, number = "feder-positronics/intelflo", 9179
+    repository, number = "example-org/example-repo", 9179
     rows = [copy.deepcopy(RECEIPTS[0])]
     snapshot = copy.deepcopy(rows)
     replacement = {
