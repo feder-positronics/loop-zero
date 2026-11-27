@@ -2011,7 +2011,7 @@ def conflict_merge(wt, repo):
     return reviewed
 
 
-@pytest.mark.parametrize("case", ["verified", "unverified", "second parent", "rewritten", "missing", "empty"])
+@pytest.mark.parametrize("case", ["verified", "unverified", "second parent", "rewritten", "missing", "empty", "empty commit"])
 def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isolated_git, case):
     if case == "second parent":
         reviewed = head_of(wt)
@@ -2024,6 +2024,10 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
     elif case == "rewritten":
         base = reviewed = head_of(wt)
         git(wt, "commit", "--amend", "-qm", "rewritten feature")
+    elif case == "empty commit":
+        gh.respond("api graphql", threads_json())
+        reviewed, base = head_of(wt), head_of(repo)
+        git(wt, "commit", "--allow-empty", "-qm", "empty topic commit")
     elif case == "empty":
         gh.respond("api graphql", threads_json())
         reviewed = head_of(wt)
@@ -2041,6 +2045,10 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
     head = prepare_review(wt, gh, fake_bin, history=history)
     arm_pr_base(gh, head, base)
     code, _, err = run(capsys, "review")
+    if case == "empty commit":
+        assert code == 0, err
+        assert marker(head, "delta") in posted_review(gh)["body"]
+        return
     if case != "verified":
         assert code == 1 and not list(fake_bin.glob("*.stdin"))
         if case == "missing":
@@ -2576,16 +2584,23 @@ def test_overlapping_checks_share_only_a_pass(wt, capsys, monkeypatch, first_exi
     assert ("receipt reused:" in capsys.readouterr().out) == (first_exit == 0)
 
 
-def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
-    reviews = [rev("a" * 40, "primary"), rev("b" * 40, "delta", state="CHANGES_REQUESTED")]
+@pytest.mark.parametrize("body_blocker", [False, True])
+def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head, body_blocker: bool) -> None:
+    delta = rev(head if body_blocker else "b" * 40, "delta", state="CHANGES_REQUESTED")
+    if body_blocker:
+        delta["body"] = github.BODY_BLOCKERS + delta["body"]
+    reviews = [rev("a" * 40, "primary"), delta]
     arm_approved_pr_with_check_result(gh, head, wt, "failure", reviews=reviews)
     arm_check_runs(gh, head, [{
         "name": "checks", "status": "completed", "conclusion": "failure",
         "check_suite": {"id": 10}}])
     out, _ = expect_cli(capsys, 1, "ready")
     out = out.replace(FAILED_CHECK_HINT, "")
+    context = ("Blocking findings in the review body. The review budget is exhausted." if body_blocker
+               else f"The review budget is exhausted and {head[:12]} has no eligible review.")
     assert without_accepted_receipt(out).splitlines() == [
-        f"not ready: The review budget is exhausted and {head[:12]} has no eligible review. Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused.",
+        f"not ready: {context} Open a replacement PR for changes that need review. "
+        "Another `loopzero review` on this PR will be refused.",
         "not ready: required check 'checks' is failure",
     ]
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
@@ -4172,7 +4187,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
         assert f"gh api -X POST {ELIGIBILITY_DISPATCH} -f ref=main -f 'inputs[pr]=7'" in err
     else:
         assert (code, err) == (0, "")
-        status = {"remaining": [], "missing": ["Hosted eligibility workflow could not be found. Finding resolution is complete."]}
+        status = {"remaining": [], "missing": ["Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete."]}
         assert out.splitlines()[1:] == status.get(outcome, ["refreshed Loop-zero Eligibility for PR #7"])
 
 

@@ -498,7 +498,11 @@ def test_post_review_preserves_blocking_findings_without_an_anchor(gh: FakeGh, m
         assert "**critical**: G" in payload["body"]
         published = dict(body=payload["body"], user={"login": "publisher"}, state="COMMENTED", commit_id=HEAD)
         monkeypatch.setattr(github, "open_blocking_findings", lambda *_: [])
-        for head in (HEAD, "b" * 40):
+        clean_merge, changed = "b" * 40, "c" * 40
+        monkeypatch.setattr(eligibility, "base_merge_material", lambda *a, **k: b"" if a[3] == clean_merge else None)
+        assert eligibility.readiness_review([published], changed, ("publisher",), repo=REPO, number=7,
+                                            base_branch="main") is None
+        for head in (HEAD, clean_merge):
             evidence = eligibility.readiness_review([published], head, ("publisher",), repo=REPO, number=7, base_branch="main")
             pr = github.PR(7, f"https://github.com/{REPO}/pull/7", head, "main", False, "OPEN", "MERGEABLE")
             blocker = eligibility.body_blocker(evidence)

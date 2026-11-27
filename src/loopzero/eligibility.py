@@ -175,7 +175,7 @@ def approved_delta(reviews: list[dict], head: str, publishers: tuple[str, ...], 
 
 def body_blocker(review: dict | None) -> str | None:
     if review and review["body"].startswith(github.BODY_BLOCKERS):
-        return "blocking findings in the review body; push fixes before requesting another review"
+        return "blocking findings in the review body"
     return None
 
 
@@ -194,9 +194,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     reviewed = marker[1]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
         return None
-    if body_blocker(latest):
-        return latest
-    if marker[2] == "primary":
+    if marker[2] == "primary" and not body_blocker(latest):
         verdict = _summary_verdict(latest["body"], "primary")
         state = latest.get("state")
         if verdict.startswith("request_changes** (") and state in {"CHANGES_REQUESTED", "COMMENTED"}:
