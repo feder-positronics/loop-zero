@@ -1117,6 +1117,9 @@ def test_pr_pushes_and_creates_draft(
     head = head_of(wt)
     gh.respond_pr_list([], branch=branch)
     gh.respond_pr_create(pr_json(headRefOid=head), branch=branch)
+    task = (wt / ".loopzero" / "task.md").read_text()
+    gh.respond_pr_view(pr_json(headRefOid=head, body=task), branch=branch)
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     pushes = trace_pushes(fake_tool, tmp_path)
     expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
     assert pushes.read_text() == f"push origin {head}:refs/heads/{branch}\n"
@@ -1126,13 +1129,14 @@ def test_pr_pushes_and_creates_draft(
     assert [c["argv"][:2] for c in gh.calls] == [
         branch_head_key(branch).split(), history_key.split(),
         branch_head_key(branch).split(), pr_list_key(branch).split(), ["api", f"repos/{REPO}/pulls"],
+        ["api", f"repos/{REPO}/pulls/7"], ["api", f"repos/{REPO}/pulls/7"],
     ]
-    create = gh.calls[-1]
-    payload = json.loads(create["--input"])
+    payload = json.loads(gh.calls[-3]["--input"])
+    assert "Recorded for" not in payload["body"], "the draft opens without head-specific validation"
     assert payload["draft"] is True and payload["head"] == branch
     heading = (wt / ".loopzero" / "task.md").read_text().splitlines()[0].lstrip("# ")
     assert payload["title"] == heading
-    body = payload["body"]
+    body = json.loads(gh.calls[-1]["--input"])["body"]
     assert "## Context and goal" in body and git(repo, "rev-parse", "origin/main").strip() in body
     assert body.count("## Validation") == 1 and f"Recorded for `{head[:12]}`" in body
     assert "(filled by `loopzero check`)" not in body, "placeholder replaced in place"
@@ -1233,6 +1237,18 @@ exec /usr/bin/git "$@"
 
 
 @pytest.mark.parametrize("live", [dict(headRefOid="b" * 40), dict(baseRefName="release")], ids=["head", "target"])
+def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, gh, capsys):
+    head = head_of(wt)
+    gh.respond(branch_history_key(), [])
+    gh.respond_pr_list([])
+    gh.respond_pr_create(pr_json(headRefOid="b" * 40))  # another writer pushed B after the pinned push
+    gh.respond_pr_view(pr_json(headRefOid="b" * 40))
+    _, err = expect_cli(capsys, 1, "pr", stdout="")
+    assert "rerun loopzero pr" in err and head not in err
+    assert not any("PATCH" in call["argv"] for call in gh.calls)
+    assert "Recorded for" not in json.loads(gh.calls[-2]["--input"])["body"]
+
+
 def test_pr_does_not_patch_a_body_for_a_head_or_target_the_pr_moved_from(wt, gh, capsys, live):
     arm_pr_body_patch(gh, head_of(wt))
     gh.respond_pr_view(pr_json(**{"headRefOid": head_of(wt), **live}))

@@ -629,6 +629,26 @@ def test_post_review_submits_comment(gh: FakeGh, app_token_helper, verdict: str,
             assert gh.argv(int(looked_up))[:2] == ["api", "graphql"]
 
 
+@pytest.mark.parametrize("live,first_post_fails", [
+    (dict(state="CLOSED"), False), (dict(baseRefName="release"), False),
+    (dict(baseRefName="release"), True), (dict(headRefOid="b" * 40), False),
+], ids=["closed", "retargeted", "retargeted-before-fallback", "moved"])
+def test_post_review_rereads_the_live_pr_before_each_post(gh: FakeGh, live: dict, first_post_fails: bool) -> None:
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
+    gh.respond(FILES_KEY, PR_FILES)
+    open_pr = pr_json(headRefOid=HEAD)
+    if first_post_fails:
+        rejection = {"message": "Unprocessable Entity", "errors": [{"message": "Can not approve your own pull request"}]}
+        gh.respond(REVIEWS_KEY, {"stdout": json.dumps(rejection), "stderr": "gh: Unprocessable Entity (HTTP 422)\n", "exit": 1})
+        gh.respond_pr_view(open_pr, pr_json(**{"headRefOid": HEAD, **live}))
+    else:
+        gh.respond_pr_view(pr_json(**{"headRefOid": HEAD, **live}))
+    pr = github.PR(7, "url", HEAD, "main", False, "OPEN", "UNKNOWN", author="someone-else")
+    with pytest.raises(github.GhError, match="PR is"):
+        github.post_review(REPO, 7, HEAD, review(verdict="approve"), pr=pr, token="", publisher="bot-user", base="main")
+    assert len(calls_for(gh, REVIEWS_KEY)) == int(first_post_fails)
+
+
 def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
     arm_review(gh)
     gh.fail(REVIEWS_KEY, "HTTP 500 server error")

@@ -495,10 +495,8 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -
 def _validate_pr_body_size(body: str) -> str:
     limit = 65_536
     if len(body) > limit:
-        raise CliError(
-            f"generated PR body is {len(body)} characters; GitHub allows {limit}. "
-            "Shorten the PR description or validation text and rerun the command."
-        )
+        raise CliError(f"generated PR body is {len(body)} characters; GitHub allows {limit}. "
+                       "Shorten the PR description or validation text and rerun the command.")
     return body
 
 
@@ -537,10 +535,8 @@ def _require_pr_details(wt: Path) -> None:
         if not value or re.fullmatch(r"<[^<>]*>", value):
             unfilled.append(f"'- **{name}:**'")
     if unfilled:
-        raise CliError(
-            f"fill {', '.join(unfilled)} in {worktree.task_file(wt)}"
-            " (Context, Problem and Goal become the PR description)"
-        )
+        raise CliError(f"fill {', '.join(unfilled)} in {worktree.task_file(wt)}"
+                       " (Context, Problem and Goal become the PR description)")
 
 
 def _append_review(body: str, result: ReviewResult) -> str:
@@ -691,7 +687,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
                        "run `loopzero start <new-task-slug>` from the main checkout")
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
-    body = _pr_body(wt, head, config, existing)
+    _pr_body(wt, head, config, existing)  # refuse an unusable body before pushing
     force_lease = False
     git_branch = os.fsdecode(branch.encode("utf-8", "surrogateescape"))
     push = ["push", "origin"]
@@ -708,17 +704,16 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
     _track_upstream(wt, git_branch)
-    if pr is not None:
-        with github.pr_lock(config.repo, pr.number):
-            live = github.pr_view(config.repo, pr.number)
-            if live.state != "OPEN":
-                raise CliError(f"PR #{pr.number} closed during publication; reopen it before retrying loopzero pr")
-            if (live.head_sha, live.base_ref) != (head, config.base_branch):
-                raise CliError(f"PR #{pr.number} is at {live.head_sha[:12]} on {live.base_ref}; rerun loopzero pr")
-            if (body := _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))) != live.body.replace("\r\n", "\n"):
-                github.update_body(config.repo, pr.number, body)
-    else:
-        pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), body)
+    if pr is None:  # the draft opens with task prose only; validation follows under the live head and target guard
+        pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), worktree.task_text(wt))
+    with github.pr_lock(config.repo, pr.number):
+        live = github.pr_view(config.repo, pr.number)
+        if live.state != "OPEN":
+            raise CliError(f"PR #{pr.number} closed during publication; reopen it before retrying loopzero pr")
+        if (live.head_sha, live.base_ref) != (head, config.base_branch):
+            raise CliError(f"PR #{pr.number} is at {live.head_sha[:12]} on {live.base_ref}; rerun loopzero pr")
+        if (body := _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))) != live.body.replace("\r\n", "\n"):
+            github.update_body(config.repo, pr.number, body)
     print(pr.url)
     return 0
 
@@ -749,10 +744,8 @@ def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.P
         retry = "loopzero review --repost" if repost else "loopzero review"
         number = endpoint.removeprefix(f"{pulls}/")
         if endpoint.startswith(f"{pulls}/") and number.isdecimal():
-            raise CliError(
-                f"Could not read PR #{number}. Verify that PR and its branch {branch!r}, "
-                f"then rerun `{retry}`. {exc}"
-            ) from exc
+            raise CliError(f"Could not read PR #{number}. Verify that PR and its branch {branch!r}, "
+                           f"then rerun `{retry}`. {exc}") from exc
         if exc.tail.endswith(github.PR_APP_INSTALLATION_HINT):
             raise CliError(f"{exc}\nThen rerun `{retry}`.") from exc
         raise
@@ -861,7 +854,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:  # no
         try:
             github.post_review(
                 config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
-                publisher=publisher,
+                publisher=publisher, base=config.base_branch,
             )
         except (github.GhError, _proc.ProcTimeout) as exc:
             path = _review_file(wt, head, kind)
@@ -929,10 +922,8 @@ def _repost_reviewer_families(
     candidates = [family for family in config.reviewers if family not in authors]
     excluded = [family for family in config.reviewers if family in authors]
     if result.fallback and result.family not in excluded:
-        raise CliError(
-            f"saved review claims a same-family fallback, but {result.family} is not a configured "
-            "reviewer family that contributed to this PR lineage; run without --repost"
-        )
+        raise CliError(f"saved review claims a same-family fallback, but {result.family} is not a configured "
+                       "reviewer family that contributed to this PR lineage; run without --repost")
     if not result.fallback and not candidates:
         raise IndependentReviewerUnavailable(
             "saved review has no same-family fallback disclosure, but every configured family "
