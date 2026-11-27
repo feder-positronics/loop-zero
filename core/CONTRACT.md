@@ -27,8 +27,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 4. `loopzero review` runs a reviewer model's own CLI (a native review), by
    default from a family independent of the writers, on the exact head and posts
    one GitHub review with inline findings. If there is no commentable line,
-   blocking findings go in the review body and need a reviewed fix. Approval
-   exits 0, changes requested 5.
+   blocking findings go in the review body and need a reviewed fix.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
    passes. A PR whose only blockers are missing or skipped required checks (even
    while GitHub still computes mergeability) also leaves draft but is not ready
@@ -110,8 +109,7 @@ current accounts. A reserved class carries a `hold` label on the PR (the CLI
 reads PR labels only, so copy an issue's hold to its PR) plus one issue comment
 naming the hazard and end condition for the
 [decisions owner](../docs/DELEGATION.md#team-roles) (or human owner) to resolve.
-No separate per-PR go-ahead to merge, take out of draft or queue; no hold renewal. Merge-authority
-holds also block the owner queue route below.
+No separate per-PR go-ahead to merge, take out of draft or queue; no hold renewal.
 
 ## Blockers
 
