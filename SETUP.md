@@ -437,7 +437,12 @@ queue_rules:
       - base = main
       - -draft
       - check-success = Loop-zero Eligibility
+    checks_timeout: 30 min
 ```
+
+A candidate gets one eligibility trigger and the job retries evidence outages for
+90 s; if that still fails the check stays pending, so set `checks_timeout` on the
+queue rule to bound the wait.
 
 This is a required server-side gate: the command API has no expected-SHA field,
 and a request can be processed after the source changes. The CLI's head-change

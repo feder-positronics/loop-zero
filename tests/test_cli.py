@@ -2974,7 +2974,7 @@ def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monk
         assert ("merge-authority hold" in out) == bool(labels)
         with monkeypatch.context() as hosted_env:
             hosted_env.chdir(trusted)
-            assert hosted.main() == expected
+            assert hosted.main() == 0
         capsys.readouterr()
         payload = json.loads(gh.calls[-1]["--input"])
         assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{head}"
@@ -4250,10 +4250,10 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
     error_status = 503 if transient else {"denied": 403, "missing": 404, "missing-required": 404}.get(outcome)
     gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": f"HTTP {error_status}"} if error_status else "", "")
     monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
-    runs = [] if outcome == "retry" else [{"display_title": "Refresh eligibility for PR #7" if outcome == "applied" else "unknown"}]
+    runs = [] if outcome == "retry" else [{"display_title": "any title"}]
     monkeypatch.setattr(github.time, "time", lambda: 1795640554)
     endpoint = ELIGIBILITY_DISPATCH.removesuffix("/dispatches")
-    gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs)})
+    gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs) + (outcome == "unknown")})
     title = r"\u0141\xf3d\u017a" if outcome == "refreshed" else "Łódź"
     expect_cli(capsys, 0, "resolve", stderr="", stdout=f"0b9b59e7  important  src/{title}.py:3  {title}\n")
     assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
@@ -4512,7 +4512,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head,
                              "--publish"]) == (0 if expected else 1)
     states = [json.loads(c["--input"])["state"] for c in gh.calls if "--input" in c]
-    assert states == ["pending", "success" if expected else "failure"]
+    assert states == ["pending", "success" if expected else "pending"]
     gh.respond_pr_view( pr_json(headRefOid="b" * 40))
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
 
@@ -4525,6 +4525,39 @@ def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head,
     assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
     out, err = capsys.readouterr()
     assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err and "Not Found\"}" in err
+
+
+@pytest.mark.parametrize("publishers,pr_head,message", [
+    ("", "a" * 40, "configure delivery.review_publishers"), ('review_publishers = ["x"]', "aaaaaaa", "full 40-character source SHA"),
+])
+def test_eligibility_main_names_each_usage_mistake(wt, capsys, publishers, pr_head, message):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f"\n{publishers}\n")
+    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", pr_head]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and message in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("pr_update,reviewed,expected", [
+    ({"mergeable": "UNKNOWN"}, True, github.MERGEABILITY_PENDING),
+    ({}, False, "Awaiting trusted review of current source head"),
+    ({"state": "MERGED"}, True, None),
+])
+def test_manual_refresh_publishes_pending_or_skips_landed(wt, gh, head, pr_update, reviewed, expected):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    gh.respond_pr_view(pr_json(headRefOid=head, **pr_update))
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "ci-service"}}})
+    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state="APPROVED", verdict="approve")] if reviewed else [])
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head, "--publish"])
+    statuses = [json.loads(c["--input"]) for c in gh.calls if "--input" in c]
+    assert [s["state"] for s in statuses] == (["pending", "pending"] if expected else [])
+    if expected:
+        assert statuses[-1]["description"] == expected
 
 
 def test_merge_material_lets_read_timeouts_propagate(monkeypatch):

@@ -109,7 +109,7 @@ def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case
     if blocker == "important":
         publisher.respond("api graphql", threads_json(fixtures.thread(fixtures.marker("important") + "\nFinding",
                                                                          author="trusted-publisher")))
-    statuses = check_source(publisher, ["pending", status], exit_code=int(status == "failure"))
+    statuses = check_source(publisher, ["pending", status])
     assert all(s["context"] == "Loop-zero Eligibility" for s in statuses)
     assert delays == {"unknown": [2, 4, 8], "settles": [2]}.get(blocker, [])
     if status == "success":
@@ -205,7 +205,7 @@ def test_hosted_review_coverage_after_source_head_changes(
 
     ordinary = change == "ordinary"
     state = ("failure" if candidate else "pending") if ordinary else "success"
-    statuses = check_source(publisher, ["pending", state], exit_code=int(state == "failure"))
+    statuses = check_source(publisher, ["pending", state])
     if state == "failure":
         assert "source #7: no review recorded" in statuses[-1]["description"]
 
@@ -249,8 +249,8 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
         raise github.ProcTimeout("lost status reply", "")
 
     monkeypatch.setattr(github, "commit_status", lose_reply)
-    check_source(publisher, ["pending", state], exit_code=int(not ready),
-                 error=hosted.LoopZeroError if readback != "match" else None,
+    check_source(publisher, ["pending", state],
+                 error=hosted.LoopZeroError if readback not in {"match", "publisher"} else None,
                  match="confirm eligibility status publication")
 
 
@@ -349,7 +349,8 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     monkeypatch.setattr("loopzero.candidate._retry_clock", lambda: now[0])
     monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda s: (sleeps.append(s), now.__setitem__(0, now[0] + s)))
     mergeability_sleeps = []
-    monkeypatch.setattr(hosted.eligibility, "sleep", mergeability_sleeps.append)
+    monkeypatch.setattr(hosted.eligibility, "sleep",
+                        lambda s: (mergeability_sleeps.append(s), now.__setitem__(0, now[0] + s)))
     published = []
     def publish(*args):
         published.append(args)
@@ -395,13 +396,14 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         monkeypatch.setattr(hosted.mergify, "api_get", lambda repo, suffix: candidate_status()
                             if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     with pytest.raises(error, match=message or None) if error else nullcontext():
-        assert hosted.main() == int(case in {"api", "mergify", "pending_mergeability", "policy", "hold"})
+        assert hosted.main() == int(case in {"api", "mergify", "pending_mergeability"})
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
               "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
     states |= {"settled_mergeability": ["pending", "success"], "pending_mergeability": ["pending"]}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
     if case in {"settled_mergeability", "pending_mergeability"}:
-        assert mergeability_sleeps == ([2] if case == "settled_mergeability" else [2, 4, 8])
+        assert mergeability_sleeps[:3] == ([2] if case == "settled_mergeability" else [2, 4, 8])
+        assert (set(sleeps) == {5}) == (case == "pending_mergeability")  # a persistent outage retries for the 90 s window
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":
         assert rest_calls.count("apps/mergify") == 8 and sleeps == [4] * 7 and len(evaluated) == 16
@@ -477,3 +479,9 @@ def test_source_status_limit(publisher, capsys, prior):
     for states in (expected, [*expected, "pending"]):
         check_source(publisher, states, error=github.GhError, match=message)
     assert capsys.readouterr().out == ""
+
+
+def test_source_status_flattens_reasons_and_keeps_later_ones_visible():
+    result = github.Readiness(False, ("src/a\n::notice title=x::forged" + "z" * 200, "has merge conflicts"))
+    state, message = hosted.eligibility.source_status(result)
+    assert state == "failure" and "\n" not in message and message.endswith("; has merge conflicts")
