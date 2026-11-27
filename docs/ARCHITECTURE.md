@@ -232,8 +232,6 @@ visible. The evidence diff digest always binds the original Git bytes. Git force
 text hunks for every file (overriding `-diff`, `binary` and NUL detection) and
 runs no external diff command or text conversion, so changed lines stay visible.
 Chunked review summarizes only files whose Git header reports a deletion.
-The runner probes the selected Codex binary with `--version` and records its
-stdout in runner provenance and the saved review receipt when available.
 Unsupported Claude options follow existing native failure handling.
 Native defaults and read-only tools remain enabled. Neither reviewer loads
 instructions from the reviewed head, which the PR controls: Claude runs with
