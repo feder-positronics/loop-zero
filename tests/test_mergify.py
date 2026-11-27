@@ -354,10 +354,10 @@ def test_failed_job_diagnostics_are_bounded_and_keep_links(monkeypatch):
     calls = []
 
     def logs(argv, **options):
-        job = argv[-1].split("/")[-2]
+        job = argv[2].split("/")[-2]
         calls.append(job)
-        assert argv[1:6] == ["api", "--hostname", "github.com", "--allow-escape-sequences",
-                             f"repos/{repo}/actions/jobs/{job}/logs"]
+        assert argv[1:] == ["api", f"repos/{repo}/actions/jobs/{job}/logs",
+                            "--hostname", "github.com", "--allow-escape-sequences"]
         assert options["tail_chars"] == 256 * 1024 and 0 < options["timeout"] <= 5
         if job == "1":
             return SimpleNamespace(exit_code=1, stdout="credential in remote error")

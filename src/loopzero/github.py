@@ -24,7 +24,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from loopzero import runners
-from loopzero._proc import SECRET_PATTERNS, ProcTimeout, ToolMissing, build_env, redact, run, secret_forms
+from loopzero._proc import SECRET_PATTERNS, Completed, ProcTimeout, ToolMissing, build_env, redact, run, secret_forms
 from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, LoopZeroError, ReviewResult, is_sha
 
@@ -534,9 +534,9 @@ def api_get(endpoint: str, **kwargs) -> object:
     return _gh_json("api", endpoint, **kwargs)
 
 
-def job_log(repo: str, job_id: str):
-    return run(["gh", "api", "--hostname", "github.com", "--allow-escape-sequences",
-                f"repos/{repo}/actions/jobs/{job_id}/logs"], cwd=Path.cwd(), env_allowlist=GH_ENV,
+def job_log(repo: str, job_id: str) -> Completed:
+    return run(["gh", "api", f"repos/{repo}/actions/jobs/{job_id}/logs",
+                "--hostname", "github.com", "--allow-escape-sequences"], cwd=Path.cwd(), env_allowlist=GH_ENV,
                timeout=read_timeout(5), encoding="utf-8", merge_output=True, tail_chars=256 * 1024)
 
 

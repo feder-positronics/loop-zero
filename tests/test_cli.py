@@ -4812,6 +4812,7 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         template = MERGIFY_QUEUE_FIXTURE.get(
             "admission_report" if admission else f"{kind.partition('_')[0]}_report", MERGIFY_QUEUE_FIXTURE["report"])
         body = template.replace("@url@", URL).replace("@sha@", "f" * 7 if kind == "head" else head[:7])
+        body += MERGIFY_QUEUE_FIXTURE["attribution"].get(kind, "")
         if kind in {"isolated", "stacked"}:
             job = 139880043495 if kind == "isolated" else 139939028086
             job_url = f"https://github.com/{REPO}/actions/runs/99/job/{job}"
@@ -4821,10 +4822,10 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
                          "::test_role_and_catalog_capability_failures_are_advisory[CREATE ROLE isolated NOLOGIN]")
             body += f"\n- ❌ [`Backend static checks and unit lane / Backend validation`]({job_url})"
             log = f"2026-11-26T11:47:24.4155165Z FAILED {node} - detail from the test\n"
-            gh.respond(f"api --hostname github.com --allow-escape-sequences repos/{REPO}/actions/jobs/{job}/logs", log)
+            gh.respond(f"api repos/{REPO}/actions/jobs/{job}/logs", log)
         comments.append({"id": 43, "user": {"login": "someone-else" if kind == "author" else "mergify[bot]"},
                          "updated_at": MERGIFY_QUEUE_FIXTURE["admission"].get(kind, "2026-11-25T19:01:00Z"),
-                         "body": body + MERGIFY_QUEUE_FIXTURE["attribution"].get(kind, "")})
+                         "body": body})
     requeued = {"rule_requeue": "19:02", "requeue": "19:02", "rule_same": "19:01", "linked_already": "19:00:30"}
     if kind in requeued:  # linked_already: a command Mergify answered "already queued" before the departure
         at = requeued[kind]
