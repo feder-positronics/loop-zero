@@ -1145,8 +1145,8 @@ def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bo
     runs = data.get("workflow_runs") if isinstance(data, dict) else None
     complete = isinstance(runs, list) and data.get("total_count") == len(runs)
     titles = [run.get("display_title") if isinstance(run, dict) else 0 for run in runs] if complete else []
-    # Consumer workflows may not set a run title; a title whose last "#N" names another PR excludes a run.
-    if any((isinstance(t, str) and int((re.findall(r"#([0-9]+)", t) or [number])[-1]) == number) or t is None
+    # Consumer workflows may not set a run title; a title naming another PR excludes a run.
+    if any((isinstance(t, str) and int((re.findall(r"(?i)\b(?:pr|pull request) #([0-9]+)", t) or [number])[0]) == number) or t is None
            for t in titles):
         return True
     if not complete or not all(t is None or isinstance(t, str) for t in titles):

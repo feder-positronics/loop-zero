@@ -4166,9 +4166,9 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: Fak
     transient = outcome in {"applied", "consumer", "other", "numbered", "malformed", "retry", "unknown"}
     gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": "HTTP 503" if transient else "HTTP 403"} if transient or outcome == "denied" else "", "")
     monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
-    titles = {"applied": "Refresh eligibility for PR #7", "consumer": "Eligibility", "numbered": "Run #42: eligibility for pull request #7", "malformed": {"x": 1}}
+    titles = {"applied": "Refresh eligibility for PR #7", "consumer": "Eligibility", "numbered": "Eligibility for pull request #7 (run #42)", "malformed": {"x": 1}}
     runs = [] if outcome in {"retry", "other"} else [{"display_title": titles.get(outcome, "Refresh eligibility for PR #8")}]
-    runs = [{"display_title": "Eligibility for pr #8"}] if outcome == "other" else runs
+    runs = [{"display_title": "Eligibility for pr #8 (run #7)"}] if outcome == "other" else runs
     monkeypatch.setattr(github.time, "time", lambda: 1795640554)
     endpoint = ELIGIBILITY_DISPATCH.removesuffix("/dispatches")
     gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs) + (outcome == "unknown")})

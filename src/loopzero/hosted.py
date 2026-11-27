@@ -91,7 +91,7 @@ def _run(cfg: Config) -> int:
         return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
     github.commit_status(cfg.repo, head, eligibility.CONTEXT, "pending",
                          "Refreshing live source review evidence")
-    snapshot = None
+    snapshot = rejection = None
     try:
         if candidate:
             def policy(source_number: int, source: dict) -> None:
@@ -100,13 +100,16 @@ def _run(cfg: Config) -> int:
                                               snapshot=github.pr_from_rest(source))
                 if not result.ready:
                     raise _SourcePolicyRejection(f"source #{source_number}: " + "; ".join(result.reasons))
-            candidate_mod.attest_candidate(
-                event, base_branch=cfg.base_branch,
-                github_get=lambda path: github.api_get(path.lstrip("/")),
-                mergify_status=lambda owner, repo, branch: mergify.api_get(
-                    f"{owner}/{repo}", f"/merge-queue/status?branch={quote(branch, safe='')}"),
-                source_policy=policy,
-            )
+            try:
+                candidate_mod.attest_candidate(
+                    event, base_branch=cfg.base_branch,
+                    github_get=lambda path: github.api_get(path.lstrip("/")),
+                    mergify_status=lambda owner, repo, branch: mergify.api_get(
+                        f"{owner}/{repo}", f"/merge-queue/status?branch={quote(branch, safe='')}"),
+                    source_policy=policy,
+                )
+            except _SourcePolicyRejection as exc:
+                rejection = str(exc)
         else:
             snapshot = eligibility.source_snapshot(cfg.repo, number, head, github.pr_from_rest(pr))
             result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers,
@@ -114,11 +117,9 @@ def _run(cfg: Config) -> int:
         current = _publication_snapshot(cfg.repo, number, head, snapshot)
         if current is None:
             return 0
-        state, message = (("success", "All attested candidate sources are reviewed") if candidate
+        state, message = (("failure", rejection) if rejection else
+                          ("success", "All attested candidate sources are reviewed") if candidate
                           else _source_status(result, current))
-    except _SourcePolicyRejection as exc:
-        _publication_snapshot(cfg.repo, number, head, None)
-        state, message = "failure", str(exc)
     except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable) as exc:
         print(f"Eligibility pending: evidence unavailable ({exc}); rerun this workflow", file=sys.stderr)
         return 1
