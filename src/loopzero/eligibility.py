@@ -270,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.publish:
             publish("pending", "Refreshing source review evidence")
         result = evaluate(cfg.repo, args.pr, args.head, cfg.base_branch, cfg.review_publishers)
-        if args.publish and github.pr_view(cfg.repo, args.pr).state != "MERGED":
+        if args.publish:
             state = "success" if result.ready else "pending" if result.reasons == (github.MERGEABILITY_PENDING,) else "failure"
             publish(state, reasons_text(result.reasons) or "Reviewed source head")
     except (LoopZeroError, OSError) as exc:

@@ -132,12 +132,12 @@ def _run(cfg: Config) -> int:
     snapshot = None
     try:
         if candidate:
-            retry(lambda: _attest(cfg, event))
+            current = retry(lambda: (_attest(cfg, event), _publication_snapshot(cfg.repo, number, head, None))[1])
         else:
             snapshot = eligibility.source_snapshot(cfg.repo, number, head, github.pr_from_rest(pr))
             result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers,
                                           snapshot=snapshot)
-        current = retry(lambda: _publication_snapshot(cfg.repo, number, head, snapshot))
+            current = _publication_snapshot(cfg.repo, number, head, snapshot)
         if current is None:
             return 0
         state, message = (("success", "All attested candidate sources are reviewed") if candidate
