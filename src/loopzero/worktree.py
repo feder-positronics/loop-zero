@@ -50,12 +50,12 @@ def git(cwd: Path, *args: str, env_allowlist: tuple[str, ...] = GIT_ENV, timeout
 def branch_name(repo_root: Path, slug: str) -> str:
     """Return `lz/<slug>` after git itself confirms it is a well-formed branch name."""
     if not slug or "/" in slug or slug.startswith("."):
-        raise WorktreeError(f"invalid slug: {slug!r}")
+        raise WorktreeError(f"invalid slug: {slug!r}. Choose a task slug such as `fix-check-output`.")
     name = f"lz/{slug}"
     done = run(["git", "check-ref-format", "--branch", name], cwd=repo_root,
                env_allowlist=GIT_ENV, timeout=30)
     if done.exit_code != 0:
-        raise WorktreeError(f"invalid slug: {slug!r} ({done.stderr.strip()})")
+        raise WorktreeError(f"invalid slug: {slug!r} ({done.stderr.strip()}). Choose a task slug such as `fix-check-output`.")
     return name
 
 
@@ -227,11 +227,11 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     wt = worktree_dir(repo_root, slug)
     task = task_file(wt)
     existing = wt.exists()
-    refusal = f"worktree directory already exists: {wt}"
+    refusal = f"worktree directory already exists: {wt}. Resume there if it belongs to this task, or run `loopzero start` with a new slug."
     if wt.is_symlink() or task.parent.is_symlink() or task.is_symlink() or task.exists():
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
-        raise WorktreeError(f"branch already exists: {branch}")
+        raise WorktreeError(f"branch already exists: {branch}. Run `git worktree list` to find the checkout, or use a new slug.")
     base = _fetch_base(repo_root, base_branch)
     detached = not existing
     if existing:
@@ -325,7 +325,7 @@ def task_text(wt: Path) -> str:
 
 def base_sha(wt: Path) -> str:
     if not (match := _BASE_SECTION.search(task_text(wt))):
-        raise WorktreeError(f"no '<branch> @ <sha>' line in the Base section of {task_file(wt)}")
+        raise WorktreeError(f"no '<branch> @ <sha>' line in the Base section of {task_file(wt)}. Restore that line in the task file using the base branch and SHA from task creation.")
     return match.group(1)
 
 

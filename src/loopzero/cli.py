@@ -176,7 +176,7 @@ def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, head
     if pr is None:
         raise CliError(f"no pull request for {branch}; run `loopzero pr` first")
     if pr.state != "OPEN" and not (allow_merged and pr.state == "MERGED"):
-        raise CliError(f"PR #{pr.number} is {pr.state}, not open: {pr.url}")
+        raise CliError(f"PR #{pr.number} is {pr.state}: {pr.url}. Reopen a closed unmerged PR or run `loopzero start` for a new task.")
     return pr
 
 
@@ -304,7 +304,7 @@ def _readiness(
         if mergify.configured(config.repo, config.base_branch, config.mergify_queue or "", mergify_deadline):
             reasons = tuple(reason for reason in reasons if reason != behind)
         else:
-            reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
+            reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates. Verify the queue in Mergify or ask its maintainer to disable source branch updates.")
         result = dataclasses.replace(result, ready=not reasons, reasons=reasons)
     review_reason = review_blocker or github.MISSING_REVIEW_REASON
     if review_reason in result.reasons:
@@ -380,8 +380,8 @@ def _check_report_problem(
                     "Retry unchanged only if the failure was transient.")
         return ("check receipt's plan differs from the trusted workflow. "
                 "Run `loopzero check` with the current workflow.")
-    recovery = ("Run loopzero check in this worktree at this head with the same current CLI and effective "
-                "settings as ready.")
+    recovery = ("Rerun `loopzero check` in this worktree at this head with the same CLI version, environment "
+                "and `--config` (if supplied) as the blocked command, then retry it.")
     if report.settings_sha256 is None:
         return f"check receipt is missing its settings fingerprint. {recovery}"
     if report.settings_sha256 != sandbox.settings_fingerprint(config):
@@ -650,7 +650,7 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
         print(f"--- {github.redact_credentials(result.command)} (exit {result.exit_code}) ---", file=sys.stderr)
         tail = _proc.tail(result.tail)
         shortened |= (preview := _check_failure_preview(tail)) != tail
-        print(preview, file=sys.stderr)
+        print(f"{preview}\nFix the failed stage, then rerun `loopzero check`.", file=sys.stderr)
         if not config.network and (result.command.startswith("uv sync --offline --locked")
                                    or OFFLINE_FAILURE_RE.search(tail)):
             env = sandbox.check_environment(config)
@@ -787,7 +787,7 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
     pr = _require_review_pr(config, branch, head, repost=args.repost)
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
-        raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
+        raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}. Retarget the PR on GitHub and retry.")
     token = github.app_token()  # one identity for the publisher check and the post
     publisher = github.login(token=token)
     if config.review_publishers and publisher.casefold() not in {
@@ -802,7 +802,7 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
                        f"Configured publishers: {', '.join(config.review_publishers)}.{helper}")
     saved = [kind for kind, exists in zip(kinds, saved_files, strict=True) if exists] if args.repost else []
     if len(saved) > 1:
-        raise CliError("multiple saved reviews for HEAD; publication is ambiguous")
+        raise CliError("multiple saved reviews for HEAD make publication ambiguous. Check the PR review history, then run `loopzero review` without `--repost`.")
     reviews = [] if saved else _pr_reviews(config.repo, pr.number)
     kind, reviewed = (saved[0], None) if saved else _select_review_round(config, pr, head, reviews)
     publication_context = {"repo": config.repo, "number": pr.number, "publisher": publisher}
@@ -814,7 +814,7 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
                     or publication.get("number") != pr.number
                     or not isinstance(publication.get("publisher"), str)
                     or not publication["publisher"]):
-                raise CliError("saved publication identity differs from this repository/PR")
+                raise CliError("saved publication identity differs from this repository/PR. Switch to the original PR worktree or run `loopzero review` without `--repost`.")
             confirmed, reviews = _recover_review(wt, config, pr, result,
                                                        publication["publisher"], token)
             if confirmed:
@@ -823,10 +823,10 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
             reviews = _pr_reviews(config.repo, pr.number)
         # Exact read-back above may confirm an older published note; a new post needs the current form.
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
-            raise CliError("saved fallback note is not in the published form; run without --repost")
+            raise CliError("saved fallback note is not in the published form. Run `loopzero review` without `--repost`.")
         allowed, reviewed = _select_review_round(config, pr, head, reviews)
         if allowed != kind:
-            raise CliError("saved review kind differs from the remaining review budget")
+            raise CliError("saved review kind differs from the remaining review budget. Run `loopzero review` without `--repost`.")
         _delta_patch(wt, config, reviewed, head, pr.number)
     else:
         if args.model is None and args.effort is None and _has_recoverable_review(
@@ -892,7 +892,7 @@ def _require_open_review_round(config: Config, pr: github.PR, head: str, kind: s
     if pr.head_sha != head:
         raise CliError("PR head moved during the review; pull it and rerun `loopzero review`")
     if pr.state != "OPEN" or pr.base_ref != config.base_branch:
-        raise CliError(f"PR is {pr.state.lower()} targeting {pr.base_ref}, not open against {config.base_branch}")
+        raise CliError(f"PR is {pr.state.lower()} targeting {pr.base_ref}, not open against {config.base_branch}. Reopen or retarget it on GitHub, then run `loopzero review --repost`.")
     reviews = _pr_reviews(config.repo, pr.number)
     markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if any(marker.kind == kind and marker.head == head for marker in markers):
@@ -913,7 +913,7 @@ def _refresh_publisher_token(token: str, publisher: str) -> str:
 
 def _review_verdict(result: ReviewResult) -> int:
     summary = ", ".join(f"{sum(f.severity == s for f in result.findings)} {s}" for s in runners.SEVERITIES)
-    print(f"{result.kind} review by {result.family} on {result.head[:12]}: {result.verdict} ({summary})")
+    print(f"{result.kind} review by {result.family} on {result.head[:12]}: {result.verdict} ({summary})", end="\n" if result.verdict == "approve" else ". Inspect the PR review and run `loopzero resolve` to list open findings.\n")
     return 0 if result.verdict == "approve" else 5  # the exit code is the verdict, as for check
 
 
@@ -925,7 +925,7 @@ def _repost_reviewer_families(
     excluded = [family for family in config.reviewers if family in authors]
     if result.fallback and result.family not in excluded:
         raise CliError(f"saved review claims a same-family fallback, but {result.family} is not a configured "
-                       "reviewer family that contributed to this PR lineage; run without --repost")
+                       "reviewer family that contributed to this PR lineage. Run `loopzero review` without `--repost`.")
     if not result.fallback and not candidates:
         raise IndependentReviewerUnavailable(
             "saved review has no same-family fallback disclosure, but every configured family "
@@ -1053,8 +1053,8 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
     if not _is_ancestor(wt, since, head):
         raise CliError(
             f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original tip with `git reflog`. "
-            "Back up your branch, reset to that tip and replay later fixes. To publish the restored head, "
-            f"run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR"
+            "Back up your branch, restore that tip and replay later fixes. Fetch the base and "
+            f"merge `{shlex.quote(f'origin/{config.base_branch}')}` into the restored branch, then run `loopzero check`, `loopzero pr` and `loopzero review`, or open a new PR."
         )
     merged = worktree.merges_since(wt, since)
     if not merged:
@@ -1232,7 +1232,7 @@ def _load_review(
         if not isinstance(data, dict):
             raise ValueError("review receipt must be an object")
         if data.get("head") != head:
-            raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
+            raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}. Run `loopzero review` without `--repost`.")
         saved_publication = data.pop("publication", None)
         if data.get("kind") != kind or (publication is not None and saved_publication != publication):
             raise ValueError("saved review kind or publication mismatch")
@@ -1244,11 +1244,11 @@ def _load_review(
                 raise ValueError("retired paired review")
         result = ReviewResult(**{**data, "findings": findings})
     except FileNotFoundError:
-        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost") from None
+        raise CliError(f"no saved {kind} review for {head[:12]} at {path}. Run `loopzero review` without `--repost`.") from None
     except (KeyError, OSError, TypeError, ValueError) as exc:
-        raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
+        raise CliError(f"{path} is not runner-produced: invalid saved review. Run `loopzero review` without `--repost`.") from exc
     if not runners.validate_runner_result(result):
-        raise CliError(f"{path} is not runner-produced: provenance/envelope mismatch")
+        raise CliError(f"{path} is not runner-produced: provenance/envelope mismatch. Run `loopzero review` without `--repost`.")
     return result, saved_publication
 
 
@@ -1863,7 +1863,7 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
     if readiness is None:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha is None:
-            raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
+            raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet. Verify it on GitHub, then rerun `loopzero merge --wait` to finish cleanup.")
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
@@ -1929,7 +1929,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     branch = worktree.branch(wt)
     pr = _require_pr(config, branch)
     if pr.base_ref != config.base_branch:  # trusted publishers belong to the configured base
-        raise CliError(f"PR #{pr.number} targets {pr.base_ref}, configured base is {config.base_branch}")
+        raise CliError(f"PR #{pr.number} targets {pr.base_ref}, configured base is {config.base_branch}. Retarget the PR on GitHub and retry.")
     publishers = config.review_publishers or (github.login(),)
     if not args.finding:
         for marker_id, _thread, f in github.open_findings(config.repo, pr.number, publishers):
@@ -2033,7 +2033,7 @@ def _run(args: argparse.Namespace) -> int:
         print(f"loopzero {args.command}: {prefix}{_one_line(exc)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print(f"loopzero {args.command}: interrupted", file=sys.stderr)
+        print(f"loopzero {args.command}: interrupted. Run `loopzero status` before resuming delivery.", file=sys.stderr)
         return 130
 
 
