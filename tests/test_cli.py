@@ -556,9 +556,10 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, tmp_
         assert_contains(body, f"Recorded for `{head_of(wt)[:12]}`", "- `echo ok`: exit 0")
 
 
+FENCED_EXAMPLE = "~~~~markdown\n## Context and goal\n<!-- loopzero:checks:start -->\nExample\n<!-- loopzero:checks:end -->\n~~~~"
 LIVE_PR_BODY = (
     "# Owner-edited title\n\n## Acceptance\n- Updated acceptance on GitHub.\n\n"
-    "## Validation\n"
+    f"## Validation\n{FENCED_EXAMPLE}\n\n"
     "Browser: original failure reproduced; corrected image returns 200.\n\n"
     "## Review\n- primary, claude, aaaaaaaaaaaa, request_changes\n"
     "- delta, claude, bbbbbbbbbbbb, approve\n\n"
@@ -593,8 +594,7 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
         return
 
     if command == "check":
-        assert body.startswith("# Owner-edited title\n\n## Acceptance\n")
-        assert "- Updated acceptance on GitHub." in body
+        assert body.startswith("# Owner-edited title\n\n## Acceptance\n- Updated acceptance on GitHub.")
         report = cli._load_report(wt)
         results = tuple(replace(stage, duration_s=999.0) for stage in report.results)
         cli._save_report(wt, replace(report, results=results))
@@ -603,7 +603,8 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
         assert "Updated acceptance on GitHub" not in body
     assert_contains(body, "Browser: original failure reproduced; corrected image returns 200.",
                     "- primary, claude, aaaaaaaaaaaa, request_changes", "- delta, claude, bbbbbbbbbbbb, approve",
-                    "## Evidence\nProduction probe returned 100 records.")
+                    "## Evidence\nProduction probe returned 100 records.", FENCED_EXAMPLE)
+    assert "## Validation\n<!-- loopzero:checks:start -->\n" in body
     gh.respond_pr_list([pr_json(headRefOid=original_head, body=body)])
     before = len(gh.calls)
     expect_cli(capsys, 0, command)
@@ -1313,12 +1314,15 @@ def test_pr_updates_existing_open_pr(wt, gh, capsys, corrupt_report, git_calls):
     if corrupt_report:
         (wt / ".loopzero" / "checks.json").write_text('{"results": "nope"}')
     arm_pr_body_patch(gh, head_of(wt))
+    merged = closed_history_row(pr_json(number=8, state="MERGED", baseRefName="release", url=URL[:-1] + "8"))
+    gh.respond(branch_history_key(), [merged])
+    gh.respond(f"api repos/{REPO}/pulls/8", merged)
 
     git_calls.clear()
     _, err = expect_cli(capsys, 0, "pr", stdout=URL + "\n")
     assert not any(call[:2] == ["merge-base", "--is-ancestor"] for call in git_calls)
     assert ("warning: ignoring unreadable" in err) == corrupt_report
-    assert [c['argv'][:2] for c in gh.calls] == HISTORY_CALLS + LOOKUP_CALLS + [['api', f'repos/{REPO}/pulls/7']] * 2
+    assert [c['argv'][:2] for c in gh.calls] == HISTORY_CALLS + [['api', f'repos/{REPO}/pulls/8']] + LOOKUP_CALLS + [['api', f'repos/{REPO}/pulls/7']] * 2
     assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 

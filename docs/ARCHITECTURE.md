@@ -124,9 +124,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    matching open PR is absent, then checks the newest closed PR when requested. Check refresh
    is open-only. Before pushing
    or writing, `pr` requires a confirmed merge or a complete closed-history read
-   through GitHub REST. A confirmed merge completes that branch even when a
-   newer duplicate exists. If the head commit cannot prove completion, the
-   fallback scans closed PRs by source branch across up to 100 REST pages.
+   through GitHub REST. A confirmed merge into the configured base completes
+   that branch even when a newer duplicate exists. If the head commit cannot
+   prove completion, the fallback scans closed PRs by source branch across up
+   to 100 REST pages.
    Invalid or incomplete history blocks publication. An unfinished branch
    creates or refreshes a draft PR. All effective origin push URLs must target
    the configured repository. A leased rewrite requires the PR head in the task branch's
