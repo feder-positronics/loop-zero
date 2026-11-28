@@ -86,10 +86,6 @@ def _field(value: object, name: str) -> object:
     return value.get(name) if isinstance(value, dict) else None
 
 
-def _matches(pattern: re.Pattern[str], value: object) -> bool:
-    return isinstance(value, str) and pattern.fullmatch(value) is not None
-
-
 def _identity(actor: object) -> tuple[object, object, object, object]:
     if not isinstance(actor, dict):
         return (None, None, None, None)
@@ -444,7 +440,8 @@ def _attest_candidate_once(  # noqa: C901 - candidate retry loop with one outcom
     _require(event.get("action") in {"opened", "synchronize"},
              "Candidate attestation requires its creation or head-update event")
     full_name = repository.get("full_name")
-    _require(_matches(_REPOSITORY, full_name), "GitHub event repository name is invalid")
+    _require(isinstance(full_name, str) and _REPOSITORY.fullmatch(full_name) is not None,
+             "GitHub event repository name is invalid")
     event_head = _object(event_pr.get("head"), "GitHub event candidate head is missing")
     event_ref = event_head.get("ref")
     _require(isinstance(event_ref, str) and event_ref.startswith(QUEUE_BRANCH_PREFIX),
