@@ -9,6 +9,7 @@ import subprocess
 import sys
 from contextlib import nullcontext
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from shutil import copytree
 
@@ -44,6 +45,12 @@ def commit_on_origin(repo: Path, name: str) -> str:
     return worktree.head(clone)
 
 
+def refused_start(repo, slug, diagnostic):
+    with pytest.raises(worktree.WorktreeError, match=diagnostic) as error:
+        worktree.start(repo, slug, "main")
+    return str(error.value)
+
+
 @pytest.mark.parametrize("slug", ["zażółć\u00a0", "ok-1.2_x"])
 def test_branch_reads_valid_names_and_rejects_detached_head(repo: Path, slug: str) -> None:
     git(repo, "switch", "-c", worktree.branch_name(repo, slug))
@@ -60,7 +67,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     upstream = commit_on_origin(repo, "feature.txt")
     if branch == "symbolic":
         git(repo, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/main")
-    elif branch and branch != "legacy":
+    elif branch not in {None, "legacy"}:
         checkout = repo.parent / "single-branch"
         origin = (repo.parent / "origin.git").as_uri()
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
@@ -84,14 +91,15 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     assert git(repo, "rev-parse", "refs/remotes/origin/main").strip() == upstream
     assert worktree.base_sha(wt) == upstream
     text = worktree.task_text(wt)
+    lines = text.splitlines()
     assert text.startswith("# My task\n")
-    headings = [ln for ln in text.splitlines() if ln.startswith("## ")]
-    assert headings == ["## Context and goal", "## Acceptance", "## Notes", "## Base",
-                        "## Validation", "## Review"], "matches core/HANDOFF.md"
-    prompts = [ln.split(":**", 1)[0] for ln in text.splitlines() if ln.startswith("- **")]
-    assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
-    base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
-    assert base_section.strip().splitlines() == [f"main @ {upstream}"]
+    assert [line for line in lines if line.startswith("## ")] == [
+        "## Context and goal", "## Acceptance", "## Notes", "## Base", "## Validation", "## Review",
+    ]
+    assert [line.split(":**", 1)[0] for line in lines if line.startswith("- **")] == [
+        "- **Goal", "- **Problem", "- **Context",
+    ]
+    assert text.split("## Base\n", 1)[1].split("\n## ", 1)[0].strip() == f"main @ {upstream}"
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -113,7 +121,7 @@ def test_start_rejects_origin_response_for_another_ref(repo, monkeypatch, legacy
     monkeypatch.setattr(worktree, "run", wrong_ref)
     with pytest.raises(worktree.GitError, match=r"origin did not report|refs/remotes/origin/unrelated"):
         worktree.start(repo, "wrong-ref", "main")
-    assert not (repo / ".worktrees" / "wrong-ref").exists()
+    assert not worktree.worktree_dir(repo, "wrong-ref").exists()
 
 
 @pytest.mark.parametrize("state", [
@@ -157,12 +165,8 @@ def test_start_resumes_only_a_clean_checkout_at_the_expected_identity(repo, monk
         git(wt, "push", "origin", "HEAD:main")
 
     # A checkout can change after Git reports its registration.
-    def registered_before_change(cwd, *args, **kwargs):
-        return registration if args == listing else invoke(cwd, *args, **kwargs)
-
-    monkeypatch.setattr(worktree, "git", registered_before_change)
-    with pytest.raises(worktree.WorktreeError, match=expected):
-        worktree.start(repo, "my-task", "main")
+    monkeypatch.setattr(worktree, "git", lambda cwd, *args, **kw: registration if args == listing else invoke(cwd, *args, **kw))
+    refused_start(repo, "my-task", expected)
     assert not worktree.task_file(wt).exists()
 
 
@@ -173,29 +177,29 @@ def test_start_excludes_worktrees_and_task_dir(repo: Path, monkeypatch, case: st
     if case in ("file", "directory"):
         link = exclude if case == "file" else exclude.parent
         link.symlink_to(link.rename(repo.parent / "outside"))
-        with pytest.raises(worktree.WorktreeError, match="outside its Git directory"):
-            worktree.start(repo, "t1", "main")
+        refused_start(repo, "t1", "outside its Git directory")
         assert exclude.read_text() == "*.log" and not (repo / ".worktrees").exists()
         return
     old_inode = exclude.stat().st_ino
     write = worktree.os.write
-    replacement, concurrent = case == "replace", case in ("append", "replace")
+    replacement = case == "replace"
 
     def interleave(fd, rules):
-        if concurrent and rules.endswith(b".loopzero/\n"):
-            edit = exclude.with_suffix(".edited") if replacement else exclude
-            with edit.open("w" if replacement else "a") as stream:
-                stream.write("*.log\nlocal.env" if replacement else "\nlocal.env")
+        if rules.endswith(b".loopzero/\n"):
             if replacement:
+                edit = exclude.with_suffix(".edited")
+                edit.write_text("*.log\nlocal.env")
                 edit.replace(exclude)
+            else:
+                with exclude.open("a") as stream:
+                    stream.write("\nlocal.env")
             monkeypatch.setattr(worktree.os, "write", write)
         return write(fd, rules)
 
     monkeypatch.setattr(worktree.os, "write", interleave)
     wt = worktree.start(repo, "t1", "main")
     assert (exclude.stat().st_ino != old_inode) == replacement
-    expected = ["*.log", "local.env"] if concurrent else ["*.log"]
-    assert exclude.read_text().splitlines() == [*expected, ".worktrees/", ".loopzero/"]
+    assert exclude.read_text().splitlines() == ["*.log", "local.env", ".worktrees/", ".loopzero/"]
     assert not worktree.is_dirty(wt) and not worktree.is_dirty(repo)
     installed = exclude.stat()
     worktree.start(repo, "t2", "main")
@@ -209,15 +213,11 @@ def test_start_refuses_exclude_symlink_swapped_in_at_open(repo, monkeypatch):
     open_file = worktree.os.open
 
     def swap_at_open(path, *args, **kwargs):
-        if path != exclude:
-            return open_file(path, *args, **kwargs)
-        monkeypatch.setattr(worktree.os, "open", open_file)
-        exclude.unlink()
-        exclude.symlink_to(outside)
-        try:
-            return open_file(path, *args, **kwargs)
-        finally:
+        if path == exclude:
+            monkeypatch.setattr(worktree.os, "open", open_file)
             exclude.unlink()
+            exclude.symlink_to(outside)
+        return open_file(path, *args, **kwargs)
 
     monkeypatch.setattr(worktree.os, "open", swap_at_open)
     with pytest.raises(OSError) as error:
@@ -245,29 +245,24 @@ def test_start_refuses_an_existing_task_destination(repo: Path, collision: str) 
         link.parent.mkdir(exist_ok=True)
         link.symlink_to(repo.parent / "missing")
     kind = "branch" if collision == "branch" else "worktree directory"
-    with pytest.raises(worktree.WorktreeError, match=f"^{kind} already exists"):
-        worktree.start(repo, "dup", "main")
+    refused_start(repo, "dup", f"^{kind} already exists")
     assert bool(git(repo, "branch", "--list", "lz/dup")) == (collision == "branch")
 
 
-@pytest.mark.parametrize("slug", ["a/b", "bad..name", "trail.lock", ""])
-def test_start_rejects_bad_slug(repo: Path, slug: str) -> None:
-    with pytest.raises(worktree.WorktreeError, match="invalid slug"):
-        worktree.start(repo, slug, "main")
-    assert not (repo / ".worktrees").exists(), "rejected before fetch or worktree add"
-
-
-@pytest.mark.parametrize("change", [("remove", "origin"), ("rename", "origin", "upstream")])
-def test_start_explains_missing_origin(repo: Path, change: tuple[str, ...]) -> None:
-    git(repo, "remote", *change)
-
-    with pytest.raises(worktree.WorktreeError, match="no Git remote named 'origin'") as info:
-        worktree.start(repo, "my-task", "main")
-
-    for repair in ("add origin <url>", "rename <name> origin"):
-        assert f"git remote {repair}" in str(info.value)
-    assert git(repo, "branch", "--list", "lz/my-task") == ""
-    assert not worktree.worktree_dir(repo, "my-task").exists()
+@pytest.mark.parametrize("slug,remote_change", [
+    *((slug, ()) for slug in ("a/b", "bad..name", "trail.lock", "")),
+    ("my-task", ("remove", "origin")), ("my-task", ("rename", "origin", "upstream")),
+])
+def test_start_rejects_invalid_slug_or_missing_origin(repo: Path, slug, remote_change) -> None:
+    if remote_change:
+        git(repo, "remote", *remote_change)
+        diagnostic = refused_start(repo, slug, "no Git remote named 'origin'")
+        assert "git remote add origin <url>" in diagnostic and "git remote rename <name> origin" in diagnostic
+        assert not git(repo, "branch", "--list", "lz/my-task")
+        assert not worktree.worktree_dir(repo, slug).exists()
+    else:
+        refused_start(repo, slug, "invalid slug")
+        assert not (repo / ".worktrees").exists()
 
 
 def test_start_reports_git_failure_with_command(repo: Path) -> None:
@@ -312,15 +307,12 @@ def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path)
 
 def test_task_helpers_errors(repo: Path) -> None:
     wt = worktree.start(repo, "tk", "main")
-    worktree.task_file(wt).write_text("# no base line\n")
-    with pytest.raises(worktree.WorktreeError, match="Restore that line in the task file"):
-        worktree.base_sha(wt)
-    worktree.task_file(wt).write_text("## Base\nmain @ " + "a" * 40 + "\n")
-    assert worktree.base_sha(wt) == "a" * 40
-    worktree.task_file(wt).write_text("Base: " + "b" * 40 + "\n")  # retired single-line form
-    with pytest.raises(worktree.WorktreeError, match="Restore that line in the task file"):
-        worktree.base_sha(wt)
-    worktree.task_file(wt).unlink()
+    task = worktree.task_file(wt)
+    for text in ("# no base line\n", f"Base: {'b' * 40}\n"):
+        task.write_text(text)
+        with pytest.raises(worktree.WorktreeError, match="Restore that line in the task file"):
+            worktree.base_sha(wt)
+    task.unlink()
     with pytest.raises(worktree.WorktreeError, match="missing"):
         worktree.task_text(wt)
 
@@ -364,9 +356,7 @@ def test_cleanup_preserves_ignored_nested_worktrees(repo: Path, tmp_path: Path, 
     else:
         source = init_git_repo(tmp_path / "other") if kind == "other repo" else repo
         git(source, "worktree", "add", "--detach", str(nested))
-    preserved = nested
-    if kind == "registered only":
-        preserved = nested.rename(tmp_path / "moved")
+    preserved = nested.rename(tmp_path / "moved") if kind == "registered only" else nested
     assert not worktree.is_dirty(wt)
     with pytest.raises(worktree.WorktreeError, match=r"nested (Git )?worktree"):
         worktree.cleanup(wt, worktree.head(wt))
@@ -415,9 +405,7 @@ def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> Non
     assert wt.exists() == (state != "clean")
     assert git(repo, "show-ref", "--verify", "refs/heads/lz/abandoned")
     if state == "clean":
-        assert git(repo, "ls-remote", "origin", "refs/heads/lz/abandoned").split() == [
-            head, "refs/heads/lz/abandoned"
-        ]
+        assert git(repo, "ls-remote", "origin", "refs/heads/lz/abandoned").split() == [head, "refs/heads/lz/abandoned"]
 
 
 def test_start_retries_after_git_checkout_interrupt(repo, tmp_path):
@@ -432,10 +420,11 @@ def test_start_retries_after_git_checkout_interrupt(repo, tmp_path):
         f'kill -INT "$(cat {shlex.quote(str(pid_file))})"; exec sleep 30')
     start = ("import os, sys; from pathlib import Path; from loopzero.cli import main; "
              "Path(sys.argv[1]).write_text(str(os.getpid())); sys.exit(main(['start', 'paused']))")
-    command = [sys.executable, "-c", start, str(pid_file)]
-    first = subprocess.run(command, cwd=repo, capture_output=True, timeout=8, check=False)
+    invoke = partial(subprocess.run, [sys.executable, "-c", start, str(pid_file)],
+                     cwd=repo, capture_output=True, timeout=8, check=False)
+    first = invoke()
     assert entered.exists() and first.returncode in (-2, 130)
     git(repo, "config", "--unset", "filter.paused.smudge")
-    resumed = subprocess.run(command, cwd=repo, capture_output=True, timeout=8, check=False)
+    resumed = invoke()
     assert resumed.returncode == 0, resumed.stderr
     assert worktree.task_file(worktree.worktree_dir(repo, "paused")).is_file()

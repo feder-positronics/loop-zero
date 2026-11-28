@@ -69,7 +69,7 @@ def test_run_reaps_child_before_propagating_keyboard_interrupt(run_python, monke
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="checks Linux process state")
-def test_timeout_stops_descendant_and_preserves_output(tmp_path, monkeypatch):
+def test_timeout_stops_descendant_and_preserves_output(run_python, monkeypatch):
     wait = "import signal; signal.pause()"
     child = f"import os; print(os.getpid(), flush=True); {wait}"
     parent = (
@@ -87,24 +87,16 @@ def test_timeout_stops_descendant_and_preserves_output(tmp_path, monkeypatch):
         monkeypatch.setattr(subprocess, "Popen", ReadyPopen)
         try:
             with pytest.raises(_proc.ProcTimeout, match="timed out") as raised:
-                _proc.run(
-                    [sys.executable, "-c", parent], cwd=tmp_path, env_allowlist=(), timeout=0.05,
-                )
+                run_python(parent, env_allowlist=(), timeout=0.05)
             pid = int(raised.value.stdout)
             stat = Path(f"/proc/{pid}/stat")
             try:
                 deadline = time.monotonic() + 5
-                while True:
-                    try:
-                        state = stat.read_text().rsplit(")", 1)[1].split()[0]
-                    except (FileNotFoundError, ProcessLookupError):
-                        state = "gone"
-                    if state in {"gone", "Z", "X"}:
-                        break
-                    assert time.monotonic() < deadline, f"descendant did not exit: {state}"
-                    time.sleep(0.01)
-                assert raised.value.stderr == "parent stderr\n"
-                assert unrelated.poll() is None
+                with suppress(FileNotFoundError, ProcessLookupError):
+                    while (state := stat.read_text().rsplit(")", 1)[1].split()[0]) not in {"Z", "X"}:
+                        assert time.monotonic() < deadline, f"descendant did not exit: {state}"
+                        time.sleep(0.01)
+                assert raised.value.stderr == "parent stderr\n" and unrelated.poll() is None
             finally:
                 with suppress(ProcessLookupError):
                     os.kill(pid, signal.SIGKILL)

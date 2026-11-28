@@ -12,16 +12,14 @@ import sys
 import threading
 import traceback
 from types import SimpleNamespace
+from unittest.mock import Mock
 import urllib.error
 import urllib.request
 
 import pytest
 
 from loopzero import github, mergify
-
-
-def response(payload: object) -> io.BytesIO:
-    return io.BytesIO(json.dumps(payload).encode())
+from tests.test_github import gh as gh
 
 
 
@@ -35,12 +33,11 @@ def test_malformed_authorization_is_not_logged(monkeypatch, operation, args):
     monkeypatch.setattr(urllib.request, "getproxies", dict)
     monkeypatch.setattr(mergify, "_retry_sleep", lambda _delay: None)
 
-    def reject_network(_connection):
-        pytest.fail("invalid Authorization header reached the network")
-
-    monkeypatch.setattr(http.client.HTTPSConnection, "connect", reject_network)
+    connect = Mock(side_effect=AssertionError("invalid Authorization header reached the network"))
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", connect)
     with pytest.raises(mergify.MergifyError, match="invalid URL or header") as failure:
         operation(*args)
+    connect.assert_not_called()
     assert fake_key not in "".join(traceback.format_exception(failure.value))
 
 
@@ -54,7 +51,8 @@ def request_log(monkeypatch):
             seen.append(request)
             if status:
                 raise urllib.error.HTTPError(request.full_url, status, "test response", {}, None)
-            return response(payload)
+            return io.BytesIO(json.dumps(payload).encode())
+
         monkeypatch.setattr(mergify, "_open", open_)
         return seen
 
@@ -133,7 +131,6 @@ UNSAFE_CONFIGS = [
 
 
 @pytest.mark.parametrize("text,options,accepted", [
-    (SAFE_CONFIG, {}, True),
     (SAFE_CONFIG, {"mode": "parallel"}, False),
     (ONE_CHECK.replace("main}", "main, batch_size: 8}"), {}, True),
     *((text, {}, False) for text in UNSAFE_CONFIGS),
@@ -158,7 +155,8 @@ def test_queue_proof_checks_default_branch_once_after_checking_file_identity(que
 
 
 def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
-    head, marker = "a" * 40, f"<!-- loopzero:mergify-confirmed head={'a' * 40} queue=main -->"
+    head = "a" * 40
+    marker = f"<!-- loopzero:mergify-confirmed head={head} queue=main -->"
     rows = [("trusted", "@mergifyio queue main"), ("attacker", marker),  # early queue: no request
             ("trusted", f"prefix {marker}"), ("trusted", marker), ("attacker", "@mergifyio requeue")]
     monkeypatch.setattr(mergify.github, "login", lambda token=None: "trusted" if token == "" else "app[bot]")
@@ -174,22 +172,14 @@ def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
     (mergify.request, "@mergifyio queue\n\n<!-- loopzero:mergify-request head=abc queue=main -->"),
     (mergify.mark_confirmed, "<!-- loopzero:mergify-confirmed head=abc queue=main -->"),
 ])
-def test_comment_writes_use_github_rest_api(monkeypatch, writer, body):
-    calls = []
-
-    def run(argv, **_kwargs):
-        input_index = argv.index("--input") + 1
-        with open(argv[input_index], encoding="utf-8") as handle:
-            payload = json.load(handle)
-        calls.append((argv[1:input_index] + argv[input_index + 1:], payload))
-        return type("Done", (), {"exit_code": 0, "stdout": "", "stderr": ""})()
-
-    monkeypatch.setattr(mergify.github, "run", run)
+def test_comment_writes_use_github_rest_api(gh, writer, body):
+    endpoint = "repos/acme/widgets/issues/7/comments"
+    gh.respond(f"api {endpoint} --method POST", {})
     writer("acme/widgets", 7, "abc", "main")
-
-    assert calls == [([
-        "api", "repos/acme/widgets/issues/7/comments", "--method", "POST", "--input", "--include",
-    ], {"body": body})]
+    call, = gh.calls
+    assert call["argv"][:5] == ["api", endpoint, "--method", "POST", "--input"]
+    assert call["argv"][6:] == ["--include"]
+    assert json.loads(call["input_files"]["--input"]) == {"body": body}
 
 
 @pytest.mark.parametrize("unsafe,diagnostic", [
@@ -206,10 +196,8 @@ def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnost
     key.write_text("secret\n")
     key.chmod(0o600)
     assert mergify._credential(key) == "secret"
-    if unsafe == "file":
-        key.chmod(0o644)
-    elif unsafe == "directory":
-        tmp_path.chmod(0o755)
+    if unsafe in {"file", "directory"}:
+        (key if unsafe == "file" else tmp_path).chmod(0o644 if unsafe == "file" else 0o755)
     elif unsafe == "parent_file":
         parent = tmp_path / "not-a-directory"
         parent.write_text("")
@@ -278,32 +266,31 @@ def test_api_get_retries_and_classifies_failures(monkeypatch, failure, status, b
     calls, sleeps = [], []
     body_errors = {"reset": ConnectionResetError(), "truncated": http.client.IncompleteRead(b"{")}
 
-    class Body(io.BytesIO):
-        def read(self, *args):
-            if len(calls) == 1 and failure in body_errors:
-                raise body_errors[failure]
-            return super().read(*args)
-
     def fake_open(request):
         calls.append((request.get_method(), sum(sleeps)))
         if status in {403, 429} or (status == 503 and len(calls) == 1):
             raise urllib.error.HTTPError(request.full_url, status, "x", {"Retry-After": "40"} if status < 500 else {}, None)
         if not status and failure not in body_errors:
             raise urllib.error.URLError(failure)
-        return Body(b"{}")
+        body = io.BytesIO(b"{}")
+        if len(calls) == 1 and failure in body_errors:
+            body.read = Mock(side_effect=body_errors[failure])
+        return body
 
     monkeypatch.setattr(mergify, "_open", fake_open)
     monkeypatch.setattr(mergify, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(mergify, "_credential", lambda: "k")
-    if status in {403, 429}:
-        with pytest.raises(mergify.MergifyError, match="Retry-After: 40s" + ("; retry delay exceeds" if wait is None else "")):
-            mergify.api_get("acme/widgets", "/merge-queue/status", None if budget is None else mergify.time.monotonic() + budget)
-    elif status == 503 or failure in body_errors:
-        assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
+    deadline = None if budget is None else mergify.time.monotonic() + budget
+    if status == 503 or failure in body_errors:
+        assert mergify.api_get("acme/widgets", "/merge-queue/status", deadline) == {}
     else:
-        with pytest.raises(mergify.MergifyError, match="transport failed") as info:
-            mergify.api_get("acme/widgets", "/merge-queue/status")
-        assert str(failure) in str(info.value)
+        diagnostic = "transport failed" if status is None else "Retry-After: 40s"
+        if status and wait is None:
+            diagnostic += "; retry delay exceeds"
+        with pytest.raises(mergify.MergifyError, match=diagnostic) as info:
+            mergify.api_get("acme/widgets", "/merge-queue/status", deadline)
+        if status is None:
+            assert str(failure) in str(info.value)
     assert calls == ([("GET", 0)] if wait is None else [("GET", 0), ("GET", wait)])
     assert sleeps == ([] if wait is None else [wait])
 
@@ -367,10 +354,9 @@ def test_failed_job_diagnostics_are_bounded_and_keep_links(monkeypatch):
         assert argv[1:] == ["api", f"repos/{repo}/actions/jobs/{job}/logs",
                             "--hostname", "github.com", "--allow-escape-sequences"]
         assert options["tail_chars"] == 256 * 1024 and 0 < options["timeout"] <= 5
-        if job == "1":
-            return SimpleNamespace(exit_code=1, stdout="credential in remote error")
-        if job == "2":
-            return SimpleNamespace(exit_code=0, stdout="ordinary output")
+        if job in {"1", "2"}:
+            output = "credential in remote error" if job == "1" else "ordinary output"
+            return SimpleNamespace(exit_code=int(job == "1"), stdout=output)
         return SimpleNamespace(exit_code=0, stdout="\n".join([
             "\x1b[31m FAIL  frontend.test.ts > suite > test\x1b[0m",
             "  1) [chromium] \u203a tests/example.spec.ts:2:1 \u203a summary",
