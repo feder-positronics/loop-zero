@@ -105,6 +105,10 @@ def _repo_root(wt: Path) -> Path:
         raise PrimaryCheckout("this is the primary checkout, nothing to clean up")
     if common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
+    candidate = wt.parent.parent
+    if (common == root and (candidate / ".git").is_file()
+            and common == Path(_git(candidate, "rev-parse", "--absolute-git-dir", paths=True)).resolve()):
+        return candidate
     return root
 
 
@@ -586,6 +590,8 @@ def cmd_start(args: argparse.Namespace) -> int:
     # Nest task worktrees in the primary checkout, so removing a harness worktree cannot delete them.
     listing = _git(root, "worktree", "list", "--porcelain", "-z", paths=True)
     primary = Path(listing.split("\0", 1)[0].removeprefix("worktree "))
+    if root != primary and primary == Path(_git(root, "rev-parse", "--absolute-git-dir", paths=True)):
+        primary = root  # Git reports the metadata path for a split primary checkout.
     # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
     branch = current.stdout.strip()
     if branch.startswith("lz/") and root == primary:
