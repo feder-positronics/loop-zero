@@ -18,16 +18,18 @@ flowchart TD
     G --> C
     F -->|changes requested after the delta| R["Reject findings with reasons,<br/>or fix in a replacement PR"]
     R -->|findings rejected| H
-    F -->|approved| H["Check it is ready: no blocking findings,<br/>required CI green on the same version<br/><sub>loopzero ready --wait</sub>"]
+    F -->|approved| H["Take the PR out of draft and check readiness<br/><sub>loopzero ready --wait</sub>"]
     H -->|review coverage lost and budget allows another review| F
-    H -->|ready| I["Merge<br/><sub>loopzero merge --wait</sub>"]
-    I -->|direct merge or queue landing| K["Verify landing and clean up branch and worktree"]
+    H -->|ready| I["Merge or wait for the queue<br/><sub>loopzero merge --wait</sub>"]
+    I -->|landed| K["Verify landing and clean up branch and worktree"]
 ```
 
 Summarizes [The six steps](../core/CONTRACT.md#the-six-steps),
 [Blockers](../core/CONTRACT.md#blockers) (review coverage, head movement and
-readiness) and the [review budget](../core/CONTRACT.md#review-budget); the queue
-is described in [MERGIFY.md](MERGIFY.md).
+readiness) and the [review budget](../core/CONTRACT.md#review-budget).
+`loopzero ready` can admit the PR when it leaves draft on repositories with
+auto-queue rules. For [loop-zero's queue](MERGIFY.md), `loopzero merge` requests
+admission explicitly.
 
 ## 2. How many reviews a change gets
 
@@ -42,7 +44,7 @@ flowchart TD
     C -->|approved| Z
     C -->|approved, blockers resolved, then a verified base merge conflicts| M["One extra review of verified base merges<br/><sub>conflict delta</sub>"]
     M -->|approved| Z
-    M -->|code fix needed| E
+    M -->|findings require another change| E
     C -->|findings remain| D["PR owner rejects findings with reasons"]
     D -->|ready| Z
     C -->|code fix needed| E["PR owner opens a replacement PR"]

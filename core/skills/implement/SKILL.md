@@ -47,10 +47,7 @@ Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 Keep review suggestions within scope. Finish planned test, documentation and
 generated-file edits before primary review.
 Before the first draft push and check, rebase onto `origin/<base>` (`[repo].base`,
-default `main`). Keep unrelated base updates out of a pending delta. Once a review
-is published, merge `origin/<base>` into the task branch if a base update is
-required. Rebasing away the reviewed commit blocks the delta. Check the new head
-after resolving a conflict and use the review budget above to review it.
+default `main`). Keep unrelated base updates out of a pending delta.
 For a stack, follow [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
 
 Never bypass the sandbox, change the check list or enable `[checks].network` to pass checks.
