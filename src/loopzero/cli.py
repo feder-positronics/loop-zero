@@ -534,6 +534,21 @@ def _seed_task_evidence(task: str, body: str) -> str:
     return "\n\n".join([body.rstrip(), *missing]) + "\n" if missing else body
 
 
+def _section_order(local, live, baseline, digest):
+    order = list(dict.fromkeys([*live, *local]))
+    by_key = {digest(repr(part)): part for part in local.keys() & live.keys()}
+    previous_order = [by_key[key] for key in baseline if key in by_key]
+    shared = set(previous_order)
+    task_order = [part for part in local if part in shared]
+    if task_order == previous_order:
+        return order
+    if [part for part in live if part in shared] not in (previous_order, task_order):
+        raise CliError("PR description conflict in section order: "
+                       "reconcile .loopzero/task.md with the GitHub PR body and rerun loopzero pr")
+    reordered = iter(task_order)
+    return [next(reordered) if part in shared else part for part in order]
+
+
 def _sync_task_narrative(task: str, existing: str) -> str:
     """Merge each narrative part against its last shared text."""
     pattern = re.compile(rf"{_SECTION_START}([^\n]*)(?:\n|\Z).*?{_SECTION_END}", re.MULTILINE | re.DOTALL)
@@ -564,23 +579,10 @@ def _sync_task_narrative(task: str, existing: str) -> str:
         live[None, 0] = (prefix[:prior.start()] + prefix[prior.end():]).rstrip()
         baseline = dict(pair.split(":") for pair in (prior[2] or "").split())
 
-    order = list(dict.fromkeys([*live, *local]))
-    if prior and prior[1]:
-        by_key = {digest(repr(part)): part for part in local.keys() & live.keys()}
-        previous_order = [by_key[key] for key in baseline if key in by_key]
-        shared = set(previous_order)
-        task_order = [part for part in local if part in shared]
-        if task_order != previous_order:
-            live_order = [part for part in live if part in shared]
-            if live_order not in (previous_order, task_order):
-                raise CliError("PR description conflict in section order: "
-                               "reconcile .loopzero/task.md with the GitHub PR body and rerun loopzero pr")
-            reordered = iter(task_order)
-            order = [next(reordered) if part in shared else part for part in order]
     content = []
     fingerprints = {}
     empty = digest("")
-    for part in order:
+    for part in _section_order(local, live, baseline if prior and prior[1] else {}, digest):
         name, _ = part
         current, proposed = live.get(part, ""), local.get(part, "")
         if name in {"Validation", "Review"}:
