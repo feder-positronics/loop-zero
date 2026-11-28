@@ -1483,7 +1483,7 @@ def readiness(
     )
 
 
-def mark_ready(repo: str, number: int, node_id: str) -> None:
+def mark_ready(repo: str, number: int, node_id: str = "") -> None:
     if node_id:
         try:
             _gh("api", "graphql", "-f", "query=mutation($id:ID!){"
