@@ -148,7 +148,7 @@ def _real_codex(path, guard, *, version="codex-cli 0.161.0"):
 
 def _fake_codex(bin_dir, last_message, *, exit_code=0, stderr="", version="codex-cli 0.161.0",
                 rollout=None, events=None, leading_events=()):
-    return write_fake_tool(bin_dir, "codex", f"""#!/usr/bin/python3
+    return write_fake_tool(bin_dir, "codex", f"""#!/usr/bin/python3 -S
 import argparse, json, os, shutil, sys
 from pathlib import Path
 
