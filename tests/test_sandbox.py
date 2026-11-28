@@ -84,6 +84,28 @@ def test_settings_fingerprint_is_stable_across_releases(inputs, expected):
     assert sandbox.settings_fingerprint(config) == expected
 
 
+def test_fingerprints_bind_effective_allowlist(monkeypatch):
+    monkeypatch.setenv("LZ_KEEP", "original")
+    monkeypatch.delenv("LZ_UNSET", raising=False)
+    config = make_config()
+    reordered = make_config(env_allowlist=("LZ_KEEP", "HOME", "PATH", "LZ_KEEP", "LZ_UNSET"))
+    receipt = sandbox.settings_fingerprint(config)
+    stage = sandbox._execution_settings(config, "main")
+    assert sandbox.settings_fingerprint(reordered) == receipt
+    assert sandbox._execution_settings(reordered, "main") == stage
+
+    monkeypatch.setenv("LZ_KEEP", "changed")
+    assert sandbox.settings_fingerprint(reordered) != receipt
+    with_grant = make_config(env_allowlist=(*config.env_allowlist, "HEAVY_SLOT_GRANTED_CORES"))
+    monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "2")
+    assert sandbox.settings_fingerprint(with_grant) == sandbox.settings_fingerprint(config)
+    grant_stage = sandbox._execution_settings(with_grant, "main")
+    monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "4")
+    assert sandbox._execution_settings(with_grant, "main") != grant_stage
+    explicit = make_config(env_allowlist=with_grant.env_allowlist, env=(("HEAVY_SLOT_GRANTED_CORES", "2"),))
+    assert sandbox.settings_fingerprint(explicit) != sandbox.settings_fingerprint(config)
+
+
 @pytest.fixture
 def bwrap_log(fake_tool, tmp_path) -> Path:
     log = tmp_path / "bwrap.argv"
