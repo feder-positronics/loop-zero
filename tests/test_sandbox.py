@@ -955,7 +955,6 @@ def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case, cac
         git(git_repo, "commit", "-qam", "change actual input")
     if case == "no_base":
         git(git_repo, "update-ref", "-d", "refs/remotes/origin/main")
-
     result = sandbox.run_checks(config, git_repo, status=(messages := []).append)
     assert result.results[0].exit_code == 1
     assert any("workflow.toml: checks.inputs" in message and repr(paths) in message
@@ -981,7 +980,6 @@ def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_ba
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
     assert path.read_bytes() == b"hello\n" and cache_check(config, clean=True, verify_reuse=True).head == fetched_base
     cli._require_receipt(git_repo, config, fetched_base)
-
     git(git_repo, "config", "core.autocrlf", "true")
     path.unlink()
     git(git_repo, "checkout-index", "-u", "--", path.name)
@@ -1001,7 +999,6 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, c
         (git_repo / ".loopzero/task.md").write_text(f"## Base\nmain @ {head}\n")
     elif base == "tracked":
         git(git_repo, "update-ref", base_ref, head)
-
     config = make_config(inputs={"*": (".",)})
     report = cache_check(config, clean=True, verify_reuse=base != "absent")
     if base == "absent":
@@ -1009,7 +1006,6 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, c
         assert result.exit_code == 0 and result.input_key.endswith(":") and result.reused_from is None
         cli._require_receipt(git_repo, config, head)
         return
-
     tree = git(git_repo, "rev-parse", "HEAD^{tree}").strip()
     new_base = git(git_repo, "commit-tree", tree, "-p", head, "-m", "advance base").strip()
     git(git_repo, "update-ref", base_ref, new_base)
