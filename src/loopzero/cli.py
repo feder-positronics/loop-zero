@@ -1293,6 +1293,7 @@ def _mark_ready(
 ) -> None:
     _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
     with github.bounded_reads(deadline, token=None, retry=True) if deadline is not None else nullcontext():
+        observe_only = None
         for retry in (False, True):
             live = github.pr_view(config.repo, number)
             github.read_timeout(0)
@@ -1302,6 +1303,8 @@ def _mark_ready(
                 raise CliError(f"{problem}; rerun loopzero ready")
             if not live.is_draft:
                 return
+            if observe_only is not None:
+                raise observe_only
             if retry:
                 _verify_wait_snapshot(args, wt, config, head, live.head_sha, config)
                 fresh = _readiness(wt, config, live, head, workflow_wait=True, mergify_deadline=deadline)
@@ -1311,10 +1314,13 @@ def _mark_ready(
                 github.mark_ready(config.repo, number)
                 return
             except (github.GhUnavailable, _proc.ProcTimeout) as exc:
-                if (retry or deadline is None or github._rate_limited(None, {}, str(exc))
-                        or time.monotonic() + github.RETRY_DELAY >= deadline):
+                remaining = github.read_timeout()
+                if retry or deadline is None or github._rate_limited(None, {}, str(exc)):
                     raise
-                _sleep(github.RETRY_DELAY)
+                if remaining <= github.RETRY_DELAY:
+                    observe_only = exc
+                else:
+                    _sleep(github.RETRY_DELAY)
 
 
 def cmd_ready(args: argparse.Namespace) -> int:

@@ -3019,15 +3019,16 @@ def test_ready_keeps_required_check_signals_from_both_apps(wt, gh, capsys, head,
     assert ("required check 'checks' is failure" in out) is not rerun
 
 
-@pytest.mark.parametrize("outcome", ["retry", "applied", "blocker", "moved", "exhausted", "quota"])
+@pytest.mark.parametrize("outcome", ["retry", "applied", "blocker", "moved", "exhausted", "quota", "short-applied", "write-deadline"])
 def test_ready_recovers_ambiguous_activation(wt, gh, capsys, monkeypatch, head, outcome):
     arm_approved_pr(gh, head, wt, "skipped")
-    clock = poll_clock(monkeypatch)
-    attempts = []
-
+    clock, attempts = poll_clock(monkeypatch), []
     def activate(*_):
         attempts.append(clock.now)
-        if outcome == "applied" or (outcome == "retry" and len(attempts) == 2):
+        clock.now += {"short-applied": 59, "write-deadline": 60}.get(outcome, 0)
+        if outcome == "write-deadline":
+            raise github.ProcTimeout("ready write reached deadline")
+        if outcome.endswith("applied") or (outcome == "retry" and len(attempts) == 2):
             arm_pr(gh, head, isDraft=False)
             arm_named_check(gh, head, conclusion="success")
         if outcome == "blocker":
@@ -3037,14 +3038,13 @@ def test_ready_recovers_ambiguous_activation(wt, gh, capsys, monkeypatch, head, 
         if not (outcome == "retry" and len(attempts) == 2):
             detail = "secondary rate limit" if outcome == "quota" else "HTTP 502"
             raise github.GhUnavailable(("gh", "pr", "ready"), detail)
-
     monkeypatch.setattr(github, "mark_ready", activate)
     receipt = wt / ".loopzero/checks.json"
     before = receipt.read_bytes()
     code, out, err = run(capsys, "ready", "--wait=60")
     assert attempts == ([0, 5] if outcome in {"retry", "exhausted"} else [0])
     assert receipt.read_bytes() == before
-    assert code == {"blocker": 1, "moved": 1, "exhausted": 2, "quota": 2}.get(outcome, 0)
+    assert code == {"blocker": 1, "moved": 1, "exhausted": 2, "quota": 2, "write-deadline": 3}.get(outcome, 0)
     if code == 2:
         assert "Run `loopzero ready --wait`" in err
     if code == 0:
@@ -3060,7 +3060,6 @@ def test_wait_bounds_initial_reads(wt, gh, capsys, monkeypatch, head, budget, ac
     clock = poll_clock(monkeypatch)
     read = github.pr_view if activation else github.pr_for_branch
     limits = []
-
     def slow_read(*args, **kwargs):
         limits.append(github.read_timeout(120))
         pr = read(*args, **kwargs)

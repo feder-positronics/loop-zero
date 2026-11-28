@@ -1544,15 +1544,18 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
     return queued or bool(auto)
 
 
-def _merge_evidence(repo: str, number: int, head_sha: str) -> tuple[str | None, bool, MergeFailed | None]:
+def _merge_evidence(repo: str, number: int, head_sha: str) -> tuple[str | None, bool, GhError | ProcTimeout | None]:
     if sha := merged_sha(repo, number, expected_head=head_sha):
         return sha, False, None
     queue_error = None
     try:
         if merge_pending(repo, number, head_sha):
             return None, True, None
-    except MergeFailed as exc:
+    except (MergeFailed, GhUnavailable, ProcTimeout) as exc:
+        if isinstance(exc, ReadDeadline):
+            raise
         queue_error = exc
+    # The queue may have landed the PR between the two reads.
     return merged_sha(repo, number, expected_head=head_sha), False, queue_error
 
 

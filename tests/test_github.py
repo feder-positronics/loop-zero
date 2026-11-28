@@ -1179,17 +1179,20 @@ def test_merge_fails_without_proof_of_admission_or_landing(gh, case, strategy, d
 
 
 @pytest.mark.parametrize("strategy,queue_state", [
-    ("squash", "queued"), ("queue", "queued"), ("queue", "auto"), ("squash", "landed"),
+    ("squash", "queued"), ("queue", "queued"), ("queue", "auto"), ("squash", "landed"), ("squash", "landed-during-outage"),
 ])
-def test_merge_reports_queue_admission_or_landing(gh, strategy, queue_state):
+def test_merge_reports_queue_admission_or_landing(gh, monkeypatch, strategy, queue_state):
     accepted = _queue_json(queue_state == "queued")
-    landed = queue_state == "landed"
+    landed = queue_state.startswith("landed")
     if queue_state == "auto":
         accepted["data"]["repository"]["pullRequest"]["autoMergeRequest"] = {"enabledAt": "t"}
     snapshots = [merge_json()]
     if landed:
         snapshots.append(merge_json(state="MERGED", sha="d" * 40))
     arm_merge(gh, accepted, *snapshots)
+    if queue_state == "landed-during-outage":
+        monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
+        gh.fail("api graphql", "HTTP 502")
     if strategy == "queue":
         gh.respond("api graphql", _queue_json(False), accepted)
     assert github.merge(REPO, 7, strategy, HEAD) == ("d" * 40 if landed else None)
