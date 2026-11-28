@@ -64,18 +64,20 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
     elif done.returncode:
         assert "without guide update or reasoned Architecture-Review trailer" in done.stderr
     if sync == "squash":
+        git_repo = git_repo.rename(git_repo.with_name(f"{git_repo.name} "))
         assert run(git_repo, base, "--links-only").returncode == 0
         (git_repo / "README.md").write_text("[broken](absent.md)\n")
         assert run(git_repo, base, "--links-only").returncode == 1
 
 
-@pytest.mark.parametrize("target", ["absent.md", "../README.md#absent", "<Design (legacy).md>", "#explicit"])
-def test_local_links_even_with_guide_update(git_repo, base, target):
+@pytest.mark.parametrize("markdown", ["[ref](absent.md)", "[ref](../README.md#absent)", "[ref](<Design (legacy).md>)",
+                                     "[ref](#explicit)", "[ref](../README.md 'title')",
+                                     "~~~md\n[ref](missing.md)\n~~~", "[ref](#absent-heading)"])
+def test_local_links_even_with_guide_update(git_repo, base, markdown):
     (git_repo / "docs/Design (legacy).md").touch()
-    (git_repo / "docs/ARCHITECTURE.md").write_text(f'<a id="explicit"></a>\n[reference]({target})\n')
+    (git_repo / "docs/ARCHITECTURE.md").write_text(f'<a id="explicit"></a>\n```md\n# Absent heading\n```\n{markdown}\n')
     done = run(git_repo, base)
-    assert done.returncode == int("absent" in target), done.stderr
-    assert ("invalid local" in done.stderr) == ("absent" in target)
+    assert (done.returncode, "invalid local" in done.stderr) == (int("absent" in markdown), "absent" in markdown)
 
 
 def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo, base):
