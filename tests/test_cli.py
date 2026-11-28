@@ -5360,31 +5360,32 @@ def merge_wait(monkeypatch, capsys, wait, fake):
 
 
 @pytest.mark.parametrize("wait, latency, state, expected", [
-    (1, 3.0, "MERGED", 3), (1, 0.25, "MERGED", 0), (0, 0.0, "MERGED", 0), (1, 0.0, "CLOSED", 1),
+    (1, 3.0, "MERGED", 3), (400, 0.25, "MERGED", 0), (0, 0.0, "MERGED", 0), (1, 0.0, "CLOSED", 1),
+    (5, 20.0, "SUBMIT", 1),
 ])
 def test_merge_queue_landing_within_budget(
     wt, gh, capsys, monkeypatch, head, wait, latency, state, expected,
 ):
     publish_workflow(wt, WORKFLOW.replace('merge = "squash"', 'merge = "queue"'))
-    arm_approved_pr(gh, head, wt, isDraft=False)
+    arm_squash_merge(gh, head, wt)
     clock, budgets, write_timeouts = poll_clock(monkeypatch, start=1000.0), [], []
-    gh.respond("pr merge", "")
     gh.respond("api graphql", threads_json(), native_queue(False, head), native_queue(True, head))
     def landing(argv, timeout):
         if argv[1:3] == ["pr", "merge"]:
             write_timeouts.append(timeout)
-        if not write_timeouts or argv[1:3] != ["api", f"repos/{REPO}/pulls/7"]:
-            return None
-        budgets.append(timeout)
-        if len(budgets) == 1:
-            return Completed(0, json.dumps(merge_json(state="OPEN", head=head)), "", 0.0)
-        clock.now += latency
-        return Completed(0, json.dumps(merge_json(state=state, head=head, sha="e" * 40 if state == "MERGED" else None)), "", latency)
+            if state == "SUBMIT" and timeout < latency:
+                raise github.ProcTimeout("slow queue submission", duration_s=timeout)
+        if write_timeouts and argv[1:3] == ["api", f"repos/{REPO}/pulls/7"]:
+            budgets.append(timeout)
+            if len(budgets) > 1:
+                clock.now += latency
+                return Completed(0, json.dumps(merge_json(state=state, head=head, sha="e" * 40 if state == "MERGED" else None)), "", latency)
+        return None
     code, out, err, cleaned = merge_wait(monkeypatch, capsys, wait, landing)
-    assert (code, bool(cleaned), write_timeouts) == (expected, expected == 0, [300])
-    assert budgets == ([1.0, 1.0, 0.5] if state == "CLOSED" else [1.0 if wait else 120.0] * 2)
-    assert (err == "", "closed without a verified merge" in err) == (state != "CLOSED", state == "CLOSED")
-    assert ("timed out waiting for the merge queue" in out) is (expected == 3)
+    assert (code, bool(cleaned), write_timeouts) == (expected, expected == 0, [wait or 300]), out + err
+    assert budgets == ([1.0, 1.0, 0.5] if state == "CLOSED" else [min(wait or 120, 120)] * (0 if state == "SUBMIT" else 2))
+    assert_contains(err, *{"CLOSED": ("closed without a verified merge",), "SUBMIT": ("state is unknown. Run `loopzero status`",)}.get(state, ()))
+    assert (not err, "timed out waiting for the merge queue" in out) == (expected != 1, expected == 3)
 
 
 @pytest.mark.parametrize("verified", [True, False])
