@@ -531,7 +531,7 @@ def _gh_json(*args: str, token: str | None = None, **kwargs) -> object:
 def _iter_paged(endpoint: str, key: str | None = None, **kwargs) -> Iterator[dict]:
     """Yield validated rows of a list (or of `key` in an envelope) until the last of at most 100 pages."""
     seen: set[bytes] = set()
-    for page in range(1, 101):
+    for page in range(1, 102):
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
                          "-F", f"page={page}", conditional=True, **kwargs)
         if key is not None:
@@ -539,6 +539,8 @@ def _iter_paged(endpoint: str, key: str | None = None, **kwargs) -> Iterator[dic
         if (not isinstance(chunk, list) or len(chunk) > PAGE
                 or not all(isinstance(row, dict) for row in chunk)):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
+        if page == 101 and chunk:
+            raise GhError(("gh", "api", endpoint), "pagination exceeds 100 pages")
         if len(chunk) == PAGE:
             digest = hashlib.sha256(json.dumps(chunk, sort_keys=True).encode()).digest()
             if digest in seen:
@@ -547,7 +549,6 @@ def _iter_paged(endpoint: str, key: str | None = None, **kwargs) -> Iterator[dic
         yield from chunk
         if len(chunk) < PAGE:
             return
-    raise GhError(("gh", "api", endpoint), "pagination exceeds 100 pages")
 
 
 def paged(endpoint: str, key: str | None = None, **kwargs) -> list[dict]:

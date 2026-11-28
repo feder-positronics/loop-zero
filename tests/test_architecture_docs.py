@@ -66,7 +66,7 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
     if sync == "squash":
         git_repo = git_repo.rename(git_repo.with_name(f"{git_repo.name} "))
         assert run(git_repo, base, "--links-only").returncode == 0
-        (git_repo / "README.md").write_text("[broken](absent.md)\n")
+        (git_repo / "README.md").write_text("[Guide][guide]\n\n[guide]: absent.md\n")
         assert run(git_repo, base, "--links-only").returncode == 1
 
 
@@ -80,7 +80,7 @@ def test_local_links_even_with_guide_update(git_repo, base, markdown):
     assert (done.returncode, "invalid local" in done.stderr) == (int("absent" in markdown), "absent" in markdown)
 
 
-def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo, base):
+def test_interface_comparison_requires_valid_base_and_only_watches_public_changes(git_repo, base):
     path = git_repo / "src/loopzero/_cli_args.py"
     path.parent.mkdir(parents=True)
     path.write_text("def build_parser():\n    return 'public'\n\ndef _fix():\n    return 1\n")
@@ -90,12 +90,9 @@ def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo, base):
     base = git(git_repo, "rev-parse", "HEAD").strip()
     path.write_text(path.read_text().replace("return 1", "return 2"))
     assert run(git_repo, base).returncode == 0
+    assert run(git_repo, "not-a-revision").returncode == 1
     path.write_text(path.read_text().replace("'public'", "'changed'"))
     assert run(git_repo, base).returncode == 1
-
-
-def test_missing_base_fails_closed(git_repo, base):
-    assert run(git_repo, "not-a-revision").returncode == 1
 
 
 def test_direct_git_timeout(monkeypatch, capsys):
