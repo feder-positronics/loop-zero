@@ -3084,11 +3084,12 @@ def ready_wait_tail(head, status, resume="loopzero ready --wait"):
 
 
 @pytest.mark.parametrize("rerun", [False, True])
-def test_ready_keeps_required_check_signals_from_both_apps(wt, gh, capsys, head, rerun):
+@pytest.mark.parametrize("same_app", [False, True])
+def test_ready_keeps_required_check_signals_from_distinct_producers(wt, gh, capsys, head, rerun, same_app):
     arm_approved_pr(gh, head, wt, isDraft=False)
     runs = [
-        {"id": 1, "app": {"id": 10}, "name": "checks", "conclusion": "failure"},
-        {"id": 2, "app": {"id": 20}, "name": "checks", "conclusion": "success"},
+        {"id": 1, "app": {"id": 10}, "check_suite": {"id": 1}, "name": "checks", "conclusion": "failure"},
+        {"id": 2, "app": {"id": 10 if same_app else 20}, "check_suite": {"id": 2}, "name": "checks", "conclusion": "success"},
     ]
     if rerun:
         runs.append({**runs[0], "id": 3, "conclusion": "success"})

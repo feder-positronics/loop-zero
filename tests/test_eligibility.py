@@ -49,7 +49,9 @@ def legacy_review(commit_id, reviewed=HEAD):
 
 def test_review_counts_only_when_github_recorded_it_on_the_head():
     current = legacy_review(HEAD)
-    assert eligibility.eligible_review([current], HEAD, PUBLISHERS) is current
+    discussion = current | {"state": "COMMENTED", "body": "What does `loopzero:review` mean?"}
+    for reviews in ([current], [current, discussion]):
+        assert eligibility.readiness_review(reviews, HEAD, PUBLISHERS, repo=REPO, number=NUMBER, base_branch="main") is current
     assert eligibility.eligible_review([legacy_review(OTHER)], HEAD, PUBLISHERS) is None
 
 

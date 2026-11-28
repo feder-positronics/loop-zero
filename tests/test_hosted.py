@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loopzero import github, hosted
+from loopzero import eligibility, github, hosted
 from loopzero.candidate import CandidateError, CandidateRaceError
 from tests import test_github as fixtures
 from tests.conftest import git, review_summary
@@ -77,7 +77,7 @@ def approval(head=HEAD, *, state="APPROVED"):
 
 
 @pytest.mark.parametrize("case,states", [
-    ("restore", ["pending", "failure"]), ("newer success", ["pending"]), ("newer pending", ["pending"]),
+    ("manual", ["pending", "success"]), ("restore", ["pending", "failure"]), ("newer success", ["pending"]), ("newer pending", ["pending"]),
     ("newer same marker", ["pending"]), ("stale marker", ["pending", "failure"]), ("write lost", ["pending", "failure"]),
     ("many markers", ["pending", "failure"]), ("other publisher marker", ["pending", "failure"]),
     ("case-insensitive newer", ["pending"]), ("pending verdict like marker", ["pending", "pending"]), ("verdict worded like marker", ["pending", "failure"]),
@@ -86,7 +86,11 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
     ctx = {"context": "Loop-zero Eligibility"}
     old = ctx | {"id": 1, "state": "failure", "description": "Blocking finding"}
     marker = ctx | {"id": 11, "state": "pending", "description": "Refreshing live source review evidence"}
-    history = {"restore": [marker, old], "stale marker": [marker, marker | {"id": 10}, old],
+    if case == "manual":
+        publisher.respond_pr_view(pr_json())
+        marker["description"] = "Refreshing source review evidence"
+        old.update(state="success", description="Previously eligible")
+    history = {"restore": [marker, old], "manual": [marker, old], "stale marker": [marker, marker | {"id": 10}, old],
                "newer success": [old | {"id": 12, "state": "success"}, marker, old],
                "newer pending": [marker | {"id": 12, "description": "Awaiting trusted review"}, marker, old],
                "newer same marker": [marker | {"id": 12}, marker, old],
@@ -104,15 +108,16 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
                           {"stdout": "", "exit": 1, "stderr": "HTTP 422"})
         check_source(publisher, states, error=hosted.LoopZeroError)
     else:
-        posted = check_source(publisher, states)
+        posted = check_source(publisher, states, manual=case == "manual")
         if len(posted) == 2:  # The restored row is the verdict users see, not the marker.
             markers = {"Refreshing live source review evidence", "Refreshing source review evidence"}
             assert posted[1]["description"] == next(r["description"] for r in history if r["description"] not in markers)
 
 
-def check_source(publisher, states, *, exit_code=0, error=None, match=None):
+def check_source(publisher, states, *, exit_code=0, error=None, match=None, manual=False):
+    manual_args = ["--config", "workflow.toml", "--pr", "7", "--head", HEAD, "--publish"]
     with pytest.raises(error, match=match) if error else nullcontext():
-        assert hosted.main() == exit_code
+        assert (eligibility.main(manual_args) if manual else hosted.main()) == exit_code
     statuses = [json.loads(call["--input"]) for call in publisher.calls if "--input" in call]
     assert [status["state"] for status in statuses] == states
     return statuses
@@ -172,7 +177,7 @@ def test_sigterm_does_not_strand_or_overwrite_eligibility(publisher, phase, expe
     script = """
 import signal
 import sys
-from loopzero import github, hosted
+from loopzero import eligibility, github, hosted
 
 def evaluate(*_, **_kwargs):
     if sys.argv[1] == "evaluate":

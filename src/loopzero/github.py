@@ -814,7 +814,7 @@ def update_body(repo: str, number: int, body: str) -> None:
 
 
 def finding_id(head_sha: str, path: str | None, line: int | None, title: str) -> str:
-    raw = f"{head_sha}{path or ''}{line if line is not None else ''}{title}"
+    raw = json.dumps((head_sha, path, line, title))
     return hashlib.sha256(raw.encode()).hexdigest()[:8]
 
 
@@ -1256,12 +1256,12 @@ def _check_signals(
     *, workflow_wait: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
-    latest_runs: dict[tuple[str, int | None], dict] = {}
+    latest_runs: dict[tuple[str, int | None, int | None], dict] = {}
     runs = paged(f"repos/{repo}/commits/{head_sha}/check-runs", "check_runs")
     for cr in runs:
-        key = cr["name"], (cr.get("app") or {}).get("id")
+        key = cr["name"], (cr.get("app") or {}).get("id"), (cr.get("check_suite") or {}).get("id")
         latest_runs[key] = max(latest_runs.get(key, cr), cr, key=_check_run_order)
-    for (name, _), cr in latest_runs.items():
+    for (name, _, _), cr in latest_runs.items():
         state = cr.get("conclusion") or cr.get("status") or "unknown"
         timestamp = cr.get("started_at" if state in _PENDING_CHECKS else "completed_at")
         signals.setdefault(name, []).append((state, readiness_timestamp(timestamp)))
@@ -1282,7 +1282,7 @@ def _check_signals(
     stale += stale_verdicts
     superseded: list[str] = []
     workflows: list[dict] | None = None
-    for (name, _), cr in latest_runs.items():
+    for (name, _, _), cr in latest_runs.items():
         if (not workflow_wait or name not in required_ci or name in stale
                 or cr.get("conclusion") not in {"failure", "cancelled", "timed_out"}
                 or cr.get("status") != "completed" or not (cr.get("check_suite") or {}).get("id")
@@ -1294,7 +1294,7 @@ def _check_signals(
             superseded.append(name)
     capped = _check_suites_at_limit(runs)
     # A status-only success may hide a failed run outside the returned suites.
-    run_names = {name for name, _ in latest_runs}
+    run_names = {name for name, _, _ in latest_runs}
     states = {name: state for name, state in states.items() if not capped or state != "success" or name in run_names}
     return states, (*stale, *superseded), stale_verdicts, capped
 
