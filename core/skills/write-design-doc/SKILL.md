@@ -5,21 +5,19 @@ description: "Create or refine a durable design contract: exploration, ADR, init
 
 # Write Design Doc
 
-Produce the smallest artifact that lets the next actor proceed without
-re-deriving intent or architecture. Do not implement it. Unless explicitly
-requested, skip the document for a clear, small, safely bounded change.
+Write the smallest artifact that gives the next actor the intent and architecture
+to proceed. Skip clear, small, safely bounded changes unless asked to document
+them. Leave implementation to delivery.
 
-Apply [reference](reference.md).
+Apply the [reference](reference.md). Write user scenarios before proposing UI.
+Validate material UI shape with [design-mockup](../design-mockup/SKILL.md) or
+an established pattern. Blueprints give concrete paths and sequenced acceptance,
+omitting inferable coding steps.
 
-Write user scenarios before UI proposals, then validate material
-UI shape with [design-mockup](../design-mockup/SKILL.md) or an established
-pattern. Blueprints name concrete paths and sequenced acceptance without
-prescribing inferable coding steps.
+Close material gaps in existing artifacts and verify the design problem is
+resolved beyond wording. Suggestions never block. Give unresolved material
+questions owners and name the action they block.
 
-For an existing artifact, correct material gaps and verify the underlying
-design problem is resolved beyond wording. Suggestions never become blockers;
-unresolved material questions retain owners and visibly block the relevant action.
-
-Revise material ambiguity or leave an explicit blocker.
-Finish with a commit-ready document and actionable acceptance and questions.
-Record its path and material decisions in task Notes, or otherwise in the handoff.
+Validate before finishing. Resolve material ambiguity or state the blocker.
+Deliver a commit-ready document with actionable acceptance and questions. Record
+its path and material decisions in task Notes or the handoff.

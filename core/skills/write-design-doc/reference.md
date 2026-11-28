@@ -5,9 +5,9 @@ Apply at the depth appropriate to the artifact and next action.
 ## Grounding
 
 In the task worktree, read the request, full artifact, linked issue/task,
-upstream decisions, repo guidance and code that verifies current capabilities.
-Keep requester decisions settled unless evidence defeats their premise. Mark
-assumptions as vetoable and keep deferred decisions open.
+upstream decisions, repo guidance and code that verifies claims and capabilities.
+Separate facts from assumptions. Keep assumptions vetoable, deferred decisions
+open and requester decisions settled unless evidence defeats their premise.
 
 ## Artifact Choice
 

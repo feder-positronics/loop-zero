@@ -33,8 +33,9 @@ Select relevant lenses:
   only for non-inferable value; choreography needs a safety reason or observed failure.
 
 State scope, uncertainty and limits. Synthesize findings with [contract severities](../../CONTRACT.md#findings).
-Apply the linked storage rule to live-task findings.
-Leave the target unchanged. Put other actionable discussion in its issue or PR.
+Follow [Findings](../../CONTRACT.md#findings) for live-task storage. Do not create
+findings files or separate stores. Put other actionable discussion in its issue
+or PR. Leave the target unchanged.
 
 Then continue the task you were given as far as it authorizes, or hand over
 what is left of its acceptance.

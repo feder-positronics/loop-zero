@@ -26,6 +26,5 @@ follow-up privately to the requester.
 
 Before delta, compare the full repair to the primary-reviewed head. Identify
 affected callers and guarantees. Use existing test seams to exercise the
-failure and affected success, failure or timing behavior. Apply security review
-to changed trust boundaries. Record evidence, run existing checks and follow
+failure and affected success, failure or timing behavior. Apply [security-review](../security-review/SKILL.md) to changed trust boundaries. Record evidence, run existing checks and follow
 the [review budget](../../CONTRACT.md#review-budget) through delivery or handoff.
