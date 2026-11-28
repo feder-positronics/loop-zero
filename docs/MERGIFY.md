@@ -23,10 +23,10 @@ delivery, follow the contract's withdrawal rules to obtain a fresh candidate
 event. Source PRs can be refreshed with the eligibility
 workflow's manual PR-number input.
 
-Keep the local required-check list, Mergify `queue_conditions` and the effective
-GitHub ruleset on exactly the same context names (`checks` and
-`Loop-zero Eligibility` here). The
-queue injects the GitHub rules at admission and landing. Candidate CI tests the
+Keep local required checks and the GitHub ruleset aligned (`checks` and
+`Loop-zero Eligibility` here). Mergify lists `Loop-zero Eligibility` explicitly
+in `queue_conditions` and injects GitHub's required checks in queue mode.
+Candidate CI tests the
 real target including all earlier queued changes and never deploys. Never select a
 cumulative risk lane using only Mergify's `checking_base_sha`, which can already
 include earlier queued work. Mergify may directly merge a current PR using

@@ -16,8 +16,8 @@ flowchart TD
     C -->|checks pass| F["Get a review of the exact version<br/><sub>loopzero review</sub>"]
     F -->|changes requested, review budget left| G["Fix the findings, commit and push"]
     G --> C
-    F -->|changes requested after the delta| R["Reject findings with reasons,<br/>or fix in a replacement PR"]
-    R -->|findings rejected| H
+    F -->|changes requested after the delta| R["Resolve or reject findings with reasons<br/>or fix in a replacement PR"]
+    R -->|current head still has eligible review coverage| H
     F -->|approved| H["Take the PR out of draft and check readiness<br/><sub>loopzero ready --wait</sub>"]
     H -->|review coverage lost and budget allows another review| F
     H -->|ready| I["Merge or wait for the queue<br/><sub>loopzero merge --wait</sub>"]
@@ -45,9 +45,9 @@ flowchart TD
     C -->|approved, blockers resolved, then a verified base merge conflicts| M["One extra review of verified base merges<br/><sub>conflict delta</sub>"]
     M -->|approved| Z
     M -->|findings require another change| E
-    C -->|findings remain| D["PR owner rejects findings with reasons"]
-    D -->|ready| Z
-    C -->|code fix needed| E["PR owner opens a replacement PR"]
+    C -->|threads remain and this head has review coverage| D["PR owner resolves threads or rejects findings with reasons"]
+    D -->|all blockers cleared| Z
+    C -->|another reviewed fix needed| E["PR owner opens a replacement PR"]
     G["Reviewer gives no verdict:<br/>tool or login failure"] --> H["Costs nothing: try the next<br/>eligible model family"]
     H -->|none can run| J["Same-family review in a fresh session,<br/>disclosed on the PR"]
     J -->|none can run| I["PR owner restores a configured reviewer and retries the review,<br/>or reports the blocker to whoever commissioned the PR"]
