@@ -60,15 +60,17 @@ def stage_tree(repo):
     return git(repo, "write-tree").strip()
 
 
-
 @pytest.mark.parametrize("path,cap", [("core/CONTRACT.md", 1500), ("docs/DELEGATION.md", 660)])
-@pytest.mark.parametrize("grew", [True, False])
-def test_markdown_doc_budgets(git_repo, path, cap, grew):
+@pytest.mark.parametrize("case", ["grow", "hold", "symlink"])
+def test_markdown_doc_budgets(git_repo, path, cap, case):
     doc = git_repo / path
     doc.parent.mkdir(parents=True)
-    doc.write_text("line\n" * (cap + 5))
+    target = git_repo.parent / "external.md" if case == "symlink" else doc
+    target.write_text("line\n" * (cap + 5))
+    if case == "symlink":
+        doc.symlink_to(target)
     base = stage_tree(git_repo)
-    if grew:
+    if case == "grow":
         doc.write_text("line\n" * (cap + 6))
     done = run_budget(git_repo, base)
-    assert done.returncode == int(grew), done.stdout + done.stderr
+    assert done.returncode == int(case == "grow"), done.stdout + done.stderr
