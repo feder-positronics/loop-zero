@@ -289,8 +289,7 @@ def pr_lock(repo: str, number: int) -> Iterator[None]:
     """Serialize a GitHub write across local checkouts for this PR."""
     key = hashlib.sha256(f"{repo.casefold()}#{number}".encode()).hexdigest()
     PR_LOCK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    flags = os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
-    with os.fdopen(os.open(PR_LOCK_DIR / key, flags, 0o600), "rb") as lock:
+    with os.fdopen(os.open(PR_LOCK_DIR / key, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600), "rb") as lock:
         if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
             raise GhError(("lock",), f"PR lock is not a regular file: {PR_LOCK_DIR / key}")
         while True:

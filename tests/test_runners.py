@@ -634,6 +634,7 @@ CLAUDE_EXPIRED_OAUTH = {
 
 @pytest.mark.parametrize("exit_code", [0, 1])
 @pytest.mark.parametrize("output,error,diagnostic", [
+    (_claude_envelope(APPROVE), RunnerBadOutput, "forwarded credential|exited"),
     (CLAUDE_EXPIRED_OAUTH, RunnerAuthFailed, "claude: CLI is not authenticated"),
     ({"type": "result", "subtype": "error", "is_error": True,
       "result": "Invalid API key · Please run /login"}, RunnerAuthFailed, None),

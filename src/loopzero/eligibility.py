@@ -88,9 +88,8 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     marker = leading_marker(body)
     if not marker or marker.group(1) != head or not is_sha(head):
         return None
-    verdict = latest.get("state") in {"APPROVED", "CHANGES_REQUESTED"} or _summary_verdict(body, marker[2]).startswith(
-        ("approve** (", "request_changes** (")
-    )
+    verdict = latest.get("state") in {"APPROVED", "CHANGES_REQUESTED"} or _summary_verdict(
+        body, marker[2]).startswith(("approve** (", "request_changes** ("))
     present, evidence = review_projection(latest, head, repo, number)
     if present and (evidence is None or any(call["fatal"] != "absent" for call in evidence["calls"])):
         return None

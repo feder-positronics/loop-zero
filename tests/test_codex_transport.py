@@ -593,7 +593,7 @@ def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
 def test_legacy_truncated_transcript_remains_unknown():
     head = "a" * 40
     rendered = (cli.review_marker(head, "primary")
-                + "\n**approve**\n<details><summary>Raw reviewer output</summary>\n\n```\n[Transcript truncated] not JSON\n```\n</details>")
+                + "\nloopzero primary review by codex: **approve** (0 critical)\n<details><summary>Raw reviewer output</summary>\n\n```\n[Transcript truncated] not JSON\n```\n</details>")
     legacy = row(SYNTHETIC_NATIVE, rendered) | {"id": 1}
     assert eligibility.review_projection(legacy, head, "acme/widgets", 7) == (False, None)
     assert eligible(legacy) is legacy
@@ -640,7 +640,7 @@ def test_raw_leading_utf8_span_at_limit_and_overflow(separator, overflow, tighte
         padded = marker[:-3] + " " * (8192 + overflow - len(span.encode("utf-8"))) + marker[-3:]
         span = separator.join((padded, header, adjudication))
         assert len(span.encode("utf-8")) == 8192 + overflow
-    rendered = span + separator + "**approve**"
+    rendered = span + separator + f"loopzero {result.kind} review by codex: **approve** (0 critical)"
     present, evidence = projection(result, rendered)
     assert present and (evidence is not None) is (overflow == 0)
     if not tightened:

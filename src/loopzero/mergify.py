@@ -300,7 +300,7 @@ class Departure:
         if self.failure_report is None:
             return ""
         base = f"https://github.com/{repo}/actions/runs/"
-        links = re.findall(rf"^- ❌ \[`([^`\n]+)`\]\({re.escape(base)}([0-9]+/job/([0-9]+))\)",
+        links = re.findall(rf"^- ❌ \[`([^\n]+?)`\]\({re.escape(base)}([0-9]+/job/([0-9]+))\)",
                            self.failure_report, re.M)
         if not links and (candidates := re.findall(rf"^- ❌ \*\*Checks failed\*\* [^\n]*\(/{re.escape(repo)}/pull/(\d+)\)",
                                                     self.failure_report, re.M)):

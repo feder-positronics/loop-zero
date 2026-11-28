@@ -73,7 +73,7 @@ def publisher(tmp_path, gh, monkeypatch):
 
 def approval(head=HEAD, *, state="APPROVED", verdict="**approve**"):
     return {"state": state, "commit_id": head, "user": {"login": "trusted-publisher"},
-            "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n{verdict}"}
+            "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\nloopzero primary review by claude: {verdict} (0 critical)"}
 
 
 @pytest.mark.parametrize("case,states", [

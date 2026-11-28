@@ -164,10 +164,10 @@ def _tail(text: str) -> str:
     return _redact_keys(None, text)[-TAIL_CHARS:]
 
 
-def _redact_keys(family: str | None, text: str) -> str:
+def _redact_keys(family: str | None, text: str, *, match_shapes: bool = True) -> str:
     names = {"claude": CLAUDE_AUTH_ENV, "codex": CODEX_AUTH_ENV}
     env = _proc.build_env(names.get(family, (*CLAUDE_AUTH_ENV, *CODEX_AUTH_ENV)))
-    return _proc.redact(text, _proc.secret_forms(env.values()), *_proc.SECRET_PATTERNS)
+    return _proc.redact(text, _proc.secret_forms(env.values()), *(_proc.SECRET_PATTERNS if match_shapes else ()))
 
 
 def _auth_failure(family: str, diagnostic: str) -> RunnerAuthFailed:
@@ -214,8 +214,9 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
     diagnostic = _tail(raw if excerpt is None else excerpt)
     if not isinstance(payload, dict):
         raise RunnerMalformedOutput(f"{family}: review is not a JSON object", diagnostic)
-    if set(payload) != {"verdict", "findings"}:
-        raise RunnerMalformedOutput(f"{family}: review has unexpected or missing keys", diagnostic)
+    if (invalid_keys := set(payload) != {"verdict", "findings"}) or _redact_keys(family, raw, match_shapes=False) != raw:
+        problem = "has unexpected or missing keys" if invalid_keys else "contains a forwarded credential"
+        raise RunnerMalformedOutput(f"{family}: review {problem}", diagnostic)
     verdict, items = payload["verdict"], payload["findings"]
     if (not isinstance(verdict, str) or verdict not in ("approve", "request_changes")
             or not isinstance(items, list)):

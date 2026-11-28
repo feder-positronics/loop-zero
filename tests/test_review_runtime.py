@@ -150,7 +150,7 @@ def test_retired_target_uses_ordinary_eligibility_and_budget():
     snapshot = copy.deepcopy(rows)
     replacement = {
         "id": 999, "commit_id": target, "user": {"login": PUBLISHER[0]},
-        "state": "COMMENTED", "body": cli.review_marker(target, "primary") + "\n**approve**",
+        "state": "COMMENTED", "body": cli.review_marker(target, "primary") + "\nloopzero primary review by claude: **approve** (0 critical)",
     }
     def markers(history):
         return cli._pr_markers(history, target, PUBLISHER, repo=repository, number=number)
@@ -160,7 +160,7 @@ def test_retired_target_uses_ordinary_eligibility_and_budget():
     ) is replacement
     with pytest.raises(cli.CliError, match="already has a primary"):
         cli._decide_kind(markers([*rows, replacement]), target)
-    delta = {**replacement, "id": 1000, "body": cli.review_marker(target, "delta") + "\n**approve**"}
+    delta = {**replacement, "id": 1000, "body": cli.review_marker(target, "delta") + "\nloopzero delta review by claude: **approve** (0 critical)"}
     with pytest.raises(cli.CliError, match="review cap reached"):
         cli._decide_kind(markers([*rows, replacement, delta]), target)
     assert rows == snapshot
