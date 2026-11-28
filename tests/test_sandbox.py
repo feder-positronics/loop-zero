@@ -131,7 +131,7 @@ def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, monkeypatch, com
     monkeypatch.setenv("SERVICE_KEY", f" {SERVICE_KEY}\n" if end == "[REDACTED]" else SERVICE_KEY)
     (result,) = sandbox.run_checks(make_config(checks=(command,), env_allowlist=("PATH", "SERVICE_KEY")), git_repo).results
     if end == "----------":
-        assert "[REDACTED]" in result.tail and all(piece in "[REDACTED]" for piece in result.tail.split("----------"))
+        assert "[REDACTED]" in result.tail and not set(result.tail) - set("[REDACTED]-")
     elif end == "[REDACTED]":
         assert result.tail == '"[REDACTED]" [REDACTED] [REDACTED]'
     lines = result.tail.splitlines()
@@ -246,7 +246,7 @@ def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch
 
 
 def inject_check_timeout(monkeypatch, output, before_timeout=None):
-    def read_output_tail(process, limit, timeout):
+    def read_output_tail(process, limit, timeout, _forms):
         if before_timeout is not None:
             before_timeout()
         raise subprocess.TimeoutExpired(process.args, timeout, output=output[-limit:])
@@ -276,8 +276,7 @@ sys.exit(7)
     finally:
         tracemalloc.stop()
     assert result.exit_code == 7
-    assert result.tail.endswith("\nlast stdout\nfinal Ω diagnostic")
-    assert len(result.tail.encode()) == 16 * 1024
+    assert result.tail == "last stdout\nfinal Ω diagnostic"
     assert peak - baseline < 4 * 1024 * 1024
 
 
@@ -1074,3 +1073,32 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     assert report.results[0].exit_code == 7
     assert 'stage-ran' in report.results[0].tail
     assert not report.results[0].reused_from
+
+
+@pytest.mark.parametrize("timed_out", [False, True])
+@pytest.mark.parametrize(("output", "canary"), [
+    ('print("ghp_" + "q" * 40_000)', "q" * 10),
+    ('print("ghp_" + "q" * 180_000)', "q" * 10),
+    ('''
+print("-----BEGIN PRIVATE KEY-----")
+for _ in range(4_500):
+    print("synthetic-private-material")
+print("-----END PRIVATE KEY-----")
+''', "synthetic-private-material"),
+])
+def test_check_output_redaction_across_capture_boundaries(git_repo, bwrap_log, timed_out, output, canary):
+    code = f"""
+import sys
+import time
+
+{output}
+print("ordinary diagnostic", flush=True)
+if sys.argv[1] == "True":
+    time.sleep(30)
+"""
+    command = shlex.join([sys.executable, "-c", code, str(timed_out)])
+    result = sandbox._run_one(make_config(), git_repo, ["bwrap", "--chdir", str(git_repo), "--"], command, 2)
+    assert result.exit_code == (sandbox.TIMEOUT_EXIT if timed_out else 0)
+    assert "ordinary diagnostic" in result.tail
+    assert ("timed out" in result.tail) == timed_out
+    assert canary not in result.tail

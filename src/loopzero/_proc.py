@@ -102,11 +102,13 @@ def tail(text: str, lines: int = TAIL_LINES) -> str:
     return "\n".join(text.rstrip("\n").splitlines()[-lines:])
 
 
-# Credential shapes hidden wherever loopzero prints or publishes text it did not write.
+_KEY_START = r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+_KEY_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+_KEY_BOUNDARY = re.compile(rf"({_KEY_START}|-----BEGIN [A-Z ]*+-{{0,4}}\Z)|{_KEY_END.pattern}")
 SECRET_PATTERNS = (
     r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})",
     r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", r"\brt_[A-Za-z0-9_.-]{20,}", r"\bAKIA[0-9A-Z]{16}\b",
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+    rf"{_KEY_START}[\s\S]*?(?:{_KEY_END.pattern}|\Z)",
     r"(?<=://)[^\s/:@]+:[^\s/@]+(?=@)",  # URL userinfo with a password
 )
 
@@ -118,21 +120,29 @@ def secret_forms(values: Iterable[str]) -> list[str]:
                   key=len, reverse=True)
 
 
-def redact(text: str, forms: Sequence[str], *patterns: str) -> str:
+def redact(text: str, forms: Sequence[str], *patterns: str, skip: int = 0) -> str:
     pattern = "|".join([*map(re.escape, forms), *patterns])
-    return re.sub(pattern, "[REDACTED]", text) if pattern else text
+    # A match starting in the discarded prefix may cover part of the retained text.
+    if skip:
+        skip = max(skip, max((m.end() for m in re.finditer(pattern, text) if m.start() < skip), default=0))
+    return re.sub(pattern, "[REDACTED]", text[skip:]) if pattern else text[skip:]
 
 
-def build_env(
-    env_allowlist: Sequence[str], extra_env: Mapping[str, str] | None = None
-) -> dict[str, str]:
-    """Copy only allowlisted variables from the current environment, then apply extras."""
-    env = {key: os.environ[key] for key in env_allowlist if key in os.environ}
-    env.update(extra_env or {})
-    return env
+def build_env(env_allowlist: Sequence[str], extra_env: Mapping[str, str] | None = None) -> dict[str, str]:
+    return {**{key: os.environ[key] for key in env_allowlist if key in os.environ}, **(extra_env or {})}
 
 
-def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float) -> str:
+def _redact_capture(text: str, forms: Sequence[str], lead: int, clipped: bool, key_open: bool) -> str:
+    # The first record can start inside a token or a forwarded multiline value.
+    skip = (text.find("\n", lead) + 1 or len(text)) if clipped else 0
+    if key_open:
+        end = _KEY_END.search(text)
+        skip = max(skip, end.end() if end else len(text))
+    return redact(text, forms, *SECRET_PATTERNS, skip=skip)
+
+
+def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float,
+                      forms: Sequence[str] | None = None) -> str:
     stream = proc.stdout
     assert stream is not None
     decode = io.IncrementalNewlineDecoder(
@@ -141,14 +151,26 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float) -
     deadline = time.monotonic() + timeout
     suffix = ""
     newlines = 0
+    lead = max(map(len, forms or ()), default=0)
+    window = limit if forms is None else limit + 64 * 1024 + lead
+    clipped = key_open = False
 
     def append(chunk: str) -> None:
-        nonlocal suffix, newlines
+        nonlocal suffix, newlines, clipped, key_open
         content = chunk.rstrip("\n")
         if content:
-            suffix = (suffix + "\n" * newlines + content)[-limit:]
+            text = suffix + "\n" * newlines + content
+            if forms is not None and (cut := len(text) - window) > 0:
+                clipped = True
+                for marker in (m for m in _KEY_BOUNDARY.finditer(text) if m.start() < cut):
+                    key_open = marker[1] is not None
+            suffix = text[-window:]
             newlines = 0
-        newlines = min(limit, newlines + len(chunk) - len(content))
+        newlines = min(window, newlines + len(chunk) - len(content))
+
+    def finish() -> str:
+        append(decode(b"", final=True))
+        return suffix if forms is None else _redact_capture(suffix, forms, lead, clipped, key_open)[-limit:]
 
     try:
         with selectors.DefaultSelector() as selector:
@@ -163,17 +185,13 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float) -
                 append(decode(chunk))
         proc.wait(timeout=max(0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as exc:
-        append(decode(b"", final=True))
-        exc.output = (suffix + "\n" * newlines)[-limit:]
+        exc.output = (finish() + "\n" * min(limit, newlines))[-limit:]
         raise
-    append(decode(b"", final=True))
-    # Check tails strip trailing newlines on success, even when there are many.
-    return suffix
+    return finish().rstrip("\n")
 
 
 def run_git_paths(argv: Sequence[str], *, cwd: Path, env_allowlist: Sequence[str], timeout: float,
                   extra_env: Mapping[str, str] | None = None) -> Completed:
-    """Read Git path records, removing the final LF from line-terminated output."""
     done = run(argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout, extra_env=extra_env,
                preserve_newlines=True, encoding=sys.getfilesystemencoding())
     return replace(done, stdout=done.stdout.removesuffix("\n"))
@@ -184,18 +202,12 @@ def run(
     extra_env: Mapping[str, str] | None = None, timeout: float,
     merge_output: bool = False, input: str | None = None, encoding: str | None = None,
     preserve_newlines: bool = False, tail_chars: int | None = None, graceful_interrupt: bool = False,
-    pass_fds: tuple[int, ...] = (),
+    pass_fds: tuple[int, ...] = (), tail_secrets: Sequence[str] | None = None,
 ) -> Completed:
-    """Run `argv` (never through a shell) with an environment stripped to the allowlist.
+    """Run directly with a filtered environment and report nonzero exits in Completed.
 
-    `merge_output=True` sends stderr into stdout so interleaving is preserved.
-    `input` is written to the child's stdin; without it stdin is /dev/null.
-    `encoding` overrides the parent locale for text I/O; None retains subprocess defaults.
-    With `preserve_newlines`, decode without newline translation (UTF-8 by default)
-    and preserve undecodable stdout bytes via surrogateescape.
-    `tail_chars` bounds merged text output without input, stripping trailing
-    newlines on completion and retaining them for timeout diagnostics.
-    Nonzero exit is reported in `Completed.exit_code`; callers decide whether to raise.
+    Preserve raw newlines and undecodable stdout with `preserve_newlines`.
+    A bounded merged tail strips trailing newlines on completion and retains them on timeout.
     """
     if tail_chars is not None and (not merge_output or preserve_newlines or input is not None or tail_chars <= 0):
         raise ValueError("bounded tails require merged text output, no input and a positive length")
@@ -213,7 +225,7 @@ def run(
         ) as proc:
             try:
                 stdout, stderr = (proc.communicate(stdin, timeout=timeout) if tail_chars is None
-                                  else (_read_output_tail(proc, tail_chars, timeout), ""))
+                                  else (_read_output_tail(proc, tail_chars, timeout, tail_secrets), ""))
             except BaseException:
                 try:
                     if graceful_interrupt and os.name == "posix":
