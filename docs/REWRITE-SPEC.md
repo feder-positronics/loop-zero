@@ -24,6 +24,6 @@ the system boundaries; the [contract](../core/CONTRACT.md) owns delivery behavio
 
 [tach.toml](../tach.toml) holds the dependency layers between these modules,
 enforced by `tach check` in CI and `loopzero check`.
-[scripts/size_budget.sh](../scripts/size_budget.sh) caps Python lines in
-`src/loopzero/` and `tests/` and Markdown lines in `core/` and `docs/DELEGATION.md`.
-[pyproject.toml](../pyproject.toml) enables Ruff's `C901` complexity check for source.
+[scripts/size_budget.sh](../scripts/size_budget.sh) holds the source, test and
+Markdown line caps; Ruff's `C901` rule in [pyproject.toml](../pyproject.toml)
+checks per-function complexity.

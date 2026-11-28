@@ -127,9 +127,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    through GitHub REST. A confirmed merge completes that branch even when a
    newer duplicate exists. If the head commit cannot prove completion, the
    fallback scans closed PRs by source branch across up to 100 REST pages.
-   Failed, malformed, repeated or truncated history blocks publication. An unfinished branch creates or refreshes a draft PR. Publication
-   checks that every effective origin push URL targets the configured GitHub
-   repository. A leased rewrite also requires the PR head in the task branch's
+   Invalid or incomplete history blocks publication. An unfinished branch
+   creates or refreshes a draft PR. All effective origin push URLs must target
+   the configured repository. A leased rewrite requires the PR head in the task branch's
    local history. The push source is the captured commit. A new draft starts with task prose.
    The body patch, including saved evidence on a new draft, requires an open PR at the
    captured commit and configured target.
@@ -452,9 +452,9 @@ index, README and AGENTS guidance without network access. The repository's
 `workflow.toml` runs the default gate (alongside `tach check` against
 [tach.toml](../tach.toml) for module dependency boundaries); PR and merge-group
 CI enforce it against the event's base SHA using full checkout history.
-On pushes to main, CI runs the architecture checker with `--links-only`.
-Squash merging can drop authored trailers, so the acknowledgement gate runs
-before merge.
+Push-to-main CI runs `--links-only`, because squash merging
+can drop authored trailers and landed history cannot re-establish the pre-merge
+acknowledgement; that mode still rejects broken local links and anchors.
 `loopzero check` pins checks to trusted base configuration, so run a new or
 changed gate directly until its configuration lands on the base.
 
