@@ -6,9 +6,8 @@ description: Advisory review of a frozen code diff against acceptance criteria, 
 # Code Review
 
 Review one frozen diff without editing the tree. Read [the contract](../../CONTRACT.md),
-the PR body, and surrounding code. Confirm the exact head and follow the
-contract's [scope and budget](../../CONTRACT.md#review-budget) and
-[missing-evidence rule](../../CONTRACT.md#findings).
+PR body and surrounding code. Confirm the exact head. Follow
+[review budget](../../CONTRACT.md#review-budget) and [findings rules](../../CONTRACT.md#findings).
 Apply [local check receipt reuse](../../CONTRACT.md#check-reuse-and-delivery-priority).
 
 ## Judge
@@ -20,10 +19,7 @@ concurrent, failure, and retry cases. Check:
 - Each acceptance criterion has proof; tests exercise the claimed behavior.
 - Named tests and checks exist in the diff or tree.
 - Callers, data shapes, permissions, builds, docs, and contract remain consistent.
-- Maintainability: flag workarounds that leave the real defect in place, duplicated
-  decision logic, unnecessary shims/layers, or added code where simplifying or
-  deleting would do (`important` when it creates ongoing defect or divergence risk;
-  `suggestion` otherwise).
+- Maintainability and [structural erosion](../../CONTRACT.md#findings), including code that should be simplified or deleted.
 
 Audit sibling callers, readers, transitions, and retries when a defect reveals
 a class; report its instances together. Distinguish unavailable proof from
