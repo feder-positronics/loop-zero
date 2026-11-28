@@ -130,6 +130,7 @@ def check_source(publisher, states, *, exit_code=0, error=None, match=None, manu
     ("APPROVED", "unknown", "pending"), ("APPROVED", "settles", "success"),
 ])
 def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case, blocker, status):
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO.upper())
     review = approval() | {"state": "COMMENTED"}
     reviews = {
         "absent": [], "APPROVED": [approval()], "revoked": [approval(), review | {"state": "DISMISSED"}],

@@ -75,6 +75,8 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
                                      "~~~md\n[ref](missing.md)\n~~~", "[ref](#absent-heading)",
                                      "`[ref](missing.md)`", "`` `[ref](missing.md)` ``", "[`ref`](code`name`.md)",
                                      "API\n===\n\n[ref](#api)", "API\n---\n\n[ref](#api)",
+                                     "[guide](/docs/ARCHITECTURE.md)",
+                                     "## Install [Git](https://git-scm.com)\n\n[ref](#install-git)",
                                      "# Alpha\n# Alpha-1\n# Alpha\n\n[ref](#alpha-2)"])
 def test_local_links_even_with_guide_update(git_repo, base, markdown):
     (git_repo / "docs/Design (legacy).md").touch()
