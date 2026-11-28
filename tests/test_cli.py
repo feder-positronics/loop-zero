@@ -1100,6 +1100,16 @@ def test_pr_pushes_and_creates_draft(
         assert_contains(body, "Regression failed before the fix.", "(no `loopzero check` run recorded)")
 
 
+def test_validation_refresh_keeps_multiline_check_inside_markers(wt, head, monkeypatch):
+    stage = CheckResult("echo before\n## Smoke check\necho after", 0, 0.1, "")
+    monkeypatch.setattr(cli, "_check_report_problem", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_load_report", lambda _: CheckReport(head, False, (stage,)))
+    body = cli._pr_body(wt, head, None, "## Validation\n\n## Notes\nKeep me.\n")
+    monkeypatch.setattr(cli, "_load_report", lambda _: CheckReport(head, False, (replace(stage, exit_code=7),)))
+    refreshed = cli._pr_body(wt, head, None, body)
+    assert "## Smoke check" in body and refreshed == body.replace("exit 0", "exit 7")
+
+
 @pytest.mark.parametrize("refresh", [False, True])
 def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, refresh):
     command = (
