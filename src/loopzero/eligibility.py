@@ -9,6 +9,7 @@ import argparse
 import re
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from time import sleep
 
@@ -74,13 +75,16 @@ def review_login(row: dict) -> str:
     return login.casefold() if isinstance(login, str) else ""
 
 
+def _marked_reviews(reviews: list[dict], publishers: tuple[str, ...]) -> list[dict]:
+    trusted = {login.casefold() for login in publishers}
+    return [r for r in reviews if review_login(r) in trusted and "loopzero:review" in
+            runners.leading_review_block((r.get("body") or "").removeprefix(github.BODY_BLOCKERS))[1]]
+
+
 def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
                     repo: str = "", number: int = 0) -> dict | None:
     """Latest trusted evidence on this exact head; revocation cannot revive older evidence."""
-    trusted = {login.casefold() for login in publishers}
-    latest = next((r for r in reversed(reviews)
-                   if review_login(r) in trusted
-                   and r.get("commit_id") == head and "loopzero:review" in (r.get("body") or "")), None)
+    latest = next((r for r in reversed(_marked_reviews(reviews, publishers)) if r.get("commit_id") == head), None)
     if latest is None or latest.get("state") not in {"APPROVED", "COMMENTED", "CHANGES_REQUESTED"}:
         return None
     body = latest.get("body") or ""
@@ -179,9 +183,7 @@ def body_blocker(review: dict | None) -> str | None:
 def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
                      repo: str, number: int, base_branch: str) -> dict | None:
     """The review that covers or explicitly blocks this head."""
-    trusted = {login.casefold() for login in publishers}
-    marked = [r for r in reviews if review_login(r) in trusted
-              and "loopzero:review" in (r.get("body") or "")]
+    marked = _marked_reviews(reviews, publishers)
     if not marked or any(r.get("commit_id") == head for r in marked):
         return eligible_review(marked, head, publishers, repo=repo, number=number)
     latest = marked[-1]
@@ -234,10 +236,13 @@ def evaluate(repo: str, number: int, head: str, base: str,
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head,
                               review_blocker=body_blocker(review), publishers=publishers)
-    current = github.pr_view(repo, number) if snapshot is None else pr
-    if snapshot is None and source_fingerprint(current) != source_fingerprint(pr):
+    return _confirm_source(pr, github.pr_view(repo, number), result) if snapshot is None else result
+
+
+def _confirm_source(pr: github.PR, current: github.PR, result: github.Readiness) -> github.Readiness:
+    if source_fingerprint(current) != source_fingerprint(pr):
         return github.Readiness(False, ("source changed during eligibility refresh",))
-    if snapshot is None and result.ready and (blocker := github.mergeability_blocker(current)):
+    if result.ready and (blocker := github.mergeability_blocker(current)):
         return github.Readiness(False, (blocker,))
     return result
 
@@ -258,6 +263,29 @@ def source_status(result: github.Readiness) -> tuple[str, str]:
     return "failure", reasons_text(reasons)
 
 
+def restore_landed(repo: str, head: str, pending_id: int | None = None) -> int:
+    # Also runs on a rerun, so a failed restore is retried instead of leaving the head pending.
+    progress = {("pending", "Refreshing live source review evidence"), ("pending", "Refreshing source review evidence")}
+    rows = github.context_statuses(repo, head, CONTEXT)
+    if ((top := next(rows, {})) and (pending_id is None or top.get("id") == pending_id)
+            and (top["state"], top.get("description")) in progress and (prior := next(
+                (r for r in rows if (r["state"], r.get("description")) not in progress), None))):
+        publish_verdict(repo, head, prior["state"], prior["description"])
+    return 0
+
+
+def publish_verdict(repo: str, head: str, state: str, description: str) -> None:
+    try:
+        github.commit_status(repo, head, CONTEXT, state, description)
+    except github.StatusLimitReached:
+        raise
+    except (github.GhError, github.ProcTimeout, OSError) as exc:
+        with suppress(github.GhError, github.ProcTimeout, OSError):
+            if ((r := next(github.context_statuses(repo, head, CONTEXT), {})).get("state"), r.get("description")) == (state, description):
+                return
+        raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="trusted base workflow.toml")
@@ -271,15 +299,19 @@ def main(argv: list[str] | None = None) -> int:
             raise LoopZeroError("configure delivery.review_publishers in the trusted workflow.toml")
         if args.pr <= 0 or not is_sha(args.head):
             raise LoopZeroError("specify the PR number and the full 40-character source SHA")
-        def publish(state: str, description: str) -> None:
-            github.commit_status(cfg.repo, args.head, CONTEXT, state, description[:140])
-        if args.publish and github.pr_view(cfg.repo, args.pr).state == "MERGED":
-            args.publish = False  # A landed head needs no verdict.
-        if args.publish:
-            publish("pending", "Refreshing source review evidence")
-        result = evaluate(cfg.repo, args.pr, args.head, cfg.base_branch, cfg.review_publishers)
-        if args.publish:
-            publish(*source_status(result))
+        pending = (github.commit_status(cfg.repo, args.head, CONTEXT, "pending", "Refreshing source review evidence")
+                   if args.publish and github.pr_view(cfg.repo, args.pr).state != "MERGED" else None)
+        snapshot = source_snapshot(cfg.repo, args.pr, args.head) if pending is not None else None
+        result = evaluate(cfg.repo, args.pr, args.head, cfg.base_branch, cfg.review_publishers, snapshot=snapshot)
+        if snapshot is not None and pending is not None:
+            current = github.pr_view(cfg.repo, args.pr)
+            if current.state == "MERGED" and current.head_sha == snapshot.head_sha == args.head:
+                code = restore_landed(cfg.repo, args.head, pending.get("id") or 0)
+                print("source landed during eligibility refresh")
+                return code
+            result = _confirm_source(snapshot, current, result)
+            state, description = source_status(result)
+            publish_verdict(cfg.repo, args.head, state, description[:140])
     except (LoopZeroError, OSError) as exc:
         print(" | ".join(line.strip() for line in str(exc).splitlines() if line.strip()), file=sys.stderr)
         return 1
