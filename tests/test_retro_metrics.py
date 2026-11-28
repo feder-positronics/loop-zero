@@ -23,7 +23,8 @@ def sources(tmp_path, monkeypatch, request):
         "outcomes": [issue(n, "2026-05-24T00:00:00Z", SINCE, reason)
                      for n, reason in [(6, "completed"), (7, "not_planned")]],
         "orders": [issue(8, "2026-05-27T00:00:00Z", SINCE, "completed")],
-        "orders_open": [issue(9, "2026-01-01T00:00:00Z")],
+        "orders_open": [issue(9, "2026-01-01T00:00:00Z"), issue(5, "2026-05-02T12:00:00Z")],
+        "issues/9/timeline": [dict(event=kind, created_at=when) for kind, when in [("closed", SINCE), ("reopened", END)]],
         "p0": [issue(4, "2026-05-23T12:00:00Z"), issue(5, "2026-05-02T12:00:00Z")],
         "issues/4/timeline": [{"event": event, "created_at": time} for event, time in [
             ("labeled", "2026-05-28T23:45:00Z"), ("commented", "2026-05-28T06:00:00Z"), ("commented", END),
@@ -102,7 +103,6 @@ def record(sources, capsys):
 def test_record_replay_and_weekly_window(sources, record):
     calls, _ = sources
     report, stderr = record(host=True)
-    assert sum(call == ["host-adapter"] for call in calls) == 1 and len(calls) == 8
     expected = dict(merges=1, open_to_merge_median_hours=42, outcomes_closed=1, orders_accepted=1,
                     order_to_acceptance_median_hours=24, checks_passed=1, checks_failed=1,
                     open_p0=2, oldest_open_p0_hours=636, owner_messages=0, tokens_by_role={"builder": 31}, spend=1.25)
@@ -113,9 +113,10 @@ def test_record_replay_and_weekly_window(sources, record):
     assert report["weekly_sample"]["items"] == [
         {"kind": "merged_control", "number": 1},
         {"kind": "slowest_accepted", "number": 8},
-        {"kind": "oldest_open_order", "number": 9},
+        {"kind": "oldest_open_order", "number": 5},
     ]
     assert report["weekly_sample"]["shortfall"] == 3
+    assert sum(call == ["host-adapter"] for call in calls) == 1 and len(calls) == 9
     assert "Previous 7d" in stderr
 
 

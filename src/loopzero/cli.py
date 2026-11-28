@@ -544,6 +544,11 @@ def _sync_task_narrative(task: str, existing: str) -> str:
     prefix = task[:first.start()] if (first := pattern.search(task_prose)) else task
     live_prose = _outside_fences(existing)
     prior = re.search(r"^<!-- loopzero:task-sections ([0-9a-f ]+) -->$", live_prose, re.MULTILINE)
+    if existing:
+        live_end = first.start() if (first := pattern.search(live_prose)) else len(existing)
+        prefix = existing[:live_end]
+        if prior and prior.end() <= live_end:
+            prefix = prefix[:prior.start()] + prefix[prior.end():]
 
     def section_id(name: str) -> str:
         return hashlib.sha256(name.encode()).hexdigest()[:16]
