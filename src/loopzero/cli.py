@@ -775,10 +775,8 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 
 def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  # noqa: C901 - PR guard, publish, repost and recovery paths
-    runtime_source = (
-        "reviewer paths are unpinned because --config was provided" if args.config
-        else f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}"
-    )
+    runtime_source = ("reviewer paths are unpinned because --config was provided" if args.config
+                      else f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}")
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     kinds = ("primary", "delta")
@@ -835,6 +833,7 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
             wt, config, head, kind, publication_context,
         ):
             raise CliError(f"saved {kind} review for {head[:12]}; run `loopzero review --repost`")
+        _require_receipt(wt, config, head)
         result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
                              runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
         final_head, final_dirty = worktree.head(wt), worktree.is_dirty(wt)

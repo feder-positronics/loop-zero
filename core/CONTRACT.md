@@ -20,9 +20,10 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    generated Validation checks. Later calls sync narrative, preserving live
    Validation, Review and extra sections; `check` refreshes only its checks
    block. Drafts need no approving review.
-4. `loopzero review` runs a native review on the exact head and posts one GitHub
-   review with inline findings. Blocking findings without commentable lines go
-   in the review body and need a reviewed fix. Approval exits 0. Follow the [review budget](#review-budget).
+4. `loopzero review` requires a passing check receipt for the exact head before
+   launching a native review and posting its inline findings to GitHub.
+   Blocking findings without commentable lines go in the review body and need
+   a reviewed fix. Approval exits 0. Follow the [review budget](#review-budget).
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
    passes. On repositories that auto-queue ready PRs, leaving draft can queue
    the PR during this command. A draft blocked only by missing or skipped
