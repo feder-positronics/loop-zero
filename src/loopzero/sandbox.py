@@ -301,9 +301,10 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
 
 def check_inputs_match(config: Config, worktree: Path, report: CheckReport, *, bytes_only: bool = False) -> bool:
     base = None if bytes_only else _check_base(config, worktree)
-    return all(r.input_key and (key := _input_key(config, worktree, r.command, base))
-               and (r.input_key.startswith(key) if bytes_only else r.input_key == key)
-               for r in report.results if _has_inputs(config, r.command))
+    return all((not r.input_key if bytes_only and key == "" else
+                r.input_key and key and (r.input_key.startswith(key) if bytes_only else r.input_key == key))
+               for r in report.results if _has_inputs(config, r.command)
+               for key in (_input_key(config, worktree, r.command, base),))
 
 
 def _has_inputs(config: Config, command: str) -> bool:
@@ -322,9 +323,11 @@ def _input_key(config: Config, worktree: Path, command: str, base: str | None, *
         if not base:
             return None
         raise
-    if blobs == "" and status:
-        status(f"{workflow}: checks.inputs for {command!r} matches no files in HEAD. "
-               f"Correct these entries: {entries!r}. Running the check fresh.")
+    if blobs == "":
+        if status:
+            status(f"{workflow}: checks.inputs for {command!r} matches no files in HEAD. "
+                   f"Running the check fresh with entries {entries!r}.")
+        return "" if base is None else None  # Verifiable for readiness, unkeyed for reuse.
     return _hash_inputs(config, worktree, command, base, blobs) if blobs and base != "" else None
 
 

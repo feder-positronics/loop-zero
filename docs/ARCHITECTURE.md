@@ -513,6 +513,8 @@ Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
 command, installed version and pinned source revision, sandbox configuration and
 the resolved base SHA. A stage runs
 fresh when a matched path cannot be identified as a readable regular file.
+An unmatched pathspec also runs fresh. Readiness accepts its unkeyed passing
+stage only if the lookup succeeds and still matches no files on the same head.
 A base advance prevents reuse in a fresh check. Readiness can still accept
 the existing passing receipt at the same task head if its settings match.
 With explicit `--config`, reuse can fall back to the recorded task base if the
