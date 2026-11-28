@@ -1225,7 +1225,6 @@ def test_pr_body_mutation_rechecks_live_head_and_target(wt, gh, capsys, head, co
     assert not any(map(wrote, gh.calls))
 
 
-
 def arm_unproven_history(gh, failure):
     forbidden = "HTTP 403 forbidden"
     if failure == "read":
@@ -2226,7 +2225,6 @@ def test_review_extra_delta_after_base_conflict(wt, repo, gh, fake_bin, capsys, 
     assert run(capsys, "ready")[0] == 0
     assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
     expect_cli(capsys, 1, "review", stderr_contains=("review cap reached",))
-
 
 
 def test_review_ignores_forged_history(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
@@ -4222,7 +4220,6 @@ def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accep
     assert len([c for c in gh.calls if "--input" in c and c["argv"][1] == endpoint]) == 1
 
 
-
 @pytest.mark.parametrize("command", ["ready", "status"])
 @pytest.mark.parametrize("merge_state", ["CLEAN", "BEHIND"])
 @pytest.mark.parametrize("attested", [True, False])
@@ -4701,8 +4698,8 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
         return mergify.Membership() if confirmed or clock.now >= 210 else None
 
     monkeypatch.setattr(mergify, "configured", lambda *args: configurations.append(args) or True)
-    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: gh.respond(
-        " ".join(detail), landed_snapshot(head)))
+    gh.respond(f"api repos/{REPO}/issues/7/comments", [])
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: gh.respond(" ".join(detail), landed_snapshot(head)))
     monkeypatch.setattr(mergify, "membership", membership)
 
     assert cli._wait_for_mergify(config, pr, 90 if confirmed else 360, confirmed=confirmed) == "e" * 40
@@ -5472,3 +5469,63 @@ def test_delivery_requires_explicit_review_publishers(wt, gh, capsys, tmp_path, 
     assert (str(path) if override else "origin/main:workflow.toml") in out + err
     assert command == "status" or len(gh.calls) == calls
     assert command != "status" or ("ready:    no" in out and "review:   not evaluated" in out)
+
+
+@pytest.mark.parametrize("operation", ["ready", "request", "confirm", "resolve"])
+def test_concurrent_pr_writes(wt, tmp_path, monkeypatch, operation):
+    settings = replace(config.load_trusted(wt), mergify_queue="main")
+    pr = github.PR(7, URL, "a" * 40, "main", operation == "ready", "OPEN", "MERGEABLE")
+    writing, overlap, posted = Event(), Event(), Event()
+    def lock(fd, flags, flock=cli.fcntl.flock):
+        if write.called and flags == cli.fcntl.LOCK_EX:
+            overlap.set()
+        return flock(fd, flags)
+
+    def read(value):
+        if write.called:
+            overlap.set()
+        return value
+
+    def publish(*args, **kwargs):
+        if write.call_count > 1:
+            overlap.set()
+        writing.set()
+        assert overlap.wait(2)
+        posted.set()
+        return {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
+
+    write = Mock(side_effect=publish)
+    monkeypatch.setattr(cli.fcntl, "flock", lock)
+    monkeypatch.setattr(cli, "_require_receipt", Mock())
+    if operation == "ready":
+        monkeypatch.setattr(github, "pr_view", lambda *_: read(replace(pr, is_draft=not posted.is_set())))
+        monkeypatch.setattr(github, "mark_ready", write)
+    elif operation != "resolve":
+        membership = mergify.Membership() if operation == "confirm" else None
+        monkeypatch.setattr(mergify, "queue_attempt", lambda *_: read(mergify.QueueAttempt(requested=posted.is_set(), confirmed=operation == "confirm" and posted.is_set())))
+        monkeypatch.setattr(mergify, "membership", Mock(return_value=membership))
+        monkeypatch.setattr(mergify, "request" if operation == "request" else "mark_confirmed", write)
+        monkeypatch.setattr(github, "merged_sha", Mock(return_value=None))
+        monkeypatch.setattr(cli, "_mergify_wait_poll", Mock(return_value=(None, membership, False)))
+    else:
+        monkeypatch.setattr(github, "_parse_thread", lambda *_: ("abcdef01", None))
+        monkeypatch.setattr(github, "_review_threads", lambda *_a, **_k: read([{"id": "T", "isResolved": posted.is_set()}]))
+        monkeypatch.setattr(github, "_has_thread_reply", lambda node, _: node["isResolved"])
+        monkeypatch.setattr(github, "_gh_json", write)
+        monkeypatch.setattr(github, "_gh", Mock(return_value='{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}'))
+
+    def invoke(path):
+        if operation == "ready":
+            return cli._mark_ready(path, settings, pr.number, pr.head_sha)
+        if operation == "resolve":
+            return github.resolve_finding(REPO, 7, "abcdef01", "Fixed", ())
+        if path != wt and operation == "confirm":
+            return cli._wait_for_mergify(settings, pr, 0, False)
+        return cli._merge_with_mergify(path, settings, pr, github.Readiness(True, ()), None)
+
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(invoke, wt)
+        assert writing.wait(3)
+        pool.submit(invoke, init_git_repo(tmp_path / "other")).result(timeout=3)
+        first.result(timeout=3)
+    assert write.call_count == 1

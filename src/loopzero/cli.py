@@ -580,7 +580,6 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
 
 
 def _pr_title(wt: Path, branch: str) -> str:
-    """Use the first nonempty top-level task heading, or the branch."""
     headings = (line[2:].strip() for line in worktree.task_text(wt).splitlines() if line.startswith("# "))
     return next(filter(None, headings), branch)
 
@@ -1292,14 +1291,15 @@ OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its on
 def _mark_ready(wt: Path, config: Config, number: int, head: str, deadline: float | None = None) -> None:
     _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
     try:
-        with github.bounded_reads(deadline, token=None, retry=True) if deadline is not None else nullcontext():
-            live = github.pr_view(config.repo, number)
-            github.read_timeout(0)
-        seen = (live.head_sha, live.state, live.base_ref)
-        if problem := github.merge_hold(number, live.labels) or (
-                seen != (head, "OPEN", config.base_branch) and f"PR changed to {seen}"):
-            raise CliError(f"{problem}; rerun loopzero ready")
-        github.mark_ready(config.repo, number)
+        with github.pr_lock(config.repo, number):
+            with github.bounded_reads(deadline, token=None, retry=True) if deadline is not None else nullcontext():
+                live = github.pr_view(config.repo, number)
+            seen = (live.head_sha, live.state, live.base_ref)
+            if problem := github.merge_hold(number, live.labels) or (
+                    seen != (head, "OPEN", config.base_branch) and f"PR changed to {seen}"):
+                raise CliError(f"{problem}; rerun loopzero ready")
+            if live.is_draft:
+                github.mark_ready(config.repo, number)
     except github.ReadDeadline:
         raise
     except github.GhUnavailable as exc:
@@ -1739,7 +1739,9 @@ def _wait_for_mergify(config: Config, pr: github.PR, timeout: float, confirmed: 
             if sha:
                 return sha
             if state is not None and not confirmed:
-                mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
+                with github.pr_lock(config.repo, pr.number):
+                    if not mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue).confirmed:
+                        mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
                 confirmed = True
                 print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
         # A queued, open PR normally gets its next landing read on the next tick.
@@ -1780,14 +1782,13 @@ def _merge_with_mergify(
     wt: Path, config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
-    """Request admission after readiness, or observe a live queue entry without writing."""
     queue = config.mergify_queue
     assert queue is not None
     if not readiness.ready:
         return _follow_blocked_mergify(config, pr, readiness, queue, deadline, bounded=admit_by is not None)
     if pr.is_draft:
         raise CliError(f"PR #{pr.number} is still a draft; next: loopzero ready --wait")
-    with worktree.lock_local_state(wt):
+    with worktree.lock_local_state(wt), github.pr_lock(config.repo, pr.number):
         attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
         state = mergify.membership(config.repo, pr.number, queue, admit_by)
         if sha := github.merged_sha(
@@ -1798,7 +1799,6 @@ def _merge_with_mergify(
         if confirmed and not attempt.confirmed:
             _require_receipt(wt, config, pr.head_sha)
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
-        # A repository rule may have queued and ejected the PR before any loopzero request.
         if not confirmed and (attempt.confirmed or attempt.departure):
             if sha := _mergify_departure(config, pr, queue, closed := [], attempt.confirmed, attempt.departure):
                 return sha
@@ -1812,8 +1812,7 @@ def _merge_with_mergify(
     if deadline is not None:
         return _queue_wait(deadline, lambda remaining: _wait_for_mergify(config, pr, remaining, confirmed),
                            bounded=admit_by is not None)
-    state_name = "confirmed in" if confirmed else "requested from"
-    print(f"PR #{pr.number} {state_name} Mergify queue {queue}; {_FOLLOW_QUEUE}")
+    print(f"PR #{pr.number} {'confirmed in' if confirmed else 'requested from'} Mergify queue {queue}; {_FOLLOW_QUEUE}")
     return None
 
 
