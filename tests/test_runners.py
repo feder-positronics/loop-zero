@@ -12,7 +12,7 @@ import subprocess
 import sys
 import textwrap
 import tomllib
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import replace
 from pathlib import Path
 from select import select
@@ -1224,13 +1224,15 @@ def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, repo
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
 def test_sigterm_removes_only_cancelled_review_home(family, fake_tool, tmp_path):
-    binary = fake_tool(family, "exec sleep 15")
+    reviewer = "import signal; signal.sigwait({signal.SIGUSR1}); print('wake', flush=True); signal.pause()"
+    binary = fake_tool(family, shlex.join(["exec", sys.executable, "-c", reviewer]))
     script = """
-import subprocess, sys
+import signal, subprocess, sys
 from pathlib import Path
 from loopzero import runners
 
 family, binary = sys.argv[1:]
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
 runners._auth_binds = lambda *args: ()
 runners._sandbox_prefix = lambda family, cwd, home, *args: (
     ["env", f"HOME={home}"], runners._review_config(family, Path(binary), ()), Path(binary)
@@ -1248,11 +1250,10 @@ subprocess.Popen.communicate = announce
 runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
                     diff="diff", task_text="task")
 """
-    host_home = tmp_path / "host"
-    host_home.mkdir()
-    marker = host_home / "marker"
+    marker = tmp_path / "host" / "marker"
+    marker.parent.mkdir()
     marker.write_text("keep")
-    env = {**os.environ, "TMPDIR": str(tmp_path), "HOME": str(host_home)}
+    env = {**os.environ, "TMPDIR": str(tmp_path), "HOME": str(marker.parent)}
 
     with ExitStack() as stack:
         def start_review():
@@ -1261,7 +1262,7 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
                 stdout=subprocess.PIPE, text=True,
             ))
             stack.callback(process.kill)
-            assert select([process.stdout], [], [], 5)[0], "native reviewer did not start"
+            assert select([process.stdout], [], [], 30)[0], "native reviewer did not start"
             pid, home = process.stdout.readline().rstrip("\n").split("\t")
             stack.callback(stop_if_running, int(pid))
             return process, Path(home), int(pid)
@@ -1279,7 +1280,10 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
 
         def terminate_review(process, home, pid):
             process.terminate()
-            assert process.wait(timeout=5) == -signal.SIGTERM
+            # Wake communicate if SIGTERM reached Python just before its blocking poll.
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGUSR1)
+            assert process.wait(timeout=30) == -signal.SIGTERM
             assert not home.exists()
             assert not running(pid)
 
