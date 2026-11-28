@@ -88,8 +88,8 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     marker = leading_marker(body)
     if not marker or marker.group(1) != head or not is_sha(head):
         return None
-    verdict = latest.get("state") in {"APPROVED", "CHANGES_REQUESTED"} or any(
-        f"**{value}**" in body for value in ("approve", "request_changes")
+    verdict = latest.get("state") in {"APPROVED", "CHANGES_REQUESTED"} or _summary_verdict(body, marker[2]).startswith(
+        ("approve** (", "request_changes** (")
     )
     present, evidence = review_projection(latest, head, repo, number)
     if present and (evidence is None or any(call["fatal"] != "absent" for call in evidence["calls"])):
@@ -156,6 +156,7 @@ def base_merge_material(
 
 def _summary_verdict(body: str, kind: str) -> str:
     # Read the publisher's summary before model prose can quote either verdict.
+    body = body.removeprefix(github.BODY_BLOCKERS)
     _, machine_block = runners.leading_review_block(body)
     summary, _, rest = body[len(machine_block):].lstrip().partition("\n")
     if summary.startswith(("Reposted from runner session: ", "Reposted from runner sessions: ")):

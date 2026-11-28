@@ -603,7 +603,7 @@ def test_silent_stage_reports_live_metadata_then_completion(
     monkeypatch.setenv("AUDIT_TOKEN", "p1n-secret")
     monkeypatch.setenv("AUTH_ENABLED", "1")
     monkeypatch.setenv("RUST_BACKTRACE", "1")
-    command = ('test -z "$LZ_KEEP" || echo "$LZ_KEEP"; echo "$AUDIT_TOKEN"; '
+    command = ('test -z "$LZ_KEEP" || echo "$LZ_KEEP"; echo "$AUDIT_TOKEN"; echo ghp_\'\'syntheticRedactionSentinel; '
                'echo "tests/test_example.py:12: $RUST_BACKTRACE $NODE_ENV $DJANGO_DEBUG $CHECK_PYTHON $AUTH_ENABLED" >&2; '
                f'exit {exit_code}')
     cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN", "AUTH_ENABLED", "RUST_BACKTRACE"),
@@ -618,7 +618,7 @@ def test_silent_stage_reports_live_metadata_then_completion(
     monkeypatch.setattr(sandbox, "_run_one", run_stage)
     report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
     assert report.results[0].exit_code == exit_code
-    assert report.results[0].tail == "[REDACTED]\ntests/test_example.py:12: 1 test true /opt/cpython-3.14/bin/python3.14 1"
+    assert report.results[0].tail == "[REDACTED]\n[REDACTED]\ntests/test_example.py:12: 1 test true /opt/cpython-3.14/bin/python3.14 1"
     statuses = [event for event in events if event not in cfg.checks]
     heartbeats = [event for event in statuses if "running" in event]
     assert heartbeats and all(re.fullmatch(

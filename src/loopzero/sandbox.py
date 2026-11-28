@@ -478,10 +478,10 @@ def _check_secrets(config: Config) -> list[str]:
 
 
 def _check_tail(text: str, config: Config | None = None, *, suffix: str = "") -> str:
-    if secrets := (_check_secrets(config) if config is not None else []):
-        redacted = _proc.redact(text, secrets)
-        # Redact before cutting; the extra lead read in _run_one may hold a split secret.
-        text = redacted[len(secrets[0]):] if len(text) > CHECK_TAIL_BYTES else redacted
+    secrets = _check_secrets(config) if config is not None else []
+    redacted = _proc.redact(text, secrets, *_proc.SECRET_PATTERNS)
+    # Redact before cutting; the extra lead read in _run_one may hold a split secret.
+    text = redacted[len(secrets[0]):] if secrets and len(text) > CHECK_TAIL_BYTES else redacted
     bounded = (text + suffix).rstrip("\n")[-CHECK_TAIL_BYTES:]
     encoded = bounded.encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
     # A byte cut can start inside a multibyte character.

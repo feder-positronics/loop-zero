@@ -266,7 +266,7 @@ def test_publication_recovery_rechecks_pr_and_publisher(wt, gh, head, changed, p
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
         login: str = LOGIN, verdict: str = "approve") -> dict:
     """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""
-    return {"body": f"{marker(head, kind)}\nreview: **{verdict}**", "state": state,
+    return {"body": f"{marker(head, kind)}\nloopzero {kind} review by claude: **{verdict}** (0 critical)", "state": state,
             "commit_id": commit or head, "user": {"login": login}}
 
 
@@ -3508,16 +3508,16 @@ def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_pa
     assert run(capsys, "ready")[0] == 0
 
 
-@pytest.mark.parametrize("state", ["forged", "DISMISSED", "PENDING", "COMMENTED"])
+@pytest.mark.parametrize("state", ["forged", "quoted", "DISMISSED", "PENDING", "COMMENTED"])
 def test_ready_respects_latest_review_state(wt, gh, capsys, state, head):
+    reviews = [rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")]
     if state == "forged":
         reviews = [rev(head, "primary", login="stranger"), rev(head, "primary", commit="1" * 40)]
-    else:
-        reviews = [rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")]
+    elif state == "quoted":
+        reviews[-1].update(state="COMMENTED", body=f"{marker(head, 'delta')}\n\nProse quoted **approve**.")
     arm_approved_pr(gh, head, wt, reviews=reviews)
-    ready = state == "COMMENTED"
-    out, _ = expect_cli(capsys, 0 if ready else 1, "ready")
-    assert without_accepted_receipt(out) == (f"ready: {URL}\n" if ready else
+    out, _ = expect_cli(capsys, 0 if state == "COMMENTED" else 1, "ready")
+    assert without_accepted_receipt(out) == (f"ready: {URL}\n" if state == "COMMENTED" else
                                              "not ready: no review recorded for the current head\n")
     if state == "forged":
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1

@@ -316,7 +316,7 @@ class Departure:
                 return " Candidate jobs unavailable: GitHub could not read the candidate checks."
         jobs = sorted(dict.fromkeys(links), key=lambda job: " / " not in job[0])
         return " " + " ".join(
-            f"{name!r} ({base}{path}): " + (_job_failure(repo, job_id) if index < 3 else "log limit reached") + "."
+            f"{github._redact_tokens(name)!r} ({base}{path}): " + (_job_failure(repo, job_id) if index < 3 else "log limit reached") + "."
             for index, (name, path, job_id) in enumerate(jobs)
         ) if jobs else " Candidate jobs unavailable: no failed GitHub Actions jobs found."
 
