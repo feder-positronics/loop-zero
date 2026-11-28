@@ -232,15 +232,6 @@ def test_missing_gh_raises_typed_error(fake_bin: Path, monkeypatch: pytest.Monke
     assert "required token scope: repo" in str(info.value)
 
 
-@pytest.mark.parametrize("node_id,endpoint", [("PR_7", "api graphql ready"), ("", "pr ready")])
-def test_mark_ready_does_not_replay_an_ambiguous_write(gh: FakeGh, monkeypatch, node_id, endpoint) -> None:
-    monkeypatch.setattr(github, "_retry_sleep", lambda _delay: None)
-    gh.respond(endpoint, {"stdout": "", "stderr": "gh: HTTP 502: Bad Gateway\n", "exit": 1})
-    with pytest.raises(github.GhUnavailable):
-        github.mark_ready(REPO, 7, node_id)
-    assert [call["argv"][:2] for call in gh.calls] == [endpoint.split()[:2]]
-
-
 def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
     gh.fail(pr_list_key("lz/x"), "To get started with GitHub CLI, please run:  gh auth login\n", exit=4)
     with pytest.raises(github.GhAuth) as info:
@@ -250,13 +241,21 @@ def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
     assert "required token scope: repo" in info.value.tail
 
 
-@pytest.mark.parametrize("stdout", ["", '{"message": "detail on stdout"}'])
-def test_generic_failure_carries_command_and_tail(gh: FakeGh, stdout: str) -> None:
-    gh.respond("pr ready", {"stdout": stdout, "stderr": "gh: HTTP 422\n", "exit": 1})
-    with pytest.raises(github.GhError) as info:
-        github.mark_ready(REPO, 7, "")
-    assert info.value.command == ("gh", "pr", "ready", "7", "--repo", REPO)
-    assert info.value.tail == "gh: HTTP 422" + ("\n\n" + stdout if stdout else "\n")
+@pytest.mark.parametrize("node_id,endpoint,stderr,stdout,error", [
+    ("PR_7", "api graphql ready", "gh: HTTP 502: Bad Gateway\n", "", github.GhUnavailable),
+    ("", "pr ready", "gh: HTTP 502: Bad Gateway\n", "", github.GhUnavailable),
+    *(("", "pr ready", "gh: HTTP 422\n", content, github.GhError)
+      for content in ("", '{"message": "detail on stdout"}')),
+])
+def test_mark_ready_preserves_failure_without_replay(gh, monkeypatch, node_id, endpoint, stderr, stdout, error):
+    monkeypatch.setattr(github, "_retry_sleep", lambda _delay: None)
+    gh.respond(endpoint, {"stdout": stdout, "stderr": stderr, "exit": 1})
+    with pytest.raises(error) as info:
+        github.mark_ready(REPO, 7, node_id)
+    assert [call["argv"][:2] for call in gh.calls] == [endpoint.split()[:2]]
+    if error is github.GhError:
+        assert info.value.command == ("gh", "pr", "ready", "7", "--repo", REPO)
+        assert info.value.tail == "gh: HTTP 422" + ("\n\n" + stdout if stdout else "\n")
 
 
 # --- PR lookup / creation -----------------------------------------------------------
@@ -1007,10 +1006,10 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh, failure, wait, grace) -
     assert r.waitable_failures == ((f"required check 'checks' is {failure}",) if wait and grace else ())
 
 
-@pytest.mark.parametrize("check,runs,statuses,waitable", [
+@pytest.mark.parametrize("check,runs,statuses,waitable,producer", [
     *(pytest.param(
         failed_check(failure, id=100, started_at="2026-09-23T21:53:00Z", completed_at="2026-09-23T21:54:41Z"),
-        (producing_run(), replacement_run() | changes), [], waitable, id=case,
+        (producing_run(), replacement_run() | changes), [], waitable, None, id=case,
     ) for case, failure, changes, waitable in (
         ("failed", "failure", {}, True), ("cancelled", "cancelled", {}, True),
         ("different-workflow", "failure", {"workflow_id": 8}, False),
@@ -1022,24 +1021,43 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh, failure, wait, grace) -
         ("invalid-creation", "failure", {"created_at": "invalid"}, False),
     )),
     pytest.param(failed_check(id=100), (producing_run(created_at=replacement_run()["created_at"]), replacement_run()),
-                 [], True, id="same-second-newer-run"),
+                 [], True, None, id="same-second-newer-run"),
     pytest.param(failed_check(id=100), (producing_run(), replacement_run()),
-                 [{"context": "checks", "state": "failure"}], False, id="failing-commit-status"),
+                 [{"context": "checks", "state": "failure"}], False, None, id="failing-commit-status"),
     *(pytest.param(
         failed_check(id=100, completed_at="2026-09-23T21:54:41Z"),
         (producing_run(status="in_progress", run_attempt=2, run_started_at=started and f"2026-09-23T{started}"),),
-        [], waitable, id=f"rerun-{started}",
+        [], waitable, None, id=f"rerun-{started}",
     ) for started, waitable in (
         ("21:55:00Z", True), ("21:54:00Z", False), ("21:54:41.250Z", True),
         ("22:54:41+01:00", False), ("23:54:40.999+02:00", False), ("invalid", False), (None, False),
     )),
+    pytest.param(failed_check(), (producing_run(), replacement_run()), [], True, "page", id="paginated-producer"),
+    *(pytest.param(failed_check(), (replacement_run() | edits,), [], waitable, "suite", id=case)
+      for case, edits, waitable in (
+          ("suite-producer", {}, True), ("suite-wrong-workflow", {"workflow_id": 8}, False),
+          ("suite-wrong-head", {"head_sha": "b" * 40}, False),
+      )),
 ])
-def test_readiness_defers_only_replaceable_failure(gh, check, runs, statuses, waitable):
+def test_readiness_defers_only_replaceable_failure(gh, check, runs, statuses, waitable, producer):
     arm_workflow_check(gh, check, statuses=statuses)
+    suite = f"api repos/{REPO}/actions/runs?check_suite_id=10"
+    if producer:
+        filler = [producing_run(id=i, check_suite_id=i, workflow_id=99)
+                  for i in range(100, 200 if producer == "page" else 1099)]
+        if producer == "page":
+            runs = (*filler, *runs)
+        else:
+            runs = (*runs, *filler)
+            gh.respond(suite, {"workflow_runs": [producing_run()]})
     arm_workflow_runs(gh, *runs)
     result = readiness(workflow_wait=True)
     assert not result.ready and result.reasons == (f"required check 'checks' is {check['conclusion']}",)
     assert result.waitable_failures == (result.reasons if waitable else ())
+    if producer:
+        assert len(calls_for(gh, suite)) == int(producer == "suite")
+    if producer == "page":
+        assert [c["argv"][-2] for c in gh.calls if "actions/runs" in c["argv"][1]] == ["page=1", "page=2"]
 
 
 @pytest.mark.parametrize("conclusion", [None, "skipped", "neutral"])
@@ -1055,27 +1073,6 @@ def test_readiness_skips_actions_runs_without_a_failed_required_check(gh, conclu
         assert result.reasons == (f"required check 'checks' is {conclusion}",)
         assert result.waitable_failures == ()
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
-
-
-@pytest.mark.parametrize(("replacement_fields", "waitable"), [
-    (None, True), ({}, True), ({"workflow_id": 8}, False), ({"head_sha": "b" * 40}, False),
-])
-def test_readiness_finds_workflow_producer(gh: FakeGh, replacement_fields: dict | None, waitable: bool) -> None:
-    arm_workflow_check(gh, failed_check())
-    paginates = replacement_fields is None
-    filler = [producing_run(id=i, check_suite_id=i, workflow_id=99) for i in range(100, 200 if paginates else 1099)]
-    suite = f"api repos/{REPO}/actions/runs?check_suite_id=10"
-    if paginates:
-        arm_workflow_runs(gh, *filler, producing_run(), replacement_run())
-    else:
-        arm_workflow_runs(gh, replacement_run() | replacement_fields, *filler)
-        gh.respond(suite, {"workflow_runs": [producing_run()]})
-    result = readiness(workflow_wait=True)
-    assert not result.ready
-    assert result.waitable_failures == (result.reasons if waitable else ())
-    assert len(calls_for(gh, suite)) == int(not paginates)
-    if paginates:
-        assert [c["argv"][-2] for c in gh.calls if "actions/runs" in c["argv"][1]] == ["page=1", "page=2"]
 
 
 def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
@@ -1144,60 +1141,56 @@ def arm_merge(gh: FakeGh, queue: dict, *details: dict) -> None:
     ("not queued", "merge", "neither merged nor queued"),
     ("other head", "queue", "head changed or unavailable"),
     ("invalid strategy", "fast-forward", "unknown merge strategy"),
+    ("queued", "squash", None), ("queued", "queue", None), ("auto", "queue", None),
+    ("landed", "squash", None), ("landed-during-outage", "squash", None),
 ])
-def test_merge_fails_without_proof_of_admission_or_landing(gh, case, strategy, diagnostic):
-    queue = _queue_json(case == "other head")
+def test_merge_requires_proof_of_admission_or_landing(gh, monkeypatch, case, strategy, diagnostic):
+    queue = _queue_json(case in {"queued", "other head"})
+    pr = queue["data"]["repository"]["pullRequest"]
     if case == "missing":
         queue["data"]["repository"]["pullRequest"] = None
     if case == "other head":
-        queue["data"]["repository"]["pullRequest"]["headRefOid"] = "b" * 40
-        gh.respond("api graphql", queue)
-    elif case == "hold":
+        pr["headRefOid"] = "b" * 40
+    if case == "auto":
+        pr["autoMergeRequest"] = {"enabledAt": "t"}
+    landed = merge_json(state="MERGED", sha="d" * 40) if case.startswith("landed") else merge_json()
+    if case == "hold":
         gh.respond(f"api repos/{REPO}/pulls/7", merge_json() | {"labels": [{"name": "hold"}]})
-        gh.respond("api graphql", _queue_json(False))
+        gh.respond("api graphql", queue)
+    elif case == "other head":
+        gh.respond("api graphql", queue)
     elif case != "invalid strategy":
-        arm_merge(gh, queue, merge_json(), merge_json())
+        arm_merge(gh, queue, merge_json(), landed)
     if case == "command error":
         gh.fail("pr merge", "head commit mismatch")
-    with pytest.raises(github.GhError, match=diagnostic) as info:
-        github.merge(REPO, 7, strategy, HEAD, "main")
-    calls = [c["argv"][:2] for c in gh.calls]
-    assert ["api", "-X"] not in calls
-    if case == "hold":
-        assert ["pr", "merge"] not in calls
-    if case == "command error":
-        assert "--rebase" in info.value.command and "mismatch" in info.value.tail
-    if case in {"invalid strategy", "other head"}:
-        assert calls == ([] if case == "invalid strategy" else [["api", "graphql"]])
-
-
-@pytest.mark.parametrize("strategy,queue_state", [
-    ("squash", "queued"), ("queue", "queued"), ("queue", "auto"), ("squash", "landed"), ("squash", "landed-during-outage"),
-])
-def test_merge_reports_queue_admission_or_landing(gh, monkeypatch, strategy, queue_state):
-    accepted = _queue_json(queue_state == "queued")
-    landed = queue_state.startswith("landed")
-    if queue_state == "auto":
-        accepted["data"]["repository"]["pullRequest"]["autoMergeRequest"] = {"enabledAt": "t"}
-    snapshots = [merge_json()]
-    if landed:
-        snapshots.append(merge_json(state="MERGED", sha="d" * 40))
-    arm_merge(gh, accepted, *snapshots)
-    if queue_state == "landed-during-outage":
+    if case == "landed-during-outage":
         monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
         gh.fail("api graphql", "HTTP 502")
+
+    if diagnostic:
+        with pytest.raises(github.GhError, match=diagnostic) as info:
+            github.merge(REPO, 7, strategy, HEAD, "main")
+        calls = [c["argv"][:2] for c in gh.calls]
+        assert ["api", "-X"] not in calls
+        if case == "hold":
+            assert ["pr", "merge"] not in calls
+        if case == "command error":
+            assert "--rebase" in info.value.command and "mismatch" in info.value.tail
+        if case in {"invalid strategy", "other head"}:
+            assert calls == ([] if case == "invalid strategy" else [["api", "graphql"]])
+        return
+
     if strategy == "queue":
-        gh.respond("api graphql", _queue_json(False), accepted)
-    assert github.merge(REPO, 7, strategy, HEAD, "main") == ("d" * 40 if landed else None)
+        gh.respond("api graphql", _queue_json(False), queue)
+    assert github.merge(REPO, 7, strategy, HEAD, "main") == landed["merge_commit_sha"]
     if strategy == "queue":
         assert github.merge(REPO, 7, strategy, HEAD, "main") is None
-    writes = [c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"]]
-    assert len(writes) == 1
+    (write,) = [c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"]]
     if strategy == "squash":
-        assert writes[0] == ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
+        assert write == ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
     else:
-        assert "--squash" not in writes[0]
-    assert "--queue" not in writes[0]
+        assert "--squash" not in write
+    assert "--queue" not in write
 
 
 def test_eligibility_dispatch_retry_refuses_changed_head(monkeypatch):

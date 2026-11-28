@@ -1,7 +1,6 @@
 """Codex's bounded public proof derives from complete private native streams."""
 
 import base64
-import copy
 import dataclasses
 import hashlib
 import json
@@ -252,9 +251,14 @@ def test_full_native_attribution_and_fatal_controls(recorded_native, mutation):
 
 
 @pytest.mark.parametrize("mutation", [
-    "valid", "partial_reads", "missing", "reorder", "duplicate_session", "range", "context", "chunk_index",
+    "valid", "partial_reads", "missing", "reorder", "duplicate_session", "range", "context", "chunk_index", "wrong_head",
 ])
 def test_complete_ordered_native_chunks(recorded_native, request, fake_bin, mutation):
+    if mutation == "wrong_head":
+        another_head = dataclasses.replace(SYNTHETIC_NATIVE, head="b" * 40)
+        with pytest.raises(ValueError, match="chunk reviews do not describe the same review"):
+            runners.merge_reviews([SYNTHETIC_NATIVE, another_head])
+        return
     chunks = []
     if mutation == "partial_reads":
         invoke, _, _ = request.getfixturevalue("native")
@@ -384,15 +388,17 @@ def test_invalid_review_evidence_is_rejected(published_native, mutation):
         assert (found is not None) is (mutation == "after_prose")
 
 
-def test_overflow_is_hold_without_silent_chunk_truncation():
-    value = runners.codex_evidence(SYNTHETIC_NATIVE)
-    value["calls"] = [
-        {**copy.deepcopy(value["calls"][0]), "index": i, "session": "s" + str(i)}
-        for i in range(1, 40)
-    ]
-    value["chunk_count"] = len(value["calls"])
-    assert runners.valid_codex_evidence(value)
-    with pytest.raises(runners.RunnerBadOutput, match="8192"):
+@pytest.mark.parametrize("valid,diagnostic", [
+    (True, "8192"), (False, "invalid native evidence projection"),
+], ids=["overflow", "wrong-schema"])
+def test_codex_evidence_rejects_invalid_or_oversized_projections(valid, diagnostic):
+    value = {"version": 2}
+    if valid:
+        value = runners.codex_evidence(SYNTHETIC_NATIVE)
+        value["calls"] = [dict(value["calls"][0], index=i, session=f"s{i}") for i in range(1, 40)]
+        value["chunk_count"] = len(value["calls"])
+        assert runners.valid_codex_evidence(value)
+    with pytest.raises(runners.RunnerBadOutput, match=diagnostic):
         runners.encode_codex_evidence(value)
 
 
@@ -555,17 +561,6 @@ def test_codex_publication_rejects_inconsistent_context(rendered, publication, d
 def test_codex_evidence_rejects_invalid_transport(header, diagnostic):
     with pytest.raises(ValueError, match=diagnostic):
         runners.decode_codex_evidence(header)
-
-
-def test_codex_evidence_encoder_rejects_wrong_schema():
-    with pytest.raises(runners.RunnerBadOutput, match="invalid native evidence projection"):
-        runners.encode_codex_evidence({"version": 2})
-
-
-def test_chunk_merge_requires_the_same_review_identity():
-    another_head = dataclasses.replace(SYNTHETIC_NATIVE, head="b" * 40)
-    with pytest.raises(ValueError, match="chunk reviews do not describe the same review"):
-        runners.merge_reviews([SYNTHETIC_NATIVE, another_head])
 
 
 def test_native_evidence_projection_requires_schema_validation(monkeypatch):

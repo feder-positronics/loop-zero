@@ -590,20 +590,20 @@ def test_review_escalates_verdict_with_blocking_finding(fake_bin, tmp_path, fami
         assert result.provenance["token_usage"]["input_tokens"] == 123
 
 
-def test_claude_falls_back_to_result_text(fake_bin: Path, tmp_path: Path) -> None:
-    env = _claude_envelope(APPROVE)
-    env.pop("structured_output")
-    env["result"] = "```json\n" + json.dumps(APPROVE) + "\n```"
-    _fake_claude(fake_bin, env)
-    assert _review("claude", tmp_path).verdict == "approve"
-
-
-def test_claude_bad_severity(fake_bin: Path, tmp_path: Path) -> None:
-    bad = {"verdict": "approve", "findings": [{"severity": "nit", "path": None, "line": None,
-                                               "title": "t", "body": "b"}]}
-    _fake_claude(fake_bin, _claude_envelope(bad))
-    with pytest.raises(RunnerBadOutput, match="bad severity"):
-        _review("claude", tmp_path)
+@pytest.mark.parametrize("source", ["result-text", "bad-severity"])
+def test_claude_result_parsing(fake_bin, tmp_path, source):
+    envelope = _claude_envelope(APPROVE)
+    if source == "result-text":
+        envelope["result"] = "```json\n" + json.dumps(envelope.pop("structured_output")) + "\n```"
+    else:
+        bad_finding = dict(CHANGES["findings"][1], severity="nit", title="t", body="b")
+        envelope["structured_output"] = APPROVE | {"findings": [bad_finding]}
+    _fake_claude(fake_bin, envelope)
+    if source == "bad-severity":
+        with pytest.raises(RunnerBadOutput, match="bad severity"):
+            _review("claude", tmp_path)
+    else:
+        assert _review("claude", tmp_path).verdict == "approve"
 
 
 CLAUDE_EXPIRED_OAUTH = {
