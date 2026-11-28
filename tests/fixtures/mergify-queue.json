@@ -32,7 +32,7 @@
   },
   "admission_report": "### ⏳ Waiting for queue conditions\n\n- [ ] `check-success = Queue Preflight`",
   "requeue_guidance": [
-    "as the whole PR comment (same login)",
+    "as the whole PR comment with repository write access",
     "\"already queued\" reply to a request means a rule queued it first and is harmless",
     "`loopzero merge --wait`"
   ],
