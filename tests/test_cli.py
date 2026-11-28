@@ -3502,7 +3502,8 @@ def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatc
     policy = policy.replace("[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]')
     if change != "plain":
         publish_workflow(wt, policy)
-    arm_approved_pr(gh, head, wt, "pending", isDraft=False)
+    arm_approved_pr(gh, head, wt, "pending", isDraft=False, readiness={"local_exit": None})
+    expect_cli(capsys, 0, "check")
     external = tmp_path / "external"
     git(tmp_path, "clone", "-q", "--branch", "main", str(repo.parent / "origin.git"), str(external))
     clock, original = poll_clock(monkeypatch, jitter=1.0), cli._proc.run
