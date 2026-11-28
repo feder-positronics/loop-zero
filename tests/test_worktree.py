@@ -15,8 +15,9 @@ from shutil import copytree
 
 import pytest
 
-from loopzero import worktree
+from loopzero import sandbox, worktree
 from tests.conftest import commit_file, git, git_environment, init_git_repo
+from tests.test_sandbox import bwrap_log, make_config  # noqa: F401 - pytest fixture
 from tests.test_setup import SETUP, setup_commands
 
 
@@ -278,7 +279,7 @@ def _commit_files(repo: Path, files: dict[str, bytes | None]) -> str:
     return git(repo, "rev-parse", "HEAD").strip()
 
 
-def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path) -> None:
+def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path, bwrap_log) -> None:  # noqa: F811 - fixture
     from loopzero.runners import render_patch, split_diff
 
     base = _commit_files(git_repo, dict.fromkeys(("attr.py", "nul.py", "gone.py", "padded.py", "carriage.py"), b"old\n"))
@@ -292,7 +293,7 @@ def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path)
         ".gitmodules": b'[submodule "a-sub"]\n\tpath = a-sub\n\tignore = dirty\n'})
     assert not worktree.is_dirty(git_repo) and worktree.head(git_repo) != base
     (git_repo / "a-sub/README.md").write_text("uncommitted submodule edit")
-    assert worktree.is_dirty(git_repo)
+    assert worktree.is_dirty(git_repo) and sandbox.run_checks(make_config(scratch=()), git_repo).dirty
     (git_repo / "attr.py").write_text("uncommitted edit")
     assert worktree.is_dirty(git_repo)
     diff = worktree.diff_since(git_repo, base)

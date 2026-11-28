@@ -95,7 +95,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         raise SandboxUnavailable(
             "bwrap binary missing: bwrap not found on PATH\nsudo apt install bubblewrap")
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    dirty = bool(_git(config, worktree, "status", "--porcelain", "--untracked-files=all").strip())
+    dirty = bool(_git(config, worktree, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none").strip())
     tracked_diff = _tracked_diff(config, worktree) if dirty else ()
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config)
@@ -165,7 +165,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             if result.exit_code != 0:
                 break
     final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    final_dirty = bool(_git(config, worktree, "status", "--porcelain", "--untracked-files=all").strip())
+    final_dirty = bool(_git(config, worktree, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none").strip())
     if (final_head, final_dirty) != (head, dirty) or (dirty and tracked_diff != _tracked_diff(config, worktree)):
         results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
                     f"HEAD before: {head}; HEAD after: {final_head}; "
@@ -611,7 +611,7 @@ def bwrap_argv(  # noqa: C901 - one bind rule per sandbox mount class
 
 
 def _tracked_diff(config: Config, worktree: Path) -> tuple[str, ...]:
-    args = ("diff", "--binary", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames")
+    args = ("diff", "--binary", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=none")
     return tuple(hashlib.sha256(_git(config, worktree, *args, *staged).encode()).hexdigest()
                  for staged in (("--cached",), ()))
 
