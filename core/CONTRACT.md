@@ -43,8 +43,8 @@ Without `--wait`, exit 0 can mean queue request or entry only.
 A Mergify departure without landing exits 1 with available
 [details](../docs/MERGIFY.md#failed-candidate-checks). To push to a requested
 or queued PR, withdraw it first. For Mergify use `loopzero merge --cancel`
-(no `--wait`). For GitHub use Remove from queue on the PR. Confirm removal
-on the PR before pushing, then review and readmit.
+(no `--wait`). On GitHub, disable pending auto-merge or remove the queue entry.
+Confirm no request or entry remains before pushing, then review and readmit.
 
 On start/resume run `loopzero status` in the task worktree and rerun a pending
 waiter. After ejection follow [Mergify recovery](../SETUP.md#requeue-after-cancellation-or-ejection).
