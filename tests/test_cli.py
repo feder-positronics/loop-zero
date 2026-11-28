@@ -804,9 +804,12 @@ def advance_checks(wt, commands):
 
 
 @pytest.mark.parametrize("command,missing", [
-    ("python3 scripts/gate.py", True), ("scripts/gate.py", True), ("python3 feature.py", False),
+    ("python3 scripts/gate.py", True), ("scripts/gate.py", True), ("python3 feature.py", False), ("python3.14 tools/checks", False),
     ("test ! -f scripts/absent.py && echo fine", False), (".venv/bin/tool", False), ("VAR=./x echo fine", False)])
 def test_check_preflights_missing_trusted_script(wt, capsys, command, missing):
+    if command.endswith(" tools/checks"):
+        (wt / "tools/checks").mkdir(parents=True)
+        (wt / "tools/checks/__main__.py").write_text("print('directory check ran')\n")
     advance_checks(wt, ["mkdir -p .venv/bin && cp /bin/true .venv/bin/tool; echo expensive-check", command, "rm -rf .venv/bin"])
     out, err = expect_cli(capsys, int(missing), "check", stdout_endswith="FAIL\n" if missing else "PASS\n")
     assert ("expensive-check" in out) != missing
@@ -4586,7 +4589,7 @@ def test_start_rejects_a_checkout_already_on_task_work(wt, repo, monkeypatch, ca
         assert "lz/nested" not in git(repo, "branch", "--list", "lz/nested")
 
 
-@pytest.mark.parametrize("checkout", ["primary", "detached-primary", "primary-clone", "detached-harness"])
+@pytest.mark.parametrize("checkout", ["primary", "detached-primary", "primary-clone", "detached-harness", "separate-git"])
 def test_start_uses_the_primary_repo_for_task_worktrees(repo, tmp_path, monkeypatch, capsys, checkout):
     if checkout == "primary-clone":
         repo = caller = shutil.copytree(repo, tmp_path / ".worktrees" / "project")
@@ -4596,12 +4599,21 @@ def test_start_uses_the_primary_repo_for_task_worktrees(repo, tmp_path, monkeypa
     else:
         if checkout == "detached-primary":
             git(repo, "switch", "-q", "--detach")
+        elif checkout == "separate-git":
+            advance_checks(repo / ".worktrees/nested", ["true"])
+            git(repo, "init", "-q", f"--separate-git-dir={tmp_path / 'metadata'}")
         caller = repo / "subdir"
         caller.mkdir()
     monkeypatch.chdir(caller)
     task = repo / ".worktrees" / "nested"
-    expect_cli(capsys, 0, "start", "nested", stdout=f"{task}\n", stderr="")
-    assert (task / ".loopzero/task.md").exists()
+    out, _ = expect_cli(capsys, 0, "start", "nested", stderr="")
+    if checkout == "separate-git":
+        monkeypatch.chdir(Path(out.strip()))
+        expect_cli(capsys, 0, "check", stdout_endswith="PASS\n")
+        git(repo, "worktree", "add", "-q", "--detach", str(tmp_path / "harness"))
+        monkeypatch.chdir(tmp_path / "harness")
+        expect_cli(capsys, 1, "start", "other", stderr_contains=("Rerun from the primary checkout",))
+    assert out == f"{task}\n" and (task / ".loopzero/task.md").exists() and cli._repo_root(task) == repo
     if checkout == "detached-harness":
         assert "lz/nested" in git(repo, "branch", "--list", "lz/nested")
         (task / "uncommitted.txt").write_text("work\n")
