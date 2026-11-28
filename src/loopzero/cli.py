@@ -536,7 +536,7 @@ def _sync_task_narrative(task: str, existing: str) -> str:
     existing = existing.replace("\r\n", "\n")
     task_prose = _outside_fences(task)
     owned = {m[1]: task[m.start():m.end()] for m in pattern.finditer(task_prose)
-             if m.group(1) not in {"Validation", "Review"}}
+             if m[1].rstrip(" \t") not in {"Validation", "Review"}}
     prefix = task[:first.start()] if (first := pattern.search(task_prose)) else task
 
     def replace(match: re.Match[str]) -> str:
