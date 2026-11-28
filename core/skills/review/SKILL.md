@@ -32,11 +32,9 @@ Select relevant lenses:
   deterministic versus prompt enforcement, stale scaffolding. Keep instructions
   only for non-inferable value; choreography needs a safety reason or observed failure.
 
-State scope, uncertainty, and limits. For findings, use
-[contract severities](../../CONTRACT.md#findings) and one synthesis.
-Leave the target unchanged. Do not create findings files. For live-task findings,
-follow the contract's [findings rule](../../CONTRACT.md#findings); other actionable
-discussion belongs in its issue or PR, never a separate store.
+State scope, uncertainty and limits. Synthesize findings with [contract severities](../../CONTRACT.md#findings).
+Apply the linked storage rule to live-task findings.
+Leave the target unchanged. Put other actionable discussion in its issue or PR.
 
 Then continue the task you were given as far as it authorizes, or hand over
 what is left of its acceptance.

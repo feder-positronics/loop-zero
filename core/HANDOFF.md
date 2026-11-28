@@ -1,9 +1,10 @@
 # <Title from slug>
 
 ## Context and goal
-- **Goal:** <one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>
-- **Problem:** <one or two plain sentences before code names: what goes wrong (one problem only), who notices, and evidence/cost; refs in brackets at the end>
-- **Context:** <plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>
+<!-- Follow Reporting in core/CONTRACT.md for PR prose. -->
+- **Goal:** <one sentence on the change users or owners notice, with costs or savings if known>
+- **Problem:** <one problem with evidence or cost and refs at the end>
+- **Context:** <context for a newcomer>
 
 Refs #<issue number, or remove this line>
 
