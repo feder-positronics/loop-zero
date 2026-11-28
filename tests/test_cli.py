@@ -5185,25 +5185,25 @@ def test_load_report_requires_integer_exit_code(wt, head, capsys, exit_code, ok)
         assert report.head == head
 
 
-@pytest.mark.parametrize("case", ["dirty", "unpushed", "after-head-read"])
-def test_cleanup_preserves_local_work(wt, case, capsys, monkeypatch):
+@pytest.mark.parametrize("case", ["dirty", "ignored", "unpushed", "after-head-read"])
+def test_cleanup_preserves_local_work(wt, repo, case, capsys, monkeypatch):
     pr = SimpleNamespace(head_sha=cli.worktree.head(wt))
-    if case == "dirty":
-        branch = cli.worktree.branch(wt)
-        git(wt, "config", "core.excludesFile", str(wt / ".loopzero" / "exclude"))
-        (wt / ".loopzero" / "exclude").write_text("local.env\n")
+    if case in {"dirty", "ignored"}:
+        (repo / ".git/info/exclude").write_text(".loopzero/\nlocal.env\n")
         (wt / "local.env").write_text("ignored")
-        (wt / "untracked").write_text("keep me")
+        if case == "dirty":
+            (wt / "untracked").write_text("keep me")
     else:
         git(wt, "commit", "--allow-empty", "-m", "local after merge")
     if case == "after-head-read":
         monkeypatch.setattr(cli.worktree, "head", lambda _wt: pr.head_sha)
     cli._cleanup(wt, pr)
-    assert wt.exists()
+    assert wt.exists() and git(wt, "branch", "--list", "lz/t1")
     if case == "dirty":
-        assert (wt / "untracked").read_text() == "keep me" and (wt / "local.env").read_text() == "ignored"
-        assert git(wt, "branch", "--list", branch)
-    diagnostic = {"dirty": "worktree is dirty", "unpushed": "local HEAD differs", "after-head-read": "but expected"}
+        assert (wt / "untracked").read_text() == "keep me"
+    if case in {"dirty", "ignored"}:
+        assert (wt / "local.env").read_text() == "ignored"
+    diagnostic = {"dirty": "worktree is dirty", "ignored": "local.env", "unpushed": "local HEAD differs", "after-head-read": "but expected"}
     assert diagnostic[case] in capsys.readouterr().err
 
 

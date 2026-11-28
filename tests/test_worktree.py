@@ -32,7 +32,7 @@ def origin_seed(git_repo_seed, tmp_path_factory):
 @pytest.fixture
 def repo(git_repo: Path, origin_seed: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Private checkout and origin, both seeded with the same main commit."""
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     origin = copytree(origin_seed, tmp_path / "origin.git")
     git(git_repo, "remote", "add", "origin", str(origin))
     return git_repo
@@ -75,13 +75,16 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
         assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
         repo = checkout
+    (repo.parent / "xdg/git").mkdir(parents=True)
+    git(repo, "config", "--file", str(repo.parent / "xdg/git/config"), f"url.{repo.parent / 'origin.git'}.insteadOf", "lz-origin")
+    git(repo, "remote", "set-url", "origin", "lz-origin")
     invoke, local_head = worktree.run, worktree.head(repo)
     def interleave(argv, **kwargs):
         if branch == "legacy" and argv[:3] == ("git", "fetch", "--porcelain"):
             return invoke(("git", "fetch", "--loopzero-unsupported"), **kwargs)
         result = invoke(argv, **kwargs)
         if argv[1] == "fetch" and result.exit_code == 0:
-            git(kwargs["cwd"], "fetch", "-q", "origin", f"refs/heads/{side}")
+            git(kwargs["cwd"], "fetch", "-q", str(repo.parent / "origin.git"), f"refs/heads/{side}")
         return result
 
     monkeypatch.setattr(worktree, "run", interleave)
