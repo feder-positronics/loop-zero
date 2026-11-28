@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, replace
 from os.path import commonpath
 from pathlib import Path
@@ -201,8 +201,7 @@ def _current_commands(config: Config, worktree: Path, commands: tuple[str, ...],
             latest = config_mod.load_trusted(worktree, previous=previous)
         except (config_mod.ConfigError, _proc.ProcTimeout):
             # A failed local read does not establish that the pinned plan changed.
-            yield command
-            continue
+            latest = previous
         if (latest.trusted_base_revision != previous.trusted_base_revision
                 and (latest.checks != config.checks or settings_fingerprint(latest) != settings)):
             raise config_mod.ConfigError("trusted check plan changed during the run. "
@@ -258,10 +257,8 @@ def _previous(config: Config, worktree: Path, settings_sha256: str,
 
 def _check_base(config: Config, worktree: Path) -> str:
     if config.inputs:
-        try:
+        with suppress(config_mod.ConfigError, WorktreeError):
             return config.trusted_base_revision or config_mod.base_revision(worktree, config.base_branch)
-        except (config_mod.ConfigError, WorktreeError):
-            pass
     return ""
 
 
@@ -301,7 +298,7 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
 
 
 def check_inputs_match(config: Config, worktree: Path, report: CheckReport) -> bool:
-    base = _check_base(config, worktree) if config.inputs else ""
+    base = _check_base(config, worktree)
     return all(r.input_key and r.input_key == _input_key(config, worktree, r.command, base)
                for r in report.results if _has_inputs(config, r.command))
 
@@ -383,12 +380,11 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
 def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], common_dir: Path) -> None:
     env = _proc.build_env(config.env_allowlist)
     if not {"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"} & env.keys():
-        try:
-            (common_dir / "objects/info/alternates").lstat()
-        except FileNotFoundError:
-            return
-        except OSError:
-            pass
+        with suppress(OSError):
+            try:
+                (common_dir / "objects/info/alternates").lstat()
+            except FileNotFoundError:
+                return
     # Git resolves relative and transitive paths; probe actual mounts without broadening visibility.
     output = _git(config, worktree, "-c", "core.quotepath=true", "count-objects", "-v")
     for alternate in re.findall(r"^alternate: (.*)$", output, re.MULTILINE):

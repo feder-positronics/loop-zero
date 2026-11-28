@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import tomllib
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -91,20 +92,16 @@ def base_revision(worktree: Path, base_branch: str) -> str:
 
 def _has_replacement_refs(common_dir: Path) -> bool:
     # A replacement can change what Git reads at a fixed object name.
-    for entry in ("refs/replace", "reftable"):
-        try:
-            (common_dir / entry).lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return True
-        return True
     try:
-        return b" refs/replace/" in (common_dir / "packed-refs").read_bytes()
-    except FileNotFoundError:
-        return False
+        for entry in ("refs/replace", "reftable"):
+            with suppress(FileNotFoundError):
+                (common_dir / entry).lstat()
+                return True
+        with suppress(FileNotFoundError):
+            return b" refs/replace/" in (common_dir / "packed-refs").read_bytes()
     except OSError:
         return True
+    return False
 
 
 def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,

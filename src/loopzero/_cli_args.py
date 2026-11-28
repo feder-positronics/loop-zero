@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 WAIT_TIMEOUT = 5400.0
@@ -13,12 +14,10 @@ WAIT_TIMEOUT = 5400.0
 def _wait_seconds(value: str) -> float:
     from math import isfinite
 
-    try:
+    with suppress(ValueError):
         seconds = float(value)
         if isfinite(seconds) and seconds >= 0:
             return seconds
-    except ValueError:
-        pass
     raise argparse.ArgumentTypeError("expected a finite, nonnegative number of seconds")
 
 

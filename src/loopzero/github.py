@@ -304,9 +304,8 @@ def app_token() -> str:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_BASE_ENV, timeout=read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
-    if result.exit_code or not result.stdout.strip():
+    if result.exit_code or not (token := result.stdout.strip()):
         return ""
-    token = result.stdout.strip()
     if minted is None:
         return token  # no suspend-aware clock, so use this token only for this call
     _app_token_cache = (token, minted)
@@ -466,11 +465,9 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     retry_seconds = re.fullmatch(r"[0-9]{1,18}", retry_after)
     retry_date = _HTTP_DATE.fullmatch(retry_after)
     reset = ""
-    try:
+    with suppress(OverflowError, OSError, ValueError):
         if epoch := headers.get("x-ratelimit-reset"):
             reset = datetime.fromtimestamp(int(epoch), UTC).isoformat()
-    except (OverflowError, OSError, ValueError):
-        pass
     evidence = {
         "X-RateLimit-Resource": resource if re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}", resource) else None,
         "X-RateLimit-Remaining": remaining, "X-RateLimit-Reset": reset or None,
@@ -497,13 +494,11 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
     remaining = re.search(r"(?im)^x-ratelimit-remaining:\s*(\d+)", tail)
     reset = re.search(r"(?im)^x-ratelimit-reset:\s*(\d+)", tail)
     if resource and resource[1].casefold() == "graphql" and remaining and remaining[1] == "0" and reset:
-        try:
+        with suppress(OverflowError, OSError, ValueError):
             stamp = datetime.fromtimestamp(int(reset[1]), UTC)
             if stamp.timestamp() > time.time():
                 return f"\nGraphQL quota resets at {stamp.isoformat()} (response header)."
-        except (OverflowError, OSError, ValueError):
-            pass
-    try:
+    with suppress(ToolMissing, ProcTimeout, ReadDeadline, KeyError, TypeError, ValueError, OverflowError, OSError):
         query = "query { rateLimit { remaining resetAt } }"
         result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=cwd,
                      env_allowlist=GH_ENV, extra_env={"GH_TOKEN": token} if token else None,
@@ -520,8 +515,6 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         if (type(limit["remaining"]) is int and limit["remaining"] == 0
                 and stamp.tzinfo is not None and stamp.timestamp() > time.time()):
             return f"\nGraphQL quota resets at {stamp.isoformat()} (diagnostic query)."
-    except (ToolMissing, ProcTimeout, ReadDeadline, KeyError, TypeError, ValueError, OverflowError, OSError):
-        pass
     return ""
 
 
@@ -1086,9 +1079,8 @@ def _parse_thread(node: dict, current_head: str | None,
     marker_head = match.group("head")
     if current_head is not None and marker_head != current_head and node.get("isOutdated"):
         return None
-    severity = match.group("severity")
     rest = body[match.end():].strip()
-    return match.group("id"), Finding(severity=severity, path=node.get("path"), line=node.get("line"),
+    return match.group("id"), Finding(severity=match.group("severity"), path=node.get("path"), line=node.get("line"),
                                       title=_title_of(rest), body=rest)
 
 
@@ -1245,16 +1237,9 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
 def open_blocking_findings(
     repo: str, number: int, current_head: str | None, publishers: tuple[str, ...],
 ) -> list[Finding]:
-    """Findings from unresolved review threads whose first comment opens with a blocking marker.
-
-    Only critical and important v=1 markers on the first line of a comment written by a
-    review publisher block. When `current_head` is supplied, an outdated thread is ignored
-    unless its marker names that head.
-    """
-    return [
-        parsed[1] for node in _review_threads(repo, number)
-        if (parsed := _parse_thread(node, current_head, publishers))
-    ]
+    """Unresolved findings with a trusted first-line marker, filtering outdated heads when supplied."""
+    return [parsed[1] for node in _review_threads(repo, number)
+            if (parsed := _parse_thread(node, current_head, publishers))]
 
 
 def _pull_query(repo: str, number: int, query: str) -> tuple[str, ...]:
