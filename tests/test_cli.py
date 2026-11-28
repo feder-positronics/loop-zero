@@ -2616,15 +2616,23 @@ def test_check_stops_stale_trusted_plan_between_stages(repo, wt, gh, capsys, mon
         assert seen == ["echo ok", "test -f README.md"]
 
 
+def overlap_calls(monkeypatch, entered, overlap, first, second=None, *, blocking_only=False):
+    flock = cli.fcntl.flock
+    def lock(fd, flags):
+        if entered.is_set() and (not blocking_only or flags == cli.fcntl.LOCK_EX):
+            overlap.set()
+        return flock(fd, flags)
+    monkeypatch.setattr(cli.fcntl, "flock", lock)
+    with ThreadPoolExecutor(2) as pool:
+        caller = pool.submit(first)
+        assert entered.wait(10)
+        contender = pool.submit(second or first)
+        return caller.result(timeout=15), contender.result(timeout=15)
+
+
 @pytest.mark.parametrize("first_exit", [0, 1])
 def test_overlapping_checks_share_only_a_pass(wt, capsys, monkeypatch, first_exit):
     started, waiting = Event(), Event()
-    original_flock = cli.worktree.fcntl.flock
-
-    def flock(fd, op):
-        if started.is_set():
-            waiting.set()
-        return original_flock(fd, op)
 
     def stage(_config, _wt, _prefix, command, _timeout):
         started.set()
@@ -2632,14 +2640,10 @@ def test_overlapping_checks_share_only_a_pass(wt, capsys, monkeypatch, first_exi
         return CheckResult(command, first_exit if run_stage.call_count == 1 else 0, 1.0, "")
 
     run_stage = Mock(side_effect=stage)
-    monkeypatch.setattr(cli.worktree.fcntl, "flock", flock)
     monkeypatch.setattr(cli.sandbox, "_run_one", run_stage)
     monkeypatch.setattr(cli, "_refresh_pr_checks", Mock())
-    with ThreadPoolExecutor(2) as pool:
-        first = pool.submit(cli.main, ["check"])
-        assert started.wait(5)
-        second = pool.submit(cli.main, ["check"])
-        assert (first.result(timeout=10), second.result(timeout=10)) == (first_exit, 0)
+    check = partial(cli.main, ["check"])
+    assert overlap_calls(monkeypatch, started, waiting, check) == (first_exit, 0)
 
     assert [call.args[3] for call in run_stage.call_args_list] == ["echo ok"] * (1 + first_exit) + ["test -f README.md"]
     assert ("receipt reused:" in capsys.readouterr().out) == (first_exit == 0)
@@ -4161,12 +4165,7 @@ def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accep
     gh.respond(f"api {endpoint}", [])
     gh.respond(f"api {endpoint} --method POST", {})
     writing, overlap = Event(), Event()
-    original_api, flock = github._api, cli.fcntl.flock
-
-    def lock(fd, operation):
-        if writing.is_set():
-            overlap.set()
-        return flock(fd, operation)
+    original_api = github._api
 
     def transport(path, payload, **kwargs):
         if path != endpoint:
@@ -4182,14 +4181,9 @@ def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accep
             raise github.ProcTimeout("lost Mergify command reply")
         return original_api(path, payload, **kwargs)
 
-    monkeypatch.setattr(cli.fcntl, "flock", lock)
     monkeypatch.setattr(github, "_api", transport)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(cli.main, ["merge"])
-        assert writing.wait(10), "first merge did not reach the command POST"
-        second = pool.submit(cli.main, ["merge"])
-        assert first.result(timeout=15) == (0 if accepted else 1)
-        assert second.result(timeout=15) == 0
+    merge = partial(cli.main, ["merge"])
+    assert overlap_calls(monkeypatch, writing, overlap, merge) == (0 if accepted else 1, 0)
     assert len([c for c in gh.calls if "--input" in c and c["argv"][1] == endpoint]) == 1
 
 
@@ -5449,10 +5443,7 @@ def test_concurrent_pr_writes(wt, tmp_path, monkeypatch, operation):
     settings = replace(config.load_trusted(wt), mergify_queue="main")
     pr = github.PR(7, URL, "a" * 40, "main", operation == "ready", "OPEN", "MERGEABLE")
     writing, overlap, posted = Event(), Event(), Event()
-    def lock(fd, flags, flock=cli.fcntl.flock):
-        if write.called and flags == cli.fcntl.LOCK_EX:
-            overlap.set()
-        return flock(fd, flags)
+    contender = None
 
     def read(value):
         if write.called:
@@ -5468,11 +5459,11 @@ def test_concurrent_pr_writes(wt, tmp_path, monkeypatch, operation):
         return {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
 
     write = Mock(side_effect=publish)
-    monkeypatch.setattr(cli.fcntl, "flock", lock)
     monkeypatch.setattr(cli, "_require_receipt", Mock())
     if operation == "ready":
         monkeypatch.setattr(github, "pr_view", lambda *_: read(replace(pr, is_draft=not posted.is_set())))
         monkeypatch.setattr(github, "mark_ready", write)
+        invoke = partial(cli._mark_ready, wt, settings, pr.number, pr.head_sha)
     elif operation != "resolve":
         membership = mergify.Membership() if operation == "confirm" else None
         monkeypatch.setattr(mergify, "queue_attempt", lambda *_: read(mergify.QueueAttempt(requested=posted.is_set(), confirmed=operation == "confirm" and posted.is_set())))
@@ -5480,25 +5471,16 @@ def test_concurrent_pr_writes(wt, tmp_path, monkeypatch, operation):
         monkeypatch.setattr(mergify, "request" if operation == "request" else "mark_confirmed", write)
         monkeypatch.setattr(github, "merged_sha", Mock(return_value=None))
         monkeypatch.setattr(cli, "_mergify_wait_poll", Mock(return_value=(None, membership, False)))
+        merge = partial(cli._merge_with_mergify, config=settings, pr=pr, readiness=github.Readiness(True, ()), deadline=None)
+        invoke = partial(merge, wt)
+        contender = (partial(cli._wait_for_mergify, settings, pr, 0, False) if operation == "confirm"
+                     else partial(merge, init_git_repo(tmp_path / "other")))
     else:
         monkeypatch.setattr(github, "_parse_thread", lambda *_: ("abcdef01", None))
         monkeypatch.setattr(github, "_review_threads", lambda *_a, **_k: read([{"id": "T", "isResolved": posted.is_set()}]))
         monkeypatch.setattr(github, "_has_thread_reply", lambda node, _: node["isResolved"])
         monkeypatch.setattr(github, "_gh_json", write)
         monkeypatch.setattr(github, "_gh", Mock(return_value='{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}'))
-
-    def invoke(path):
-        if operation == "ready":
-            return cli._mark_ready(path, settings, pr.number, pr.head_sha)
-        if operation == "resolve":
-            return github.resolve_finding(REPO, 7, "abcdef01", "Fixed", ())
-        if path != wt and operation == "confirm":
-            return cli._wait_for_mergify(settings, pr, 0, False)
-        return cli._merge_with_mergify(path, settings, pr, github.Readiness(True, ()), None)
-
-    with ThreadPoolExecutor(2) as pool:
-        first = pool.submit(invoke, wt)
-        assert writing.wait(3)
-        pool.submit(invoke, init_git_repo(tmp_path / "other")).result(timeout=3)
-        first.result(timeout=3)
+        invoke = partial(github.resolve_finding, REPO, 7, "abcdef01", "Fixed", ())
+    overlap_calls(monkeypatch, writing, overlap, invoke, contender, blocking_only=True)
     assert write.call_count == 1
