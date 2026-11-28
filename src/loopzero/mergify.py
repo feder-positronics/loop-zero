@@ -281,9 +281,8 @@ def _marker(kind: str, head: str, queue: str) -> str:
     return f"<!-- {kind} head={head} queue={queue} -->"
 
 
-def _comments_by(comments: list[dict], login: str):
-    return (comment for comment in comments
-            if isinstance(user := comment.get("user"), dict) and user.get("login") == login)
+def _author(comment: dict) -> str | None:
+    return user.get("login") if isinstance(user := comment.get("user"), dict) else None
 
 
 def _updated_at(comment: dict) -> str:
@@ -356,19 +355,15 @@ def _pytest_node(node: str, suffix: str) -> str:
     return node + suffix[:fallback] if fallback else ""
 
 
-def _departure(
-    comments: list[dict], repo: str, number: int, head: str, queue: str,
-) -> tuple[Departure | None, dict]:
+def _departure(comments: list[dict], repo: str, number: int, head: str, queue: str, login: str) -> tuple[Departure | None, dict]:
     """Return the current departure or the later command that superseded it."""
     comments = [item for item in comments if type(item.get("id")) is int and item["id"] > 0]
-    commands = (item for item in comments if _queue_command(str(item.get("body") or ""), queue))
-    command = max(commands, key=lambda item: item["id"], default={})
-    latest = max(_comments_by(comments, "mergify[bot]"), key=lambda item: (_updated_at(item), item["id"]), default={})
+    latest = max((item for item in comments if _author(item) == "mergify[bot]"),
+                 key=lambda item: (_updated_at(item), item["id"]), default={})
     body = str(latest.get("body") or "")
-    payload = None
+    payload = body.partition("-*- Mergify Payload -*-\n")[2].partition("\n-*- Mergify Payload End -*-")[0]
     with suppress(json.JSONDecodeError):
-        text = body.partition("-*- Mergify Payload -*-\n")[2]
-        payload = json.loads(text.partition("\n-*- Mergify Payload End -*-")[0])
+        payload = json.loads(payload)
     url = f"https://github.com/{repo}/pull/{number}#issuecomment-"
     lines = body.splitlines()
     entered = next((line for line in lines if line.startswith("- ✅ **Entered the queue** ")), "")
@@ -382,8 +377,13 @@ def _departure(
     if linked and (not admitted or (markers and _marker(REQUEST, head, queue) not in markers)):
         return None, {}
     # Second-precision timestamps: a command in the departure's second may be a new attempt.
-    if command and command is not admitted and str(command.get("created_at") or "") >= _updated_at(latest):
-        return None, command
+    for command in sorted(comments, key=lambda item: item["id"], reverse=True):
+        if (command is not admitted and str(command.get("created_at") or "") >= _updated_at(latest)
+                and _queue_command(command_body := str(command.get("body") or ""), queue)
+                and ((author := _author(command)) == login
+                     or (("\n" not in command_body.strip() or _marker(REQUEST, head, queue) in command_body.splitlines())
+                         and _verified_writer(repo, author)))):
+            return None, command
 
     reason = payload["dequeue_reason"] if isinstance(payload.get("dequeue_reason"), dict) else {}
     checks = reason.get("checks")
@@ -399,11 +399,9 @@ def _departure(
 
 
 def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
-    try:
-        comments = github.paged(f"repos/{repo}/issues/{number}/comments")
-    except github.GhError:
-        return None
-    return _departure(comments, repo, number, head, queue)[0]
+    with suppress(github.GhError):
+        return queue_attempt(repo, number, head, queue).departure
+    return None
 
 
 @dataclass(frozen=True)
@@ -418,27 +416,30 @@ class QueueAttempt:
         return self.confirmed or self.departure is not None
 
 
+def _verified_writer(repo: str, author: str | None) -> bool:
+    with suppress(github.GhError):
+        permission = github.api_get(f"repos/{repo}/collaborators/{quote(author, safe='')}/permission") if isinstance(author, str) else None
+        return isinstance(permission, dict) and permission.get("permission") in ("write", "maintain", "admin")
+    return False
+
+
 def queue_attempt(repo: str, number: int, head: str, queue: str) -> QueueAttempt:
     login, requested, confirmed = github.login(token=""), False, False
     requested_at = ""
     comments = github.paged(f"repos/{repo}/issues/{number}/comments")
-    departure, retry = _departure(comments, repo, number, head, queue)
+    departure, retry = _departure(comments, repo, number, head, queue, login)
     for item in comments:
-        author = user.get("login") if isinstance(user := item.get("user"), dict) else None
+        author = _author(item)
         body = str(item.get("body") or "")
         lines, requeue = body.splitlines(), _queue_command(body, queue)
-        if author != login:
-            if isinstance(author, str) and requeue and _marker(REQUEST, head, queue) in lines:
-                with suppress(github.GhError):
-                    permission = github.api_get(f"repos/{repo}/collaborators/{quote(author, safe='')}/permission")
-                    if isinstance(permission, dict) and permission.get("permission") in ("write", "maintain", "admin"):
-                        requested, requested_at, confirmed = True, str(item.get("created_at") or ""), False
+        same_request = _marker(REQUEST, head, queue) in lines
+        if author != login and not (item is retry or (requeue and same_request and _verified_writer(repo, author))):
             continue
         marked = any(line.startswith(f"<!-- {REQUEST} ") for line in lines)
-        if _marker(REQUEST, head, queue) in lines or (not marked and requeue and (confirmed or item is retry)):
+        if same_request or (not marked and requeue and (confirmed or item is retry)):
             requested, requested_at = True, str(item.get("created_at") or "")
-        confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)
-    latest = max(_comments_by(comments, "mergify[bot]"), key=_updated_at, default={})
+        confirmed = (author == login and _marker(CONFIRMED, head, queue) in lines) or (confirmed and not requeue)
+    latest = max((item for item in comments if _author(item) == "mergify[bot]"), key=_updated_at, default={})
     report = None
     if (_updated_at(latest) >= requested_at and type(report_id := latest.get("id")) is int and report_id > 0
             and "### ⏳ Waiting for queue conditions" in str(latest.get("body") or "").splitlines()):
