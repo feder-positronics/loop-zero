@@ -3448,6 +3448,19 @@ def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatc
     assert run(capsys, "ready", "--wait=60")[0] == exit_code and clock.fetch_timeout == 60 - clock.sleeps[0]
 
 
+def test_ready_accepts_receipt_after_forwarding_worker_cpu_grant(wt, gh, head, capsys, monkeypatch, tmp_path):
+    config = tmp_path / "check-policy.toml"
+    args = ("--config", str(config))
+    config.write_text(WORKFLOW)
+    arm_approved_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    expect_cli(capsys, 0, *args, "check")
+
+    allowlist = (*cli.Config.env_allowlist, "HEAVY_SLOT_GRANTED_CORES")
+    config.write_text(WORKFLOW.replace("[checks]", f"[checks]\nenv_allowlist = {json.dumps(allowlist)}"))
+    monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "2")
+    expect_cli(capsys, 0, *args, "ready")
+
+
 @pytest.mark.parametrize("worker", ["legacy", "different-environment", "matching"])
 def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
     policy = WORKFLOW.replace(
