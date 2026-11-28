@@ -250,7 +250,8 @@ def _previous(config: Config, worktree: Path, settings_sha256: str,
                     and is_check_exit_code(code) and code == 0 and isinstance(tail, str)):
                 source = result.get("reused_from")
                 reused_from = source if isinstance(source, str) else data["head"]
-                previous[command] = CheckResult(command, 0, 0.0, _check_tail(tail, config), key, reused_from)
+                tail = _proc.redact(tail, _check_secrets(config), *_proc.SECRET_PATTERNS)
+                previous[command] = CheckResult(command, 0, 0.0, _check_tail(tail), key, reused_from)
         return previous, resuming
     except (OSError, WorktreeError, ValueError, KeyError, TypeError, AttributeError):
         return {}, False
@@ -269,7 +270,7 @@ def _execution_settings(config: Config, base: str) -> dict:
     allowlist.extend(sorted((allowed - set(Config.env_allowlist)) & os.environ.keys()))
     return {"network": config.network, "env_allowlist": allowlist, "sandbox_ro": config.sandbox_ro,
             "writable": config.writable, "scratch": config.scratch, "env": config.env, "limits": asdict(config.limits),
-            "local_shell": CHECK_SHELL, "check_runner": [],  # Keep the historical field for existing receipts.
+            "local_shell": CHECK_SHELL, "check_runner": ["redacted-tail-v1"],
             "environment": check_environment(config), **({"base": base} if config.inputs else {})}
 
 
@@ -418,13 +419,12 @@ def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tupl
         if (not path.is_absolute() and "/" in script and ".." not in path.parts
                 and not any((worktree / path).resolve().is_relative_to(Path(root)) for root in config.writable)
                 and not (worktree / path).is_file()):
-            message = (
+            tail = _check_tail(
                 f"Check preflight: repo-local file {script!r} is absent from this task tree. "
                 "If trusted-base checks advanced, integrate the current configured base "
                 "into this task branch (resolve conflicts), then rerun loopzero check; "
-                "otherwise restore the required file."
-            )
-            return CheckResult(command, 1, 0.0, _check_tail(message)), ()
+                "otherwise restore the required file.")
+            return CheckResult(command, 1, 0.0, tail), ()
         match = re.fullmatch(r"uv run((?: --group [A-Za-z0-9_-]+)*) [A-Za-z0-9_./][A-Za-z0-9_./-]*(?: [A-Za-z0-9_./=-]+)*", command)
         if match:
             groups = [*(groups or []), *match[1].split()[1::2]]
@@ -473,14 +473,8 @@ def _check_secrets(config: Config) -> list[str]:
                               if _private_check_value(name, value))
 
 
-def _check_tail(text: str, config: Config | None = None, *, suffix: str = "") -> str:
-    if secrets := (_check_secrets(config) if config is not None else []):
-        redacted = _proc.redact(text, secrets)
-        # Redact before cutting; the extra lead read in _run_one may hold a split secret.
-        text = redacted[len(secrets[0]):] if len(text) > CHECK_TAIL_BYTES else redacted
-    bounded = (text + suffix).rstrip("\n")[-CHECK_TAIL_BYTES:]
-    encoded = bounded.encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
-    # A byte cut can start inside a multibyte character.
+def _check_tail(text: str) -> str:
+    encoded = text.rstrip("\n").encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
     return _proc.tail(encoded.decode("utf-8", errors="ignore"))
 
 
@@ -494,12 +488,11 @@ def _run_one(
             f"--fsize={_cap_limit(limits.file_mb * 1024 * 1024, resource.RLIMIT_FSIZE)}",
             "--", *CHECK_SHELL, command,
         )
-        lead = max(map(len, _check_secrets(config)), default=0)
-        done = _run_bwrap(config, worktree, prefix, argv, timeout=timeout, tail_chars=CHECK_TAIL_BYTES + lead)
+        done = _run_bwrap(config, worktree, prefix, argv, timeout=timeout, tail_chars=CHECK_TAIL_BYTES)
     except _proc.ProcTimeout as exc:
-        return CheckResult(command, TIMEOUT_EXIT, timeout,
-                           _check_tail(exc.stdout, config, suffix=f"\n[loopzero] timed out after {timeout:g}s"))
-    return CheckResult(command, done.exit_code, done.duration_s, _check_tail(done.stdout, config))
+        tail = _proc.redact(exc.stdout, _check_secrets(config), *_proc.SECRET_PATTERNS)
+        return CheckResult(command, TIMEOUT_EXIT, timeout, _check_tail(f"{tail}\n[loopzero] timed out after {timeout:g}s"))
+    return CheckResult(command, done.exit_code, done.duration_s, _check_tail(done.stdout))
 
 
 def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
@@ -550,6 +543,7 @@ def _run_bwrap(
             [*prefix[:-1], "--args", str(fd), "--", *command],
             cwd=worktree, env_allowlist=("PATH",) if "PATH" in config.env_allowlist else (),
             timeout=timeout, merge_output=tail_chars is not None, tail_chars=tail_chars, pass_fds=(fd,),
+            tail_secrets=_check_secrets(config) if tail_chars is not None else None,
         )
 
 
