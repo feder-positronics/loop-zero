@@ -115,8 +115,10 @@ class Inputs:
                 ) as stream:
                     json.dump(self.data, stream, sort_keys=True)
                 Path(stream.name).replace(self.path)
-            except OSError:
-                self.alert("snapshot", "could not write")
+            except OSError as error:
+                print(f"Cannot record metrics: could not write snapshot at {self.path}: {error}", file=sys.stderr)
+                return False
+        return True
 
 
 def pages(inputs, path, cutoff=None, **params):
@@ -494,16 +496,20 @@ def main(argv=None):
     selected = metrics.get("custom_window", metrics["last_7_days"])
     if args.alerts:
         find_alerts(inputs, args, selected, p0, host, end)
-        inputs.save()
+        if not inputs.save():
+            return 1
         print(json.dumps({"alerts": inputs.alerts}, indent=2, sort_keys=True))
         return 0
     open_orders = inputs.read("open_order_issues", lambda: load_issues(
         inputs, args.repo, args.label_order, state="open"), list)
-    if open_orders is not None:
+    if orders is None:
+        open_orders = None
+    elif open_orders is not None:
         # Include recent orders that closed after a historical report's end.
-        open_orders = list({row["number"]: row for row in [*(orders or []), *open_orders]}.values())
+        open_orders = list({row["number"]: row for row in [*orders, *open_orders]}.values())
     stalls, stalls_complete = stalled_p0s(inputs, args, p0, end)
-    inputs.save()
+    if not inputs.save():
+        return 1
     trend = [metrics[name] for name in names]
     report = {
         "repo": args.repo, "last_7_days": trend[-1], "previous_7_days": trend[-2],
