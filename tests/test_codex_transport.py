@@ -436,7 +436,7 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, fake_bi
         old_range, new_range = f"{merge_base!r},{reviewed!r}", f"{reviewed!r},{head!r}"
         tool.write_text(tool.read_text().replace(old_range, new_range))
         result = cli._run_review(native[2], cfg, head, "delta", reviewed,
-                                 publication=(repo, 7, "bot"))
+                                 number=7, publisher="bot")
         proof = runners.codex_evidence(result)
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
         argv = ["git", "diff", "--no-color", reviewed, head]

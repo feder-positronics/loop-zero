@@ -27,17 +27,16 @@ def leading_marker(body: str) -> re.Match[str] | None:
     return REVIEW_MARKER_RE.fullmatch(block[0])
 
 
-def review_envelopes(body: str) -> tuple[str, list[dict]]:
+def review_envelopes(body: str) -> list[dict]:
     """Decode only the publisher's raw-output block, which ends the body; quotes in findings come earlier."""
     if not (match := re.search(r"<details><summary>Raw reviewer output</summary>\s*```\s*\n((?:(?!\n```).)*)"
                                 r"\n```\s*</details>\s*\Z", body, re.DOTALL)):
-        return "", []
-    raw = match[1].strip()
+        return []
     try:
-        envelopes = runners._read_envelopes(raw)
+        envelopes = runners._read_envelopes(match[1].strip())
     except (ValueError, TypeError):
-        return raw, []
-    return raw, envelopes if all(isinstance(item, dict) for item in envelopes) else []
+        return []
+    return envelopes if all(isinstance(item, dict) for item in envelopes) else []
 
 
 def review_projection(review: dict, head: str, repo: str, number: int):
@@ -92,7 +91,7 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     present, evidence = review_projection(latest, head, repo, number)
     if present and (evidence is None or any(call["fatal"] != "absent" for call in evidence["calls"])):
         return None
-    _, envelopes = review_envelopes(body)
+    envelopes = review_envelopes(body)
     if not present and any(runners.codex_fatal_startup(item) for item in envelopes):
         return None
     return latest if verdict else None

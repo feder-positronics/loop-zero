@@ -203,7 +203,7 @@ def _pr_markers(reviews: list[dict], head: str,
     for review in reviews:
         body = review.get("body") or ""
         if not eligibility.review_projection(review, head, repo, number)[0] and any(
-                runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1]):
+                runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)):
             continue
         match = eligibility.leading_marker(body)
         if not match or review.get("commit_id") != match[1] or (
@@ -833,7 +833,7 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
             if blocked or not required:
                 raise CliError(f"hosted checks must pass on this head or rerun `loopzero check`: {', '.join(blocked) or 'no required hosted checks before review'}")
         result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
-                             runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
+                             number=pr.number, publisher=publisher, runtime_source=runtime_source)
         final_head, final_dirty = worktree.head(wt), worktree.is_dirty(wt)
         if final_head != head or final_dirty:
             raise CliError(
@@ -1046,7 +1046,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     return True
 
 
-def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number: int | None) -> bytes:
+def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number: int) -> bytes:
     if since is None:
         return b""
     if not _is_ancestor(wt, since, head):
@@ -1059,8 +1059,7 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
     if not merged:
         patch = worktree.diff_since(wt, since)  # Empty after an empty commit or a reverted change.
     else:
-        patch = (eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
-                 if number is not None else None)
+        patch = eligibility.base_merge_material(config.repo, number, since, head, config.base_branch, clean=False)
         if patch is None:
             raise CliError(
                 f"could not verify merge history: {since[:12]} must be on the first-parent history and "
@@ -1068,7 +1067,7 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
                 "parents. If the history is correct, GitHub objects may be unavailable or exceed verification "
                 "limits. Open a new PR from the current base for a fresh review if verification still fails."
             )
-    if not patch and number is not None:
+    if not patch:
         publishers = config.review_publishers or (github.login(),)
         if github.open_blocking_findings(config.repo, number, None, publishers):
             raise CliError("empty delta leaves blocking findings open. Run `loopzero resolve` "
@@ -1086,12 +1085,11 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
 
 def _run_review(  # noqa: C901 - reviewer fallback across families
     wt: Path, config: Config, head: str, kind: str, reviewed: str | None,
-    model: str | None = None, effort: str | None = None, *, runtime_source: str = "",
-    publication: tuple[str, int, str] | None = None,
+    model: str | None = None, effort: str | None = None, *, number: int, publisher: str, runtime_source: str = "",
 ) -> ReviewResult:
     lineage_base = _primary_base(wt, config)
     since = reviewed if kind == "delta" else lineage_base
-    patch = (_delta_patch(wt, config, since, head, publication[1] if publication else None)
+    patch = (_delta_patch(wt, config, since, head, number)
              if kind == "delta" else worktree.diff_since(wt, since))
     diff = runners.render_patch(patch)
     task = worktree.task_text(wt)
@@ -1111,10 +1109,10 @@ def _run_review(  # noqa: C901 - reviewer fallback across families
             runners.review_with, family, cwd=wt, head=head, kind=kind, task_text=task,
             reviewer_ro_paths=config.reviewer_ro_paths,
             model=model or (settings.model if settings else None), effort=chosen,
-            review_context=({"repo": config.repo, "pr": publication[1], "publisher": publication[2],
+            review_context=({"repo": config.repo, "pr": number, "publisher": publisher,
                              "head": head, "kind": kind, "base": since,
                              "diff_sha256": hashlib.sha256(patch).hexdigest(),
-                             "diff_bytes": len(patch)} if publication and family == "codex" else None),
+                             "diff_bytes": len(patch)} if family == "codex" else None),
         )
     selected = {family: select(family) for family in candidates}
     # Settle fallback settings before any launch; an unusable one only matters if reached.
