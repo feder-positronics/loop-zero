@@ -371,24 +371,23 @@ def _check_report_problem(
     if report.head != head:
         return f"check receipt is for {report.head[:12]}. Run `loopzero check` at {head[:12]}."
     if report.dirty:
-        return ("check receipt was recorded in a dirty worktree. Run `git status --short`, "
-                "settle the changes, then run `loopzero check`.")
+        return "check receipt was recorded in a dirty worktree. Run `git status --short`, settle the changes, then run `loopzero check`."
     commands = tuple(result.command for result in report.results)
-    if commands != config.checks or (require_pass and not report.ok):
-        if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
-            return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
-        if require_pass and not report.ok:
-            return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
-                    "Retry unchanged only if the failure was transient.")
-        return ("check receipt's plan differs from the trusted workflow. "
-                "Run `loopzero check` with the current workflow.")
-    recovery = ("Rerun `loopzero check` in this worktree at this head with the same CLI version, environment "
-                "and `--config` (if supplied) as the blocked command, then retry it.")
-    if report.settings_sha256 is None:
-        return f"check receipt is missing its settings fingerprint. {recovery}"
-    if all(report.settings_sha256 != sandbox.settings_fingerprint(config, legacy_allowlist=names)
-           for names in (None, config.env_allowlist, tuple(n for n in config.env_allowlist if n != sandbox.CPU_GRANT_ENV))):
-        return f"check receipt has an incompatible settings fingerprint. {recovery}"
+    if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
+        return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
+    if require_pass and not report.ok:
+        return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
+                "Retry unchanged only if the failure was transient.")
+    expected = config.checks if report.ok else config.checks[:len(commands)]
+    if commands != expected:
+        return "check receipt's plan differs from the trusted workflow. Run `loopzero check` with the current workflow."
+    if report.settings_sha256 is None or all(
+        report.settings_sha256 != sandbox.settings_fingerprint(config, legacy_allowlist=names)
+        for names in (None, config.env_allowlist, tuple(n for n in config.env_allowlist if n != sandbox.CPU_GRANT_ENV))
+    ):
+        problem = "is missing its" if report.settings_sha256 is None else "has an incompatible"
+        return (f"check receipt {problem} settings fingerprint. Rerun `loopzero check` in this worktree at this head "
+                "with the same CLI version, environment and `--config` (if supplied) as the blocked command, then retry it.")
     return None
 
 
@@ -439,9 +438,8 @@ def _save_report(
 
 
 def _load_report(wt: Path) -> CheckReport | None:
-    path = wt / CHECKS_FILE
     try:
-        data = json.loads(worktree.read_local_state(wt, path.name))
+        data = json.loads(worktree.read_local_state(wt, CHECKS_FILE.name))
         results = tuple(CheckResult(**item) for item in data["results"])
         if any(not is_check_exit_code(result.exit_code) for result in results):
             raise TypeError("exit_code must be an integer")
@@ -453,7 +451,7 @@ def _load_report(wt: Path) -> CheckReport | None:
     except FileNotFoundError:
         return None
     except (TypeError, KeyError, ValueError) as exc:
-        print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
+        print(f"warning: ignoring unreadable {wt / CHECKS_FILE}: {exc}", file=sys.stderr)
         return None
 
 
@@ -532,14 +530,11 @@ def _sync_task_narrative(task: str, existing: str) -> str:
     return prefix + content.lstrip("\n")
 
 
-_REQUIRED_TASK_LINES = ("Context", "Problem", "Goal")
-
-
 def _require_pr_details(wt: Path) -> None:
     """Report every unfilled PR description field before push."""
     task = worktree.task_text(wt)
     unfilled = []
-    for name in _REQUIRED_TASK_LINES:
+    for name in ("Context", "Problem", "Goal"):
         match = re.search(rf"^- \*\*{name}:\*\*[ \t]*(.*(?:\n[ \t]+\S.*)*)", task, re.MULTILINE)
         value = match.group(1).strip() if match else ""
         if not value or re.fullmatch(r"<[^<>]*>", value):
@@ -613,9 +608,7 @@ def _check_failure_preview(tail: str) -> str:
         line if len(line) <= 2 * edge else line[:edge] + b" [...] " + line[-edge:]
         for line in (line.encode() for line in tail.splitlines())
     )
-    if len(preview) > limit:
-        preview = b"[...]\n" + preview[6 - limit:]
-    return preview.decode(errors="ignore")
+    return (preview if len(preview) <= limit else b"[...]\n" + preview[6 - limit:]).decode(errors="ignore")
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -834,7 +827,13 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
             wt, config, head, kind, publication_context,
         ):
             raise CliError(f"saved {kind} review for {head[:12]}; run `loopzero review --repost`")
-        _require_receipt(wt, config, head)
+        if problem := _check_report_problem(report := _load_report(wt), config, head, require_pass=False):
+            raise CliError(problem)
+        if report is not None and not report.ok:
+            required = set(config.required_ci) - {eligibility.CONTEXT}
+            checks = github._check_signals(config.repo, head)[0] if required else {}
+            if not required or any(checks.get(name) != "success" for name in required):
+                raise CliError("required hosted checks must pass on this head. Fix the failure, then run `loopzero check`.")
         result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
                              runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
         final_head, final_dirty = worktree.head(wt), worktree.is_dirty(wt)

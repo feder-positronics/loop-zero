@@ -1513,14 +1513,29 @@ def test_review_context_mismatch_names_the_recovery(wt, gh, capsys, head, monkey
     assert not any(posted(call) for call in gh.calls)
 
 
-@pytest.mark.parametrize("local_exit", [None, 1])
-def test_review_requires_passing_receipt(wt, gh, capsys, head, monkeypatch, local_exit):
+@pytest.mark.parametrize(("local_exit", "hosted"), [(None, "success"), (1, "failure"), (1, None)])
+def test_review_blocks_without_passing_checks(wt, gh, capsys, head, monkeypatch, local_exit, hosted):
     arm_review_pr(wt, gh, head, receipt=False)
     arm_readiness(gh, head, wt, local_exit=local_exit)
+    if hosted is None:
+        arm_check_runs(gh, head, [])
+    else:
+        arm_named_check(gh, head, status="completed", conclusion=hosted)
     launch = Mock(side_effect=AssertionError("review launched before checks passed"))
     monkeypatch.setattr(cli, "_run_review", launch)
     expect_cli(capsys, 1, "review", stderr_contains=("loopzero check",))
     launch.assert_not_called()
+
+
+def test_review_accepts_hosted_checks_after_local_failure(wt, gh, fake_bin, capsys):
+    publish_workflow(wt, WORKFLOW.replace('["checks"]', '["checks", "Loop-zero Eligibility"]'))
+    head = prepare_review(wt, gh, fake_bin, post_id=1, receipt=False)
+    arm_readiness(gh, head, wt, local_exit=None)
+    config = cli.config_mod.load_trusted(wt)
+    failed_stage = CheckResult(config.checks[0], 1, 0.1, "known flake")
+    cli._save_report(wt, CheckReport(head, False, (failed_stage,), cli.sandbox.settings_fingerprint(config)))
+    expect_cli(capsys, 0, "review")
+    assert posted_review(gh)["commit_id"] == head
 
 
 def prepare_review(wt: Path, gh: FakeGh, fake_bin: Path, *, payload=APPROVE,
