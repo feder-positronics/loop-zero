@@ -1196,7 +1196,7 @@ def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, g
     task = wt / ".loopzero" / "task.md"
     task.write_text(
         task.read_text().replace("(filled by `loopzero check`)", "Browser verified.")
-        .replace("(filled by `loopzero review`)", "Saved review.")
+        .replace("(filled by `loopzero review`)", "Saved review.") + "\n## Migration\nRun once.\n"
     )
     arm_new_draft(gh, "b" * 40)  # another writer pushed B after the pinned push
     gh.respond_pr_view(pr_json(headRefOid="b" * 40))
@@ -1208,12 +1208,15 @@ def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, g
     assert not any(text in body for text in ("## Validation", "Browser verified.", "## Review", "Saved review."))
 
     # The branch is back at the evaluated head, but the draft still has only prose.
-    arm_pr_body_patch(gh, head, body=body)
+    task.write_text(task.read_text().replace("## Migration\nRun once.", "## Rollout\nSkip migration."))
+    arm_pr_body_patch(gh, head, body=body + "\n## Live notes\nKeep this.\n")
     expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
     patch = gh.calls[-1]
     assert "PATCH" in patch["argv"]
     body = json.loads(patch["--input"])["body"]
     assert "Browser verified." in body and "Saved review." in body
+    assert "## Migration" not in body and "Run once." not in body
+    assert_contains(body, "## Rollout\nSkip migration.", "## Live notes\nKeep this.")
 
 
 @pytest.mark.parametrize("command,live", [
@@ -1729,7 +1732,7 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
         example = "```markdown\n## Validation\nExample\n```"
         gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=example + "\n" + stale)))
     elif body_case == "existing-review":
-        arm_pr_body_patch(gh, head, body=f"# T1\n\n## Review\n(filled by `loopzero review`)\n\n{prior}\n\n## Notes\n")
+        arm_pr_body_patch(gh, head, body=f"# T1\n\n## Review  \n(filled by `loopzero review`)\n\n{prior}\n\n## Notes\n")
     else:
         monkeypatch.setattr(cli, "_run_review", change_body_during_review)
     _, err = expect_cli(capsys, 0, "review", stdout_contains=(f"primary review by claude on {head[:12]}: approve",))
@@ -1746,6 +1749,7 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
         assert len(patches) == 1 and not err
         updated = json.loads(patches[0]["--input"])["body"]
         if body_case == "existing-review":
+            assert updated.count("## Review") == 1
             assert updated.index(prior) < updated.index(line) < updated.index("## Notes")
             assert "(filled by `loopzero review`)" not in updated
         elif body_case == "receipt":
@@ -2898,6 +2902,12 @@ def test_ready_wait_after_draft_transition(wt, gh, capsys, monkeypatch, head, gi
         assert ("waiting: required check 'checks' is pending" in out) is not timed_out
         assert ("timed out waiting for required checks" in out) is timed_out
         assert sum(is_ready_call(call) for call in gh.calls) == 1
+
+
+def test_ready_wait_accepts_auto_merged_head(wt, gh, capsys, monkeypatch, head):
+    arm_approved_pr(gh, head, wt, "skipped")
+    on_ready_transition(gh, monkeypatch, lambda: gh.respond_pr_view(pr_json(headRefOid=head, state="MERGED", isDraft=False)))
+    expect_cli(capsys, 0, "ready", "--wait=0", stderr="", stdout_endswith=f"{URL}\n")
 
 
 @pytest.mark.parametrize("settled", ["success", "skipped"])
@@ -4185,25 +4195,30 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
     expect_cli(capsys, 1, "status", stdout="", stderr="loopzero status: HEAD is detached. Switch to a branch and retry.\n")
 
 
-@pytest.mark.parametrize("case", ["owned", "external", "dirty", "unpushed"])
-def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head(wt, repo, gh, capsys, case):
+@pytest.mark.parametrize("case", ["owned", "during-wait", "external", "dirty", "unpushed"])
+def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head(wt, repo, gh, capsys, monkeypatch, case):
     head, branch = head_of(wt), "lz/t1"
     origin = repo.parent / "origin.git"
     git(wt, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
-    arm_pr(gh, head, state="CLOSED")
-    if case == "external":
+    if case != "during-wait":
+        arm_pr(gh, head, state="CLOSED")
+    if case == "during-wait":
+        arm_approved_pr(gh, head, wt, "pending", isDraft=False)
+        gh.respond_pr_view(pr_json(headRefOid=head, state="CLOSED"))
+        monkeypatch.setattr(cli, "_sleep", lambda _: None)
+    elif case == "external":
         cli.worktree.task_file(wt).write_text("# Handwritten task\n")
     elif case == "dirty":
         (wt / "untracked").touch()
     elif case == "unpushed":
         git(wt, "commit", "--allow-empty", "-m", "local after close")
         gh.respond(f"api repos/{REPO}/commits/{head_of(wt)}/pulls?per_page=100&page=1", [])
-    code, out, err = run(capsys, "merge", "--wait=0")
-    assert (code, out) == (1, "")
-    assert wt.exists() is (case != "owned")
+    code, out, err = run(capsys, "merge", "--wait" if case == "during-wait" else "--wait=0")
+    assert code == 1 and (case == "during-wait" or not out)
+    assert wt.exists() is (case not in {"owned", "during-wait"})
     assert git(repo, "branch", "--list", branch)
     assert git(origin, "rev-parse", branch).strip() == head
-    assert {"owned": "kept both branch refs", "external": "ownership is unverified",
+    assert {"owned": "kept both branch refs", "during-wait": "kept both branch refs", "external": "ownership is unverified",
             "dirty": "worktree is dirty", "unpushed": "push or pull first"}[case] in err
     assert all(call["argv"][:2] != ["api", "-X"] for call in gh.calls)
 
