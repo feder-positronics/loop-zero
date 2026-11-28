@@ -12,7 +12,7 @@ import shlex
 import stat
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -21,7 +21,7 @@ from email.utils import parsedate_to_datetime
 from functools import partial
 from itertools import chain, islice, pairwise
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import quote
 
 from loopzero import runners
@@ -1158,17 +1158,16 @@ def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, .
             "-f", f"ref={base}", "-f", f"inputs[pr]={number}")
 
 
-def _eligibility_dispatched(repo: str, base: str, since: str) -> bool:
+def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bool:
     query = f"event=workflow_dispatch&branch={quote(base, safe='')}&created={quote('>=' + since, safe='')}&per_page=100"
     data = api_get(f"repos/{repo}/actions/workflows/eligibility.yml/runs?{query}")
     runs = data.get("workflow_runs") if isinstance(data, dict) else None
-    complete = isinstance(runs, list) and data.get("total_count") == len(runs)
-    if not complete or not all(isinstance(run, dict) for run in runs):
+    if not isinstance(runs, list) or data.get("total_count") != len(runs) or not all(isinstance(run, dict) for run in runs):
         raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
-    return bool(runs)  # Consumer workflows set no run title; the dispatch window identifies the run.
+    return any(run.get("display_title") == f"Refresh eligibility for PR #{number}" for run in runs)
 
 
-def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...], *,
+def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, has_blockers: Callable[[], bool], *,
                         required: bool = True) -> bool:
     args = eligibility_dispatch_args(repo, pr.number, base)
     since = datetime.fromtimestamp(time.time(), UTC).isoformat(timespec="seconds")
@@ -1180,13 +1179,11 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
                 raise
             _retry_sleep(RETRY_DELAY)
             current = pr_for_branch(repo, branch, open_only=True)
-            if current is None or (current.number, current.head_sha, current.base_ref) != (
-                pr.number, pr.head_sha, pr.base_ref,
-            ):
+            if current is None or (current.number, current.head_sha, current.base_ref) != (pr.number, pr.head_sha, pr.base_ref):
                 raise GhError(("refresh Loop-zero Eligibility",), "the PR or head changed after resolution") from exc
-            if _eligibility_dispatched(repo, base, since):
+            if _eligibility_dispatched(repo, pr.number, base, since):
                 return True
-            if open_blocking_findings(repo, pr.number, None, publishers):
+            if has_blockers():
                 raise GhError(("refresh Loop-zero Eligibility",), "blocking findings appeared after resolution") from exc
             _gh(*args)
     except (GhError, ProcTimeout, OSError) as exc:
@@ -1197,10 +1194,9 @@ def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: t
             raise GhError(("refresh Loop-zero Eligibility",),
                           f"Finding on PR #{pr.number} is resolved. Check that eligibility.yml exists on "
                           f"{base} and your GitHub login can dispatch it.") from exc
-        retry = shlex.join(("gh", *args))
         raise GhError(("refresh Loop-zero Eligibility",),
                       f"Finding on PR #{pr.number} is resolved. {exc}\n"
-                      f"Verify the PR head, remaining findings and recent runs before retrying: {retry}") from exc
+                      f"Verify the PR head, remaining findings and recent runs before retrying: {shlex.join(('gh', *args))}") from exc
     return True
 
 
@@ -1578,11 +1574,11 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
 
 
 def commit_status(repo: str, head: str, context: str, state: str, description: str, *,
-                  timeout: float = 120) -> None:
+                  timeout: float = 120) -> dict:
     """Publish a SHA-scoped status using the caller's narrowly scoped credential."""
     endpoint = f"repos/{repo}/statuses/{head}"
     try:
-        _api(endpoint, {"state": state, "context": context, "description": description}, timeout=timeout)
+        return cast(dict, _api(endpoint, {"state": state, "context": context, "description": description}, timeout=timeout))
     except GhError as exc:
         validation_error = re.search(r"\bHTTP 422\b|^method=POST endpoint=\S+ status=422\b", exc.tail)
         at_limit = False
