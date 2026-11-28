@@ -76,6 +76,10 @@ def link_errors(root):
         links = re.findall(
             r'''!?\[[^\]]*\]\(\s*(?:<([^<>\n]+)>(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*|([^)]+))\)''',
             text)
+        links.extend(re.findall(
+            r'''^ {0,3}\[(?!\^)[^\]\n]+\]:[ \t]*(?:<([^<>\n]+)>|([^\s<>]+))'''
+            r'''(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$''',
+            text, re.MULTILINE))
         for angled, raw in links:
             target = angled or re.split(r"""[ \t]+(?=["'])""", raw.strip(), maxsplit=1)[0]
             parsed = urlsplit(target)

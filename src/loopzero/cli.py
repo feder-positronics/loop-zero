@@ -487,7 +487,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = existing.replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", _outside_fences(body), re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Validation[ \t]*\n(.*?)(?=^## |\Z)", _outside_fences(body), re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = body[match.start(1):match.end(1)]
@@ -506,7 +506,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
         for placeholder in reversed(list(placeholders)):
             content = content[:placeholder.start()] + content[placeholder.end():]
         content = block + "\n" + ("\n" + content.lstrip("\n") if content.strip() else "\n")
-    return _validate_pr_body_size(body[:match.start()] + "## Validation\n" + content + body[match.end():])
+    return _validate_pr_body_size(body[:match.start(1)] + content + body[match.end():])
 
 
 def _validate_pr_body_size(body: str) -> str:
