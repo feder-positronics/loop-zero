@@ -126,11 +126,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    or writing, `pr` requires a confirmed merge or a complete closed-history read
    through GitHub REST. A confirmed merge completes that branch even when a
    newer duplicate exists. If the head commit cannot prove completion, the
-   pull-list fallback also checks earlier commits of the branch. Failed,
-   malformed, repeated or truncated history blocks publication, with a limit of
-   100 pages. An unfinished branch creates or refreshes a draft PR. Publication
-   checks that every effective origin push URL targets the configured GitHub
-   repository. A leased rewrite also requires the PR head in the task branch's
+   fallback scans closed PRs by source branch across up to 100 REST pages.
+   Invalid or incomplete history blocks publication. An unfinished branch
+   creates or refreshes a draft PR. All effective origin push URLs must target
+   the configured repository. A leased rewrite requires the PR head in the task branch's
    local history. The push source is the captured commit. A new draft starts with task prose.
    The body patch, including saved evidence on a new draft, requires an open PR at the
    captured commit and configured target.
@@ -193,9 +192,10 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    with the actual merge tree. Unavailable history blocks inherited coverage.
    Ancestor coverage includes outdated unresolved blocking threads. A primary
    that requested changes also requires resolved findings at the reviewed head.
-   Readiness keeps the latest run ID for each GitHub App and check name, then
-   combines the current verdicts for each required name. Commit status contexts
-   match case-insensitively and only the newest status for each context counts.
+   Readiness keeps the highest run ID for each check name, GitHub App and
+   producer (Actions workflow when identified, otherwise check suite).
+   It combines verdicts by required name and keeps only the newest commit status
+   per case-insensitive context.
    A positive `ready --wait`
    budget covers the first readiness read, the live PR reread before draft activation,
    and revalidation after taking a PR out of draft.
@@ -360,7 +360,7 @@ verdict before publication. Standalone evaluation performs its own PR reads.
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 Hosted attestation uses the trusted workflow's base branch for candidate and
 source targets, queue status and integration tree verification.
-The size budget runs only as a sandboxed check stage and in queue candidate CI.
+The size budget runs in the local sandbox and in PR, merge-group and main-push CI.
 A candidate lineage read that finds zero or several live batch matches is
 reread within the current attempt, under a shared deadline. Separately,
 candidate attestation restarts as a complete fresh attempt, inside its own
