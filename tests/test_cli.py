@@ -1481,10 +1481,10 @@ def arm_new_draft(gh: FakeGh, head: str, *, branch="lz/t1") -> None:
     gh.respond_pr_create(pr_json(headRefOid=head), branch=branch)
 
 
-def arm_draft_validation(gh: FakeGh, wt: Path, head: str) -> None:
+def arm_draft_validation(gh: FakeGh, wt: Path, head: str, *, body: str | None = None) -> None:
     """The created draft is reread, then receives its validation by PATCH."""
     gh.respond(f"api repos/{REPO}/pulls/7",
-               rest_pr_json(pr_json(headRefOid=head, body=(wt / ".loopzero" / "task.md").read_text())))
+               rest_pr_json(pr_json(headRefOid=head, body=body if body is not None else cli.worktree.task_text(wt))))
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
 
 
@@ -2907,7 +2907,7 @@ def test_ready_wait_after_draft_transition(wt, gh, capsys, monkeypatch, head, gi
 def test_ready_wait_accepts_auto_merged_head(wt, gh, capsys, monkeypatch, head):
     arm_approved_pr(gh, head, wt, "skipped")
     on_ready_transition(gh, monkeypatch, lambda: gh.respond_pr_view(pr_json(headRefOid=head, state="MERGED", isDraft=False)))
-    expect_cli(capsys, 0, "ready", "--wait=0", stderr="", stdout_endswith=f"{URL}\n")
+    expect_cli(capsys, 0, "ready", "--wait=0", stderr="", stdout_endswith=f"merged: {URL}\n")
 
 
 @pytest.mark.parametrize("settled", ["success", "skipped"])
@@ -5255,12 +5255,13 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
               "Recorded validation\n<!-- loopzero:checks:end -->\n")
     task = wt / ".loopzero/task.md"
     prefix = task.read_text().split("## Validation")[0] if create else ""
-    prose = prefix + "x" * (65536 + extra - len(prefix) - len(suffix))
+    prose = prefix + "x" * (65536 + extra - len(cli._sync_task_narrative(prefix, "")) - len(suffix))
+    published = cli._sync_task_narrative(prose, "") if create else prose
     head = head_of(wt)
     if create:
         task.write_text(prose)
         arm_new_draft(gh, head)
-        arm_draft_validation(gh, wt, head)
+        arm_draft_validation(gh, wt, head, body=published)
         _, err = expect_cli(capsys, int(bool(extra)), "pr")
         if extra:
             assert not git(wt, "ls-remote", "origin", "refs/heads/lz/t1").strip()
@@ -5276,7 +5277,7 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
     else:
         assert err == ""
         assert len(writes) == 1 + create  # the draft, then its validation
-        assert json.loads(writes[-1]["--input"])["body"] == prose + suffix
+        assert json.loads(writes[-1]["--input"])["body"] == published + suffix
 
 
 def merge_wait(monkeypatch, capsys, wait, fake):
