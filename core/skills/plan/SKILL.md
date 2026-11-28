@@ -8,32 +8,30 @@ description: Plan outcome-sized tasks with observable acceptance, ownership, pat
 Read [the contract](../../CONTRACT.md), repository guidance, the issue/task and
 relevant code. Use [delegation guidance](../../../docs/DELEGATION.md) for executors.
 
-Restate the ask in one precise sentence and check it against the issue or request. Size work to one
-independently acceptable outcome or failure family in one PR by default. Keep tests, generated files, docs and related
-cleanup with their change to amortize checks, review and queueing. Batch non-urgent queued chores in
-the same area and risk class, away from risky changes and behind urgent fixes. Split only at a named seam:
-separate rollout or rollback, a design-changing measurement, higher risk (such as destructive migration
-or a trust boundary), separate ownership or a diff too wide for reliable review.
-Match planning depth to the cost of reversal. For persisted state, CLI/config interfaces, trust
-boundaries, public APIs and shared abstractions, identify state and callers that must survive changes
-to assumptions after merge. Use compact state tables for material transitions and settle cheap,
-reversible choices during implementation. Make cheap design- or target-changing observations on real
-data or environments first and derive targets from them. Record each task's objective, observable
-acceptance, paths, owners, constraints and proving `workflow.toml` checks. Add checks only where existing
-checks cannot cover the behavior.
+Restate and verify the ask in one precise sentence. Default to one independently
+acceptable outcome or failure family per PR. Include related tests, generated
+files, docs and cleanup to share checks, review and queueing. Batch non-urgent
+queued chores by area and risk, separate from risky work and behind urgent fixes.
+Split at a named seam: rollout/rollback, design-changing measurement, higher
+risk (e.g. destructive migration or trust boundary), ownership or reviewability.
+
+Match depth to reversal cost. For persisted state, CLI/config interfaces,
+trust boundaries, public APIs and shared abstractions, name the state and callers
+that must survive changed assumptions after merge. Use compact state tables for
+material transitions. Settle cheap reversible choices during implementation.
+Take cheap observations on real data or environments that can change design or
+targets first, and derive targets from them. Record objective, observable
+acceptance, paths, owners, constraints and proving `workflow.toml` checks.
+Add checks only when existing ones cannot cover behavior.
 
 When authorized to file slices from an active goal or blueprint, use its
 tracking issue as the parent. Create each issue per
 [BACKLOG](../../../docs/BACKLOG.md#for-agents). Name the parent step and the evidence it
 needs in an `Unblocks: #<parent> (step N) — <evidence>` line. Link each child with
-`gh api "repos/$repo/issues/$parent/sub_issues" -F sub_issue_id="$id"`. Use
-`owner/repo` for `repo`, the parent issue number for `parent`, and the child's
-numeric `id` from the REST response for `id`.
+`gh api "repos/$repo/issues/$parent/sub_issues" -F sub_issue_id="$id"`. Use `owner/repo`, parent issue number and the child's numeric REST `id`, respectively.
 
-Record the plan in `.loopzero/task.md` using [HANDOFF](../../HANDOFF.md), without
-another tracking file. Resolve routine choices from evidence; missing authority,
-conflicting ownership or material requirements need the exact decision and options.
-Continue independent preparation. Do not implement or plan unrelated cleanup.
-
-Then continue the task you were given as far as it authorizes, or hand over
-what is left of its acceptance.
+Use [HANDOFF](../../HANDOFF.md) in `.loopzero/task.md` as the sole plan file.
+Resolve routine choices from evidence. For missing authority, conflicting
+ownership or material requirements, name the decision and options. Continue
+independent preparation and authorized work, then hand off remaining acceptance.
+Exclude unrelated cleanup from planning and implementation.

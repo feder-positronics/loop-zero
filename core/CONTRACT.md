@@ -38,12 +38,13 @@ and CI own delivery state. Keep task text and local receipts in `.loopzero/`.
 
 Both waiters use `--wait[=SECONDS]` (default 5400) and follow the same head.
 Merge shares that budget across source checks, mergeability and landing.
-Without a positive wait, exit 0 can mean queue request or entry only.
+Without `--wait`, exit 0 can mean queue request or entry only.
+`merge --wait=0` can enqueue and exit 3 while landing is pending.
 A Mergify departure without landing exits 1 with available
 [details](../docs/MERGIFY.md#failed-candidate-checks). To push to a requested
-or queued PR, first withdraw it with `loopzero merge --cancel` (no `--wait`),
-confirm removal on the PR, then push, review and readmit. A failed command
-does not prove removal.
+or queued PR, withdraw it first. For Mergify use `loopzero merge --cancel`
+(no `--wait`). For GitHub use Remove from queue on the PR. Confirm removal
+on the PR before pushing, then review and readmit.
 
 On start/resume run `loopzero status` in the task worktree and rerun a pending
 waiter. After ejection follow [Mergify recovery](../SETUP.md#requeue-after-cancellation-or-ejection).
@@ -65,7 +66,9 @@ next action and automatic resume or requester needed).
 Write for the reader's next action without thread context. Keep template
 fields. Lead with the outcome, putting required decisions or actions first.
 
-- **PRs:** Goal (user or owner impact), Problem, newcomer Context. Put dispatch,
+- **PRs:** Goal (user or owner impact), Problem, newcomer Context. State one
+  problem, who notices and evidence or cost in one or two plain sentences
+  before code names. Put bracketed references last and internal dispatch,
   rulings and batch names in Notes.
 - **Issues:** What is broken or wanted, who notices, evidence of cause and
   observable closure evidence.
@@ -109,7 +112,7 @@ merge require explicit `[checks].required_ci` and nonempty
   tests a separate candidate and preserves review across base movement. Source
   edits need fresh checks and eligible review.
 - Unknown mergeability (waitable) or confirmed conflict (immediate).
-- Required CI missing or red on the exact head. If an absent check hits the
+- Required CI missing or not green on the exact head. If an absent check hits the
   1,000-suite limit, readiness blocks until visible without missing-run grace
   or early activation.
 
@@ -122,11 +125,11 @@ evidence; branch protection and CI enforce the gates.
 
 **Owner queue route.** The PR owner takes the PR out of draft and queues it
 with eligible review, green required hosted checks, no other blockers and no
-hold. If only the local receipt is red, queue directly in GitHub after stating
+hold. If only the local receipt is not green, queue directly in GitHub after stating
 exactly one reason in a PR comment, before taking it out of draft:
 
 - The failure also occurs on main or is on the documented consumer flake list.
-- A guard failed but its guarded stage passed.
+- The failing stage is a guard, not a test, and its guarded stage passed.
 - Only a clean base merge moved the head, and the old head was green.
 
 The queue's required integration checks prove the candidate. A red local
@@ -196,8 +199,8 @@ Simplify or delete them when they fail or obstruct delivery.
   head when only optional suggestions remain.
 - After an approved ordinary delta with blocking findings resolved, one extra
   delta can cover a verified base-merge suffix containing a conflict. Otherwise
-  merge when ready or withdraw and close the exhausted PR, then run
-  `loopzero pr` on the same branch if more review is needed.
+  merge when ready. If more review is needed, withdraw the exhausted PR if
+  requested or queued, close it and run `loopzero pr` on the same branch.
 - After review publication, merge updates from the configured base.
   [Blockers](#blockers) defines inherited coverage. Source commits, modified
   merges and rebases that rewrite reviewed commits need new coverage.
@@ -205,8 +208,8 @@ Simplify or delete them when they fail or obstruct delivery.
   The CLI tries the next available configured family and reports reasons on failure.
   If none can review independently, try the preferred configured family in a
   fresh session and publish a visible same-family fallback line. If none can
-  run, the PR owner restores a reviewer and retries or reports the blocker to
-  whoever commissioned the PR.
+  run, the PR owner restores a configured reviewer and retries. If restoration
+  is impossible, report the blocker to whoever commissioned the PR.
 - Unconfirmed publication: inspect the cause and use `loopzero review --repost`
   to reconcile or retry saved output. Never substitute a fabricated review.
   See [setup and rollback](../SETUP.md#connect-your-agent).
