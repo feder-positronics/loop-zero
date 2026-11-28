@@ -46,6 +46,10 @@ For confirmed-abandoned tasks outside its scope, give the owner the [manual proc
 Finish planned tests, docs and generated files before primary review.
 Apply the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) to every pushed head.
+With a passing local receipt and an eligible review, start `loopzero ready --wait`
+even if hosted checks are pending or missing. When it exits 0, start
+`loopzero merge --wait`. Let the active waiter follow hosted checks and handle
+any refusal through the contract's [blocker rules](../../CONTRACT.md#blockers).
 Keep review suggestions within scope.
 Before the first draft push and check, rebase onto `origin/<base>` (`[repo].base`,
 default `main`). Keep unrelated base updates out of a pending delta.
