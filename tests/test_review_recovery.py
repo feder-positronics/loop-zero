@@ -33,17 +33,16 @@ def published_review(head, body, *, state="COMMENTED"):
 
 def record_claude_runs(fake_bin):
     reviewer = fake_bin / "claude"
-    reviewer.write_text(reviewer.read_text().replace(
-        "#!/bin/sh\n", f'#!/bin/sh\nprintf "run\\n" >> "{fake_bin}/claude.runs"\n'))
+    shebang = "#!/bin/sh\n"
+    reviewer.write_text(reviewer.read_text().replace(shebang, shebang + f'echo run >> "{fake_bin}/claude.runs"\n'))
 
 
-def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, failure="lost-reply", mutate=None, findings=None):
+def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind="primary", verdict=0, failure="lost-reply", mutate=None, findings=None):
     history = [rev(head_of(wt), "primary")] if kind == "delta" else []
     if history:
         support.commit_file(wt, "feature.py", "print('fixed')\n", "repair")
     payload = APPROVE if verdict == 0 else CHANGES
-    if findings is not None:
-        payload = payload | {"findings": findings}
+    payload = payload if findings is None else dict(payload, findings=findings)
     head = support.prepare_review(wt, gh, fake_bin, history=history, post_id=17, payload=payload)
     record_claude_runs(fake_bin)
     original = github._api
@@ -140,21 +139,28 @@ def test_plain_review_surfaces_receipt_after_interruption_before_post(wt, gh, fa
         assert (fake_bin / "claude.runs").read_text().splitlines() == ["run", "run"]
 
 
+def recover(capsys, failure, verdict, *, stdin=None):
+    if failure == "interrupt":
+        expect_cli(capsys, 130, "review")
+        if stdin:
+            stdin.unlink()
+        out, _ = expect_cli(capsys, verdict, "review", "--repost")
+        assert stdin is None or not stdin.exists(), "recovery must not launch a reviewer"
+    else:
+        out, _ = expect_cli(capsys, verdict, "review")
+        assert out.startswith("reviewer paths pinned to origin/main@")
+    if verdict == 1:
+        assert len(out.splitlines()) == int(failure != "interrupt")
+    return out
+
+
 @pytest.mark.parametrize("kind,verdict,failure", [
     (kind, verdict, failure) for kind in ("primary", "delta") for verdict in (0, 5)
     for failure in ("lost-reply", "interrupt")
 ] + [("delta", 5, "timeout")])
 def test_accepted_publication_recovers_saved_verdict(wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, failure):
     lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict, failure=failure)
-    stdin = fake_bin / "claude.stdin"
-    if failure == "interrupt":
-        expect_cli(capsys, 130, "review")
-        stdin.unlink()
-        out, _ = expect_cli(capsys, verdict, "review", "--repost")
-        assert not stdin.exists(), "recovery must not launch a reviewer"
-    else:
-        out, _ = expect_cli(capsys, verdict, "review")
-        assert out.startswith("reviewer paths pinned to origin/main@")
+    out = recover(capsys, failure, verdict, stdin=fake_bin / "claude.stdin")
     assert out.splitlines()[-1].startswith(f"{kind} review by claude")
     assert_single_publication(gh, fake_bin)
     if verdict == 5:
@@ -194,18 +200,12 @@ def test_recovery_requires_exact_live_publication(wt, gh, fake_bin, monkeypatch,
             gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments page=2", None)
         elif change in {"bad_page", "auth", "quota"}:
             rows[:] = [copy.deepcopy(rows[-1]) for _ in range(100)]
-            if change == "bad_page":
-                gh.respond(reviews_key(2), None)
+            if error := {"auth": "not logged in", "quota": "HTTP 429"}.get(change):
+                gh.fail(reviews_key(2), error)
             else:
-                gh.fail(reviews_key(2), "not logged in" if change == "auth" else "HTTP 429")
+                gh.respond(reviews_key(2), None)
     lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5, mutate=mutate, failure=failure)
-    if failure == "interrupt":
-        expect_cli(capsys, 130, "review")
-    out, _ = expect_cli(capsys, 5 if change == "duplicates" else 1, "review", *(("--repost",) if failure == "interrupt" else ()))
-    if change != "duplicates":
-        assert not out if failure == "interrupt" else (
-            out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
-        )
+    recover(capsys, failure, 5 if change == "duplicates" else 1)
     assert write_count(gh) == 1
 
 
@@ -331,16 +331,16 @@ def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
     fake_tool("codex", "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
               "echo 'Please run codex login' >&2\nexit 1\n")
 
-    def mutate(rows, comments):  # an older version published the raw runner line
+    redacted = "independent reviewers failed: codex: not authenticated"
+
+    def mutate(rows, _):
+        review = rows.pop()
         if published:
-            rows[-1]["body"] = rows[-1]["body"].replace(
-                "independent reviewers failed: codex: not authenticated", legacy)
-        else:
-            rows.pop()
+            rows.append(dict(review, body=review["body"].replace(redacted, legacy)))
 
     _, receipt = interrupt_review(mutate=mutate)
     data = json.loads(receipt.read_text())
-    assert data["fallback"] == "independent reviewers failed: codex: not authenticated"
+    assert data["fallback"] == redacted
     receipt.write_text(json.dumps({**data, "fallback": legacy}))
     errors = () if published else ("not in the published form",)
     expect_cli(capsys, 0 if published else 1, "review", "--repost", stderr_contains=errors)

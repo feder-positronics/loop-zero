@@ -55,25 +55,13 @@ print(json.dumps({'type':'turn.completed','usage':usage}))
 print('model: gpt-6.2-astra\\nreasoning effort: medium',file=sys.stderr)
 """.replace(",BASE,HEAD", "," + repr(base) + "," + repr(head))
     fake_tool("codex", script)
-    encoded_patch = patch.encode()
-    context = {
-        "repo": "acme/widgets", "pr": 7, "publisher": "bot", "head": head,
-        "kind": "primary", "base": base, "diff_bytes": len(encoded_patch),
-        "diff_sha256": hashlib.sha256(encoded_patch).hexdigest(),
-    }
+    context = test_runners.codex_context(head, base, patch)
 
     def invoke(chunk=None):
         return runners.review_with(
-            "codex",
-            cwd=git_repo,
-            head=head,
-            kind="primary",
-            diff=patch,
-            task_text="Synthetic source inspection",
-            model="gpt-6.2-astra",
-            effort="medium",
-            review_context=context,
-            chunk=chunk,
+            "codex", cwd=git_repo, head=head, kind="primary", diff=patch,
+            task_text="Synthetic source inspection", model="gpt-6.2-astra",
+            effort="medium", review_context=context, chunk=chunk,
         )
 
     return invoke, context, git_repo
@@ -131,15 +119,9 @@ def assert_invalid_native(result):
             inspect(result)
 
 
-def rewrite(result, change):
-    decoded = json.loads(result.raw)
-    change(decoded)
-    return dataclasses.replace(result, raw=json.dumps(decoded))
-
-
 def packed_json(payload):
     token = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
-    return runners.CODEX_HEADER + token + " -->"
+    return f"{runners.CODEX_HEADER}{token} -->"
 
 
 def packed(value):
@@ -151,9 +133,8 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, formatte
     invoke, _, git_repo = native
     result = invoke()
     if formatted:
-        changed = dataclasses.replace(
-            result, raw=json.dumps(json.loads(result.raw), ensure_ascii=False, indent=1)
-        )
+        raw = json.dumps(json.loads(result.raw), ensure_ascii=False, indent=1)
+        changed = dataclasses.replace(result, raw=raw)
         assert len(changed.raw.encode()) > len(changed.raw)
         assert runners.codex_evidence(changed)["raw_sha256"] != runners.codex_evidence(result)["raw_sha256"]
         result = changed
@@ -163,19 +144,12 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, formatte
     assert evidence["calls"][0]["reported"] == {"model": "gpt-6.2-astra", "effort": "medium"}
     assert evidence["raw_bytes"] == len(result.raw.encode())
     assert evidence["raw_sha256"] == hashlib.sha256(result.raw.encode()).hexdigest()
-    assert (
-        evidence["raw_sha256"]
-        != hashlib.sha256(json.dumps(json.loads(result.raw), indent=2).encode()).hexdigest()
-    )
+    reformatted = json.dumps(json.loads(result.raw), indent=2).encode()
+    assert evidence["raw_sha256"] != hashlib.sha256(reformatted).hexdigest()
     rendered = body(result)
-    lines = rendered.splitlines()
-    assert lines[0] == cli.review_marker(result.head, "primary") and lines[1].startswith(
-        runners.CODEX_HEADER
-    )
-    assert all(
-        secret not in rendered
-        for secret in ("PRIVATE_CANARY", "/home/private", "git -C", str(git_repo))
-    )
+    marker, header, *_ = rendered.splitlines()
+    assert marker == cli.review_marker(result.head, "primary") and header.startswith(runners.CODEX_HEADER)
+    assert all(secret not in rendered for secret in ("PRIVATE_CANARY", "/home/private", "git -C", str(git_repo)))
     assert projection(result) == (True, evidence)
     assert eligible(row(result))
     cli._save_review(git_repo, result)
@@ -309,8 +283,8 @@ def test_retire_inspection_respects_the_published_block_limit(published_native):
     assert runners.valid_codex_evidence(legacy_evidence)
     legacy = rendered.replace(line, packed(legacy_evidence))
     assert legacy != rendered and runners.retire_inspection(legacy) == rendered
-    marker = legacy.split("\n", 1)[0]
-    oversized = legacy.replace(marker, marker + " " * (runners.CODEX_HEADER_LIMIT - len(line)), 1)
+    marker, rest = legacy.split("\n", 1)
+    oversized = f"{marker:<{len(marker) + runners.CODEX_HEADER_LIMIT - len(line)}}\n{rest}"
     assert len(runners.leading_review_block(oversized)[1].encode()) > runners.CODEX_HEADER_LIMIT
     assert runners.retire_inspection(oversized) == oversized  # never shortened into validity
     assert cli._comparable_body(github.BODY_BLOCKERS + legacy) == github.BODY_BLOCKERS + rendered
@@ -389,7 +363,7 @@ def test_invalid_review_evidence_is_rejected(published_native, mutation):
 
 
 @pytest.mark.parametrize("valid,diagnostic", [
-    (True, "8192"), (False, "invalid native evidence projection"),
+    (True, r"evidence header.*8192.*split the PR"), (False, "invalid native evidence projection"),
 ], ids=["overflow", "wrong-schema"])
 def test_codex_evidence_rejects_invalid_or_oversized_projections(valid, diagnostic):
     value = {"version": 2}
@@ -511,13 +485,8 @@ def test_saved_or_model_supplied_summary_cannot_grant_inspection(published_nativ
         )
     else:
         message = forged if location == "model_prose" else "```\n" + forged + "\n```"
-        data["events"].insert(
-            1,
-            {
-                "type": "item.completed",
-                "item": {"id": "quoted", "type": "agent_message", "text": message},
-            },
-        )
+        item = {"id": "quoted", "type": "agent_message", "text": message}
+        data["events"].insert(1, {"type": "item.completed", "item": item})
     changed = dataclasses.replace(result, raw=json.dumps(data))
     assert runners.codex_evidence(changed)["calls"][0]["inspection"] == "unknown"
     assert projection(changed)[1]["calls"][0]["inspection"] == "unknown"
@@ -581,10 +550,9 @@ def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
 
 
 def test_legacy_truncated_transcript_remains_unknown():
-    head = "a" * 40
-    rendered = (cli.review_marker(head, "primary")
-                + f"\n{review_summary(head, family='codex')}\n<details><summary>Raw reviewer output</summary>"
-                + "\n\n```\n[Transcript truncated] not JSON\n```\n</details>")
+    head = SYNTHETIC_NATIVE.head
+    rendered = (f"{cli.review_marker(head, 'primary')}\n{review_summary(head, family='codex')}\n"
+                "<details><summary>Raw reviewer output</summary>\n\n```\n[Transcript truncated] not JSON\n```\n</details>")
     legacy = row(SYNTHETIC_NATIVE, rendered) | {"id": 1}
     assert eligibility.review_projection(legacy, head, "acme/widgets", 7) == (False, None)
     assert eligible(legacy) is legacy
@@ -592,10 +560,11 @@ def test_legacy_truncated_transcript_remains_unknown():
 
 @pytest.mark.parametrize("identity", ["another-session", None, {}])
 def test_contradictory_native_session_fields(native, identity):
-    def change(data):
-        data["events"][2].update(thread_id=data["session_id"], session_id=identity)
-
-    assert_invalid_native(rewrite(native[0](), change))
+    invoke, _, _ = native
+    result = invoke()
+    data = json.loads(result.raw)
+    data["events"][2].update(thread_id=data["session_id"], session_id=identity)
+    assert_invalid_native(dataclasses.replace(result, raw=json.dumps(data)))
 
 
 @pytest.mark.parametrize("separator,overflow,tightened", [
@@ -628,13 +597,6 @@ def test_raw_leading_utf8_span_at_limit_and_overflow(separator, overflow, tighte
                 github._review_body(result, [], padded + "\n" + adjudication)
         else:
             assert github._review_body(result, [], padded + "\n" + adjudication).startswith(padded)
-
-
-def test_codex_overflow_names_the_recovery(monkeypatch):
-    evidence = runners.codex_evidence(SYNTHETIC_NATIVE)
-    monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", 100)
-    with pytest.raises(runners.RunnerBadOutput, match=r"evidence header.*split the PR"):
-        runners.encode_codex_evidence(evidence)
 
 
 @pytest.mark.parametrize("case", ["v1", "extended", "v2", "extra", "bad-settings", "too-long", "untrusted"])
