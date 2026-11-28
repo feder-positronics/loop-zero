@@ -337,8 +337,10 @@ reuse a merged PR's branch name when the remote ref no longer points to the
 old PR head and the merge commit is in the task's recorded base. Local removal
 requires a linked checkout in the primary
 repository's managed worktree directory with the marker written to its task
-file by `start`. After a merge, it allows ignored files in a clean worktree. It refuses to
-remove nested worktrees. Git removal stays non-forced. A Git ref lock keeps the
+file by `start`. After a merge, removal allows ignored loop-zero state and
+known generated artifact directories. Other ignored paths are reported and
+keep the worktree in place. Cleanup refuses to remove nested worktrees.
+Git removal stays non-forced. A Git ref lock keeps the
 worktree at the final PR head during removal. After a merge, cleanup deletes
 the local branch only if it still points at that head.
 Hosted eligibility trusts the configured publisher's projection and live identity,

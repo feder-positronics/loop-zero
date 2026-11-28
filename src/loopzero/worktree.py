@@ -18,7 +18,7 @@ from uuid import uuid4
 from loopzero._proc import build_env, defer_sigterm, run, run_git_paths
 from loopzero.types import LoopZeroError
 
-GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
+GIT_ENV = ("PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
 EXCLUDES = (b".worktrees/", b".loopzero/")
 _BASE_SECTION = re.compile(r"^## Base\n[^\n]+ @ ([0-9a-fA-F]{7,40})[ \t]*$", re.MULTILINE)
@@ -417,10 +417,14 @@ def cleanup(wt: Path, expected_head: str, *, keep_branch: bool = False) -> None:
             raise WorktreeError("local branch changed during merge cleanup")
         if is_dirty(wt):
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-        if keep_branch and (ignored := git(wt, "ls-files", "--others", "--ignored", "--exclude-standard",
-                                           "--", ".", ":(exclude,top).loopzero/")):
-            raise WorktreeError(f"worktree contains ignored paths, refusing to remove: {ignored}")
         _require_no_nested_worktree(wt, gd)
+        generated = () if keep_branch else (
+            ":(exclude,top).venv/", ":(exclude,top).pytest_cache/", ":(exclude,top).mypy_cache/",
+            ":(exclude,top).ruff_cache/", ":(exclude,glob,top)**/__pycache__/**",
+        )
+        if ignored := git(wt, "ls-files", "--others", "--ignored", "--exclude-standard",
+                          "--", ".", ":(exclude,top).loopzero/", *generated):
+            raise WorktreeError(f"worktree contains ignored paths, refusing to remove: {ignored}")
         git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
     if keep_branch:
         return
