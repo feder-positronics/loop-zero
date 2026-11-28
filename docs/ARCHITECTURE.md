@@ -128,7 +128,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    local history. The push source is the captured commit. A new draft starts with task prose.
    The body patch, including saved evidence on a new draft, requires an open PR at the
    captured commit and configured target.
-4. `review` publishes one native review of the exact authored SHA. The contract's
+4. `review` requires a matching passing check receipt before launching a native
+   review of the exact authored SHA. Reposting saved output can recover publication
+   without launching a new review. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion
    and the PR-wide review budget across head rewrites; truthful all-writer
    trailers decide the reviewer family.
