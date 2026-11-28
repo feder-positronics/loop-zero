@@ -1524,10 +1524,7 @@ def test_review_context_mismatch_names_the_recovery(wt, gh, capsys, head, monkey
 def test_review_blocks_without_passing_checks(wt, gh, capsys, head, monkeypatch, local_exit, hosted):
     arm_review_pr(wt, gh, head, receipt=False)
     arm_readiness(gh, head, wt, local_exit=local_exit)
-    if hosted is None:
-        arm_check_runs(gh, head, [])
-    else:
-        arm_named_check(gh, head, status="completed", conclusion=hosted)
+    arm_check_runs(gh, head, [check_run(hosted)] if hosted else [])
     launch = Mock(side_effect=AssertionError("review launched before checks passed"))
     monkeypatch.setattr(cli, "_run_review", launch)
     expect_cli(capsys, 1, "review", stderr_contains=("loopzero check",))
@@ -1536,14 +1533,9 @@ def test_review_blocks_without_passing_checks(wt, gh, capsys, head, monkeypatch,
 
 @pytest.mark.parametrize("failure", ["check", "preflight", "preparation", "other plan"])
 def test_review_uses_hosted_checks_with_valid_failed_receipt(wt, gh, fake_bin, fake_tool, capsys, failure):
-    commands = {
-        "preflight": ["echo ok", "scripts/gate.py"],
-        "preparation": ["echo ok", "uv run --group dev pytest -q"],
-        "other plan": ["echo ok", "test -f README.md"],
-        "check": ["echo ok", "test -f README.md"],
-    }
+    stages = {"preflight": "scripts/gate.py", "preparation": "uv run --group dev pytest -q"}
     workflow = WORKFLOW.replace('["checks"]', '["checks", "Loop-zero Eligibility"]')
-    publish_workflow(wt, workflow.replace('["echo ok", "test -f README.md"]', json.dumps(commands[failure])))
+    publish_workflow(wt, workflow.replace("test -f README.md", stages.get(failure, "test -f README.md")))
     if failure == "preparation":
         commit_file(wt, "pyproject.toml", '[project]\nname = "fixture"\nversion = "0"\n', "add project")
         fake_tool("uv", "exit 1")
@@ -1552,6 +1544,11 @@ def test_review_uses_hosted_checks_with_valid_failed_receipt(wt, gh, fake_bin, f
         git(wt, "commit", "-qam", "remove check input")
     head = prepare_review(wt, gh, fake_bin, post_id=1, receipt=False)
     arm_readiness(gh, head, wt, local_exit=None)
+    if failure == "check":
+        arm_check_runs(gh, head, [check_run(conclusion, id=suite, check_suite={"id": suite})
+                                  for suite, conclusion in [(1, "failure"), (2, "success")]])
+        gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": [
+            {"head_sha": head, "check_suite_id": suite, "workflow_id": 7} for suite in (1, 2)]})
     if failure == "other plan":
         config = cli.config_mod.load_trusted(wt)
         stage = CheckResult("echo obsolete", 1, 0.1, "")
@@ -1817,14 +1814,16 @@ def test_runtime_pinning_requires_trusted_workflow(
     pytest.param("claude", ("--effort", "max"), "medium", None, id="disallowed-override-effort"),
 ])
 def test_review_model_and_effort(wt, gh, fake_bin, capsys, family, options, configured, expected):
+    second = "codex" if family == "claude" else "claude"
     configured_model = "opus" if family == "claude" else "gpt-5.6-luna"
-    reviewers = ["codex", "claude"] if family == "codex" else ["claude", "codex"]
     allowed = ["medium"] if expected is None else ["high"] if family == "codex" else ["medium", "high"]
     model_setting = f'model = "{configured_model}"\n' if expected else ""
-    publish_workflow(wt, WORKFLOW.replace('["claude", "codex"]', json.dumps(reviewers)) + f"""
+    publish_workflow(wt, WORKFLOW.replace('["claude", "codex"]', json.dumps([family, second])) + f"""
 [delivery.review.{family}]
 {model_setting}effort = "{configured}"
 allowed_efforts = {json.dumps(allowed)}
+[delivery.review.{second}]
+allowed_efforts = ["medium"]
 """)
     if expected is None:
         arm_review_pr(wt, gh, head_of(wt))
@@ -2422,10 +2421,10 @@ def test_review_fallback_after_independent_attempt(wt, gh, fake_bin, fake_tool, 
         fake_tool("codex", "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
                   f"echo 'Please run codex login{private_path}' >&2\nexit 1\n")
     code, out, err = run(capsys, "review", *(("--effort", "high") if bad_effort else ()))
+    if codex_ok:
+        assert code == 0 and "review by codex" in out
+        return
     if bad_effort:
-        if codex_ok:
-            assert code == 0 and "review by codex" in out
-            return
         assert code == 4 and "same-family fallback:" not in err and "reviewer codex unavailable:" not in err
         assert_contains(err, "Please run codex login", "effort 'high' is not allowed for claude")
         assert not (fake_bin / "claude.argv").exists()
@@ -2434,8 +2433,7 @@ def test_review_fallback_after_independent_attempt(wt, gh, fake_bin, fake_tool, 
     assert code == 0 and "review by claude" in out and "Same-family fallback:" in body
     assert_contains(err, "reviewer codex unavailable:", "same-family fallback: independent reviewers failed: codex:")
     if case == "redaction":
-        assert "independent reviewers failed: codex: not authenticated." in body
-        assert "secret-path" not in body
+        assert "independent reviewers failed: codex: not authenticated." in body and "secret-path" not in body
 
 
 def test_review_redacts_native_authentication_diagnostics(wt, gh, fake_tool, capsys, monkeypatch, head):
@@ -3103,9 +3101,7 @@ def test_ready_keeps_required_check_signals_from_distinct_producers(wt, gh, caps
         {"id": 1, "app": {"id": 10}, "check_suite": {"id": 1}, "name": "checks", "conclusion": "failure"},
         {"id": 2, "app": {"id": 20 if producer == "app" else 10}, "check_suite": {"id": 2}, "name": "checks", "conclusion": "success"},
     ]
-    if rerun:
-        runs.append({**runs[0], "id": 3, "conclusion": "success"})
-    arm_check_runs(gh, head, runs)
+    arm_check_runs(gh, head, runs + ([{**runs[0], "id": 3, "conclusion": "success"}] if rerun else []))
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": [
         {"head_sha": head, "check_suite_id": suite, "workflow_id": 7 if producer == "workflow" else suite}
         for suite in ((1, 2) if producer != "unknown" else ())]})
@@ -4573,10 +4569,12 @@ def test_unexpected_and_interrupt_exit_codes(wt, capsys, monkeypatch, failure, c
         assert re.fullmatch(rf"loopzero status: unexpected error \({type(failure).__name__} at test_cli\.py:\d+\): {re.escape(str(failure))}\n", err)
 
 
-@pytest.mark.parametrize("checkout", ["attached", "detached", "primary-task"])
+@pytest.mark.parametrize("checkout", ["attached", "detached", "primary-task", "primary-task-tag"])
 def test_start_rejects_a_checkout_already_on_task_work(wt, repo, monkeypatch, capsys, checkout):
-    if checkout == "primary-task":
+    if checkout.startswith("primary-task"):
         git(repo, "switch", "-q", "-c", "lz/stray")
+        if checkout.endswith("-tag"):
+            git(repo, "tag", "lz/stray")
         monkeypatch.chdir(repo)
     else:
         if checkout == "detached":
@@ -4584,7 +4582,7 @@ def test_start_rejects_a_checkout_already_on_task_work(wt, repo, monkeypatch, ca
         monkeypatch.chdir(wt / ".loopzero")
     _, err = expect_cli(capsys, 1, "start", "nested", stdout="")
     assert not (repo / ".worktrees" / "nested").exists()
-    if checkout == "primary-task":
+    if checkout.startswith("primary-task"):
         assert_contains(err, "switch it to another branch first", f"primary checkout {repo} is on task branch lz/stray")
         assert "run start from" not in err
     else:

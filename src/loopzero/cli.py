@@ -604,11 +604,11 @@ def _pr_title(wt: Path, branch: str) -> str:
 
 def cmd_start(args: argparse.Namespace) -> int:
     root = _toplevel()
-    current = config_mod.run_git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    current = config_mod.run_git(root, "symbolic-ref", "--quiet", "HEAD")
     # Nest task worktrees in the primary checkout, so removing a harness worktree cannot delete them.
     primary = _repo_root(root, linked_only=False)
     # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
-    branch = current.stdout.strip()
+    branch = current.stdout.strip().removeprefix("refs/heads/")
     if branch.startswith("lz/") and root == primary:
         raise CliError(f"primary checkout {root} is on task branch {branch}; switch it to another branch first")
     if branch.startswith("lz/") or (root != primary and root.parent.name == ".worktrees"):
@@ -848,8 +848,8 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
         if problem := _check_report_problem(wt, report := _load_report(wt), config, head, require_pass=False):
             raise CliError(problem)
         if report is not None and not report.ok:
-            required = set(config.required_ci) - {eligibility.CONTEXT}
-            checks = github._check_signals(config.repo, head)[0] if required else {}
+            required = tuple(name for name in config.required_ci if name != eligibility.CONTEXT)
+            checks = github._check_signals(config.repo, head, required_ci=required)[0] if required else {}
             blocked = [f"{name} ({checks.get(name, 'missing')})" for name in sorted(required) if checks.get(name) != "success"]
             if blocked or not required:
                 raise CliError(f"hosted checks must pass on this head or rerun `loopzero check`: {', '.join(blocked) or 'no required hosted checks before review'}")
@@ -1135,22 +1135,24 @@ def _run_review(  # noqa: C901 - reviewer fallback across families
                              "diff_sha256": hashlib.sha256(patch).hexdigest(),
                              "diff_bytes": len(patch)} if family == "codex" else None),
         )
-    selected = {family: select(family) for family in candidates}
-    # Settle fallback settings before any launch; an unusable one only matters if reached.
+    selected: dict[str, Callable[..., ReviewResult]] = {}
     unusable: dict[str, str] = {}
-    for family in excluded:
+    attempts = candidates + excluded
+    for family in attempts:
         try:
             selected[family] = select(family)
         except CliError as exc:
-            unusable[family] = f"same-family fallback {family} not possible: {exc}"
+            if candidates and family == candidates[0]:
+                raise
+            unusable[family] = str(exc)
     if runtime_source:
         print(runtime_source)
     fallback = ""
     reasons: list[str] = []  # published; runner detail stays in local stderr and failures
-    attempts = candidates + excluded
     for index, family in enumerate(attempts):
         if family in unusable:
             errors[family] = unusable[family], ""
+            reasons.append(f"{family}: unavailable")
             continue
         if family in excluded and not fallback:
             fallback = ("independent reviewers failed: " + "; ".join(reasons)
