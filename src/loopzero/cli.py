@@ -1290,16 +1290,17 @@ def _cleanup(wt: Path, pr: github.PR, *, closed: bool = False) -> None:
 OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its one reason on the PR before taking it out of draft."
 
 
-def _recheck_activation(
-    wt: Path, config: Config, live: github.PR, args: argparse.Namespace, deadline: float | None,
-) -> github.PR:
-    head = live.head_sha
-    _verify_wait_snapshot(args, wt, config, head, head, config)
-    fresh = _readiness(wt, config, live, head, workflow_wait=True, mergify_deadline=deadline)
+def _recheck_activation(wt: Path, config: Config, live: github.PR, args: argparse.Namespace,
+                        deadline: float | None) -> github.PR:
+    _verify_wait_snapshot(args, wt, config, live.head_sha, live.head_sha, config)
+    fresh = _readiness(wt, config, live, live.head_sha, workflow_wait=True, mergify_deadline=deadline)
     if live.mergeable == "UNKNOWN" or not (fresh.ready or _draft_checks_waiting(config, live, fresh)):
         raise CliError(f"draft activation blocked: {'; '.join(fresh.reasons)}; rerun loopzero ready")
     latest = github.pr_view(config.repo, live.number)
-    if dataclasses.replace(latest, is_draft=True) != live:
+    if ((latest.head_sha, latest.state, latest.base_ref) != (live.head_sha, live.state, live.base_ref)
+            or github.merge_hold(latest.number, latest.labels)
+            or (latest.is_draft and (latest.mergeable != live.mergeable
+                                     or (latest.merge_state == "BEHIND" and live.merge_state != "BEHIND")))):
         raise CliError("PR changed during draft activation recovery; rerun loopzero ready")
     return latest
 
@@ -1353,10 +1354,9 @@ def _ready(  # noqa: C901 - wait and draft activation paths share one readiness 
         pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None,
                                       mergify_deadline=deadline)
     assert readiness is not None
-    waiting = _draft_checks_waiting(config, pr, readiness)
-    wait = partial(_wait_with_deadline, wt, config, timeout=args.wait, started=started,
-                   args=args, allow_skipped=True, initial_read_time=time.monotonic() - started)
-    if kicked := bool(waiting):
+    wait = partial(_wait_with_deadline, wt, config, timeout=args.wait, started=started, args=args,
+                   allow_skipped=True, initial_read_time=time.monotonic() - started)
+    if kicked := bool(waiting := _draft_checks_waiting(config, pr, readiness)):
         _mark_ready(wt, config, pr.number, pr.head_sha, args, deadline)
         if args.wait is None:
             pending = f"; {github.MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
@@ -1563,9 +1563,8 @@ def _wait_for_checks(
                                     shown=_by_check(readiness, readiness.reasons), args=args, bounded=bounded,
                                     allow_merged=allow_merged)
         pending = _pending_checks(readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft))
-        visible = _by_check(readiness, pending)
         if pending or readiness.ready:
-            _print_wait_changes(shown, visible)
+            _print_wait_changes(shown, visible := _by_check(readiness, pending))
         if not pending:
             return current, readiness, kicked
         shown = visible

@@ -3046,7 +3046,7 @@ def test_ready_keeps_required_check_signals_from_both_apps(wt, gh, capsys, head,
     assert ("required check 'checks' is failure" in out) is not rerun
 
 
-@pytest.mark.parametrize("outcome", ["retry", "timeout-retry", "applied", "blocker", "moved", "exhausted", "quota", "short-applied", "write-deadline", "unknown", "late-hold"])
+@pytest.mark.parametrize("outcome", ["retry", "timeout-retry", "applied", "blocker", "moved", "exhausted", "quota", "short-applied", "write-deadline", "unknown", "late-hold", "applied-late"])
 def test_ready_recovers_ambiguous_activation(wt, gh, capsys, monkeypatch, head, outcome):
     arm_approved_pr(gh, head, wt, "skipped")
     clock, attempts = poll_clock(monkeypatch), []
@@ -3065,6 +3065,9 @@ def test_ready_recovers_ambiguous_activation(wt, gh, capsys, monkeypatch, head, 
             arm_pr(gh, "f" * 40 if outcome == "moved" else head, mergeable="UNKNOWN")
         if outcome == "late-hold":
             gh.respond_pr_view(pr_json(headRefOid=head, labels=[{"name": "hold"}]))
+        if outcome == "applied-late":
+            gh.respond_pr_view(pr_json(headRefOid=head, isDraft=False, mergeStateStatus="CLEAN"))
+            arm_named_check(gh, head, conclusion="success")
         if not applied:
             raise github.GhUnavailable(("gh", "pr", "ready"), "secondary rate limit" if outcome == "quota" else "HTTP 502")
     monkeypatch.setattr(github, "mark_ready", activate)
