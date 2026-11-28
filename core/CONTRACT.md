@@ -51,8 +51,8 @@ waiter. After ejection follow [Mergify recovery](../SETUP.md#requeue-after-cance
 If cleanup removed the worktree, verify landing in GitHub. Never substitute
 notifications for a waiter or yield for a notice that may already have fired.
 
-Before yielding, the delivering session or adopting coordinator posts one PR
-comment with head, exit code, awaited event and next command. Update it in place
+Before yielding with work pending, the delivering session or adopting coordinator
+posts one PR comment with head, exit code, awaited event and next command. Update it in place
 with full replacement Markdown via `gh api --method PATCH "repos/$owner/$repo/issues/comments/$comment_id" -f "body=$(cat "$body_file")"`.
 Post separately only for a request to a human, blocker, stall or final result.
 Delegates under a brief end only with a result, blocker or question
@@ -162,9 +162,9 @@ Reuse green evidence for matching head and inputs. Rerun if inputs or head chang
 or evidence is missing, red, partial or unverifiable. Reviewers still verify
 that tests prove behavior. Hosted CI and sandboxed receipts remain required.
 
-On shared runner hosts, run each check, script, workflow step and job with the
-pinned toolchain. Never use the host interpreter. Fix a missing newer API by
-using the pinned interpreter, without adapting code to the older one.
+Run every check, script, workflow step and shared-runner job with the pinned
+toolchain. Never use the host interpreter. Fix a missing newer API by using
+the pinned interpreter, without adapting code to the older one.
 
 ## Findings
 
