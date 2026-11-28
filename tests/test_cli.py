@@ -312,11 +312,13 @@ def arm_readiness(
     arm_named_check(gh, head, status="completed", conclusion=conclusion)
     gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [])
     if local_exit is not None:
-        config = cli._load_config(SimpleNamespace(config=None, command="ready"), wt)
-        results = tuple(CheckResult(command, local_exit, 0.1, "") for command in config.checks)
-        cli._save_report(
-            wt, CheckReport(head, dirty, results, cli.sandbox.settings_fingerprint(config))
-        )
+        save_check_receipt(wt, head, local_exit, dirty)
+
+
+def save_check_receipt(wt: Path, head: str, local_exit: int = 0, dirty: bool = False, *, config_path=None) -> None:
+    config = cli.config_mod.load(config_path) if config_path else cli.config_mod.load_trusted(wt)
+    results = tuple(CheckResult(command, local_exit, 0.1, "") for command in config.checks)
+    cli._save_report(wt, CheckReport(head, dirty, results, cli.sandbox.settings_fingerprint(config)))
 
 
 def without_accepted_receipt(out: str) -> str:
@@ -1492,7 +1494,9 @@ def arm_pr_base(gh, head, base):
     gh.respond(f"api repos/{REPO}/pulls/7", detail)
 
 
-def arm_review_pr(gh, head, *, branch="lz/t1", history=(), post_id=None):
+def arm_review_pr(wt, gh, head, *, branch="lz/t1", history=(), post_id=None, receipt=True, config_path=None):
+    if receipt:
+        save_check_receipt(wt, head, config_path=config_path)
     arm_pr(gh, head, branch=branch)
     gh.respond(reviews_key(), list(history))
     if post_id is not None:
@@ -1500,7 +1504,7 @@ def arm_review_pr(gh, head, *, branch="lz/t1", history=(), post_id=None):
 
 
 def test_review_context_mismatch_names_the_recovery(wt, gh, capsys, head, monkeypatch):
-    arm_review_pr(gh, head)
+    arm_review_pr(wt, gh, head)
     result = ReviewResult("claude", head, "primary", "approve", (), "")
     monkeypatch.setattr(cli, "_run_review", lambda *_args, **_kwargs: result)
     monkeypatch.setattr(cli, "_matches_publication", lambda *_: False)
@@ -1508,10 +1512,21 @@ def test_review_context_mismatch_names_the_recovery(wt, gh, capsys, head, monkey
     assert not any(posted(call) for call in gh.calls)
 
 
+@pytest.mark.parametrize("local_exit", [None, 1])
+def test_review_requires_passing_receipt(wt, gh, capsys, head, monkeypatch, local_exit):
+    arm_review_pr(wt, gh, head, receipt=False)
+    arm_readiness(gh, head, wt, local_exit=local_exit)
+    launch = Mock(side_effect=AssertionError("review launched before checks passed"))
+    monkeypatch.setattr(cli, "_run_review", launch)
+    expect_cli(capsys, 1, "review", stderr_contains=("loopzero check",))
+    launch.assert_not_called()
+
+
 def prepare_review(wt: Path, gh: FakeGh, fake_bin: Path, *, payload=APPROVE,
-                   history=(), post_id: int = 1, branch="lz/t1") -> str:
+                   history=(), post_id: int = 1, branch="lz/t1", receipt=True, config_path=None) -> str:
     head = head_of(wt)
-    arm_review_pr(gh, head, branch=branch, history=history, post_id=post_id)
+    arm_review_pr(wt, gh, head, branch=branch, history=history, post_id=post_id,
+                  receipt=receipt, config_path=config_path)
     _fake_claude(fake_bin, _claude_envelope(payload))
     return head
 
@@ -1653,6 +1668,8 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
 
     def change_body_during_review(*args, **kwargs):
         result = run_review(*args, **kwargs)
+        if body_case == "edited":
+            (wt / cli.CHECKS_FILE).unlink()
         if body_case == "read-fails":  # the pre-post checks read the PR twice before the summary does
             done = sum(call["argv"][:2] == f"api repos/{REPO}/pulls/7".split() for call in gh.calls)
             gh.respond(f"api repos/{REPO}/pulls/7", *[rest_pr_json(pr_json(headRefOid=head))] * (done + 2),
@@ -1715,7 +1732,8 @@ def test_review_runtime_paths_use_only_verified_base(
     elif source == "bootstrap":
         git(wt, "update-ref", "refs/remotes/origin/main",
             git(wt, "rev-list", "--max-parents=0", "HEAD").strip())
-    prepare_review(wt, gh, fake_bin)
+    prepare_review(wt, gh, fake_bin, receipt=source not in {"missing_ref", "bootstrap"},
+                   config_path=workflow if source == "override" else None)
     code, out, err = run(capsys, *(["--config", str(workflow)] if source == "override" else []),
                          "review")
     if source in {"missing_ref", "bootstrap"}:
@@ -1742,7 +1760,7 @@ def test_runtime_pinning_requires_trusted_workflow(
         revision = () if options else (git(wt, "rev-list", "--max-parents=0", "HEAD").strip(),)
         for checkout, ref in ((wt, "refs/remotes/origin/main"), (origin, "refs/heads/main")):
             git(checkout, "update-ref", *options, ref, *revision)
-    prepare_review(wt, gh, fake_bin)
+    prepare_review(wt, gh, fake_bin, receipt=False)
     out, err = expect_cli(capsys, 1, command, stderr_contains=("--config",))
     assert "reviewer paths" not in out + err
     assert not gh.calls
@@ -1766,7 +1784,7 @@ def test_review_model_and_effort(wt, gh, fake_bin, capsys, family, options, conf
 allowed_efforts = {json.dumps(allowed)}
 """)
     if expected is None:
-        arm_review_pr(gh, head_of(wt))
+        arm_review_pr(wt, gh, head_of(wt))
         expect_cli(capsys, 1, "review", *options, stdout="", stderr_contains=("effort 'max' is not allowed for claude",))
         assert not (fake_bin / "claude.argv").exists()
         return
@@ -1786,7 +1804,7 @@ allowed_efforts = {json.dumps(allowed)}
 def test_review_refuses_when_reviewer_dirties_worktree(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, head
 ) -> None:
-    arm_review_pr(gh, head)
+    arm_review_pr(wt, gh, head)
     reviewer = _fake_claude(fake_bin, _claude_envelope(APPROVE))
     reviewer.write_text(reviewer.read_text().replace("#!/bin/sh\n", "#!/bin/sh\ntouch drift.txt\n"))
 
@@ -1820,7 +1838,7 @@ def arm_saved_repost(gh, fake_bin):
 
 def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_bin: Path,
                                                     capsys, head) -> None:
-    arm_review_pr(gh, head)
+    arm_review_pr(wt, gh, head)
     envelope = {"padding": "x" * 574_264, "synthetic_metadata": "private-runner-metadata",
                 **_claude_envelope(CHANGES, modelUsage={"claude-sonnet-4-6": {}})}
     _fake_claude(fake_bin, envelope)
@@ -1885,7 +1903,7 @@ def test_interrupted_review_save_preserves_previous_receipt(wt, gh, fake_bin, ca
 
 
 def test_repost_refuses_a_saved_review_for_the_wrong_round(wt, gh, capsys, head, monkeypatch):
-    arm_review_pr(gh, head)
+    arm_review_pr(wt, gh, head)
     cli._review_file(wt, head, "primary").touch()
     result = ReviewResult("claude", head, "primary", "approve", (), "")
     monkeypatch.setattr(cli, "_load_review", lambda *_args: (result, None))
@@ -1905,7 +1923,7 @@ def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_sta
         (fake_bin / "claude.stdin").unlink()
         _fake_codex(fake_bin, json.dumps(APPROVE))
     else:
-        arm_review_pr(gh, head)
+        arm_review_pr(wt, gh, head)
         if saved_state != "missing":
             saved.write_text(json.dumps({
                 "family": "claude", "head": "0" * 40 if saved_state == "stale" else head,
@@ -1934,7 +1952,7 @@ def test_review_chunks_oversized_diff_with_same_family(
         git(wt, "commit", "-qm", "large review")
 
     head = head_of(wt)
-    arm_review_pr(gh, head, post_id=8)
+    arm_review_pr(wt, gh, head, post_id=8)
     envelope = json.dumps(_claude_envelope(APPROVE))
     _fake_codex(fake_bin, json.dumps(APPROVE))
     fake_tool("claude", f"""
@@ -2374,7 +2392,7 @@ def test_review_fallback_after_independent_attempt(wt, gh, fake_bin, fake_tool, 
 
 
 def test_review_redacts_native_authentication_diagnostics(wt, gh, fake_tool, capsys, monkeypatch, head):
-    arm_review_pr(gh, head)
+    arm_review_pr(wt, gh, head)
     for family, env in (("claude", "ANTHROPIC_API_KEY"), ("codex", "OPENAI_API_KEY")):
         monkeypatch.setenv(env, f"opaque-fake-{family}-credential")
         fake_tool(family, "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
@@ -2422,7 +2440,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
         git(wt, "commit", "-q", "--allow-empty", "-m",
             "mixed\n\nCo-Authored-By: Claude <n@a.c>\nCo-Authored-By: Codex <n@o.c>")
         head = head_of(wt)
-    arm_review_pr(gh, head)
+    arm_review_pr(wt, gh, head)
 
     failures = {
         "claude": cli.runners.RunnerAuthFailed("claude: CLI is not authenticated\nnot printed\nsecond detail\nlast cause"),
@@ -2463,7 +2481,7 @@ def test_review_reports_unavailable_sandbox(
 
 
 def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypatch, head) -> None:
-    arm_review_pr(gh, head, post_id=4)
+    arm_review_pr(wt, gh, head, post_id=4)
 
     def review_with(family, **kwargs):
         if family == "claude":
