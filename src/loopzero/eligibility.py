@@ -173,7 +173,7 @@ def approved_delta(reviews: list[dict], head: str, publishers: tuple[str, ...], 
 
 def body_blocker(review: dict | None) -> str | None:
     if review and review["body"].startswith(github.BODY_BLOCKERS):
-        return "blocking findings in the review body"
+        return "blocking findings in the review body need fixes"
     return None
 
 

@@ -34,7 +34,7 @@ GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 PR_LOCK_DIR = Path.home() / ".cache/loopzero/pr-locks"
 _app_token_cache = ("", 0.0)
-MISSING_REVIEW_REASON = "no review recorded for the current head"
+MISSING_REVIEW_REASON = "no review recorded for this head. Run `loopzero review`."
 BODY_BLOCKERS = "<!-- loopzero:body-blockers -->\n"
 MERGEABILITY_PENDING = "GitHub is computing mergeability"
 MARKER_RE = re.compile(
@@ -1196,7 +1196,7 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
                     f"Retry loopzero resolve with the same reply on PR #{number}.\n{exc}",
                 ) from exc
             return finding
-        raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
+        raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}. Run `loopzero resolve` to list open IDs.")
 
 
 def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, ...]:
@@ -1432,7 +1432,7 @@ def behind_reason(pr: PR) -> str:
 
 def mergeability_blocker(pr: PR) -> str | None:
     if pr.mergeable == "CONFLICTING":
-        return f"PR #{pr.number} has merge conflicts with {pr.base_ref}"
+        return f"PR #{pr.number} has merge conflicts with {pr.base_ref}. Run `git fetch origin {shlex.quote(pr.base_ref)}` and `git merge {shlex.quote(f'origin/{pr.base_ref}')}`. Resolve conflicts, run `loopzero check` and `loopzero pr`, then follow the review guidance from `loopzero ready`."
     if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
         return MERGEABILITY_PENDING
     return None
@@ -1456,7 +1456,7 @@ def readiness(
     if pr.state != "OPEN":
         reasons.append(f"PR #{pr.number} is {pr.state}, not open")
     if pr.base_ref != base_branch:
-        reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}")
+        reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}. Retarget the PR on GitHub and retry.")
     if blocker := mergeability_blocker(pr):
         reasons.append(blocker)
     if pr.merge_state == "BEHIND" and not allow_behind:
@@ -1464,11 +1464,11 @@ def readiness(
     if review_blocker or not reviewed_head:
         reasons.append(review_blocker or MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
-        reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
+        reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}. Run `loopzero review` for the current head.")
     for f in open_blocking_findings(repo, pr.number, None if ancestor_review or not reviewed_head else pr.head_sha,
                                     publishers):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
-        reasons.append(f"open {f.severity} finding at {where}: {f.title}")
+        reasons.append(f"open {f.severity} finding at {where}: {f.title}. Run `loopzero resolve` to list finding IDs and address the review.")
     checks, stale, stale_verdicts, capped = (_check_signals(
         repo, pr.head_sha, review_at, review_grace, required_ci if workflow_wait else (),
         workflow_wait and stale_verdict_grace,
