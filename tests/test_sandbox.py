@@ -947,13 +947,14 @@ def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case, cac
     command = 'test "$(cat README.md)" = hello'
     paths = () if case == "empty" else ("ipnut.txt",)
     config = make_config(checks=(command,), inputs={command: paths})
-    cache_check(config)
+    saved = cache_check(config)
+    with pytest.raises(cli.CliError, match="readable, regular worktree files"):
+        cli._require_receipt(git_repo, config, saved.head)
     (git_repo / "README.md").write_text("fail\n")
     if case != "dirty":
         git(git_repo, "commit", "-qam", "change actual input")
     if case == "no_base":
         git(git_repo, "update-ref", "-d", "refs/remotes/origin/main")
-
     result = sandbox.run_checks(config, git_repo, status=(messages := []).append)
     assert result.results[0].exit_code == 1
     assert any("workflow.toml: checks.inputs" in message and repr(paths) in message
@@ -977,18 +978,16 @@ def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_ba
     path = git_repo / "README.md"
     command = "python3 -c 'from pathlib import Path; exit(13 in Path(\"README.md\").read_bytes())'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
-    assert path.read_bytes() == b"hello\n"
-    assert cache_check(config, clean=True, verify_reuse=True).head == fetched_base
-
+    assert path.read_bytes() == b"hello\n" and cache_check(config, clean=True, verify_reuse=True).head == fetched_base
+    cli._require_receipt(git_repo, config, fetched_base)
     git(git_repo, "config", "core.autocrlf", "true")
     path.unlink()
     git(git_repo, "checkout-index", "-u", "--", path.name)
-    assert path.read_bytes() == b"hello\r\n"
-    assert not git(git_repo, "status", "--porcelain")
+    assert path.read_bytes() == b"hello\r\n" and not git(git_repo, "status", "--porcelain")
+    with pytest.raises(cli.CliError, match=r"input bytes.*Rerun `loopzero check`"):
+        cli._require_receipt(git_repo, config, fetched_base)
     report = sandbox.run_checks(config, git_repo)
-    assert not report.dirty and report.head == fetched_base
-    assert report.results[0].exit_code == 1
-    assert report.results[0].reused_from is None
+    assert (report.dirty, report.head, report.results[0].exit_code, report.results[0].reused_from) == (False, fetched_base, 1, None)
 
 
 @pytest.mark.parametrize("base", ["tracked", "recorded", "absent"])
@@ -1000,14 +999,13 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, c
         (git_repo / ".loopzero/task.md").write_text(f"## Base\nmain @ {head}\n")
     elif base == "tracked":
         git(git_repo, "update-ref", base_ref, head)
-
     config = make_config(inputs={"*": (".",)})
-    cache_check(config, clean=True, verify_reuse=base != "absent")
+    report = cache_check(config, clean=True, verify_reuse=base != "absent")
     if base == "absent":
-        [result] = sandbox.run_checks(config, git_repo).results
-        assert (result.exit_code, result.input_key, result.reused_from) == (0, None, None)
+        [result] = report.results
+        assert result.exit_code == 0 and result.input_key.endswith(":") and result.reused_from is None
+        cli._require_receipt(git_repo, config, head)
         return
-
     tree = git(git_repo, "rev-parse", "HEAD^{tree}").strip()
     new_base = git(git_repo, "commit-tree", tree, "-p", head, "-m", "advance base").strip()
     git(git_repo, "update-ref", base_ref, new_base)

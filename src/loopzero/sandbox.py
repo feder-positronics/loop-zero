@@ -130,7 +130,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             is_check = ordinal > len(preparations)
             if progress:
                 progress(command)
-            key = _input_key(config, worktree, command, "" if dirty else base,
+            key = _input_key(config, worktree, command, "" if dirty else base or None,
                              status=status, workflow=workflow)
             old = previous.get(command)
             if key and old and old.input_key == key and ordinal > last_run:
@@ -298,9 +298,10 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
         raise
 
 
-def check_inputs_match(config: Config, worktree: Path, report: CheckReport) -> bool:
-    base = _check_base(config, worktree)
-    return all(r.input_key and r.input_key == _input_key(config, worktree, r.command, base)
+def check_inputs_match(config: Config, worktree: Path, report: CheckReport, *, bytes_only: bool = False) -> bool:
+    base = None if bytes_only else _check_base(config, worktree)
+    return all(r.input_key and (key := _input_key(config, worktree, r.command, base))
+               and (r.input_key.startswith(key) if bytes_only else r.input_key == key)
                for r in report.results if _has_inputs(config, r.command))
 
 
@@ -308,10 +309,10 @@ def _has_inputs(config: Config, command: str) -> bool:
     return command in config.inputs or "." in config.inputs.get("*", ())
 
 
-def _input_key(config: Config, worktree: Path, command: str, base: str, *,
+def _input_key(config: Config, worktree: Path, command: str, base: str | None, *,
                status: Callable[[str], None] | None = None,
                workflow: str | Path = "workflow.toml") -> str | None:
-    if not _has_inputs(config, command) or (not base and status is None):
+    if not _has_inputs(config, command) or (base == "" and status is None):
         return None
     entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
     try:
@@ -323,18 +324,14 @@ def _input_key(config: Config, worktree: Path, command: str, base: str, *,
     if blobs == "" and status:
         status(f"{workflow}: checks.inputs for {command!r} matches no files in HEAD. "
                f"Correct these entries: {entries!r}. Running the check fresh.")
-    if not blobs or not base:
-        return None
-    return _hash_inputs(config, worktree, command, base, blobs)
+    return _hash_inputs(config, worktree, command, base, blobs) if blobs and base != "" else None
 
 
-def _hash_inputs(config: Config, worktree: Path, command: str, base: str, blobs: str) -> str | None:
+def _hash_inputs(config: Config, worktree: Path, command: str, base: str | None, blobs: str) -> str | None:
     contents = []
-    root = worktree.resolve()
     try:
-        for entry in blobs.split("\n"):
-            if not entry:
-                continue
+        root = worktree.resolve()
+        for entry in filter(None, blobs.split("\n")):
             metadata, name = entry.split("\t", 1)
             if name.startswith('"'):
                 name = os.fsdecode(ast.literal_eval("b" + name))
@@ -347,8 +344,9 @@ def _hash_inputs(config: Config, worktree: Path, command: str, base: str, blobs:
                 contents.append(hashlib.file_digest(stream, "sha256").hexdigest())
     except (OSError, ValueError, SyntaxError, RuntimeError):
         return None
-    payload = [command, installed_version(), _execution_settings(config, base), blobs, contents]
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    prefix = hashlib.sha256(json.dumps([blobs, contents]).encode()).hexdigest() + ":"
+    stage = [command, installed_version(), _execution_settings(config, base), blobs, contents] if base is not None else None
+    return prefix + hashlib.sha256(json.dumps(stage, sort_keys=True).encode()).hexdigest() if stage is not None else prefix
 
 
 @contextmanager

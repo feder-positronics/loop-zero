@@ -175,8 +175,12 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    and unset names outside the default allowlist. Readiness can also match the
    prior raw allowlist hash against the current names, with or without the
    inherited CPU grant. A receipt for input-keyed checks binds the
-   configured base branch. Only the
-   stage reuse key binds the exact base revision. Source-check waiters check for policy
+   configured base branch. Passing keyed receipts also bind the declared file bytes.
+   The saved stage key pairs a byte digest with its execution digest. Only stage reuse
+   compares the execution digest, which binds the exact base revision. Older keyed
+   receipts require a fresh check. Configured inputs must match readable, regular
+   worktree files to yield a byte digest. A missing base revision still permits
+   a byte digest and disables stage reuse. Source-check waiters check for policy
    changes on every poll.
    Local readiness and hosted eligibility share the mergeability verdict.
    Hosted source refresh retries an unknown result on the same head before
