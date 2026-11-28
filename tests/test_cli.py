@@ -4409,9 +4409,9 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
         if "viewer {" in query:
             return {"data": {"viewer": {"login": LOGIN}}}
         if cut == "resolution" and accepted["resolution"] and "reviewThreads(" in query:
-            duplicate = dict(node, id="THREAD_2", line=4, comments={"nodes": node["comments"]["nodes"]})
-            node["comments"]["pageInfo"] = {"hasNextPage": True, "endCursor": "ROOT"}
-            return threads_json(dict(node, isResolved=True), duplicate)
+            duplicate = dict(finding_pr, id="THREAD_2", line=4, comments={"nodes": finding_pr["comments"]["nodes"]})
+            finding_pr["comments"]["pageInfo"] = {"hasNextPage": True, "endCursor": "ROOT"}
+            return threads_json(dict(finding_pr, isResolved=True), duplicate)
         if "reviewThreads(" in query:
             node["isResolved"] = bool(accepted["resolution"])
             node["comments"]["pageInfo"] = {
