@@ -553,27 +553,19 @@ def test_linked_worktree_and_git_directory_are_read_only(
     assert sandbox.run_checks(make_config(), linked).ok
 
 
-@pytest.mark.parametrize("severities,verdict", [
-    ((), "approve"), (("suggestion",), "approve"), (("suggestion", "important"), "request_changes"),
-])
-def test_only_blocking_findings_request_changes(severities, verdict):
-    findings = [{"severity": s, "path": None, "line": None, "title": "t", "body": "b"} for s in severities]
-    # The model's own verdict no longer decides; exit 5 must mean something to resolve.
-    result = runners.parse_review({"verdict": "request_changes", "findings": findings},
-                                  family="claude", head="a" * 40, kind="primary", raw="{}")
-    assert result.verdict == verdict
-
-
 @pytest.mark.parametrize("family", ["claude", "codex"])
-def test_review_escalates_verdict_with_blocking_finding(fake_bin, tmp_path, family):
-    _fake_review(fake_bin, family, CHANGES, diagnostic="model: fallback" if family == "codex" else None)
-
+@pytest.mark.parametrize("payload, verdict, locations", [
+    ({"verdict": "request_changes", "findings": []}, "approve", []),
+    ({"verdict": "request_changes", "findings": CHANGES["findings"][1:]}, "approve", [("suggestion", None, None)]),
+    ({"verdict": "request_changes", "findings": CHANGES["findings"][::-1]}, "request_changes",
+     [("suggestion", None, None), ("important", "a.py", 3)]),
+    (CHANGES, "request_changes", [("important", "a.py", 3), ("suggestion", None, None)]),
+])
+def test_review_derives_verdict_from_findings(fake_bin, tmp_path, family, payload, verdict, locations):
+    _fake_review(fake_bin, family, payload, diagnostic="model: fallback" if family == "codex" else None)
     result = _review(family, tmp_path)
-
-    assert result.verdict == "request_changes"
-    assert [(f.severity, f.path, f.line) for f in result.findings] == [
-        ("important", "a.py", 3), ("suggestion", None, None),
-    ]
+    assert result.verdict == verdict
+    assert [(f.severity, f.path, f.line) for f in result.findings] == locations
     if family == "codex":
         assert result.model == "fallback"
         assert json.loads(result.raw)["session_id"] == "codex-session-123"

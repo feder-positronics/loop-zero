@@ -150,13 +150,10 @@ def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = Fals
     """Share a monotonic budget across reads, including any retries."""
     previous = _read_scope.get()
     deadline = min(previous[0], deadline) if previous else deadline
-    scope = _read_scope.set((deadline, token, retry))
-    try:
+    with _read_scope.set((deadline, token, retry)):
         yield
         if check_on_exit:
             read_timeout(0)
-    finally:
-        _read_scope.reset(scope)
 
 
 def read_timeout(limit: float = math.inf, *, scoped: bool = True) -> float:
@@ -172,11 +169,8 @@ def read_timeout(limit: float = math.inf, *, scoped: bool = True) -> float:
 @contextmanager
 def api_error_diagnostics():
     """Include response headers and safe error details for a trusted API validation."""
-    scope = _api_error_diagnostics.set(True)
-    try:
+    with _api_error_diagnostics.set(True):
         yield
-    finally:
-        _api_error_diagnostics.reset(scope)
 
 
 def _included_response(output: str) -> tuple[str | None, dict[str, str], str]:
@@ -874,9 +868,9 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     return blocker_prefix + "\n".join(lines) + _review_transcript(result, legacy_display)
 
 
-def _review_settings_lines(result: ReviewResult, *, include_configured: bool) -> list[str]:
+def _review_settings_lines(result: ReviewResult, *, include_configured: bool) -> Iterator[str]:
     claims = "launch configuration and CLI claims" if include_configured else "CLI claims"
-    lines = [f"\nSettings per native call ({claims}, not backend attestation):"]
+    yield f"\nSettings per native call ({claims}, not backend attestation):"
     for index, call in enumerate(review_settings(result), 1):
         request, reported = call["requested"], call["reported"]
         if result.family == "codex":
@@ -887,8 +881,7 @@ def _review_settings_lines(result: ReviewResult, *, include_configured: bool) ->
             fields.append(("configured", call["configured"]))
         settings = "; ".join(f"{label} model {value['model'] or 'unknown'} "
                              f"(effort {value['effort'] or 'unknown'})" for label, value in fields)
-        lines.append(f"- Call {index}: {settings}")
-    return lines
+        yield f"- Call {index}: {settings}"
 
 
 def _review_transcript(result: ReviewResult, legacy_display: bool) -> str:
@@ -1519,17 +1512,15 @@ def merge(repo: str, number: int, strategy: str, head_sha: str, base: str) -> st
         _gh(*argv, timeout=300)
     except (GhError, ProcTimeout, OSError) as exc:
         write_error = exc
-    scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
     try:
-        sha, queued, queue_error = _merge_evidence(repo, number, head_sha, base)
-        if strategy == "queue":
-            read_timeout(0)  # Queue evidence read after the wait budget is a timeout.
+        with _read_scope.set(_read_scope.get() if strategy == "queue" else None):
+            sha, queued, queue_error = _merge_evidence(repo, number, head_sha, base)
+            if strategy == "queue":
+                read_timeout(0)  # Queue evidence read after the wait budget is a timeout.
     except (GhError, ProcTimeout) as exc:
         if strategy == "queue" or isinstance(exc, (MergeFailed, ClosedUnmerged)):
             raise
         raise MergeFailed(("gh", *argv), f"PR #{number} merge could not be verified: {exc}") from exc
-    finally:
-        _read_scope.reset(scope)
     if sha or queued:
         return sha
     if queue_error:
