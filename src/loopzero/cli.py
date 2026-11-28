@@ -391,6 +391,8 @@ def _check_report_problem(
         problem = "is missing its" if report.settings_sha256 is None else "has an incompatible"
         return (f"check receipt {problem} settings fingerprint. Rerun `loopzero check` in this worktree at this head "
                 "with the same CLI version, environment and `--config` (if supplied) as the blocked command, then retry it.")
+    if report.ok and not sandbox.check_inputs_match(config, wt, report, bytes_only=True):
+        return "check receipt input bytes changed or could not be verified. Rerun `loopzero check` with `checks.inputs` that match readable, regular worktree files."
     return None
 
 
