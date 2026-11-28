@@ -1946,26 +1946,30 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         return 0
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply, publishers)
     _print_display(f"resolved {args.finding}: {finding.title}")
+
+    def has_blockers() -> bool:
+        repo, number, head = config.repo, pr.number, pr.head_sha
+        if not github.open_blocking_findings(repo, number, None, publishers):
+            return False
+        exact = eligibility.eligible_review(_pr_reviews(repo, number), head, publishers, repo=repo, number=number)
+        return exact is None or bool(github.open_blocking_findings(repo, number, head, publishers))
+
     try:
         with github.api_error_diagnostics():
-            remaining = github.open_blocking_findings(config.repo, pr.number, None, publishers)
+            if has_blockers():
+                return 0
     except (github.GhError, _proc.ProcTimeout, OSError) as exc:
-        retry = shlex.join(("gh", *github.eligibility_dispatch_args(
-            config.repo, pr.number, config.base_branch,
-        )))
+        retry = shlex.join(("gh", *github.eligibility_dispatch_args(config.repo, pr.number, config.base_branch)))
         raise CliError(
-            f"Resolved finding {args.finding} on PR #{pr.number}, but could not refresh "
-            f"Loop-zero Eligibility. {exc}\n"
-            "To check remaining findings, run `loopzero resolve` with no arguments. "
+            f"Resolved finding {args.finding} on PR #{pr.number}, but could not refresh Loop-zero Eligibility. {exc}\n"
+            "To check remaining findings, run `loopzero resolve`. "
             f"Then, if no findings remain, run `{retry}`."
         ) from exc
-    if not remaining:
-        if github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers,
-                                      required=eligibility.CONTEXT in config.required_ci):
-            print(f"Requested a Loop-zero Eligibility refresh for PR #{pr.number}. "
-                  "Run `loopzero ready --wait` to follow the verdict.")
-        else:
-            print("Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete.")
+    if github.refresh_eligibility(config.repo, pr, branch, config.base_branch, has_blockers,
+                                  required=eligibility.CONTEXT in config.required_ci):
+        print(f"Requested a Loop-zero Eligibility refresh for PR #{pr.number}. Run `loopzero ready --wait` to follow the verdict.")
+    else:
+        print("Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete.")
     return 0
 
 
