@@ -35,7 +35,10 @@ Run commands expected to exceed about two minutes as [long-running jobs](../../.
 and follow the brief's waiting and output limits.
 
 Keep receipts, evidence, review artifacts and handoffs on the PR, issue or named durable scratch;
-reserve `/tmp` for running-command logs, builds and browser runs. At task finish, leave leftover
+reserve `/tmp` for running-command logs, builds and browser runs. Use `loopzero start`
+from an existing clone for new task worktrees and keep its task-file ownership marker.
+After verified merge or PR closure, run the contract's merge command to finish cleanup.
+At task finish, leave leftover
 worktrees and generated files to the [retention job](../../../docs/DELEGATION.md#leftover-cleanup) named in host
 or repository instructions; with no named job or unverified conditions, preserve them and report cleanup to the owner.
 For confirmed-abandoned tasks outside its scope, give the owner the [manual procedure](../../../SETUP.md#removing-an-abandoned-task-worktree).

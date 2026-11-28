@@ -346,7 +346,11 @@ install fails interpreter checks.
 
 For a merged PR, retry cleanup from a durable directory with
 `(cd "/absolute/path/to/task-worktree" && loopzero merge)`.
-For a closed, unmerged PR outside the host retention job's scope, the task owner
+Use the same command for a closed, unmerged PR to remove a clean worktree at
+the published PR head while keeping both branches. Automatic local removal
+requires the ownership marker that `loopzero start` adds to the task file.
+The command exits 1 for a closed PR and reports the cleanup result on stderr.
+For an unmarked worktree on a closed PR outside the host retention job's scope, the task owner
 can remove the worktree manually after confirming it is abandoned and no session
 or job still uses it. In GitHub, verify the closed PR belongs to this repository
 and task branch, and copy its full head SHA. Preserve any delivery evidence

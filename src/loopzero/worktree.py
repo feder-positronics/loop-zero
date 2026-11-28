@@ -73,6 +73,18 @@ def task_file(wt: Path) -> Path:
     return Path(wt) / ".loopzero" / "task.md"
 
 
+START_MARKER = "<!-- Created by loopzero start. Keep this line for cleanup. -->"
+
+
+def require_started(wt: Path, root: Path) -> None:
+    """Require both the managed location and the local start record."""
+    if wt.parent == worktree_dir(root, "").resolve():
+        with suppress(FileNotFoundError, UnicodeDecodeError):
+            if START_MARKER in read_local_state(wt, "task.md").splitlines():
+                return
+    raise WorktreeError(f"worktree ownership is unverified, preserving {wt}")
+
+
 @contextmanager
 def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False, wait: Callable[[float], None] | None = None):
     path = wt / ".loopzero"
@@ -257,7 +269,8 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         template = template.parents[2] / "core" / template.name
     text = template.read_text(encoding="utf-8")
     text = text.replace("<base branch> @ <sha>", f"{base_branch} @ {base}", 1)
-    _initialize_task(task, text.replace("<Title from slug>", title_from_slug(slug), 1))
+    _initialize_task(task, text.replace("<Title from slug>", title_from_slug(slug), 1)
+                     + f"\n{START_MARKER}\n")
     return wt
 
 
@@ -389,13 +402,13 @@ def _require_no_nested_worktree(wt: Path, git_dir: Path) -> None:
             raise WorktreeError(f"nested Git worktree at {path}, refusing to remove: {wt}")
 
 
-def cleanup(wt: Path, expected_head: str) -> None:
+def cleanup(wt: Path, expected_head: str, *, keep_branch: bool = False) -> None:
     """Remove a clean verified worktree and its branch, preserving nested worktrees."""
     wt = Path(wt).absolute()
     if not wt.exists():
         raise WorktreeError(f"no such worktree: {wt}")
     if head(wt) != expected_head:
-        raise WorktreeError("local HEAD differs from merged PR head")
+        raise WorktreeError("local HEAD differs from final PR head")
     name = branch(wt, native=True)
     gd = Path(git(wt, *_ABSOLUTE_COMMON_DIR, paths=True))
     ref = f"refs/heads/{name}"
@@ -406,6 +419,8 @@ def cleanup(wt: Path, expected_head: str) -> None:
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
         _require_no_nested_worktree(wt, gd)
         git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
+    if keep_branch:
+        return
     worktrees = git(gd, f"--git-dir={gd}", "worktree", "list", "--porcelain", "-z", paths=True)
     if f"branch {ref}" in worktrees.split("\0"):
         raise WorktreeError(f"local branch {name!r} is checked out in another worktree")
