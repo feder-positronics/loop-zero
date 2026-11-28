@@ -571,8 +571,8 @@ LIVE_PR_BODY = (
       for command in ("check", "pr") for newline in ("\n", "\r\n")),
     ("check", "# PR\n\n## Evidence\nRetained browser proof.\n", True),
     ("check", "# PR\n\n## Checks\nLegacy summary.\n\n## Validation  \nHuman evidence.\n\n## Review\nApproved.\n", True),
-    *(("check", "# PR\n\n## Validation" + suffix, True) for suffix in ("", " ##")),
-], ids=["check-lf", "check-crlf", "pr-lf", "pr-crlf", "new-head-evidence", "new-head-legacy-and-validation", "bare-validation", "closing-hashes"])
+    *((command, "# PR\n\n## Validation" + suffix, True) for command, suffix in (("check", ""), ("check", " ##"), ("pr", " ##"))),
+], ids=["check-lf", "check-crlf", "pr-lf", "pr-crlf", "new-head-evidence", "new-head-legacy-and-validation", "bare-validation", "check-closing-hashes", "pr-closing-hashes"])
 def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advance):
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     original_head = head_of(wt)
@@ -584,7 +584,7 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
         commit_file(wt, "feature.py", "print('new')\n", "new behavior")
         head = head_of(wt)
         gh.respond_pr_list([pr_json(headRefOid=head, body=body)])
-        expect_cli(capsys, 0, command)
+        expect_cli(capsys, 0, "check")
         updated = json.loads(gh.calls[-1]["--input"])["body"]
         assert original_head[:12] not in updated and head[:12] in updated
         assert updated.count("Recorded for") == 1 and updated.count("## Validation") == 1
