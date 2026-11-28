@@ -374,11 +374,10 @@ def _check_report_problem(
         return ("check receipt was recorded in a dirty worktree. Run `git status --short`, "
                 "settle the changes, then run `loopzero check`.")
     commands = tuple(result.command for result in report.results)
-    failed = require_pass and not report.ok
-    if failed or commands != config.checks:
+    if commands != config.checks or (require_pass and not report.ok):
         if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
             return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
-        if failed:
+        if require_pass and not report.ok:
             return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
                     "Retry unchanged only if the failure was transient.")
         return ("check receipt's plan differs from the trusted workflow. "
@@ -387,7 +386,8 @@ def _check_report_problem(
                 "and `--config` (if supplied) as the blocked command, then retry it.")
     if report.settings_sha256 is None:
         return f"check receipt is missing its settings fingerprint. {recovery}"
-    if report.settings_sha256 != sandbox.settings_fingerprint(config):
+    if all(report.settings_sha256 != sandbox.settings_fingerprint(config, legacy_allowlist=names)
+           for names in (None, config.env_allowlist, tuple(n for n in config.env_allowlist if n != sandbox.CPU_GRANT_ENV))):
         return f"check receipt has an incompatible settings fingerprint. {recovery}"
     return None
 
