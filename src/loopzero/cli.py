@@ -468,7 +468,15 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
     heading = f"Recorded for `{loaded.head[:12]}`" + ("" if loaded.head == head else " (not current head)")
     if _check_report_problem(wt, loaded, config, head, require_pass=False):
         heading += " (unverified, run `loopzero check`)"
-    results = [f"- `{github.redact_credentials(r.command)}`: exit {r.exit_code}" for r in loaded.results]
+    results = []
+    for result in loaded.results:
+        command = github.redact_credentials(result.command)
+        if any(token in command for token in ("\n", "\r", "`", "<!--", "~~~")):
+            command = command.replace("\r\n", "\n").replace("\r", "\n")
+            fence = "~" * max(3, max(map(len, re.findall(r"~+", command)), default=0) + 1)
+            results.append(f"- exit {result.exit_code}\n\n{fence}sh\n{command}\n{fence}\n")
+        else:
+            results.append(f"- `{command}`: exit {result.exit_code}")
     return "\n".join([heading, *(results or ["- (no check commands configured)"])])
 
 

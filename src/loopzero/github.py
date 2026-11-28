@@ -874,9 +874,9 @@ def _unplaced_findings(unplaced: list[Finding]) -> tuple[str, list[str]]:
     if not unplaced:
         return "", []
     blocked = any(f.severity in BLOCKING for f in unplaced)
-    lines = ["\nFindings without a commentable line:\n" if blocked else "\nFindings without a file location:\n"]
+    lines = ["\nFindings without a commentable line:\n"]
     for finding in unplaced:
-        where = f" ({finding.path}:{finding.line})" if finding.path and finding.severity in BLOCKING else ""
+        where = f" ({finding.path}:{finding.line})" if finding.path else ""
         line = f"- **{finding.severity}**: {finding.title}{where} — {finding.body}".rstrip(" —")
         lines.append(runners._redact_keys(None, line))
     return (BODY_BLOCKERS if blocked else ""), lines

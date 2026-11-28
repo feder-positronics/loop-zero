@@ -1444,6 +1444,7 @@ def test_readiness_at_check_suite_limit(gh: FakeGh, monkeypatch, unrelated, lega
     (3000, "file-3000", "important", HEAD, "file-3000"),
     (3000, "outside-diff", "important", HEAD, "file-0001"),
     (3001, "file-3001", "suggestion", HEAD, None),
+    (1, "file-0001", "suggestion", HEAD, None),
     (3000, "outside-diff", "important", "b" * 40, None),
 ])
 def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: str,
@@ -1453,11 +1454,14 @@ def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: 
     gh.respond(FILES_KEY, *(files[i:i + 100] for i in range(0, 3001, 100)))
     detail_key = f"api repos/{REPO}/pulls/7"
     gh.respond(detail_key, rest_pr_json(pr_json(headRefOid=live_head)) | {"changed_files": changed_files})
-    result = review(findings=(Finding(severity, path, 1, "Incorrect", "Fix this"),))
+    line = 42 if changed_files == 1 else 1
+    result = review("approve" if severity == "suggestion" else "request_changes",
+                    (Finding(severity, path, line, "Incorrect", "Fix this"),))
 
     if severity == "suggestion":
         payload = github.review_payload(REPO, 7, HEAD, result, "")
-        assert payload["comments"] == [] and "Incorrect" in payload["body"]
+        assert payload["comments"] == []
+        assert f"Incorrect ({path}:{line})" in payload["body"]
     elif anchor is None:
         message = rf"PR #7.*{path}.*3,000" if live_head == HEAD else "PR #7 head moved"
         with pytest.raises(github.GhError, match=message):
