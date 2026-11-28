@@ -572,13 +572,15 @@ LIVE_PR_BODY = (
       for command in ("check", "pr") for newline in ("\n", "\r\n")),
     ("check", "# PR\n\n## Evidence\nRetained browser proof.\n", True),
     ("check", "# PR\n\n## Checks\nLegacy summary.\n\n## Validation  \nHuman evidence.\n\n## Review\nApproved.\n", True),
-], ids=["check-lf", "check-crlf", "pr-lf", "pr-crlf", "new-head-evidence", "new-head-legacy-and-validation"])
+    ("check", "# PR\n\n## Validation", True),
+], ids=["check-lf", "check-crlf", "pr-lf", "pr-crlf", "new-head-evidence", "new-head-legacy-and-validation", "bare-validation"])
 def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advance):
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     original_head = head_of(wt)
     arm_pr_body_patch(gh, original_head, body=live)
     expect_cli(capsys, 0, command)
     body = json.loads(gh.calls[-1]["--input"])["body"]
+    assert body.count("## Validation") == 1
     if advance:
         commit_file(wt, "feature.py", "print('new')\n", "new behavior")
         head = head_of(wt)
@@ -608,6 +610,22 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
     history = HISTORY_CALLS if command == "pr" else []
     lookup = LOOKUP_CALLS if command == "pr" else [commit_pr_read(original_head), *LOOKUP_CALLS[1:]]
     assert [c["argv"][:2] for c in gh.calls[before:]] == history + lookup + LOOKUP_CALLS[-1:]
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_pr_sync_reorders_published_sections(wt, gh, capsys, head, conflict):
+    task = cli.worktree.task_file(wt)
+    migration, backup = "## Migration\nRun migration.\n\n", "## Prerequisites\nTake backup.\n\n"
+    original = task.read_text() + migration + backup
+    live = cli._sync_task_narrative(original, "")
+    task.write_text(original.replace(migration + backup, backup + migration))
+    if conflict:
+        live = live.replace(migration, "").replace("## Acceptance", migration + "## Acceptance")
+    arm_pr_body_patch(gh, head, body=live)
+    expect_cli(capsys, int(conflict), "pr", stderr_contains=("section order",) if conflict else ())
+    if not conflict:
+        body = json.loads(gh.calls[-1]["--input"])["body"]
+        assert body.index("Take backup.") < body.index("Run migration.")
 
 
 @pytest.mark.parametrize("change", ["task-preamble", "live-preamble", "notes-collision"])

@@ -497,7 +497,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = existing.replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(rf"{_SECTION_START}Validation[ \t]*\n(.*?){_SECTION_END}", _outside_fences(body), re.DOTALL | re.MULTILINE)
+    match = re.search(rf"{_SECTION_START}Validation[ \t]*(?:\n|\Z)(.*?){_SECTION_END}", _outside_fences(body), re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = body[match.start(1):match.end(1)]
@@ -516,7 +516,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
         for placeholder in reversed(list(placeholders)):
             content = content[:placeholder.start()] + content[placeholder.end():]
         content = block + "\n" + ("\n" + content.lstrip("\n") if content.strip() else "\n")
-    return _validate_pr_body_size(body[:match.start(1)] + content + body[match.end():])
+    return _validate_pr_body_size(body[:match.start(1)].removesuffix("\n") + "\n" + content + body[match.end():])
 
 
 def _validate_pr_body_size(body: str) -> str:
@@ -532,6 +532,21 @@ def _seed_task_evidence(task: str, body: str) -> str:
     missing = [task[section.start():section.end()].rstrip()
                for section in _TASK_EVIDENCE.finditer(_outside_fences(task)) if section[1] not in present]
     return "\n\n".join([body.rstrip(), *missing]) + "\n" if missing else body
+
+
+def _section_order(local, live, baseline, digest):
+    order = list(dict.fromkeys([*live, *local]))
+    by_key = {digest(repr(part)): part for part in local.keys() & live.keys()}
+    previous_order = [by_key[key] for key in baseline if key in by_key]
+    shared = set(previous_order)
+    task_order = [part for part in local if part in shared]
+    if task_order == previous_order:
+        return order
+    if [part for part in live if part in shared] not in (previous_order, task_order):
+        raise CliError("PR description conflict in section order: "
+                       "reconcile .loopzero/task.md with the GitHub PR body and rerun loopzero pr")
+    reordered = iter(task_order)
+    return [next(reordered) if part in shared else part for part in order]
 
 
 def _sync_task_narrative(task: str, existing: str) -> str:
@@ -556,18 +571,18 @@ def _sync_task_narrative(task: str, existing: str) -> str:
     local = parts(task)
     live = parts(existing.replace("\r\n", "\n"))
     prefix = live[None, 0]
-    marker = r"^<!-- loopzero:task-(?:sections [0-9a-f ]+|sync ((?:[0-9a-f]{16}:[0-9a-f]{16} )*))-->$"
+    marker = r"^<!-- loopzero:task-(?:sections [0-9a-f ]+|sync (ordered )?((?:[0-9a-f]{16}:[0-9a-f]{16} )*))-->$"
     prior = re.search(marker, _outside_fences(prefix), re.MULTILINE)
     baseline = {}
-    has_baseline = bool(prior and prior[1] is not None)
+    has_baseline = bool(prior and prior[2] is not None)
     if prior:
         live[None, 0] = (prefix[:prior.start()] + prefix[prior.end():]).rstrip()
-        baseline = dict(pair.split(":") for pair in (prior[1] or "").split())
+        baseline = dict(pair.split(":") for pair in (prior[2] or "").split())
 
     content = []
     fingerprints = {}
     empty = digest("")
-    for part in dict.fromkeys([*live, *local]):
+    for part in _section_order(local, live, baseline if prior and prior[1] else {}, digest):
         name, _ = part
         current, proposed = live.get(part, ""), local.get(part, "")
         if name in {"Validation", "Review"}:
@@ -583,10 +598,10 @@ def _sync_task_narrative(task: str, existing: str) -> str:
                            "reconcile .loopzero/task.md with the GitHub PR body and rerun loopzero pr")
         content.append(current if proposed_hash == previous else proposed)
         if proposed:
-            fingerprints[key] = proposed_hash
+            fingerprints[part] = f"{key}:{proposed_hash} "
 
-    metadata = "".join(f"{key}:{fingerprints[key]} " for key in sorted(fingerprints))
-    content.insert(1, f"<!-- loopzero:task-sync {metadata}-->")
+    metadata = "".join(fingerprints.get(part, "") for part in local)
+    content.insert(1, f"<!-- loopzero:task-sync ordered {metadata}-->")
     return "\n\n".join(filter(None, content)) + "\n"
 
 
