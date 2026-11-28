@@ -383,7 +383,7 @@ def _lock_verified_ref(wt: Path, ref: str, expected_head: str) -> Iterator[None]
                 transaction.kill()
 
 
-def _require_no_nested_worktree(wt: Path, git_dir: Path) -> None:
+def _require_no_nested_worktree(wt: Path, git_dir: Path, *, allow_submodules: bool) -> bool:
     root = wt.resolve()
     records = git(git_dir, f"--git-dir={git_dir}", "worktree", "list", "--porcelain", "-z",
                    paths=True)
@@ -396,10 +396,20 @@ def _require_no_nested_worktree(wt: Path, git_dir: Path) -> None:
     def fail_scan(exc: OSError) -> None:
         raise WorktreeError(f"could not inspect nested worktrees in {wt}: {exc}") from exc
 
-    # Other repositories' checkouts are absent from this Git registry.
+    links = git(wt, "ls-files", "-z", "--format=%(objectmode) %(path)", paths=True) if allow_submodules else ""
+    gitfiles = {path for entry in links.split("\0")
+                if entry.startswith("160000 ") and (path := root / entry[7:] / ".git").is_file()}
+    modules = Path(git(wt, "rev-parse", "--absolute-git-dir", paths=True)).resolve() / "modules"
     for path, directories, files in root.walk(on_error=fail_scan):
         if path != root and (".git" in files or ".git" in directories):
-            raise WorktreeError(f"nested Git worktree at {path}, refusing to remove: {wt}")
+            if path / ".git" not in gitfiles or not Path(git(
+                path, "rev-parse", "--absolute-git-dir", paths=True)).resolve().is_relative_to(modules):
+                raise WorktreeError(f"nested Git worktree at {path}, refusing to remove: {wt}")
+            if ignored := git(path, "ls-files", "--others", "--ignored", "--exclude-standard"):
+                raise WorktreeError(f"submodule {path} contains ignored paths, refusing to remove: {ignored}")
+            if git(path, "rev-list", "--max-count=1", "--all", "--reflog", "--not", "--remotes"):
+                raise WorktreeError(f"submodule {path} contains local history, refusing to remove: {wt}")
+    return bool(gitfiles)
 
 
 def cleanup(wt: Path, expected_head: str, *, keep_branch: bool = False) -> None:
@@ -417,7 +427,7 @@ def cleanup(wt: Path, expected_head: str, *, keep_branch: bool = False) -> None:
             raise WorktreeError("local branch changed during merge cleanup")
         if is_dirty(wt):
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-        _require_no_nested_worktree(wt, gd)
+        force = ("--force",) if _require_no_nested_worktree(wt, gd, allow_submodules=keep_branch) else ()
         generated = () if keep_branch else (
             ":(exclude,top).venv/", ":(exclude,top).pytest_cache/", ":(exclude,top).mypy_cache/",
             ":(exclude,top).ruff_cache/", ":(exclude,glob,top)**/__pycache__/**",
@@ -425,7 +435,7 @@ def cleanup(wt: Path, expected_head: str, *, keep_branch: bool = False) -> None:
         if ignored := git(wt, "ls-files", "--others", "--ignored", "--exclude-standard",
                           "--", ".", ":(exclude,top).loopzero/", *generated):
             raise WorktreeError(f"worktree contains ignored paths, refusing to remove: {ignored}")
-        git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
+        git(gd, f"--git-dir={gd}", "worktree", "remove", *force, str(wt))  # never the primary checkout
     if keep_branch:
         return
     worktrees = git(gd, f"--git-dir={gd}", "worktree", "list", "--porcelain", "-z", paths=True)

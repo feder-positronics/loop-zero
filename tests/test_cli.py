@@ -1077,8 +1077,7 @@ def test_pr_pushes_and_creates_draft(
     expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
     assert pushes.read_text() == f"push origin {head}:refs/heads/{branch}\n"
     assert git(wt, "rev-parse", "--abbrev-ref", "@{upstream}").rstrip("\n") == f"origin/{branch}"
-    origin = repo.parent / "origin.git"
-    assert git(origin, "rev-parse", branch).strip() == head
+    assert git(repo.parent / "origin.git", "rev-parse", branch).strip() == head
     assert [c["argv"][:2] for c in gh.calls] == [
         branch_head_key(branch).split(), history_key.split(),
         branch_head_key(branch).split(), pr_list_key(branch).split(), ["api", f"repos/{REPO}/pulls"],
@@ -4224,13 +4223,16 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
     expect_cli(capsys, 1, "status", stdout="", stderr="loopzero status: HEAD is detached. Switch to a branch and retry.\n")
 
 
-@pytest.mark.parametrize("case", ["owned", "during-wait", "external", "dirty", "ignored", "unpushed"])
+@pytest.mark.parametrize("case", ["owned", "during-wait", "external", "dirty", "ignored", "unpushed", "submodule-local"])
 def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head(wt, repo, gh, capsys, monkeypatch, case):
+    if case in {"owned", "submodule-local"}:
+        git(wt, "-c", "protocol.file.allow=always", "submodule", "add", str(repo), "module")
+        if case == "submodule-local":
+            git(wt / "module", "commit", "--allow-empty", "-qm", "Unpublished submodule commit")
+        git(wt, "commit", "-qam", "Add initialized submodule")
     head, branch = head_of(wt), "lz/t1"
-    origin = repo.parent / "origin.git"
     git(wt, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
-    if case != "during-wait":
-        arm_pr(gh, head, state="CLOSED")
+    arm_pr(gh, head, state="CLOSED")
     if case == "during-wait":
         arm_approved_pr(gh, head, wt, "pending", isDraft=False)
         gh.respond_pr_view(pr_json(headRefOid=head, state="CLOSED"))
@@ -4240,19 +4242,17 @@ def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head
     elif case == "dirty":
         (wt / "untracked").touch()
     elif case == "ignored":
-        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
-            exclude.write("\n.env\n")
+        (repo / ".git/info/exclude").write_text(".loopzero/\n.env\n")
         (wt / ".env").write_text("local configuration")
     elif case == "unpushed":
         git(wt, "commit", "--allow-empty", "-m", "local after close")
         gh.respond(f"api repos/{REPO}/commits/{head_of(wt)}/pulls?per_page=100&page=1", [])
-    code, out, err = run(capsys, "merge", "--wait" if case == "during-wait" else "--wait=0")
-    assert code == 1 and (case == "during-wait" or not out)
+    _, err = expect_cli(capsys, 1, "merge", "--wait" if case == "during-wait" else "--wait=0", stdout=None if case == "during-wait" else "")
     assert wt.exists() is (case not in {"owned", "during-wait"})
     assert git(repo, "branch", "--list", branch)
-    assert git(origin, "rev-parse", branch).strip() == head
+    assert git(repo.parent / "origin.git", "rev-parse", branch).strip() == head
     assert {"owned": "kept both branch refs", "during-wait": "kept both branch refs", "external": "ownership is unverified",
-            "dirty": "worktree is dirty", "ignored": ".env", "unpushed": "push or pull first"}[case] in err
+            "dirty": "worktree is dirty", "ignored": ".env", "unpushed": "push or pull first", "submodule-local": "local history"}[case] in err
     if case == "ignored":
         assert (wt / ".env").read_text() == "local configuration"
     assert all(call["argv"][:2] != ["api", "-X"] for call in gh.calls)
