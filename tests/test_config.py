@@ -64,58 +64,50 @@ def test_missing_file(tmp_path):
         config.load(tmp_path / "nope.toml")
 
 
-FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/proc/1", "/dev", "/sys/fs", "/tmp/../run"]
-
-
 @pytest.mark.parametrize("text,message", [
     ("[repo\n", "invalid TOML"),
     ("[checks]\ncommands = []\n", "missing required key repo.name"),
+    ('repo = "o/n"\n', r"\[repo\] must be a table"),
     ('[repo]\nname = 3\n', "repo.name must be a string"),
-    *((f'[repo]\nname = "{name}"\n', 'must look like "owner/name"')
+    *((table("repo", name=name), 'must look like "owner/name"')
       for name in ("noslash", "a/b/c", "a/", "a/b c", "a/b@c", "-a/@b", "a/b?x=1", "acme/..", "./widgets", "../w")),
-    (MINIMAL + '[checks]\ncommands = "pytest"\n', "checks.commands must be an array"),
-    (MINIMAL + '[checks]\ncommands = ["ok", 1]\n', "non-empty strings"),
-    (MINIMAL + '[checks]\ncommands = ["true", "   "]\n',
-     r"workflow\.toml: checks\.commands.*nonblank command"),
-    (MINIMAL + '[checks]\nnetwork = "yes"\n', "checks.network must be a boolean"),
-    (MINIMAL + '[delivery]\nmerge = "ff"\n', "delivery.merge must be one of"),
-    (MINIMAL + '[delivery]\nmerge = "mergify"\n', "mergify_queue is required"),
-    *((MINIMAL + f'[delivery]\n{strategy}mergify_queue = "main"\n',
-       rf"delivery\.mergify_queue.*delivery\.merge.*{selected}")
-      for strategy, selected in [("", "squash"), ('merge = "squash"\n', "squash"), ('merge = "queue"\n', "queue")]),
-    (MINIMAL + '[checks]\ncommands = ["uv run pytest -q"]\n[checks.inputs]\n"uv run pytest -q" = "src"\n', r"checks\.inputs"),
-    (MINIMAL + '[delivery]\nreviewers = ["gpt"]\n', "delivery.reviewers entries"),
-    (MINIMAL + '[repo2]\nx = 1\n', "unknown key\\(s\\) in top level: repo2"),
-    (MINIMAL + 'nmae = "x"\n', "unknown key\\(s\\) in \\[repo\\]: nmae"),
-    ('repo = "o/n"\n', "\\[repo\\] must be a table"),
+    (MINIMAL + '[repo2]\nx = 1\n', r"unknown key\(s\) in top level: repo2"),
+    (MINIMAL + 'nmae = "x"\n', r"unknown key\(s\) in \[repo\]: nmae"),
     (MINIMAL + 'base = ""\n', "repo.base must not be empty"),
-    (MINIMAL + '[delivery]\nreviewers = []\n', "at least one reviewer"),
-    (MINIMAL + '[delivery]\nreviewer_ro_paths = ["relative"]\n', "must be absolute"),
-    (MINIMAL + '[delivery.review.codex]\nmode = "x"\n',
-     "unknown key\\(s\\) in \\[delivery.review.codex\\]: mode"),
-    (MINIMAL + '[delivery.review.codex]\nallowed_efforts = [1]\n',
-     "allowed_efforts must be a list of non-empty strings"),
-    (MINIMAL + '[delivery.review.codex]\nallowed_efforts = "medium"\n',
-     "allowed_efforts must be an array"),
-    (MINIMAL + '[checks]\nro_paths = ["/home/<you>/.cache"]\n', "unreplaced example placeholder"),
-    *((MINIMAL + table("checks", ro_paths=[path]), "must not expose") for path in FORBIDDEN),
-    (MINIMAL + '[checks]\nwritable = ["/run/x"]\n', "writable must not expose"),
-    *((MINIMAL + f'[checks]\nscratch = ["{path}"]\n', "scratch entries must be relative")
-      for path in ("../x", "/abs")),
-    (MINIMAL + '[checks.env]\nlower = "x"\n', "invalid variable name 'lower'"),
-    *((MINIMAL + f'[checks.env]\n{key} = "/x"\n', f"must not override {key}")
-      for key in ("PATH", "HOME")),
-    (MINIMAL + '[checks.env]\nX = 1\n', "checks.env.X must be a str"),
+    (MINIMAL + table("checks", commands=["echo ok"]) + table("checks.inputs", **{"echo okay": ["."]}),
+     r'checks\.inputs\."echo okay".*exact'),
+    (MINIMAL + table("checks", commands=COMMANDS) + table("checks.inputs", **{COMMANDS[0]: "src"}), r"checks\.inputs"),
     (MINIMAL + '[checks]\nenv = ["X=1"]\n', "checks.env must be a table"),
     (MINIMAL + '[checks]\nlimits = 1\n', "checks.limits must be a table"),
-    (MINIMAL + '[checks]\nlimits = { memory_mb = 0 }\n',
-     "checks.limits.memory_mb must be a positive int"),
-    (MINIMAL + '[checks]\nlimits = { cpu = 1 }\n',
-     "unknown key\\(s\\) in checks.limits: cpu"),
-    (MINIMAL + '[checks]\ncommands = ["echo ok"]\n'
-     '[checks.inputs]\n"echo okay" = ["."]\n', r'checks\.inputs\."echo okay".*exact'),
-    (MINIMAL + '[checks]\nrunner = ["runner"]\n', "unknown key\\(s\\) in \\[checks\\]: runner"),
-    (MINIMAL + '[delivery]\nreview_chunk_bytes = 200000\n', "unknown key\\(s\\) in \\[delivery\\]: review_chunk_bytes"),
+    *((MINIMAL + table(section, **options), message) for section, options, message in [
+        ("checks", {"commands": "pytest"}, "checks.commands must be an array"),
+        ("checks", {"commands": ["ok", 1]}, "non-empty strings"),
+        ("checks", {"commands": ["true", "   "]}, r"workflow\.toml: checks\.commands.*nonblank command"),
+        ("checks", {"network": "yes"}, "checks.network must be a boolean"),
+        ("checks", {"ro_paths": ["/home/<you>/.cache"]}, "unreplaced example placeholder"),
+        ("checks", {"writable": ["/run/x"]}, "writable must not expose"),
+        ("checks", {"runner": ["runner"]}, r"unknown key\(s\) in \[checks\]: runner"),
+        ("checks.env", {"lower": "x"}, "invalid variable name 'lower'"),
+        ("checks.env", {"X": 1}, "checks.env.X must be a str"),
+        ("checks.limits", {"memory_mb": 0}, "checks.limits.memory_mb must be a positive int"),
+        ("checks.limits", {"cpu": 1}, r"unknown key\(s\) in checks.limits: cpu"),
+        ("delivery", {"merge": "ff"}, "delivery.merge must be one of"),
+        ("delivery", {"merge": "mergify"}, "mergify_queue is required"),
+        ("delivery", {"reviewers": ["gpt"]}, "delivery.reviewers entries"),
+        ("delivery", {"reviewers": []}, "at least one reviewer"),
+        ("delivery", {"reviewer_ro_paths": ["relative"]}, "must be absolute"),
+        ("delivery", {"review_chunk_bytes": 200000}, r"unknown key\(s\) in \[delivery\]: review_chunk_bytes"),
+        ("delivery.review.codex", {"mode": "x"}, r"unknown key\(s\) in \[delivery.review.codex\]: mode"),
+        ("delivery.review.codex", {"allowed_efforts": [1]}, "allowed_efforts must be a list of non-empty strings"),
+        ("delivery.review.codex", {"allowed_efforts": "medium"}, "allowed_efforts must be an array"),
+    ]),
+    *((MINIMAL + table("delivery", mergify_queue="main", **options),
+       rf"delivery\.mergify_queue.*delivery\.merge.*{selected}")
+      for options, selected in [({}, "squash"), ({"merge": "squash"}, "squash"), ({"merge": "queue"}, "queue")]),
+    *((MINIMAL + table("checks", ro_paths=[path]), "must not expose")
+      for path in ("/", "/home", "/root", "/run", "/var/run", "/proc/1", "/dev", "/sys/fs", "/tmp/../run")),
+    *((MINIMAL + table("checks", scratch=[path]), "scratch entries must be relative") for path in ("../x", "/abs")),
+    *((MINIMAL + table("checks.env", **{key: "/x"}), f"must not override {key}") for key in ("PATH", "HOME")),
 ])
 def test_invalid_content(tmp_path, text, message):
     with pytest.raises(config.ConfigError, match=message) as info:

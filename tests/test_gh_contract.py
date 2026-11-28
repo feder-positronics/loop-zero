@@ -82,23 +82,20 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
     return fake.calls
 
 
-def offline_run(argv: list[str], tmp_path: Path, call: dict | None = None) -> str:
+def offline_run(argv: list[str], tmp_path: Path, call: dict) -> str:
     if REAL_GH is None:
         pytest.skip("GitHub CLI (gh) is not installed")
     actual = list(argv)
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    for flag, content in (call or {}).get("input_files", {}).items():
-        path = tmp_path / f"input-{actual.index(flag)}"
+    tmp_path.mkdir()
+    for flag, content in call.get("input_files", {}).items():
+        index = actual.index(flag) + 1
+        path = tmp_path / f"input-{index}"
         path.write_text(content)
-        actual[actual.index(flag) + 1] = str(path)
-    home = tmp_path / "home"
-    config = tmp_path / "gh-config"
-    home.mkdir(exist_ok=True)
-    config.mkdir(exist_ok=True)
+        actual[index] = str(path)
     env = {
         "PATH": os.environ.get("PATH", ""),
-        "HOME": str(home),
-        "GH_CONFIG_DIR": str(config),
+        "HOME": str(tmp_path),
+        "GH_CONFIG_DIR": str(tmp_path),
         "GH_HOST": "127.0.0.1",
         "GH_TOKEN": "offline-contract-token",
         "GH_ENTERPRISE_TOKEN": "offline-contract-token",
@@ -131,20 +128,16 @@ def test_contract_capture_covers_operations_with_rest_metadata(captured_argv: li
 def test_captured_methods_match_the_wire(captured_argv: list[dict], tmp_path: Path) -> None:
     for index, call in enumerate(captured_argv):
         argv = call["argv"]
-        if argv[0] == "pr":
-            assert argv[1] == "merge"
+        if argv[:2] == ["pr", "merge"] or argv[1] == "graphql":
             expected = "POST"
-        elif argv[1] == "graphql":
-            expected = "POST"
+        elif "--method" in argv or argv[1] == "-X":
+            flag = "-X" if argv[1] == "-X" else "--method"
+            expected = argv[argv.index(flag) + 1]
+            if "-F" in argv or "-f" in argv:
+                assert flag == "--method" and expected == "GET", argv
         else:
-            if any(flag in argv for flag in ("-F", "-f")):
-                assert argv[argv.index("--method") + 1] == "GET", argv
-            if argv[1] == "-X":
-                expected = argv[2]
-            elif "--method" in argv:
-                expected = argv[argv.index("--method") + 1]
-            else:
-                expected = "POST" if "--input" in argv else "GET"
+            assert "-F" not in argv and "-f" not in argv, argv
+            expected = "POST" if "--input" in argv else "GET"
         output = offline_run(argv, tmp_path / str(index), call)
         methods = re.findall(r"^> (GET|POST|PATCH|PUT|DELETE) ", output, re.MULTILINE)
         assert methods and methods[0] == expected, (argv, expected, output)

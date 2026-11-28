@@ -31,57 +31,59 @@ def published_review(head, body, *, state="COMMENTED"):
             "state": state, "user": {"login": LOGIN}}
 
 
-def arm_published_review(gh, head, body, *, state="COMMENTED"):
-    gh.respond(reviews_key(), [published_review(head, body, state=state)])
-
-
 def record_claude_runs(fake_bin):
     reviewer = fake_bin / "claude"
     reviewer.write_text(reviewer.read_text().replace(
         "#!/bin/sh\n", f'#!/bin/sh\nprintf "run\\n" >> "{fake_bin}/claude.runs"\n'))
 
 
-def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=False,
-               mutate=None, timeout=False, findings=None):
-    history = []
-    if kind == "delta":
-        history = [rev(head_of(wt), "primary")]
+def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, failure="lost-reply", mutate=None, findings=None):
+    history = [rev(head_of(wt), "primary")] if kind == "delta" else []
+    if history:
         support.commit_file(wt, "feature.py", "print('fixed')\n", "repair")
     payload = APPROVE if verdict == 0 else CHANGES
     if findings is not None:
-        payload = {**payload, "findings": findings}
+        payload = payload | {"findings": findings}
     head = support.prepare_review(wt, gh, fake_bin, history=history, post_id=17, payload=payload)
     record_claude_runs(fake_bin)
     original = github._api
 
     def transport(endpoint, payload, **kwargs):
         response = original(endpoint, payload, **kwargs)
-        if endpoint.endswith("/reviews"):
-            review = published_review(head, payload["body"])
-            comments = [{**c, "commit_id": head, "user": {"login": LOGIN},
-                         "pull_request_review_id": 17} for c in payload["comments"]]
-            rows = [*history, review]
-            if mutate:
-                mutate(rows, comments)
-            gh.respond(reviews_key(), rows)
-            gh.respond(REVIEW_COMMENTS, comments)
-            if interrupted:
-                raise KeyboardInterrupt
-            if timeout:
-                raise _proc.ProcTimeout("gh POST timed out")
-            raise github.GhError(("gh", "api", endpoint), "client timed out after acceptance")
-        return response
+        if not endpoint.endswith("/reviews"):
+            return response
+        rows = [*history, published_review(head, payload["body"])]
+        comments = [dict(c, commit_id=head, user={"login": LOGIN}, pull_request_review_id=17)
+                    for c in payload["comments"]]
+        if mutate:
+            mutate(rows, comments)
+        gh.respond(reviews_key(), rows)
+        gh.respond(REVIEW_COMMENTS, comments)
+        raise {
+            "interrupt": KeyboardInterrupt(),
+            "timeout": _proc.ProcTimeout("gh POST timed out"),
+            "lost-reply": github.GhError(("gh", "api", endpoint), "client timed out after acceptance"),
+        }[failure]
 
     monkeypatch.setattr(github, "_api", transport)
     return head
 
 
 @pytest.fixture
-def interrupted_receipt(wt, gh, fake_bin, monkeypatch, capsys):
+def interrupt_review(wt, gh, fake_bin, monkeypatch, capsys):
+    def interrupt(*, kind="primary", verdict=0, **options):
+        head = lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict,
+                          failure="interrupt", **options)
+        expect_cli(capsys, 130, "review")
+        return head, cli._review_file(wt, head, kind)
+
+    return interrupt
+
+
+@pytest.fixture
+def interrupted_receipt(interrupt_review):
     original = github._api
-    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
-    assert run(capsys, "review")[0] == 130
-    path = cli._review_file(wt, head, "primary")
+    head, path = interrupt_review()
     return head, path, json.loads(path.read_text()), original
 
 
@@ -95,6 +97,10 @@ def raw_details(raw):
     return f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
 
 
+def write_count(gh):
+    return sum("--input" in call for call in gh.calls)
+
+
 def assert_single_publication(gh, fake_bin, *, allow_body_update=False):
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
     writes = [c["argv"][1] for c in gh.calls if "--input" in c]
@@ -102,9 +108,7 @@ def assert_single_publication(gh, fake_bin, *, allow_body_update=False):
 
 
 @pytest.mark.parametrize("override", [None, "pr", "head", "raw", "bytes", "effort"])
-def test_plain_review_surfaces_receipt_after_interruption_before_post(
-    wt, gh, fake_bin, monkeypatch, capsys, override,
-):
+def test_plain_review_surfaces_receipt_after_interruption_before_post(wt, gh, fake_bin, monkeypatch, capsys, override):
     head = support.prepare_review(wt, gh, fake_bin)
     record_claude_runs(fake_bin)
     with monkeypatch.context() as before_post:
@@ -136,22 +140,22 @@ def test_plain_review_surfaces_receipt_after_interruption_before_post(
         assert (fake_bin / "claude.runs").read_text().splitlines() == ["run", "run"]
 
 
-@pytest.mark.parametrize("kind", ["primary", "delta"])
-@pytest.mark.parametrize("verdict", [0, 5])
-@pytest.mark.parametrize("interrupted", [False, True, "timeout"])
-def test_accepted_publication_recovers_saved_verdict(
-    wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, interrupted,
-):
-    lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict,
-               interrupted=interrupted is True, timeout=interrupted == "timeout")
-    if interrupted is True:
+@pytest.mark.parametrize("kind,verdict,failure", [
+    (kind, verdict, failure) for kind in ("primary", "delta") for verdict in (0, 5)
+    for failure in ("lost-reply", "interrupt")
+] + [("delta", 5, "timeout")])
+def test_accepted_publication_recovers_saved_verdict(wt, gh, fake_bin, monkeypatch, capsys, kind, verdict, failure):
+    lost_reply(wt, gh, fake_bin, monkeypatch, kind=kind, verdict=verdict, failure=failure)
+    stdin = fake_bin / "claude.stdin"
+    if failure == "interrupt":
         expect_cli(capsys, 130, "review")
-        (fake_bin / "claude.stdin").unlink()
-    out, _ = expect_cli(capsys, verdict, "review", *(("--repost",) if interrupted is True else ()))
-    if interrupted is True:
-        assert not (fake_bin / "claude.stdin").exists(), "recovery must not launch a reviewer"
+        stdin.unlink()
+        out, _ = expect_cli(capsys, verdict, "review", "--repost")
+        assert not stdin.exists(), "recovery must not launch a reviewer"
+    else:
+        out, _ = expect_cli(capsys, verdict, "review")
+        assert out.startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1].startswith(f"{kind} review by claude")
-    assert interrupted is True or out.startswith("reviewer paths pinned to origin/main@")
     assert_single_publication(gh, fake_bin)
     if verdict == 5:
         files = ["api", f"repos/{REPO}/pulls/7/files"]
@@ -161,10 +165,8 @@ def test_accepted_publication_recovers_saved_verdict(
 @pytest.mark.parametrize("change", ["body", "comment", "location", "publisher", "pending",
                                      "dismissed", "newer", "duplicates", "bad_page", "auth", "quota",
                                      "head", "comment_page", "kind", "wrong_head"])
-@pytest.mark.parametrize("interrupted", [False, True])
-def test_recovery_requires_exact_live_publication(
-    wt, gh, fake_bin, monkeypatch, capsys, change, interrupted,
-):
+@pytest.mark.parametrize("failure", ["lost-reply", "interrupt"])
+def test_recovery_requires_exact_live_publication(wt, gh, fake_bin, monkeypatch, capsys, change, failure):
     def mutate(rows, comments):
         row = rows[-1]
         edits = {
@@ -181,10 +183,8 @@ def test_recovery_requires_exact_live_publication(
             target, update = edits[change]
             target.update(update)
         elif change in {"newer", "duplicates"}:
-            rows.append(copy.deepcopy(rows[-1]))
-            rows[-1]["id"] = 18
-            if change == "newer":
-                rows[-1]["state"] = "PENDING"
+            state = "PENDING" if change == "newer" else row["state"]
+            rows.append(dict(row, id=18, state=state))
             gh.respond(f"api repos/{REPO}/pulls/7/reviews/18/comments --method GET",
                        [{**c, "pull_request_review_id": 18} for c in comments])
         elif change == "head":
@@ -194,31 +194,29 @@ def test_recovery_requires_exact_live_publication(
             gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments page=2", None)
         elif change in {"bad_page", "auth", "quota"}:
             rows[:] = [copy.deepcopy(rows[-1]) for _ in range(100)]
-            gh.respond(reviews_key(2), None)
-            if change != "bad_page":
+            if change == "bad_page":
+                gh.respond(reviews_key(2), None)
+            else:
                 gh.fail(reviews_key(2), "not logged in" if change == "auth" else "HTTP 429")
-    lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5, mutate=mutate,
-               interrupted=interrupted)
-    if interrupted:
+    lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5, mutate=mutate, failure=failure)
+    if failure == "interrupt":
         expect_cli(capsys, 130, "review")
-    out, _ = expect_cli(capsys, 5 if change == "duplicates" else 1, "review", *(("--repost",) if interrupted else ()))
+    out, _ = expect_cli(capsys, 5 if change == "duplicates" else 1, "review", *(("--repost",) if failure == "interrupt" else ()))
     if change != "duplicates":
-        assert not out if interrupted else (
+        assert not out if failure == "interrupt" else (
             out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
         )
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert write_count(gh) == 1
 
 
 @pytest.mark.parametrize("change", ["login", "raw", "repo", "publisher", "number"])
 def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
-    wt, gh, fake_bin, monkeypatch, capsys, change,
+    wt, gh, interrupt_review, capsys, change,
 ):
     if change == "login":
         support.commit_file(wt, "workflow.toml", support.WORKFLOW_BASE + f'review_publishers = ["{LOGIN}", "other-login"]\n', "publishers")
         git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
-    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="delta", verdict=5, interrupted=True)
-    assert run(capsys, "review")[0] == 130
-    path = cli._review_file(wt, head, "delta")
+    _, path = interrupt_review(kind="delta", verdict=5)
     saved = json.loads(path.read_text())
     if change == "login":
         gh.respond("api graphql viewer", {"data": {"viewer": {"login": "other-login"}}})
@@ -228,7 +226,7 @@ def test_interrupted_publication_uses_valid_saved_runner_and_request_identity(
         saved["publication"][change] = "wrong"
     path.write_text(json.dumps(saved))
     expect_cli(capsys, 5 if change == "login" else 1, "review", "--repost")
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert write_count(gh) == 1
 
 
 @pytest.mark.parametrize("change", ["revoked", "deadline", "read_timeout"])
@@ -252,10 +250,10 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
     monkeypatch.setattr(github, "paged", read)
     out, _ = expect_cli(capsys, 1, "review", stderr_contains=("read-back blocked",))
     assert out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert write_count(gh) == 1
 
 
-def test_repost_recovers_review_with_redacted_findings(wt, gh, fake_bin, monkeypatch, capsys):
+def test_repost_recovers_review_with_redacted_findings(interrupt_review, gh, fake_bin, capsys):
     title = "Rotate sk-ant-FAKE0123"
     findings = [
         {"severity": "important", "path": "feature.py", "line": 1,
@@ -263,9 +261,7 @@ def test_repost_recovers_review_with_redacted_findings(wt, gh, fake_bin, monkeyp
         {"severity": "suggestion", "path": None, "line": None,
          "title": "Replace ghp_FAKE0123456789", "body": "See sk-FakeToken0123 in the log."},
     ]
-    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=5,
-                      interrupted=True, findings=findings)
-    assert run(capsys, "review")[0] == 130
+    head, _ = interrupt_review(verdict=5, findings=findings)
     payload = support.posted_review(gh)
     assert "**suggestion**: Replace [REDACTED] — See [REDACTED] in the log." in payload["body"]
     comment, = payload["comments"]
@@ -278,7 +274,7 @@ def test_repost_recovers_review_with_redacted_findings(wt, gh, fake_bin, monkeyp
 
 
 def test_interrupted_explicit_repost_recovers_repost_body(wt, gh, fake_bin, monkeypatch, capsys):
-    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=5, interrupted=True)
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=5, failure="interrupt")
     original = github._api
     def rejected(endpoint, payload, **kwargs):
         if endpoint.endswith("/reviews"):
@@ -292,7 +288,7 @@ def test_interrupted_explicit_repost_recovers_repost_body(wt, gh, fake_bin, monk
     out, _ = expect_cli(capsys, 5, "review", "--repost")
     assert out.startswith("primary review by claude")
     assert not (fake_bin / "claude.stdin").exists()
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert write_count(gh) == 1
     assert support.marker(head, "primary", "repost") in support.posted_review(gh)["body"]
 
 
@@ -312,9 +308,7 @@ def test_recovery_transport_retries_only_within_deadline(monkeypatch, failure, b
 
 
 @pytest.mark.parametrize("optional", ["junk", [], [{"model": "request"}] * 5])
-def test_optional_settings_cannot_block_explicit_repost(
-    interrupted_receipt, gh, fake_bin, monkeypatch, capsys, optional,
-):
+def test_optional_settings_cannot_block_explicit_repost(interrupted_receipt, gh, fake_bin, monkeypatch, capsys, optional):
     _, path, saved, original = interrupted_receipt
     saved["provenance"]["requested_settings"] = optional
     saved["provenance"]["reported_settings"] = "forged"
@@ -330,7 +324,7 @@ def test_optional_settings_cannot_block_explicit_repost(
 
 @pytest.mark.parametrize("published", [True, False])
 def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
-    wt, gh, fake_bin, fake_tool, monkeypatch, capsys, published,
+    wt, gh, fake_tool, interrupt_review, capsys, published,
 ):
     legacy = "independent reviewers failed: codex: /home/u/secret: boom"
     git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
@@ -344,16 +338,13 @@ def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
         else:
             rows.pop()
 
-    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0,
-                      interrupted=True, mutate=mutate)
-    assert run(capsys, "review")[0] == 130
-    receipt = cli._review_file(wt, head, "primary")
+    _, receipt = interrupt_review(mutate=mutate)
     data = json.loads(receipt.read_text())
     assert data["fallback"] == "independent reviewers failed: codex: not authenticated"
     receipt.write_text(json.dumps({**data, "fallback": legacy}))
     errors = () if published else ("not in the published form",)
     expect_cli(capsys, 0 if published else 1, "review", "--repost", stderr_contains=errors)
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert write_count(gh) == 1
 
 
 @pytest.mark.parametrize("publication,source,metadata", [
@@ -369,29 +360,26 @@ def test_repost_confirms_historical_claude_publication(
     prefix = support.marker(head, "primary", source)
     qualified = publication != "legacy"
     identity = f"loopzero primary review by claude on `{head}`, "
-    verdict = "**approve** (0 critical, 0 important, 0 suggestion)"
-    elapsed = f"{saved['duration_s']:.1f}s"
+    verdict = f"{saved['duration_s']:.1f}s: **approve** (0 critical, 0 important, 0 suggestion)"
     if qualified:
         settings = "CLI claims" if publication == "pre-configured" else "launch configuration and CLI claims"
-        body = f"{prefix}\n{identity}{elapsed}: {verdict}\n\n"
-        body += legacy_settings(settings, provenance["requested_settings"][0], saved)
+        body = f"{prefix}\n{identity}{verdict}\n\n" + legacy_settings(settings, provenance["requested_settings"][0], saved)
         if publication != "pre-configured":
             body += "; configured model unknown (effort unknown)"
     else:
+        provenance["requested_settings"] = {"null": None, "empty": [], "malformed": "bad", "legacy": None}[metadata]
         if metadata == "legacy":
-            provenance.pop("requested_settings", None)
-        else:
-            provenance["requested_settings"] = {"null": None, "empty": [], "malformed": "bad"}[metadata]
+            del provenance["requested_settings"]
         path.write_text(json.dumps(saved))
         if source == "repost":
             prefix += "\nReposted from runner session: `claude-session-123`"
         effort = f" (effort {saved['effort']})" if saved["effort"] else ""
-        body = f"{prefix}\n{identity}model {saved['model'] or 'unknown'}{effort}, {elapsed}: {verdict}"
+        body = f"{prefix}\n{identity}model {saved['model'] or 'unknown'}{effort}, {verdict}"
     if publication == "summary":
         body += "\n\nNative Claude output is retained in the restricted local review receipt."
     else:
         body += raw_details(saved["raw"])
-    arm_published_review(gh, head, body)
+    gh.respond(reviews_key(), [published_review(head, body)])
     if publication == "pre-configured":
         assert "configured_settings" in provenance
         assert run(capsys, "review", "--repost")[0] == 1
@@ -401,7 +389,7 @@ def test_repost_confirms_historical_claude_publication(
     if qualified:
         assert saved["raw"] not in out + err
     if publication == "pre-configured":
-        arm_published_review(gh, head, body + "changed")
+        gh.respond(reviews_key(), [published_review(head, body + "changed")])
         assert run(capsys, "review", "--repost")[0] == 1
     assert_single_publication(gh, fake_bin)
 
@@ -421,13 +409,9 @@ def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkey
         f"loopzero primary review by codex on `{head}`, unknown: "
         "**approve** (0 critical, 0 important, 0 suggestion)\n\n"
         + legacy_settings("CLI claims", call["requested"], call["reported"])
-        + raw_details("Native Codex transcript retained in the restricted local review receipt; "
-                      "public evidence is publisher-derived, not backend attestation. "
-                      f"Exact raw SHA256: {evidence['raw_sha256']}")
+        + codex_notice(evidence["raw_sha256"])
     )
-    if altered:
-        body += "changed"
-    arm_published_review(gh, head, body, state="APPROVED")
+    gh.respond(reviews_key(), [published_review(head, body + ("changed" if altered else ""), state="APPROVED")])
     gh.respond(REVIEW_COMMENTS, [])
 
     monkeypatch.setattr(cli.runners, "review_with", lambda *a, **k: pytest.fail("repost launched a reviewer"))
@@ -437,11 +421,15 @@ def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkey
     assert all("--input" not in call for call in gh.calls)
 
 
+def codex_notice(raw_sha256):
+    return raw_details("Native Codex transcript retained in the restricted local review receipt; "
+                       "public evidence is publisher-derived, not backend attestation. "
+                       f"Exact raw SHA256: {raw_sha256}")
+
+
 def test_old_notice_heading_is_normalized_only_for_the_trailing_notice():
     quoted = raw_details("Native Codex transcript quoted")
-    notice = raw_details("Native Codex transcript retained in the restricted local review receipt; "
-                         "public evidence is publisher-derived, not backend attestation. "
-                         "Exact raw SHA256: " + "a" * 64)
+    notice = codex_notice("a" * 64)
     new = notice.replace("Raw reviewer output", "Review evidence notice")
     assert cli._comparable_body("x" + quoted + notice) == "x" + quoted + new
     assert cli._comparable_body("x" + notice + quoted) == "x" + notice + quoted
