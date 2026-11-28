@@ -18,7 +18,7 @@ flowchart TD
     G --> C
     F -->|changes requested after the delta| R["Reject findings with reasons,<br/>or fix in a replacement PR"]
     R -->|findings rejected| H
-    F -->|approved| H["Check it is ready: no blocking findings,<br/>required CI green on the same version<br/><sub>loopzero ready --wait</sub>"]
+    F -->|approved| H["Take the PR out of draft and check readiness<br/><sub>loopzero ready --wait</sub>"]
     H -->|review coverage lost and budget allows another review| F
     H -->|ready| I["Merge or wait for the queue<br/><sub>loopzero merge --wait</sub>"]
     I -->|landed| K["Verify landing and clean up branch and worktree"]
@@ -27,8 +27,9 @@ flowchart TD
 Summarizes [The six steps](../core/CONTRACT.md#the-six-steps),
 [Blockers](../core/CONTRACT.md#blockers) (review coverage, head movement and
 readiness) and the [review budget](../core/CONTRACT.md#review-budget).
-Leaving draft can admit a PR on repositories with auto-queue rules.
-[Loop-zero's queue](MERGIFY.md) uses explicit admission.
+`loopzero ready` can admit the PR when it leaves draft on repositories with
+auto-queue rules. For [loop-zero's queue](MERGIFY.md), `loopzero merge` requests
+admission explicitly.
 
 ## 2. How many reviews a change gets
 
