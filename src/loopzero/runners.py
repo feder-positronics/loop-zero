@@ -1222,8 +1222,8 @@ def _validated_evidence(result: ReviewResult) -> tuple[bool, dict | None]:
 
 def families_from_trailer(value: str) -> set[str]:
     """Every reviewer family a ``Co-Authored-By`` value names."""
-    tokens = set(re.findall(r"\w+", value.lower()))
-    words = {"claude": ("claude", "anthropic"), "codex": ("codex", "gpt", "openai")}
+    tokens = set(re.findall(r"[^\W\d_]+", value.lower()))
+    words = {"claude": ("claude", "anthropic"), "codex": ("codex", "gpt", "chatgpt", "openai")}
     return {family for family, names in words.items() if tokens.intersection(names)}
 
 
