@@ -6,6 +6,7 @@ import re
 import tomllib
 from collections.abc import Callable
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -105,20 +106,15 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
     # Stage-boundary reads reuse the existing ref without fetching absent objects.
     if previous is not None and not refresh:
         local_env["GIT_NO_LAZY_FETCH"] = "1"
-    resolved = _proc.run(
-        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), extra_env=local_env,
-    )
+    trusted_git = partial(_proc.run, cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, extra_env=local_env)
+    resolved = trusted_git(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=read_timeout(60))
     if resolved.exit_code != 0:
         raise ConfigError(f"{source} has no remote-tracking base commit. Fetch origin/{branch}. {hint}")
     revision = resolved.stdout.strip()
     if previous is not None and previous.base_branch == branch and previous.trusted_base_revision == revision:
         return previous, revision
-    shown = _proc.run(
-        ["git", "show", f"{revision}:workflow.toml"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), preserve_newlines=True, encoding="utf-8",
-        extra_env=local_env,
-    )
+    shown = trusted_git(["git", "show", f"{revision}:workflow.toml"], timeout=read_timeout(60),
+                        preserve_newlines=True, encoding="utf-8")
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
     return _parse_workflow(shown.stdout.encode("utf-8", "surrogateescape"), source, f". {hint}",
@@ -148,10 +144,7 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
 
 def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every workflow.toml section in one pass
     _reject_unknown("top level", data, _SECTIONS)
-    sections = {
-        section: _check_table(section, data.get(section, {}), schema)
-        for section, schema in _SECTIONS.items()
-    }
+    sections = {name: _check_table(name, data.get(name, {}), schema) for name, schema in _SECTIONS.items()}
     repo, checks, delivery = sections["repo"], sections["checks"], sections["delivery"]
 
     if (name := repo.get("name")) is None:
@@ -210,8 +203,7 @@ def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every work
         merge_strategy=merge,
         mergify_queue=mergify_queue,
         reviewers=reviewers,
-        review_publishers=_strings("delivery.review_publishers",
-                                   delivery.get("review_publishers", [])),
+        review_publishers=_strings("delivery.review_publishers", delivery.get("review_publishers", [])),
         review=review,
         network=checks.get("network", False),
         inputs=inputs, env=env, **kwargs,
