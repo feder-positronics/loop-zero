@@ -115,7 +115,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 )
         scratch = {entry: scratch_root / entry for entry in config.scratch}
         for entry, source in scratch.items():
-            source.mkdir(parents=True)
+            source.mkdir(parents=True, exist_ok=True)
             # Mount points must exist before bwrap binds the source read-only.
             (worktree / entry).mkdir(parents=True, exist_ok=True)
         prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
@@ -410,13 +410,15 @@ def check_preflight(config: Config, worktree: Path) -> tuple[CheckResult | None,
         if not re.fullmatch(r"[A-Za-z0-9_./=-]+(?: +[A-Za-z0-9_./=-]+)*", command):
             continue
         words = command.split()
-        script = words[1] if re.fullmatch(r"python(?:3(?:\.\d+)?)?", words[0]) and len(words) > 1 else words[0]
+        python = len(words) > 1 and re.fullmatch(r"python(?:3(?:\.\d+)?)?", words[0])
+        script = words[1] if python else words[0]
         path = Path(script)
+        target = worktree / path
         if "=" in words[0] or any(path.is_relative_to(Path(entry)) for entry in config.scratch):
             continue
         if (not path.is_absolute() and "/" in script and ".." not in path.parts
-                and not any((worktree / path).resolve().is_relative_to(Path(root)) for root in config.writable)
-                and not (worktree / path).is_file()):
+                and not any(target.resolve().is_relative_to(Path(root)) for root in config.writable)
+                and not (target.is_file() or (python and target.is_dir()))):
             tail = _check_tail(
                 f"Check preflight: repo-local file {script!r} is absent from this task tree. "
                 "If trusted-base checks advanced, integrate the current configured base "

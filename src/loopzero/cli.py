@@ -94,17 +94,24 @@ class PrimaryCheckout(CliError):
     """The command runs in the primary checkout, which has no task worktree to remove."""
 
 
-def _repo_root(wt: Path) -> Path:
-    """Verify the primary checkout or bare repository owns this linked worktree."""
-    first = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0]
+def _repo_root(wt: Path, *, linked_only: bool = True) -> Path:
+    first, _, fields = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).partition("\0")
     if not first.startswith("worktree "):
         raise CliError("Git did not identify the primary worktree; refusing cleanup")
-    root = Path(first.removeprefix("worktree "))
+    root = Path(first.removeprefix("worktree ")).resolve()
     common = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)).resolve()
-    if root.resolve() == wt.resolve():
-        raise PrimaryCheckout("this is the primary checkout, nothing to clean up")
-    if common not in (root.resolve(), (root / ".git").resolve()):
+    if root == common and not fields.startswith("bare\0"):
+        candidates = (wt, wt.parent.parent) if wt.parent.name == ".worktrees" else (wt,)
+        for candidate in candidates:
+            if (candidate / ".git").is_file() and Path(_git(candidate, "rev-parse", "--absolute-git-dir", paths=True)).resolve() == common:
+                root = candidate
+                break
+        else:
+            raise CliError("Git reports only the primary metadata directory. Rerun from the primary checkout.")
+    elif common not in (root, (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
+    if linked_only and root == wt.resolve():
+        raise PrimaryCheckout("this is the primary checkout, nothing to clean up")
     return root
 
 
@@ -590,8 +597,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     root = _toplevel()
     current = config_mod.run_git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
     # Nest task worktrees in the primary checkout, so removing a harness worktree cannot delete them.
-    listing = _git(root, "worktree", "list", "--porcelain", "-z", paths=True)
-    primary = Path(listing.split("\0", 1)[0].removeprefix("worktree "))
+    primary = _repo_root(root, linked_only=False)
     # An interrupted start leaves a detached task worktree; harness worktrees elsewhere may start.
     branch = current.stdout.strip()
     if branch.startswith("lz/") and root == primary:

@@ -162,7 +162,7 @@ def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, monkeypatch, com
     ("echo ok", 0),
 ])
 def test_check_pipeline_verdict(git_repo, bwrap_log, monkeypatch, capsys, command, stage_exit):
-    config = make_config(checks=(command,))
+    config = make_config(checks=(command,), scratch=("build/cache", "build"))
     monkeypatch.setattr(cli, "_context", lambda *args, **kwargs: (git_repo, config))
     monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *args: None)
     assert cli.main(["check"]) == (1 if stage_exit else 0)
