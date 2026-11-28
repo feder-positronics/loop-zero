@@ -10,7 +10,6 @@ import stat
 import signal
 import subprocess
 import sys
-import textwrap
 import tomllib
 from contextlib import ExitStack
 from dataclasses import replace
@@ -39,6 +38,8 @@ from loopzero.sandbox import SANDBOX_HOME, SandboxUnavailable
 
 from .conftest import git
 from .test_sandbox import FAKE_BWRAP, _pairs, _real_bwrap_works
+
+FIXTURES = Path(__file__).with_name("fixtures")
 
 APPROVE = {"verdict": "approve", "findings": []}
 CHANGES = {
@@ -112,25 +113,10 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0, capture_e
     """Fake ``claude`` that checks argv shape, dumps argv and prints ``stdout``."""
     text = stdout if isinstance(stdout, str) else json.dumps(stdout)
     capture = f'env > "{bin_dir}/claude.env"' if capture_env else ":"
-    return write_fake_tool(
-        bin_dir,
-        "claude",
-        f"""
-        printf '%s\\0' "$@" > "{bin_dir}/claude.argv"
-        cat > "{bin_dir}/claude.stdin"
-        {capture}
-        for required in "-p" "--output-format json" "--permission-mode plan" "--json-schema"; do
-          case " $* " in
-            *" $required "*) ;;
-            *) echo "missing $required" >&2; exit 64;;
-          esac
-        done
-        cat <<'JSON'
-        {text}
-        JSON
-        exit {exit_code}
-        """,
-    )
+    script = (FIXTURES / "fake-claude.sh.in").read_text()
+    return write_fake_tool(bin_dir, "claude", script.format(
+        bin_dir=bin_dir, capture=capture, stdout=text, exit_code=exit_code,
+    ))
 
 
 def _codex_probes(version):
@@ -139,14 +125,9 @@ def _codex_probes(version):
 
 
 def _real_codex(path, guard, *, version="codex-cli 0.161.0"):
-    write_fake_tool(path.parent, path.name, _codex_probes(version) + textwrap.dedent(f"""
-        set -eu
-        cat >/dev/null
-        {guard}
-        while [ "$1" != --output-last-message ]; do shift; done
-        printf '%s' {shlex.quote(json.dumps(APPROVE))} > "$2"
-        echo '{{"thread_id":"synthetic-r2","usage":{{"total_tokens":1}}}}'
-    """))
+    script = (FIXTURES / "fake-codex-auth.sh.in").read_text()
+    body = script.format(guard=guard, last_message=shlex.quote(json.dumps(APPROVE)))
+    write_fake_tool(path.parent, path.name, _codex_probes(version) + body)
 
 
 def _fake_codex(
@@ -159,50 +140,21 @@ def _fake_codex(
     rollout: str | None = None,
 ) -> Path:
     """Fake ``codex`` that checks argv shape and writes ``last_message`` to -o file."""
-    stderr = stderr.replace("\n", "\n        ")
     rollout_script = "" if rollout is None else (
         'mkdir -p "$codex_home/sessions/2026/10/30"\n'
         "printf '%s\\n' " + shlex.quote(rollout)
         + ' > "$codex_home/sessions/2026/10/30/rollout-test-$sid.jsonl"'
     )
-    return write_fake_tool(
-        bin_dir,
-        "codex",
-        f"""
-        {textwrap.indent(_codex_probes(version), '        ').lstrip()}
-        codex_home="${{CODEX_HOME:-$HOME/.codex}}"
-        printf '%s\\0' "$@" > "{bin_dir}/codex.argv"
-        printf '%s' "$codex_home" > "{bin_dir}/codex.home"
-        [ -e "$codex_home/config.toml" ] && echo yes > "{bin_dir}/codex.config" || true
-        cat > "{bin_dir}/codex.stdin"
-        [ "$1" = exec ] || {{ echo "expected exec subcommand" >&2; exit 64; }}
-        out=""; schema=""
-        while [ $# -gt 0 ]; do
-          case "$1" in
-            --output-last-message) out="$2"; shift;;
-            --output-schema) schema="$2"; shift;;
-            --sandbox) [ "$2" = danger-full-access ] || {{ echo "bad sandbox $2" >&2; exit 64; }}; shift;;
-          esac
-          shift
-        done
-        [ -n "$out" ] || {{ echo "missing -o" >&2; exit 64; }}
-        [ -f "$schema" ] || {{ echo "missing schema file" >&2; exit 64; }}
-        cp "$schema" "{bin_dir}/codex.schema"
-        [ -n "{stderr}" ] && echo "{stderr}" >&2
-        cat > "$out" <<'MSG'
-        {last_message}
-        MSG
-        count_file="{bin_dir}/codex.calls"
-        count=1; [ ! -f "$count_file" ] || count=$(( $(cat "$count_file") + 1 ))
-        printf '%s' "$count" > "$count_file"
-        sid="codex-session-123"; [ "$count" -eq 1 ] || sid="$sid-$count"
-        {rollout_script.replace(chr(10), chr(10) + '        ')}
-        echo '{{"type":"thread.started","thread_id":"'"$sid"'"}}'
-        printf '%s\\n' {shlex.quote(json.dumps({"type":"item.completed","item":{"id":"final","type":"agent_message","text":last_message}}))}
-        echo '{{"type":"turn.completed","usage":{{"input_tokens":123,"output_tokens":2}}}}'
-        exit {exit_code}
-        """,
-    )
+    final_event = {"type": "item.completed", "item": {
+        "id": "final", "type": "agent_message", "text": last_message,
+    }}
+    script = (FIXTURES / "fake-codex.sh.in").read_text()
+    return write_fake_tool(bin_dir, "codex", script.format(
+        bin_dir=bin_dir, version_probe=_codex_probes(version).rstrip("\n"),
+        stderr=stderr, last_message=last_message, rollout_script=rollout_script,
+        final_event=shlex.quote(json.dumps(final_event)),
+        exit_code=exit_code,
+    ))
 
 
 def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
@@ -485,23 +437,11 @@ def test_real_claude_environment_auth_hides_host_state(repo,
         f"test ! -e {shlex.quote(str(path))} || "
         "{ echo 'host state exposed' >&2; exit 70; }" for path in hidden
     )
-    write_fake_tool(fake_bin, "claude", f"""
-        set -eu
-        cat >/dev/null
-        {checks}
-        test "${{CLAUDE_CODE_OAUTH_TOKEN-}}" = {shlex.quote(oauth)} || exit 71
-        test "${{ANTHROPIC_API_KEY-}}" = {shlex.quote(api)} || exit 72
-        test "${{CLAUDE_CONFIG_DIR-}}" = '' || exit 73
-        for value in "$CLAUDE_CODE_OAUTH_TOKEN" "$ANTHROPIC_API_KEY"; do
-          case "$value" in ''|' ') continue;; esac
-          case "$*" in *"$value"*) exit 74;; esac
-        done
-        mkdir -p "$HOME/.claude"
-        printf private > "$HOME/.claude/history.jsonl"
-        printf private > "$HOME/.claude/.config.json"
-        printf private > "$HOME/.claude.json"
-        printf '%s\\n' {shlex.quote(json.dumps(_claude_envelope(APPROVE)))}
-    """)
+    script = (FIXTURES / "fake-claude-env-auth.sh.in").read_text()
+    write_fake_tool(fake_bin, "claude", script.format(
+        checks=checks, oauth=shlex.quote(oauth), api=shlex.quote(api),
+        stdout=shlex.quote(json.dumps(_claude_envelope(APPROVE))),
+    ))
     (fake_bin / "bwrap").unlink()  # Real kernel namespace, overriding the autouse fake.
     result = _review("claude", repo)
     assert result.verdict == "approve"

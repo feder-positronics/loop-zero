@@ -1,0 +1,6 @@
+set -eu
+cat >/dev/null
+{guard}
+while [ "$1" != --output-last-message ]; do shift; done
+printf '%s' {last_message} > "$2"
+echo '{{"thread_id":"synthetic-r2","usage":{{"total_tokens":1}}}}'

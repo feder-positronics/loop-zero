@@ -245,13 +245,8 @@ def test_full_native_attribution_and_fatal_controls(recorded_native, mutation):
             item["aggregated_output"] = item["aggregated_output"].replace(*output_edits[mutation])
     altered = dataclasses.replace(result, raw=json.dumps(data))
     if mutation in (
-        "fatal_before",
-        "fatal_after",
-        "missing_terminal",
-        "wrong_final",
-        "mixed_session",
-        "after_verdict",
-        "terminal_failure",
+        "fatal_before", "fatal_after", "missing_terminal", "wrong_final",
+        "mixed_session", "after_verdict", "terminal_failure",
     ):
         assert_invalid_native(altered)
     else:
@@ -364,9 +359,9 @@ def test_invalid_review_evidence_is_rejected(published_native, mutation):
     }
     if mutation == "invalid_event_offset":
         update_evidence(value, ("calls", 0, "diff_event", "end"), value["raw_bytes"] + 1)
-        changed = rendered.replace(line, packed(value))
     elif isinstance(mutation, tuple):
         update_evidence(value, *mutation)
+    if isinstance(mutation, tuple) or mutation == "invalid_event_offset":
         changed = rendered.replace(line, packed(value))
     elif mutation == "duplicate_key":
         payload = json.dumps(value, sort_keys=True, separators=(",", ":"))

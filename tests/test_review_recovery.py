@@ -45,8 +45,7 @@ def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=Fals
     history = []
     if kind == "delta":
         history = [rev(head_of(wt), "primary")]
-        (wt / "feature.py").write_text("print('fixed')\n")
-        git(wt, "commit", "-qam", "repair")
+        support.commit_file(wt, "feature.py", "print('fixed')\n", "repair")
     payload = APPROVE if verdict == 0 else CHANGES
     if findings is not None:
         payload = {**payload, "findings": findings}
@@ -437,10 +436,7 @@ def test_repost_confirms_pre_configured_codex_publication(wt, gh, capsys, monkey
     arm_published_review(gh, head, body, state="APPROVED")
     gh.respond(REVIEW_COMMENTS, [])
 
-    def unexpected_launch(*args, **kwargs):
-        pytest.fail("repost launched a reviewer")
-
-    monkeypatch.setattr(cli.runners, "review_with", unexpected_launch)
+    monkeypatch.setattr(cli.runners, "review_with", lambda *a, **k: pytest.fail("repost launched a reviewer"))
     _, err = expect_cli(capsys, int(altered), "review", "--repost")
     if altered:
         assert "conflicting or ambiguous review publication" in err

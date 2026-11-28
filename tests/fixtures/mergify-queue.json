@@ -7,6 +7,10 @@
     "isolated": "**The failure is in this pull request.** It failed tested alone on top of `main`.",
     "batch": "**Not proven to be this pull request's failure.** It failed in a batch with [#124](/example-org/example-repo/pull/124)."
   },
+  "failed_job": {
+    "isolated": [139880043495, "tests/unit/research_protocol/test_research_protocol_export.py::TestCheckedInArtifact::test_main_check_exit_code_is_zero"],
+    "stacked": [139939028086, "tests/unit/infrastructure/test_final_qa_capabilities.py::test_role_and_catalog_capability_failures_are_advisory[CREATE ROLE isolated NOLOGIN]"]
+  },
   "expected": {
     "stacked": [
       "stack",

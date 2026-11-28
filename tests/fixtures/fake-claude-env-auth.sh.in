@@ -1,0 +1,15 @@
+set -eu
+cat >/dev/null
+{checks}
+test "${{CLAUDE_CODE_OAUTH_TOKEN-}}" = {oauth} || exit 71
+test "${{ANTHROPIC_API_KEY-}}" = {api} || exit 72
+test "${{CLAUDE_CONFIG_DIR-}}" = '' || exit 73
+for value in "$CLAUDE_CODE_OAUTH_TOKEN" "$ANTHROPIC_API_KEY"; do
+  case "$value" in ''|' ') continue;; esac
+  case "$*" in *"$value"*) exit 74;; esac
+done
+mkdir -p "$HOME/.claude"
+printf private > "$HOME/.claude/history.jsonl"
+printf private > "$HOME/.claude/.config.json"
+printf private > "$HOME/.claude.json"
+printf '%s\n' {stdout}

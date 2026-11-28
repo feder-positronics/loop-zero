@@ -1,0 +1,32 @@
+{version_probe}
+codex_home="${{CODEX_HOME:-$HOME/.codex}}"
+printf '%s\0' "$@" > "{bin_dir}/codex.argv"
+printf '%s' "$codex_home" > "{bin_dir}/codex.home"
+[ -e "$codex_home/config.toml" ] && echo yes > "{bin_dir}/codex.config" || true
+cat > "{bin_dir}/codex.stdin"
+[ "$1" = exec ] || {{ echo "expected exec subcommand" >&2; exit 64; }}
+out=""; schema=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output-last-message) out="$2"; shift;;
+    --output-schema) schema="$2"; shift;;
+    --sandbox) [ "$2" = danger-full-access ] || {{ echo "bad sandbox $2" >&2; exit 64; }}; shift;;
+  esac
+  shift
+done
+[ -n "$out" ] || {{ echo "missing -o" >&2; exit 64; }}
+[ -f "$schema" ] || {{ echo "missing schema file" >&2; exit 64; }}
+cp "$schema" "{bin_dir}/codex.schema"
+[ -n "{stderr}" ] && echo "{stderr}" >&2
+cat > "$out" <<'MSG'
+{last_message}
+MSG
+count_file="{bin_dir}/codex.calls"
+count=1; [ ! -f "$count_file" ] || count=$(( $(cat "$count_file") + 1 ))
+printf '%s' "$count" > "$count_file"
+sid="codex-session-123"; [ "$count" -eq 1 ] || sid="$sid-$count"
+{rollout_script}
+echo '{{"type":"thread.started","thread_id":"'"$sid"'"}}'
+printf '%s\n' {final_event}
+echo '{{"type":"turn.completed","usage":{{"input_tokens":123,"output_tokens":2}}}}'
+exit {exit_code}

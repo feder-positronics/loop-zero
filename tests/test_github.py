@@ -9,6 +9,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 from urllib.parse import quote
 
 import pytest
@@ -603,11 +604,8 @@ def test_invalid_gh_json_reports_location_without_response_content(gh: FakeGh) -
 
 def test_gh_timeout_redacts_diagnostics(monkeypatch) -> None:
     token = "ghs_FAKE000"
-
-    def timeout(*args, **kwargs):
-        raise github.ProcTimeout(f"gh timed out: {token}", token, stderr=token)
-
-    monkeypatch.setattr(github, "run", timeout)
+    timeout = github.ProcTimeout(f"gh timed out: {token}", token, stderr=token)
+    monkeypatch.setattr(github, "run", Mock(side_effect=timeout))
     with pytest.raises(github.ProcTimeout, match="gh timed out: \\[REDACTED\\]") as info:
         github._gh("api", "user", "--method", "POST", token=token)
 
@@ -1209,10 +1207,7 @@ def test_merge_reports_queue_admission_or_landing(gh, monkeypatch, strategy, que
 
 def test_eligibility_dispatch_retry_refuses_changed_head(monkeypatch):
     pr = github.PR(7, "https://example.invalid/7", HEAD, "main", False, "OPEN", "MERGEABLE")
-    def lost_reply(*_args):
-        raise github.ProcTimeout("lost reply", "")
-
-    monkeypatch.setattr(github, "_gh", lost_reply)
+    monkeypatch.setattr(github, "_gh", Mock(side_effect=github.ProcTimeout("lost reply", "")))
     monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
     monkeypatch.setattr(github, "pr_for_branch", lambda *_args, **_kwargs: replace(pr, head_sha="b" * 40))
     monkeypatch.setattr(github, "_eligibility_dispatched", lambda *_args: True)
