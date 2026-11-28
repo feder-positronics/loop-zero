@@ -119,7 +119,8 @@ No separate per-PR go-ahead to merge, take out of draft or queue; no hold renewa
 and nonempty `[delivery].review_publishers` in the effective workflow. Readiness
 blocks when any of these apply:
 
-- A check stage failed on this head (no passing check receipt).
+- No passing check receipt for this head and effective check inputs.
+- A [merge-authority hold](#merge-authority) on the PR.
 - An unresolved `critical`/`important` review thread, unless GitHub marks it
   outdated and its marker names another head. When relying on an ancestor review,
   every unresolved blocking thread counts, including outdated threads.
