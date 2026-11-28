@@ -484,7 +484,7 @@ _CHECKS_START = "<!-- loopzero:checks:start -->"
 _CHECKS_END = "<!-- loopzero:checks:end -->"
 _SECTION_START = r"^ {0,3}## "
 _SECTION_END = rf"(?={_SECTION_START}|\Z)"
-_TASK_EVIDENCE = re.compile(rf"{_SECTION_START}(Validation|Review)[ \t]*(?:\n|\Z).*?{_SECTION_END}", re.MULTILINE | re.DOTALL)
+_TASK_EVIDENCE = re.compile(rf"{_SECTION_START}(Validation|Review)(?:[ \t]+#+)?[ \t]*(?:\n|\Z)(.*?){_SECTION_END}", re.MULTILINE | re.DOTALL)
 
 
 def _outside_fences(body: str) -> str:
@@ -497,12 +497,12 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = existing.replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(rf"{_SECTION_START}Validation[ \t]*(?:\n|\Z)(.*?){_SECTION_END}", _outside_fences(body), re.DOTALL | re.MULTILINE)
+    match = next((section for section in _TASK_EVIDENCE.finditer(_outside_fences(body)) if section[1] == "Validation"), None)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
-    content = body[match.start(1):match.end(1)]
-    before, start, after = match[1].partition(_CHECKS_START)
-    if start or _CHECKS_END in match[1]:
+    content = body[match.start(2):match.end(2)]
+    before, start, after = match[2].partition(_CHECKS_START)
+    if start or _CHECKS_END in match[2]:
         middle, end, suffix = after.partition(_CHECKS_END)
         if not end or _CHECKS_END in before or _CHECKS_END in suffix or _CHECKS_START in after:
             raise CliError("malformed loopzero checks block: fix the marker pair in Validation in the PR description on GitHub")
@@ -511,12 +511,12 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
         # Replace only our placeholder, retaining behavioral evidence.
         placeholders = re.finditer(
             r"^\((?:filled by `loopzero check`|no `loopzero check` run recorded)\)\n?",
-            match[1], flags=re.MULTILINE,
+            match[2], flags=re.MULTILINE,
         )
         for placeholder in reversed(list(placeholders)):
             content = content[:placeholder.start()] + content[placeholder.end():]
         content = block + "\n" + ("\n" + content.lstrip("\n") if content.strip() else "\n")
-    return _validate_pr_body_size(body[:match.start(1)].removesuffix("\n") + "\n" + content + body[match.end():])
+    return _validate_pr_body_size(body[:match.start(2)].removesuffix("\n") + "\n" + content + body[match.end():])
 
 
 def _validate_pr_body_size(body: str) -> str:
@@ -538,12 +538,14 @@ def _section_order(local, live, baseline, digest, unordered):
     order = list(live)
     by_key = {digest(repr(part)): part for part in local.keys() & live.keys()}
     previous_order = [by_key[key] for key in baseline if key in by_key]
-    shared = set(previous_order)
+    shared = set(by_key.values() if unordered else previous_order)
     task_order = [part for part in local if part in shared]
+    live_order = [part for part in live if part in shared]
     # Legacy fingerprints describe shared text but cannot establish a prior order.
-    if unordered or task_order != previous_order:
-        if not unordered and [part for part in live if part in shared] not in (previous_order, task_order):
-            raise CliError("PR description conflict in section order: "
+    if task_order != live_order and (unordered or task_order != previous_order):
+        if unordered or live_order != previous_order:
+            headings = ", ".join(part[0] for part, other in zip(task_order, live_order, strict=True) if part != other)
+            raise CliError(f"PR description conflict in section order{f' ({headings})' if unordered else ''}: "
                            "reconcile .loopzero/task.md with the GitHub PR body and rerun loopzero pr")
         reordered = iter(task_order)
         order = [next(reordered) if part in shared else part for part in order]
@@ -566,7 +568,7 @@ def _sync_task_narrative(task: str, existing: str) -> str:
         result: dict[tuple[str | None, int], str] = {(None, 0): prefix.rstrip()}
         counts: dict[str, int] = {}
         for match in pattern.finditer(prose):
-            name = match[1].rstrip(" \t")
+            name = re.sub(r"^(Validation|Review)[ \t]+#+\Z", r"\1", match[1].rstrip(" \t"))
             index = counts.get(name, 0)
             result[name, index] = body[match.start():match.end()].rstrip()
             counts[name] = index + 1
@@ -628,13 +630,13 @@ def _require_pr_details(wt: Path, task: str) -> None:
 def _append_review(body: str, result: ReviewResult) -> str:
     """Append one compact review record under Review, replacing its placeholder."""
     line = f"- {result.kind}, {result.family}, {result.head[:12]}, {result.verdict}"
-    match = re.search(rf"{_SECTION_START}Review[ \t]*\n(.*?){_SECTION_END}", _outside_fences(body), re.DOTALL | re.MULTILINE)
+    match = next((section for section in _TASK_EVIDENCE.finditer(_outside_fences(body)) if section[1] == "Review"), None)
     if not match:
         return f"{body.rstrip()}\n\n## Review\n{line}\n"
-    existing = re.sub(r"^\(filled by `loopzero review`\)[ \t]*(?:\n+|$)", "", body[match.start(1):match.end(1)]).rstrip()
+    existing = re.sub(r"^\(filled by `loopzero review`\)[ \t]*(?:\n+|$)", "", body[match.start(2):match.end(2)]).rstrip()
     if existing:
         line = f"{existing}\n{line}"
-    return (body[:match.start(1)] + line + "\n\n" + body[match.end():]).rstrip() + "\n"
+    return (body[:match.start(2)].removesuffix("\n") + "\n" + line + "\n\n" + body[match.end():]).rstrip() + "\n"
 
 
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
