@@ -60,13 +60,16 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    is active, leave queue commands, head pushes (including `loopzero pr`),
    hold labels and draft toggles alone. Leave Mergify's batch PR open;
    closing it discards the whole batch's CI. Withdraw only to stop unsafe
-   delivery, honor an owner stop or repair a confirmed delivery blocker.
-   Request removal with `loopzero merge --cancel` (without `--wait`), then
-   confirm removal on the PR before editing. After the fix, refresh eligibility
-   and readmit; a changed head needs fresh checks and eligible review.
+   delivery, honor an owner stop, repair a confirmed delivery blocker,
+   [change findings or review thread state](../SETUP.md#hosted-review-eligibility)
+   or [replace an exhausted PR](#review-budget).
+   `loopzero merge --cancel` requests removal asynchronously. Confirm removal
+   on the PR before editing. Before readmitting, refresh eligibility and get
+   fresh checks and eligible review for any changed head.
 
 On start/resume, run `loopzero status` and resume a pending `--wait` before
-yielding. A timeout or CLI error does not confirm removal. After ejection,
+yielding. Notifications never replace the waiter. A timeout or CLI error does
+not confirm removal. After ejection,
 read the [Mergify recovery steps](../SETUP.md#requeue-after-cancellation-or-ejection).
 If cleanup removed the worktree, verify the merge in GitHub.
 Before yielding, record head, last exit code, awaited event and next command
