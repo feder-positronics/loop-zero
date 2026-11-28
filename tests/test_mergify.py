@@ -325,7 +325,7 @@ def test_request_deadline(monkeypatch, phase):
         if seconds == 0 and phase == "cleanup":
             signal.raise_signal(signal.SIGALRM)
 
-    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_))
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_))
     monkeypatch.setattr(signal, "setitimer", arm)
     with (
         pytest.raises(TimeoutError, match="Mergify HTTP request timed out"),

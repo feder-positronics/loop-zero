@@ -87,18 +87,21 @@ def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False
         raise WorktreeError(f"local state directory is not a directory or is a symbolic link: {path}") from exc
     try:
         if lock:
-            deadline = time.monotonic() + 60
-            while (remaining := deadline - time.monotonic()) > 0:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    time.sleep(min(0.1, remaining))
-            else:
-                raise TimeoutError(f"task state is busy in {wt}; retry when the other command finishes")
+            _lock_state_directory(wt, fd)
         yield fd
     finally:
         os.close(fd)
+
+
+def _lock_state_directory(wt: Path, fd: int) -> None:
+    deadline = time.monotonic() + 60
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(min(0.1, remaining))
+    raise TimeoutError(f"task state is busy in {wt}; retry when the other command finishes")
 
 
 def lock_local_state(wt: Path):
@@ -106,17 +109,27 @@ def lock_local_state(wt: Path):
     return _local_state_directory(wt, create=True, lock=True)
 
 
-def _regular_state(wt: Path, fd: int, name: str) -> bool:
+def _regular_state(wt: Path, fd: int, name: str) -> int | None:
     with suppress(FileNotFoundError):
-        if not stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode):
             raise WorktreeError(f"local state file is not regular or is a symbolic link: {wt / '.loopzero' / name}")
-        return True
-    return False
+        return info.st_ino
+    return None
+
+
+@contextmanager
+def lock_check_state(wt: Path, name: str) -> Iterator[tuple[int, bool]]:
+    """Lock the validated directory and detect receipt replacement while acquiring the lock."""
+    with _local_state_directory(wt, create=True) as fd:
+        before = _regular_state(wt, fd, name)
+        _lock_state_directory(wt, fd)
+        yield fd, _regular_state(wt, fd, name) != before
 
 
 def local_state_files(wt: Path, *names: str) -> tuple[bool, ...]:
     with suppress(FileNotFoundError), _local_state_directory(wt) as fd:
-        return tuple(_regular_state(wt, fd, name) for name in names)
+        return tuple(_regular_state(wt, fd, name) is not None for name in names)
     return (False,) * len(names)
 
 

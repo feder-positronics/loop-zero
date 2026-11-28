@@ -3,23 +3,23 @@
 from __future__ import annotations
 
 import base64
-import http.client
 import json
 import os
 import re
 import signal
 import stat
-import ssl
 import time
-import urllib.error
-import urllib.request
 from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from . import github
 from .types import LoopZeroError, is_sha
+
+if TYPE_CHECKING:
+    from urllib.request import Request
 
 API = "https://api.mergify.com/v1"
 REQUEST = "loopzero:mergify-request"
@@ -74,11 +74,6 @@ def _credential(path: Path | None = None) -> str:
     return token
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *_args, **_kwargs):
-        raise MergifyError("Mergify API refused an HTTP redirect")
-
-
 _retry_sleep = time.sleep
 
 
@@ -87,7 +82,13 @@ class _RequestDeadline(Exception):
 
 
 @contextmanager
-def _open(request: urllib.request.Request, timeout: float = 30):
+def _open(request: Request, timeout: float = 30):
+    from urllib.request import HTTPRedirectHandler, build_opener
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            raise MergifyError("Mergify API refused an HTTP redirect")
+
     timeout = github.read_timeout(timeout)
     def expire(_signum, _frame):
         raise _RequestDeadline()
@@ -100,7 +101,7 @@ def _open(request: urllib.request.Request, timeout: float = 30):
             cleanup.callback(signal.setitimer, signal.ITIMER_REAL, 0)
             signal.setitimer(signal.ITIMER_REAL, timeout)
             try:
-                response = urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout)
+                response = build_opener(NoRedirect).open(request, timeout=timeout)
             except ValueError:
                 raise MergifyError("Mergify API request has an invalid URL or header") from None
             yield cleanup.enter_context(response)
@@ -108,9 +109,11 @@ def _open(request: urllib.request.Request, timeout: float = 30):
         raise TimeoutError("Mergify HTTP request timed out") from None
 
 
-def _api_request(repo: str, suffix: str, method: str | None = None) -> urllib.request.Request:
+def _api_request(repo: str, suffix: str, method: str | None = None) -> Request:
+    from urllib.request import Request
+
     owner, name = (quote(part, safe="") for part in repo.split("/", 1))
-    return urllib.request.Request(
+    return Request(
         f"{API}/repos/{owner}/{name}{suffix}", method=method,
         headers={"Accept": "application/json", "User-Agent": "loopzero",
                  "Authorization": f"Bearer {_credential()}"},
@@ -125,7 +128,11 @@ def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | N
         return _read_queue(_api_request(repo, suffix), deadline)
 
 
-def _read_queue(request: urllib.request.Request, deadline: float | None) -> object | None:
+def _read_queue(request: Request, deadline: float | None) -> object | None:
+    from http.client import IncompleteRead
+    from ssl import SSLCertVerificationError
+    from urllib.error import HTTPError, URLError
+
     for retry in (True, False):
         wait = None
         try:
@@ -133,7 +140,7 @@ def _read_queue(request: urllib.request.Request, deadline: float | None) -> obje
                 payload = json.load(response)
             github.read_timeout(0)
             return payload
-        except urllib.error.HTTPError as exc:
+        except HTTPError as exc:
             if exc.code == 404:
                 return None
             wait = github.retry_after(exc.headers.get("Retry-After", "")) if exc.headers else None
@@ -141,10 +148,10 @@ def _read_queue(request: urllib.request.Request, deadline: float | None) -> obje
             transient = exc.code >= 500 or exc.code == 429 or (exc.code == 403 and wait is not None)
         except (json.JSONDecodeError, UnicodeDecodeError):
             detail, transient = "Mergify queue lookup returned no valid JSON", True
-        except (OSError, http.client.IncompleteRead) as exc:
-            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        except (OSError, IncompleteRead) as exc:
+            reason = exc.reason if isinstance(exc, URLError) else exc
             detail = f"Mergify queue transport failed: {reason}"
-            transient = not isinstance(reason, ssl.SSLCertVerificationError)
+            transient = not isinstance(reason, SSLCertVerificationError)
         if not transient:
             raise MergifyError(detail)
         if not retry:
@@ -259,11 +266,13 @@ def configured(repo: str, branch: str, queue: str, deadline: float | None = None
 
 
 def dequeue(repo: str, number: int) -> None:
+    from urllib.error import HTTPError
+
     request = _api_request(repo, f"/merge-queue/pull/{number}/dequeue", "POST")
     try:
         with _open(request):
             return
-    except urllib.error.HTTPError as exc:
+    except HTTPError as exc:
         raise MergifyError(f"Mergify dequeue failed with HTTP {exc.code}") from exc
     except OSError as exc:
         raise MergifyError("Mergify dequeue transport failed") from exc
