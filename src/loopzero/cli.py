@@ -477,8 +477,8 @@ _CHECKS_END = "<!-- loopzero:checks:end -->"
 _TASK_EVIDENCE = re.compile(r"^## (Validation|Review)[ \t]*(?:\n|\Z).*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
 
 
-def _live_heading_text(body: str) -> str:
-    # Keep character offsets while hiding headings inside Markdown fences.
+def _outside_fences(body: str) -> str:
+    # Keep character offsets while hiding Markdown fences and their contents.
     return re.sub(r"^ {0,3}((`|~)\2{2,}+)[^\n]*\n.*?(?:^ {0,3}\1\2*[ \t]*$|\Z)",
                   lambda match: " " * len(match[0]), body, flags=re.MULTILINE | re.DOTALL)
 
@@ -487,22 +487,24 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = existing.replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", _live_heading_text(body), re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", _outside_fences(body), re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = body[match.start(1):match.end(1)]
-    before, start, after = content.partition(_CHECKS_START)
-    if start or _CHECKS_END in content:
-        _, end, suffix = after.partition(_CHECKS_END)
+    before, start, after = match[1].partition(_CHECKS_START)
+    if start or _CHECKS_END in match[1]:
+        middle, end, suffix = after.partition(_CHECKS_END)
         if not end or _CHECKS_END in before or _CHECKS_END in suffix or _CHECKS_START in after:
             raise CliError("malformed loopzero checks block: fix the marker pair in Validation in the PR description on GitHub")
-        content = before + block + suffix
+        content = content[:len(before)] + block + content[len(before + start + middle + end):]
     else:
         # Replace only our placeholder, retaining behavioral evidence.
-        content = re.sub(
+        placeholders = re.finditer(
             r"^\((?:filled by `loopzero check`|no `loopzero check` run recorded)\)\n?",
-            "", content, flags=re.MULTILINE,
+            match[1], flags=re.MULTILINE,
         )
+        for placeholder in reversed(list(placeholders)):
+            content = content[:placeholder.start()] + content[placeholder.end():]
         content = block + "\n" + ("\n" + content.lstrip("\n") if content.strip() else "\n")
     return _validate_pr_body_size(body[:match.start()] + "## Validation\n" + content + body[match.end():])
 
@@ -516,27 +518,34 @@ def _validate_pr_body_size(body: str) -> str:
 
 
 def _seed_task_evidence(task: str, body: str) -> str:
-    present = {section[1] for section in _TASK_EVIDENCE.finditer(body)}
-    missing = [section[0].rstrip() for section in _TASK_EVIDENCE.finditer(task) if section[1] not in present]
+    present = {section[1] for section in _TASK_EVIDENCE.finditer(_outside_fences(body))}
+    missing = [task[section.start():section.end()].rstrip()
+               for section in _TASK_EVIDENCE.finditer(_outside_fences(task)) if section[1] not in present]
     return "\n\n".join([body.rstrip(), *missing]) + "\n" if missing else body
+
+
+def _without_task_evidence(task: str) -> str:
+    for section in reversed(list(_TASK_EVIDENCE.finditer(_outside_fences(task)))):
+        task = task[:section.start()] + task[section.end():]
+    return task
 
 
 def _sync_task_narrative(task: str, existing: str) -> str:
     """Explicit pr updates task-owned prose; live evidence stays authoritative."""
-    pattern = re.compile(r"^## ([^\n]+)\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    pattern = re.compile(r"^## ([^\n]*)(?:\n|\Z).*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
     existing = existing.replace("\r\n", "\n")
-    owned = {m.group(1): m.group() for m in pattern.finditer(task)
+    task_prose = _outside_fences(task)
+    owned = {m[1]: task[m.start():m.end()] for m in pattern.finditer(task_prose)
              if m.group(1) not in {"Validation", "Review"}}
-    content = existing[first.start():] if (first := pattern.search(existing)) else ""
-    prefix = task[:first.start()] if (first := pattern.search(task)) else task
+    prefix = task[:first.start()] if (first := pattern.search(task_prose)) else task
 
     def replace(match: re.Match[str]) -> str:
-        section = match.group()
+        section = existing[match.start():match.end()]
         replacement = owned.pop(match.group(1), section)
         trailing = section[len(section.rstrip()):]
         return replacement.rstrip() + trailing
 
-    content = pattern.sub(replace, content)
+    content = "".join(map(replace, pattern.finditer(_outside_fences(existing))))
     for section in owned.values():
         content = content.rstrip() + "\n\n" + section
     return prefix + content.lstrip("\n")
@@ -558,7 +567,7 @@ def _require_pr_details(wt: Path, task: str) -> None:
 def _append_review(body: str, result: ReviewResult) -> str:
     """Append one compact review record under Review, replacing its placeholder."""
     line = f"- {result.kind}, {result.family}, {result.head[:12]}, {result.verdict}"
-    match = re.search(r"^## Review\n(.*?)(?=^## |\Z)", _live_heading_text(body), re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Review\n(.*?)(?=^## |\Z)", _outside_fences(body), re.DOTALL | re.MULTILINE)
     if not match:
         return f"{body.rstrip()}\n\n## Review\n{line}\n"
     existing = re.sub(r"^\(filled by `loopzero review`\)[ \t]*(?:\n+|$)", "", body[match.start(1):match.end(1)]).rstrip()
@@ -689,7 +698,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_clean(wt)
     task = worktree.task_text(wt).replace("\r\n", "\n")
     _require_pr_details(wt, task)
-    pr = github.merged_pr_for_branch(config.repo, branch)
+    pr = github.merged_pr_for_branch(config.repo, branch, base=config.base_branch)
     if pr is not None:
         raise CliError(f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
                        "run `loopzero start <new-task-slug>` from the main checkout")
@@ -715,7 +724,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _git(wt, "config", f"branch.{git_branch}.remote", "origin")
     _git(wt, "config", f"branch.{git_branch}.merge", f"refs/heads/{git_branch}")
     if pr is None:
-        prose = _TASK_EVIDENCE.sub("", task)
+        prose = _without_task_evidence(task)
         pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), prose)
     with github.pr_lock(config.repo, pr.number):
         live = github.pr_view(config.repo, pr.number)
