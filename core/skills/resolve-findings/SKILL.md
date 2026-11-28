@@ -27,6 +27,8 @@ Fix new critical defects in this batch or file a follow-up issue for non-securit
 defects. For security defects, follow [security-review](../security-review/SKILL.md)
 and send evidence and any follow-up privately to the requester.
 
+If a base conflict must be resolved after review, merge the configured base into
+the task branch to preserve the reviewed commit for the delta.
 Before requesting the delta, compare the full repair with the primary-reviewed
 head. Identify affected callers and guarantees for each repaired behavior. Use
 existing test seams to exercise the failing case and any success, failure or
