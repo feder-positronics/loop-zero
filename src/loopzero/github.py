@@ -1506,14 +1506,14 @@ def merge(repo: str, number: int, strategy: str, head_sha: str, base: str) -> st
         return None
     if sha := merged_sha(repo, number, expected_head=head_sha, expected_base=base, check_hold=True):
         return sha
-    timeout = read_timeout(300)
+    timeout = read_timeout()
     write_error = None
     try:
-        _gh(*argv, timeout=timeout if strategy == "queue" else 300)
+        _gh(*argv, timeout=timeout if strategy == "queue" and math.isfinite(timeout) else 300)
     except (GhError, ProcTimeout, OSError) as exc:
-        if isinstance(exc, ProcTimeout) and strategy == "queue" and _read_scope.get() is not None:
+        if isinstance(exc, ProcTimeout) and strategy == "queue" and math.isfinite(timeout):
             raise MergeFailed(
-                ("gh", *argv), "Queue submission timed out. Submission state is unknown. Run loopzero status before retrying.",
+                ("gh", *argv), f"PR #{number} queue submission timed out. Submission state is unknown. Run `loopzero status` before retrying.",
             ) from exc
         write_error = exc
     try:

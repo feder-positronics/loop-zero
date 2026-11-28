@@ -5359,7 +5359,7 @@ def merge_wait(monkeypatch, capsys, wait, fake):
 
 
 @pytest.mark.parametrize("wait, latency, state, expected", [
-    (1, 3.0, "MERGED", 3), (1, 0.25, "MERGED", 0), (0, 0.0, "MERGED", 0), (1, 0.0, "CLOSED", 1),
+    (1, 3.0, "MERGED", 3), (400, 0.25, "MERGED", 0), (0, 0.0, "MERGED", 0), (1, 0.0, "CLOSED", 1),
     (5, 20.0, "SUBMIT", 1),
 ])
 def test_merge_queue_landing_within_budget(
@@ -5382,8 +5382,8 @@ def test_merge_queue_landing_within_budget(
         return None
     code, out, err, cleaned = merge_wait(monkeypatch, capsys, wait, landing)
     assert (code, bool(cleaned), write_timeouts) == (expected, expected == 0, [wait or 300]), out + err
-    assert budgets == ([1.0, 1.0, 0.5] if state == "CLOSED" else [wait or 120.0] * (0 if state == "SUBMIT" else 2))
-    assert_contains(err, *{"CLOSED": ("closed without a verified merge",), "SUBMIT": ("state is unknown. Run loopzero status",)}.get(state, ()))
+    assert budgets == ([1.0, 1.0, 0.5] if state == "CLOSED" else [min(wait or 120, 120)] * (0 if state == "SUBMIT" else 2))
+    assert_contains(err, *{"CLOSED": ("closed without a verified merge",), "SUBMIT": ("state is unknown. Run `loopzero status`",)}.get(state, ()))
     assert (not err, "timed out waiting for the merge queue" in out) == (expected != 1, expected == 3)
 
 
