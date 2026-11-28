@@ -212,9 +212,9 @@ def test_full_native_attribution_and_fatal_controls(recorded_native, mutation):
         events.insert(1, events.pop(-2))
     elif mutation == "terminal_failure":
         events.insert(-1, {"type": "turn.failed"})
-    if mutation == "wrong_final":
+    elif mutation == "wrong_final":
         events[-2]["item"]["text"] = '{"verdict":"request_changes","findings":[]}'
-    if mutation == "mixed_session":
+    elif mutation == "mixed_session":
         events[2]["session_id"] = "another-session"
     command_edits = {
         "wrong_repo": (str(repo), "/wrong/repo"),
@@ -223,6 +223,7 @@ def test_full_native_attribution_and_fatal_controls(recorded_native, mutation):
         "moving_range": (context["base"], "origin/main"),
     }
     output_edits = {"wrong_head": (result.head, "a" * 40), "wrong_diff": ("PRIVATE_CANARY", "FAKE_CANARY")}
+    command_formats = {"quoted_command": "'{}'", "ambiguous_shell": "{} ; echo ignored", "echo": "echo {}"}
     for event in events:
         item = event.get("item", {})
         if item.get("type") != "command_execution":
@@ -231,12 +232,8 @@ def test_full_native_attribution_and_fatal_controls(recorded_native, mutation):
             item["id"] = "same"
         elif mutation in command_edits:
             item["command"] = item["command"].replace(*command_edits[mutation])
-        elif mutation == "quoted_command":
-            item["command"] = "'" + item["command"] + "'"
-        elif mutation == "ambiguous_shell":
-            item["command"] += " ; echo ignored"
-        elif mutation == "echo":
-            item["command"] = "echo " + item["command"]
+        elif mutation in command_formats:
+            item["command"] = command_formats[mutation].format(item["command"])
         elif mutation == "failed" and event["type"] == "item.completed":
             item["exit_code"] = 1
         elif mutation == "unmatched" and event["type"] == "item.started":
@@ -245,13 +242,8 @@ def test_full_native_attribution_and_fatal_controls(recorded_native, mutation):
             item["aggregated_output"] = item["aggregated_output"].replace(*output_edits[mutation])
     altered = dataclasses.replace(result, raw=json.dumps(data))
     if mutation in (
-        "fatal_before",
-        "fatal_after",
-        "missing_terminal",
-        "wrong_final",
-        "mixed_session",
-        "after_verdict",
-        "terminal_failure",
+        "fatal_before", "fatal_after", "missing_terminal", "wrong_final",
+        "mixed_session", "after_verdict", "terminal_failure",
     ):
         assert_invalid_native(altered)
     else:
@@ -362,11 +354,9 @@ def test_invalid_review_evidence_is_rejected(published_native, mutation):
         "after_prose": without_header + "\n" + line,
         "fence": without_header + "\n```\n" + line + "\n```",
     }
-    if mutation == "invalid_event_offset":
-        update_evidence(value, ("calls", 0, "diff_event", "end"), value["raw_bytes"] + 1)
-        changed = rendered.replace(line, packed(value))
-    elif isinstance(mutation, tuple):
-        update_evidence(value, *mutation)
+    edit = (("calls", 0, "diff_event", "end"), value["raw_bytes"] + 1) if mutation == "invalid_event_offset" else mutation
+    if isinstance(edit, tuple):
+        update_evidence(value, *edit)
         changed = rendered.replace(line, packed(value))
     elif mutation == "duplicate_key":
         payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
