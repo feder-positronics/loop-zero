@@ -338,10 +338,14 @@ def issue_progress(inputs, repo, issue, end):
             pull = f"repos/{match[1]}/pulls/{match[2]}"
             commits = pages(inputs, f"{pull}/commits")
             comments = pages(inputs, f"repos/{match[1]}/issues/{match[2]}/comments")
-            if comments is None or not _complete_pr_commits(inputs, pull, commits):
+            reviews = pages(inputs, f"{pull}/reviews")
+            inline_comments = pages(inputs, f"{pull}/comments")
+            if (comments is None or reviews is None or inline_comments is None
+                    or not _complete_pr_commits(inputs, pull, commits)):
                 raise ValueError("linked PR activity unavailable or truncated")
             dates += [timestamp(item["commit"]["committer"]["date"]) for item in commits]
-            dates += [timestamp(item["created_at"]) for item in comments]
+            dates += [timestamp(item["created_at"]) for item in comments + inline_comments]
+            dates += [timestamp(item["submitted_at"]) for item in reviews if item["state"] != "PENDING"]
     return max(date for date in dates if date < end)
 
 

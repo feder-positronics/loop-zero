@@ -8,6 +8,7 @@ from scripts import retro_metrics
 REPO = "example/sample"
 SINCE = "2026-05-28T00:00:00Z"
 END = "2026-05-29T00:00:00Z"
+RECENT = "2026-05-28T23:00:00Z"
 
 
 def issue(number, created, closed=None, reason=None):
@@ -16,7 +17,7 @@ def issue(number, created, closed=None, reason=None):
 
 @pytest.fixture
 def sources(tmp_path, monkeypatch, request):
-    commit_rows, commit_total = getattr(request, "param", (1, 1))
+    commit_rows, commit_total, *review_data = getattr(request, "param", (1, 1))
     rows = {
         "pulls": [dict(issue(n, created, closed), merged_at=closed)
                   for n, created, closed in [(1, "2026-05-26T06:00:00Z", SINCE), (2, SINCE, END)]],
@@ -29,21 +30,20 @@ def sources(tmp_path, monkeypatch, request):
         "issues/4/timeline": [{"event": event, "created_at": time} for event, time in [
             ("labeled", "2026-05-28T23:45:00Z"), ("commented", "2026-05-28T06:00:00Z"), ("commented", END),
         ]],
-        "issues/5/timeline": [{"event": "closed", "created_at": "2026-05-10T00:00:00Z"},
-                              {"event": "reopened", "created_at": "2026-05-20T00:00:00Z"}, {
+        "issues/5/timeline": [dict(event=kind, created_at=f"2026-05-{day}T00:00:00Z")
+                              for kind, day in [("closed", 10), ("reopened", 20)]] + [{
             "event": "cross-referenced", "created_at": "2026-05-26T01:00:00Z",
             "source": {"issue": {"created_at": "2026-05-26T00:00:00Z",
                                  "pull_request": {"url": f"https://api.github.com/repos/{REPO}/pulls/3"}}},
         }],
         "pulls/3": {"commits": commit_total},
-        "pulls/3/commits": [{"commit": {"committer": {"date": "2026-05-28T21:00:00Z"}}}] * commit_rows,
-        "issues/3/comments": [],
+        "pulls/3/commits": [{"commit": {"committer": {"date": SINCE if hasattr(request, "param") else RECENT}}}] * commit_rows,
+        **{path: [] for path in ("issues/3/comments", "pulls/3/reviews", "pulls/3/comments")},
+        **(review_data[0] if review_data else {}),
     }
     if commit_rows == 0:
-        rows["p0"] = [issue(1, SINCE)]
-        if commit_total is None:
-            del rows["orders"]
-            rows["orders_open"] = []
+        rows.update(p0=[issue(1, SINCE)], orders_open=[])
+        del rows["orders"]
     calls = []
 
     def collect(argv, *, input, **kwargs):
@@ -63,10 +63,9 @@ def sources(tmp_path, monkeypatch, request):
                 path = query.split("labels=")[1].split("&")[0]
                 if path == "orders" and "state=open" in query:
                     path = "orders_open"
-            if path not in rows:
+            if (data := rows.get(path)) is None:
                 raise subprocess.CalledProcessError(1, argv)
-            data = rows[path]
-            if path == "pulls/3/commits":
+            if isinstance(data, list):
                 offset = (int(query.rsplit("=", 1)[1]) - 1) * 100
                 data = data[offset:offset + 100]
         return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
@@ -110,12 +109,10 @@ def test_record_replay_and_weekly_window(sources, record):
     assert [week["open_p0"] for week in report["trend_4_weeks"]] == [1, 0, 1, 2]
     assert report["trend_4_weeks"][0]["since"] == "2026-05-01T00:00:00Z"
     assert report["previous_7_days"]["until"] == report["last_7_days"]["since"]
-    assert report["weekly_sample"]["items"] == [
-        {"kind": "merged_control", "number": 1},
-        {"kind": "slowest_accepted", "number": 8},
-        {"kind": "oldest_open_order", "number": 5},
-    ]
-    assert report["weekly_sample"]["shortfall"] == 3
+    sample = report["weekly_sample"]
+    assert [(item["kind"], item["number"]) for item in sample["items"]] == [
+        ("merged_control", 1), ("slowest_accepted", 8), ("oldest_open_order", 5)]
+    assert sample["shortfall"] == 3
     assert sum(call == ["host-adapter"] for call in calls) == 1 and len(calls) == 9
     assert "Previous 7d" in stderr
 
@@ -129,7 +126,6 @@ def test_weekly_sample_reserves_controls_and_deduplicates_stalled_order():
     sample = retro_metrics.weekly_sample(REPO, start, end, pulls, orders, orders, alerts)
     assert sample == retro_metrics.weekly_sample(
         REPO, start, end, pulls[::-1], orders[::-1], orders[::-1], alerts)
-    assert len(sample["items"]) == 8
     assert sample["shortfall"] == 0
     assert all(item["kind"] == "merged_control" for item in sample["items"][:2])
     assert [item["number"] for item in sample["items"][2:]] == [8, 7, 1, 2, 3, 4]
@@ -175,16 +171,18 @@ def test_invalid_band_is_usage_error(capsys):
     assert "ordered limits" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(("sources", "detail_reads", "stalled"), [
-    ((101, None), 0, True),
-    ((250, 250), 1, True),
-    ((250, 251), 1, False),
-    ((250, None), 1, False),
+@pytest.mark.parametrize(("sources", "detail_reads", "verdict"), [
+    ((101, None), 0, "stalled"), ((250, 250), 1, "stalled"),
+    ((250, 251), 1, "unknown"), ((250, None), 1, "unknown"),
+    ((1, 1, {"pulls/3/reviews": [{"state": "CHANGES_REQUESTED", "submitted_at": RECENT}]}), 0, "active"),
+    ((1, 1, {"pulls/3/comments": [{"created_at": RECENT}]}), 0, "active"),
+    ((1, 1, {"pulls/3/reviews": None}), 0, "unknown"),
+    ((1, 1, {"pulls/3/comments": None}), 0, "unknown"),
 ], indirect=["sources"])
-def test_stalled_issue_checks_linked_pr_commit_count_at_limit(sources, detail_reads, stalled, record):
+def test_stalled_issue_checks_linked_pr_activity(sources, detail_reads, verdict, record):
     calls, _ = sources
-    report, _ = record("--alerts", "--stall-hours", "1")
+    report, _ = record("--alerts", "--stall-hours", "24")
     alerts = report["alerts"]
-    assert any(a["kind"] == "stalled_p0" and a["issue"] == 5 for a in alerts) == stalled
-    assert any(a.get("source") == "p0/#5/activity" for a in alerts) == (not stalled)
+    assert any(a["kind"] == "stalled_p0" and a["issue"] == 5 for a in alerts) == (verdict == "stalled")
+    assert any(a.get("source") == "p0/#5/activity" for a in alerts) == (verdict == "unknown")
     assert sum(call[-1] == f"repos/{REPO}/pulls/3" for call in calls) == detail_reads
