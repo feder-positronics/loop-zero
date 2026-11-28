@@ -15,7 +15,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/check_architecture_docs.
 @pytest.fixture
 def base(git_repo):
     for name in ("docs/ARCHITECTURE.md", "docs/README.md", "README.md", "AGENTS.md",
-                 "core/CONTRACT.md"):
+                 "core/CONTRACT.md", "workflow.toml"):
         path = git_repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# Current\n")
@@ -30,7 +30,7 @@ def run(repo, base, *args):
 
 
 @pytest.mark.parametrize("sync", ["missing", "guide", "trailer", "empty", "short", "squash",
-                                  "untracked-non-utf8", "staged-non-utf8"])
+                                  "untracked-non-utf8", "staged-non-utf8", "rename"])
 def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, sync):
     if sync.endswith("non-utf8"):
         if sys.platform != "linux":
@@ -42,7 +42,11 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
         done = run(git_repo, base)
         assert done.returncode == 0, done.stderr
     git(git_repo, "checkout", "-b", "authored")
-    (git_repo / "core/CONTRACT.md").write_text("# New authority\n")
+    if sync == "rename":
+        git(git_repo, "mv", "workflow.toml", "retired.toml")
+        git(git_repo, "commit", "-m", "Move watched contract")
+    else:
+        (git_repo / "core/CONTRACT.md").write_text("# New authority\n")
     if sync == "guide":
         (git_repo / "docs/ARCHITECTURE.md").write_text("# New authority explained\n")
     if sync in {"trailer", "empty", "short", "squash"}:
@@ -65,12 +69,13 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
         assert run(git_repo, base, "--links-only").returncode == 1
 
 
-@pytest.mark.parametrize("target", ["absent.md", "../README.md#absent"])
-def test_broken_local_link_fails_even_with_guide_update(git_repo, base, target):
-    (git_repo / "docs/ARCHITECTURE.md").write_text(f"# Current\n[reference]({target})\n")
+@pytest.mark.parametrize("target", ["absent.md", "../README.md#absent", "<Design (legacy).md>", "#explicit"])
+def test_local_links_even_with_guide_update(git_repo, base, target):
+    (git_repo / "docs/Design (legacy).md").touch()
+    (git_repo / "docs/ARCHITECTURE.md").write_text(f'<a id="explicit"></a>\n[reference]({target})\n')
     done = run(git_repo, base)
-    assert done.returncode == 1
-    assert "invalid local" in done.stderr
+    assert done.returncode == int("absent" in target), done.stderr
+    assert ("invalid local" in done.stderr) == ("absent" in target)
 
 
 def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo, base):
