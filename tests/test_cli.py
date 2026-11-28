@@ -4356,26 +4356,28 @@ REPLY_ACCEPTED = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id":
 THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
 
 
-@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "retry", "unknown", "missing", "missing-required"])
-def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh: FakeGh, capsys, monkeypatch, outcome) -> None:
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "outdated", "inherited", "denied", "applied", "retry", "unknown", "missing", "missing-required"])
+def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh: FakeGh, capsys, monkeypatch, outcome, head) -> None:
     if outcome == "missing-required":
         publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', 'required_ci = ["Loop-zero Eligibility"]'))
     sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
     finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
     listing, backoffs = threads_json({**finding_pr, "path": "src/Łódź.py"}), []
-    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
-               listing if outcome == "remaining" else threads_json())
+    outdated = threads_json(dict(_finding_thread("a1b2c3d4", "a" * 40), isOutdated=True))
+    remaining = outdated if outcome in {"outdated", "inherited"} else {"remaining": listing}.get(outcome, threads_json())
+    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED, remaining)
+    gh.respond(reviews_key(), [rev("a" * 40 if outcome == "inherited" else head, "primary")])
     transient = outcome in {"applied", "retry", "unknown"}
     error_status = 503 if transient else {"denied": 403, "missing": 404, "missing-required": 404}.get(outcome)
     gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": f"HTTP {error_status}"} if error_status else "", "")
     monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
-    runs = [] if outcome == "retry" else [{"display_title": "any title"}]
+    runs = [{"display_title": f"Refresh eligibility for PR #{8 if outcome == 'retry' else 7}"}]
     monkeypatch.setattr(github.time, "time", lambda: 1795640554)
     endpoint = ELIGIBILITY_DISPATCH.removesuffix("/dispatches")
     gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs) + (outcome == "unknown")})
     title = r"\u0141\xf3d\u017a" if outcome == "refreshed" else "Łódź"
     expect_cli(capsys, 0, "resolve", stderr="", stdout=f"0b9b59e7  important  src/{title}.py:3  {title}\n")
-    assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
+    assert not any(ELIGIBILITY_DISPATCH in c["argv"] for c in gh.calls)
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
     assert out.splitlines()[0] == f"resolved 0b9b59e7: {title}"
     calls = [c["argv"] for c in gh.calls
@@ -4383,7 +4385,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
     dispatches = [c["argv"] for c in gh.calls if ELIGIBILITY_DISPATCH in c["argv"]]
-    assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "retry": 2}.get(outcome, 1)
+    assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "inherited": 0, "retry": 2}.get(outcome, 1)
     assert backoffs == ([5] if transient else [])
     if outcome == "missing-required":
         assert code == 1 and "Check that eligibility.yml exists" in err and "before retrying" not in err
@@ -4392,13 +4394,12 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
         assert f"gh api -X POST {ELIGIBILITY_DISPATCH} -f ref=main -f 'inputs[pr]=7'" in err
     else:
         assert (code, err) == (0, "")
-        status = {"remaining": [], "missing": ["Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete."]}
+        status = {"remaining": [], "inherited": [], "missing": ["Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete."]}
         assert out.splitlines()[1:] == status.get(outcome, [ELIGIBILITY_REQUESTED])
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
 def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, monkeypatch, cut):
-    node = finding_pr
     reply = "Fixed the loop bound."
     accepted = {"reply": 0, "resolution": 0}
     original_gh, original_json = github._gh, github._gh_json
@@ -4409,11 +4410,9 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
         if "viewer {" in query:
             return {"data": {"viewer": {"login": LOGIN}}}
         if "reviewThreads(" in query:
-            node["isResolved"] = bool(accepted["resolution"])
-            node["comments"]["pageInfo"] = {
-                "hasNextPage": bool(accepted["reply"]), "endCursor": "ROOT",
-            }
-            return threads_json(node)
+            finding_pr["isResolved"] = bool(accepted["resolution"])
+            finding_pr["comments"]["pageInfo"] = {"hasNextPage": bool(accepted["reply"]), "endCursor": "ROOT"}
+            return threads_json(finding_pr)
         if "comments(first: 100" in query:
             assert kwargs.get("token") == ""
             if "after=ROOT" in args:

@@ -1202,7 +1202,7 @@ def test_eligibility_dispatch_retry_refuses_changed_head(monkeypatch):
     monkeypatch.setattr(github, "_eligibility_dispatched", lambda *_args: True)
 
     with pytest.raises(github.GhError, match="the PR or head changed after resolution"):
-        github.refresh_eligibility(REPO, pr, "lz/task", "main", PUBLISHERS)
+        github.refresh_eligibility(REPO, pr, "lz/task", "main", lambda: False)
 
 
 @pytest.mark.parametrize("args, attempts, error", [
