@@ -5291,7 +5291,7 @@ def test_queue_wait_budget_boundaries(monkeypatch):
     assert cli._queue_wait(1, poll, bounded=True) == "e" * 40  # a landing verified in time survives scope exit
     monkeypatch.setattr(github, "merge", lambda *_: setattr(clock, "now", 50))
     monkeypatch.setattr(cli, "_wait_for_merge", lambda _config, _pr, timeout: budgets.append(timeout))
-    cli._merge_and_follow(SimpleNamespace(repo=REPO, merge_strategy="queue"), pr, 60, 60)
+    cli._merge_and_follow(SimpleNamespace(repo=REPO, merge_strategy="queue", base_branch="main"), pr, 60, 60)
     assert budgets == [10]  # the follow budget is what the merge write left
     closed = [github.ClosedUnmerged(("gh",), "closed")]
     monkeypatch.setattr(github, "merged_sha", lambda *_args, **_kwargs: "e" * 40)
