@@ -315,7 +315,7 @@ def test_recovery_transport_retries_only_within_deadline(monkeypatch, failure, b
     error = github.GhError if failure == "transient" else _proc.ProcTimeout
     with pytest.raises(error), github.bounded_reads(10 + budget, retry=True):
         github.mark_ready("acme/widgets", 7) if failure == "write" else github.api_get("repos/acme/widgets/pulls/7/reviews")
-    assert (timeouts, sleeps) == (([10, 5], [5]) if budget == 10 else ([120 if failure == "write" else 0.5], []))
+    assert (timeouts, sleeps) == (([10, 5], [5]) if budget == 10 else ([0.5], []))
 
 
 @pytest.mark.parametrize("optional", ["junk", [], [{"model": "request"}] * 5])

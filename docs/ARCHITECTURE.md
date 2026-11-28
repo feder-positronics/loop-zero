@@ -173,7 +173,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    budget covers the first readiness read, the live PR reread before draft activation,
    and revalidation after taking a PR out of draft.
    Before the first draft activation it rereads the PR and refuses a moved head, changed target, closed state or hold.
-   The live REST detail supplies the node ID for the GraphQL activation mutation.
+   The live REST detail supplies the node ID for the GraphQL activation mutation. Without a node ID, or after an
+   unbounded transient failure, the GitHub CLI fallback checks the draft state before attempting activation.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in
    [cli.py](../src/loopzero/cli.py)), the check blocks readiness throughout,
@@ -361,8 +362,10 @@ one state transition should not become repeated writes that trigger policy CI.
 GitHub reads and the idempotent thread resolution mutation retry transient
 failures once after five seconds and honor a secondary limit’s Retry-After
 within the read budget. An active waiter can resume a fresh poll after a
-verified hourly reset within the original deadline. Mergify
-queue reads retry once after two seconds, subject to Retry-After and the
+verified hourly reset within the original deadline. A bounded draft activation
+reconciles an ambiguous GitHub reply by reading the exact PR again. An unchanged,
+eligible draft gets one backed-off attempt within the same budget. Queue follow
+pins the PR target branch along with its source head. Mergify queue reads retry once after two seconds, subject to Retry-After and the
 remaining queue wait budget. Calls without a deadline allow less than five
 seconds of backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).

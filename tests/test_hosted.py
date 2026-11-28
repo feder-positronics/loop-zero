@@ -118,9 +118,8 @@ def check_source(publisher, states, *, exit_code=0, error=None, match=None):
 
 
 @pytest.mark.parametrize("case,blocker,status", [
-    ("COMMENTED", "", "success"), ("APPROVED", "", "success"),
-    ("absent", "", "pending"), ("untrusted", "", "pending"),
-    ("stale", "", "pending"), ("malformed", "", "pending"),
+    ("COMMENTED", "", "success"), ("APPROVED", "", "success"), ("absent", "", "pending"),
+    ("untrusted", "", "pending"), ("stale", "", "pending"), ("malformed", "", "pending"),
     ("revoked", "", "pending"), ("absent", "important", "failure"),
     ("absent", "conflict", "failure"), ("COMMENTED", "important", "failure"),
     ("APPROVED", "unknown", "pending"), ("APPROVED", "settles", "success"),
@@ -147,9 +146,11 @@ def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case
     assert delays == {"unknown": [2, 4, 8], "settles": [2]}.get(blocker, [])
     if status == "success":
         assert sum(c["argv"][1] != "graphql" for c in publisher.calls) <= 5 + int(blocker == "settles")
-    if status == "pending":
-        expected = github.MERGEABILITY_PENDING if blocker == "unknown" else "Awaiting trusted review of current source head"
-        assert statuses[-1]["description"] == expected
+    if blocker == "conflict":
+        assert github.MISSING_REVIEW_REASON in statuses[-1]["description"]
+    elif status == "pending":
+        assert statuses[-1]["description"] == (github.MERGEABILITY_PENDING if blocker == "unknown"
+                                               else "Awaiting trusted review of current source head")
 
 
 @pytest.mark.parametrize("change,reason", [
@@ -187,15 +188,12 @@ hosted.eligibility.evaluate = evaluate
 github.commit_status = publish
 raise SystemExit(hosted.main())
 """
-    def statuses():
-        return [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c]
-
-    stopped = subprocess.run([sys.executable, "-c", script, phase], timeout=10)
-    assert stopped.returncode == -signal.SIGTERM
-    assert statuses() == ["pending", expected]
-
-    subprocess.run([sys.executable, "-c", script, "retry"], timeout=10, check=True)
-    assert statuses() == ["pending", expected, "pending", "success"]
+    for mode, exit_code, states in [
+        (phase, -signal.SIGTERM, ["pending", expected]),
+        ("retry", 0, ["pending", expected, "pending", "success"]),
+    ]:
+        assert subprocess.run([sys.executable, "-c", script, mode], timeout=10, check=False).returncode == exit_code
+        assert [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c] == states
 
 
 @pytest.mark.parametrize("candidate", [False, True])
@@ -300,7 +298,7 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
 
 
 @pytest.mark.parametrize("error,states", [
-    ("before", []), ("config", []), ("head", ["pending", "failure"]),
+    ("before", []), ("config", []), ("no-publishers", []), ("head", ["pending", "failure"]),
     ("metadata", ["pending", "failure"]), ("merged", ["pending"]),
     ("api", ["pending"]), ("recover", ["pending", "success"]),
     ("publication", ["pending", "pending"]), ("pages", ["pending", "failure"]),
@@ -335,6 +333,8 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
         for number in (1, 2):
             publisher.respond(f"{reviews} " + ("--method GET" if number == 1 else f"page={number}"), page)
         exception, message = github.GhError, "GitHub repeated a full page"
+    elif error == "no-publishers":
+        Path("workflow.toml").write_text(f'[repo]\nname="{REPO}"\n')
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
     check_source(publisher, states, error=None if error == "merged" else exception, match=message)
@@ -348,14 +348,12 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     ("poll_drift", CandidateRaceError, "changed during mergeability polling"),
     ("hold", None, "source #101: PR #101 has a merge-authority hold"),
     ("race", CandidateRaceError, "metadata changed"),
-    ("malformed", CandidateError, "invalid payload"),
-    ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
-    ("interrupt", KeyboardInterrupt, ""), ("api", None, ""), ("mergify", None, ""),
-    ("mergify_auth", hosted.mergify.MergifyError, "HTTP 401"),
+    ("malformed", CandidateError, "invalid payload"), ("head", hosted.LoopZeroError, "head changed"),
+    ("publisher", CandidateError, "not open"), ("interrupt", KeyboardInterrupt, ""),
+    ("api", None, ""), ("mergify", None, ""), ("mergify_auth", hosted.mergify.MergifyError, "HTTP 401"),
     ("manual", hosted.LoopZeroError, "pull_request_target creation"), ("metadata", None, ""),
-    ("stale", hosted.LoopZeroError, "head is no longer current"),
-    ("untrusted", CandidateError, "head event was not sent"),
-])
+    *((case, hosted.LoopZeroError, "head is no longer current") for case in ("stale", "head-shape")),
+    ("untrusted", CandidateError, "head event was not sent")])
 def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatch, capsys, request, case, error, message):
     event = candidate_event()
     event["action"], event["sender"]["id"] = (
@@ -379,6 +377,8 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
     if case == "malformed":
         values["/repos/owner/repo/pulls/101"] = []
+    if case == "head-shape":
+        del event["pull_request"]["head"]
     prepare_event(tmp_path, monkeypatch, "owner/repo", {"inputs": {"pr": "900"}} if case == "manual" else event, base=branch)
     rest_calls, sleeps = [], []
 
@@ -441,9 +441,9 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
                             if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     with pytest.raises(error, match=message or None) if error else nullcontext():
         assert hosted.main() == int(case in {"api", "mergify", "pending_mergeability"})
-    states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
-              "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
-    states |= {"settled_mergeability": ["pending", "success"], "pending_mergeability": ["pending"]}
+    states = {case: ["pending", "success"] for case in ("valid", "trunk", "settled_mergeability")}
+    states.update({case: ["pending"] for case in ("interrupt", "api", "mergify", "pending_mergeability")})
+    states.update({case: [] for case in ("manual", "metadata", "stale", "head-shape")})
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
     if case in {"settled_mergeability", "pending_mergeability"}:
         assert mergeability_sleeps[:3] == ([2] if case == "settled_mergeability" else [2, 4, 8])

@@ -66,8 +66,7 @@ def test_ancestor_review_must_itself_be_eligible_at_its_commit(monkeypatch):
 
 @pytest.fixture
 def base_merge(git_repo, monkeypatch):
-    """A reviewed source commit, then a clean merge of main into it; returns (reviewed, head, base)."""
-    def build(*, unrelated_root=False, pr_head=None, pr_base_ref="main"):
+    def build(*, unrelated_root=False, pr_head=None, pr_base_ref="main", pr_base_sha=None):
         git(git_repo, "switch", "-qc", "source")
         git(git_repo, "commit", "-qm", "reviewed source", "--allow-empty")
         reviewed = git(git_repo, "rev-parse", "HEAD").strip()
@@ -83,7 +82,7 @@ def base_merge(git_repo, monkeypatch):
         git(git_repo, "switch", "-q", "source")
         git(git_repo, "merge", "-q", "--no-edit", "main")
         head = git(git_repo, "rev-parse", "HEAD").strip()
-        pr = {"head": {"sha": pr_head or head}, "base": {"ref": pr_base_ref, "sha": base}}
+        pr = {"head": {"sha": pr_head or head}, "base": {"ref": pr_base_ref, "sha": pr_base_sha or base}}
         monkeypatch.setattr(github, "api_get", lambda path: pr)
         monkeypatch.setattr(eligibility.candidate, "fetched_git",
                             lambda *_: nullcontext(lambda *args, **_: git(git_repo, *args)))
@@ -93,6 +92,7 @@ def base_merge(git_repo, monkeypatch):
 
 @pytest.mark.parametrize("change", [
     {"unrelated_root": True}, {"pr_head": OTHER}, {"pr_base_ref": "release"},
+    {"pr_base_sha": "main"},
 ])
 def test_clean_base_merge_needs_live_head_base_and_complete_history(base_merge, change):
     assert base_merge(**change) is None
