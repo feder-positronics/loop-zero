@@ -34,9 +34,7 @@ CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, OSError, ValueError)
-# --wait: poll interval, and how long a required check may stay
-# missing before GitHub is assumed to have dropped the event for this head.
-# Each poll costs several GitHub API calls from a quota shared by every session.
+# Each readiness poll spends shared GitHub API quota.
 WAIT_INTERVAL, MISSING_RUN_GRACE = 30.0, 120.0
 STALE_VERDICT_GRACE, MAX_REVIEW_CLOCK_SKEW = 900.0, 30.0
 PUSH_TIMEOUT = 600.0  # consumer pre-push hooks (lint, tests) routinely exceed GIT_TIMEOUT
@@ -275,7 +273,6 @@ def _readiness(
         None if diagnostics else _check_report_problem(_load_report(wt), config, head)
     ):
         return github.Readiness(False, (problem,))
-    # GitHub's Date header, not the host clock, ages the review.
     reviews = _pr_reviews(config.repo, pr.number, dates=(dates := [])) if reviews is None else reviews
     publishers = config.review_publishers
     review = eligibility.readiness_review(
@@ -294,7 +291,6 @@ def _readiness(
         ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
-        # Allow host clock skew only when GitHub did not supply a usable Date.
         stale_verdict_grace=(
             workflow_wait and review_age is not None
             and (0 if server else -MAX_REVIEW_CLOCK_SKEW) <= review_age < STALE_VERDICT_GRACE
@@ -326,8 +322,7 @@ def _readiness(
                 exhausted if reason == review_reason else reason for reason in result.reasons
             ))
     report = _load_report(wt)  # deliberate re-read: a check can land during the GitHub reads
-    receipt_problem = _check_report_problem(report, config, head)
-    if receipt_problem:
+    if receipt_problem := _check_report_problem(report, config, head):
         return github.Readiness(False, (*result.reasons, receipt_problem), checks=result.checks)
     if announce_receipt:
         _print_receipt(wt, report, "accepted")
@@ -1295,6 +1290,20 @@ def _cleanup(wt: Path, pr: github.PR, *, closed: bool = False) -> None:
 OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its one reason on the PR before taking it out of draft."
 
 
+def _recheck_activation(
+    wt: Path, config: Config, live: github.PR, args: argparse.Namespace, deadline: float | None,
+) -> github.PR:
+    head = live.head_sha
+    _verify_wait_snapshot(args, wt, config, head, head, config)
+    fresh = _readiness(wt, config, live, head, workflow_wait=True, mergify_deadline=deadline)
+    if live.mergeable == "UNKNOWN" or not (fresh.ready or _draft_checks_waiting(config, live, fresh)):
+        raise CliError(f"draft activation blocked: {'; '.join(fresh.reasons)}; rerun loopzero ready")
+    latest = github.pr_view(config.repo, live.number)
+    if dataclasses.replace(latest, is_draft=True) != live:
+        raise CliError("PR changed during draft activation recovery; rerun loopzero ready")
+    return latest
+
+
 def _mark_ready(
     wt: Path, config: Config, number: int, head: str, args: argparse.Namespace, deadline: float | None,
 ) -> None:
@@ -1304,18 +1313,16 @@ def _mark_ready(
             live = github.pr_view(config.repo, number)
             github.read_timeout(0)
             seen = (live.head_sha, live.state, live.base_ref)
-            if problem := github.merge_hold(number, live.labels) or (
-                    seen != (head, "OPEN", config.base_branch) and f"PR changed to {seen}"):
+            if problem := (github.merge_hold(number, live.labels)
+                           or (seen != (head, "OPEN", config.base_branch) and f"PR changed to {seen}")
+                           or (live.mergeable == "CONFLICTING" and github.mergeability_blocker(live))):
                 raise CliError(f"{problem}; rerun loopzero ready")
             if not live.is_draft:
                 return
             if observe_only is not None:
                 raise observe_only
-            if retry:
-                _verify_wait_snapshot(args, wt, config, head, live.head_sha, config)
-                fresh = _readiness(wt, config, live, head, workflow_wait=True, mergify_deadline=deadline)
-                if not fresh.ready and not _draft_checks_waiting(config, live, fresh):
-                    raise CliError(f"draft activation blocked: {'; '.join(fresh.reasons)}; rerun loopzero ready")
+            if retry and not (live := _recheck_activation(wt, config, live, args, deadline)).is_draft:
+                return
             _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
             try:
                 github.mark_ready(config.repo, number, live.node_id)
@@ -1324,9 +1331,8 @@ def _mark_ready(
                 remaining = github.read_timeout()
                 if retry or deadline is None or github._rate_limited(None, {}, str(exc)):
                     raise
-                if remaining <= github.RETRY_DELAY:
-                    observe_only = exc
-                else:
+                observe_only = exc if remaining <= github.RETRY_DELAY else None
+                if observe_only is None:
                     _sleep(github.RETRY_DELAY)
 
 
@@ -1544,10 +1550,9 @@ def _wait_for_checks(
         return observed, latest, readiness
 
     for _ in _poll_until(started, timeout, bounded=bounded, initial_read_time=initial_read_time):
-        if initial is None:
+        readiness, initial = initial, None
+        if readiness is None:
             current, previous, readiness = _read_wait_poll(poll, deadline)
-        else:
-            readiness, initial = initial, None
         if readiness is None:
             return current, None, kicked
         if not kicked and _draft_checks_waiting(config, current, readiness):
@@ -1566,18 +1571,13 @@ def _wait_for_checks(
         shown = visible
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
-            print(
-                "waiting: required check verdict predates the review; awaiting refresh: "
-                + ", ".join(readiness.stale_verdicts)
-            )
+            print("waiting: required check verdict predates the review; awaiting refresh: "
+                  + ", ".join(readiness.stale_verdicts))
             stale_notice = True
         if (
             elapsed >= MISSING_RUN_GRACE
             and set(pending) <= _check_reasons(readiness, "missing", "skipped").keys()
-            and not _read_wait_poll(
-                partial(github.has_check_activity, config.repo, pr.head_sha, readiness),
-                deadline,
-            )
+            and not _read_wait_poll(partial(github.has_check_activity, config.repo, pr.head_sha, readiness), deadline)
         ):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "

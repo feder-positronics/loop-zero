@@ -186,9 +186,11 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    combines the current verdicts for each required name. A positive `ready --wait`
    budget covers the first readiness read, the live PR reread before draft activation,
    and revalidation after taking a PR out of draft.
-   Before the first draft activation it rereads the PR and refuses a moved head, changed target, closed state or hold.
-   The live REST detail supplies the node ID for the GraphQL activation mutation. Without a node ID, or after an
-   unbounded transient failure, the GitHub CLI fallback checks the draft state before attempting activation.
+   The live PR read before activation blocks a moved head, changed target, closed state, hold, or merge conflict.
+   The live REST detail supplies the node ID for the GraphQL activation mutation. Without a node ID, the CLI uses
+   the GitHub CLI activation command. After a transient write failure within a positive wait budget, the waiter
+   can resume if GitHub already applied the write. One backed-off retry requires known mergeability, fresh
+   eligibility and a final PR read that still agrees with the checked snapshot.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in
    [cli.py](../src/loopzero/cli.py)), the check blocks readiness throughout,

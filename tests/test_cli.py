@@ -2860,7 +2860,6 @@ def test_ready_waits_for_checks_on_original_head(wt, gh, capsys, monkeypatch, se
 @pytest.mark.parametrize("wait", [False, True])
 def test_pending_mergeability_does_not_delay_draft_checks(wt, gh, capsys, head, wait):
     arm_approved_pr(gh, head, wt, "skipped", mergeable="UNKNOWN")
-
     expect_cli(capsys, 3, "ready", *(["--wait=0"] if wait else []), stderr="",
                stdout_contains=("marked ready;", "checks", "GitHub is computing mergeability"))
     assert sum(is_ready_call(call) for call in gh.calls) == 1
@@ -3047,32 +3046,33 @@ def test_ready_keeps_required_check_signals_from_both_apps(wt, gh, capsys, head,
     assert ("required check 'checks' is failure" in out) is not rerun
 
 
-@pytest.mark.parametrize("outcome", ["retry", "applied", "blocker", "moved", "exhausted", "quota", "short-applied", "write-deadline"])
+@pytest.mark.parametrize("outcome", ["retry", "timeout-retry", "applied", "blocker", "moved", "exhausted", "quota", "short-applied", "write-deadline", "unknown", "late-hold"])
 def test_ready_recovers_ambiguous_activation(wt, gh, capsys, monkeypatch, head, outcome):
     arm_approved_pr(gh, head, wt, "skipped")
     clock, attempts = poll_clock(monkeypatch), []
     def activate(*_):
         attempts.append(clock.now)
         clock.now += {"short-applied": 59, "write-deadline": 60}.get(outcome, 0)
-        if outcome == "write-deadline":
-            raise github.ProcTimeout("ready write reached deadline")
-        if outcome.endswith("applied") or (outcome == "retry" and len(attempts) == 2):
+        if outcome == "write-deadline" or (outcome == "timeout-retry" and len(attempts) == 1):
+            raise github.ProcTimeout("ready write timed out")
+        applied = outcome.endswith("retry") and len(attempts) == 2
+        if outcome.endswith("applied") or applied:
             arm_pr(gh, head, isDraft=False)
             arm_named_check(gh, head, conclusion="success")
         if outcome == "blocker":
             arm_named_check(gh, head, conclusion="failure")
-        if outcome == "moved":
-            arm_pr(gh, "f" * 40)
-        if not (outcome == "retry" and len(attempts) == 2):
-            detail = "secondary rate limit" if outcome == "quota" else "HTTP 502"
-            raise github.GhUnavailable(("gh", "pr", "ready"), detail)
+        if outcome in {"moved", "unknown"}:
+            arm_pr(gh, "f" * 40 if outcome == "moved" else head, mergeable="UNKNOWN")
+        if outcome == "late-hold":
+            gh.respond_pr_view(pr_json(headRefOid=head, labels=[{"name": "hold"}]))
+        if not applied:
+            raise github.GhUnavailable(("gh", "pr", "ready"), "secondary rate limit" if outcome == "quota" else "HTTP 502")
     monkeypatch.setattr(github, "mark_ready", activate)
-    receipt = wt / ".loopzero/checks.json"
-    before = receipt.read_bytes()
+    before = (receipt := wt / ".loopzero/checks.json").read_bytes()
     code, out, err = run(capsys, "ready", "--wait=60")
-    assert attempts == ([0, 5] if outcome in {"retry", "exhausted"} else [0])
+    assert attempts == ([0, 5] if outcome.endswith("retry") or outcome == "exhausted" else [0])
     assert receipt.read_bytes() == before
-    assert code == {"blocker": 1, "moved": 1, "exhausted": 2, "quota": 2, "write-deadline": 3}.get(outcome, 0)
+    assert code == {"blocker": 1, "moved": 1, "unknown": 1, "late-hold": 1, "exhausted": 2, "quota": 2, "write-deadline": 3}.get(outcome, 0)
     assert code != 2 or "Run `loopzero ready --wait`" in err
     assert code != 0 or f"ready: {URL}" in out
 
@@ -3344,13 +3344,13 @@ def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, hea
     ({"headRefOid": "b" * 40}, ("rerun loopzero ready",)),
     ({"labels": [{"name": "hold"}]}, ("rerun loopzero ready",)),
     ({"baseRefName": "release"}, ("rerun loopzero ready",)),
+    ({"mergeable": "CONFLICTING"}, ("merge conflicts",)),
     (None, ("run loopzero check at this head", cli.OWNER_ROUTE)),
-], ids=["head", "hold", "target", "lost-receipt"])
+], ids=["head", "hold", "target", "conflict", "lost-receipt"])
 def test_ready_rechecks_the_live_pr_before_the_first_activation(wt, gh, capsys, head, monkeypatch, change, diagnostic):
     arm_approved_pr(gh, head, wt)
     if change is None:
         pr = github.PR(7, URL, head, "main", True, "OPEN", "MERGEABLE")
-
         def snapshot(*_args, **_kwargs):
             (wt / ".loopzero/checks.json").unlink()
             return pr, github.Readiness(True, ())
