@@ -51,15 +51,15 @@ class FakeGh:
         self.calls_file.write_text("[]")
         self.scenario_file.write_text("{}")
         replay_source = Path(__file__).with_name("fake_gh.py").read_text()
-        write_fake_tool(fake_bin, "gh",
-            f"#!{sys.executable}\n{replay_source}\n"
-            "import sys\n"
-            f"code, stdout, stderr = replay(sys.argv[1:], {str(self.calls_file)!r}, "
-            f"{str(self.scenario_file)!r}, os.getcwd(), os.environ)\n"
-            "sys.stdout.write(stdout)\n"
-            "sys.stderr.write(stderr)\n"
-            "sys.exit(code)\n"
-        )
+        write_fake_tool(fake_bin, "gh", f"""#!{sys.executable}
+{replay_source}
+import sys
+code, stdout, stderr = replay(sys.argv[1:], {str(self.calls_file)!r},
+                             {str(self.scenario_file)!r}, os.getcwd(), os.environ)
+sys.stdout.write(stdout)
+sys.stderr.write(stderr)
+sys.exit(code)
+""")
 
     def replay_in_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Replay fake gh requests without starting an interpreter for each call."""
@@ -92,12 +92,13 @@ class FakeGh:
         open_pages, closed_pages, selected = [], [], []
         for snapshot in snapshots:
             opened = next((pr for pr in snapshot if pr.get("state", "OPEN") == "OPEN"), None)
-            open_pages.append([{"number": opened["number"]}] if opened else [])
-            if opened:
-                selected.append(opened)
-            else:
-                closed_pages.append([{"number": snapshot[0]["number"]}] if snapshot else [])
-                selected.extend(snapshot[:1])
+            chosen = opened or (snapshot[0] if snapshot else None)
+            page = [{"number": chosen["number"]}] if chosen else []
+            open_pages.append(page if opened else [])
+            if not opened:
+                closed_pages.append(page)
+            if chosen:
+                selected.append(chosen)
         self.append(pr_list_key(branch), *open_pages)
         if closed_pages:
             self.append(pr_list_key(branch, "closed"), *closed_pages)
@@ -224,21 +225,19 @@ def comments_posted(gh: FakeGh, index: int = -1) -> list[dict]:
 # --- errors ------------------------------------------------------------------------
 
 
-def test_missing_gh_raises_typed_error(fake_bin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PATH", str(fake_bin))  # empty dir: no gh, no git
-    with pytest.raises(github.GhMissing) as info:
+@pytest.mark.parametrize("missing", [True, False], ids=["missing-cli", "unauthenticated"])
+def test_pr_lookup_reports_github_cli_remediation(request, fake_bin, monkeypatch, missing):
+    if missing:
+        monkeypatch.setenv("PATH", str(fake_bin / "missing"))
+    else:
+        request.getfixturevalue("gh").fail(pr_list_key("lz/x"), "To get started with GitHub CLI, please run:  gh auth login\n", exit=4)
+    with pytest.raises(github.GhMissing if missing else github.GhAuth) as info:
         github.pr_for_branch(REPO, "lz/x")
-    assert "gh auth login --scopes repo" in str(info.value)
-    assert "required token scope: repo" in str(info.value)
-
-
-def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
-    gh.fail(pr_list_key("lz/x"), "To get started with GitHub CLI, please run:  gh auth login\n", exit=4)
-    with pytest.raises(github.GhAuth) as info:
-        github.pr_for_branch(REPO, "lz/x")
-    assert info.value.command[:2] == ("gh", "api")
-    assert "gh auth login" in info.value.tail
-    assert "required token scope: repo" in info.value.tail
+    diagnostic = str(info.value) if missing else info.value.tail
+    assert "required token scope: repo" in diagnostic
+    assert ("gh auth login --scopes repo" if missing else "gh auth login") in diagnostic
+    if not missing:
+        assert info.value.command[:2] == ("gh", "api")
 
 
 @pytest.mark.parametrize("node_id,endpoint,stderr,stdout,error", [
@@ -306,16 +305,20 @@ def test_pr_lookup_with_local_head_handles_only_unknown_sha_422(gh: FakeGh, mess
 
 @pytest.mark.parametrize("head_change", [
     {"ref": "lz/other"}, {"repo": {"full_name": "fork/widgets"}},
-    {"repo": "malformed"},
-])
-def test_pr_for_branch_rejects_changed_or_foreign_detail(gh: FakeGh, head_change: dict) -> None:
-    detail = rest_pr_json(pr_json())
-    detail["head"].update(head_change)
-    gh.respond(pr_list_key(), [{"number": 7}])
-    gh.respond(f"api repos/{REPO}/pulls/7", detail)
-
-    with pytest.raises(github.GhError, match="PR changed during branch lookup"):
-        github.pr_for_branch(REPO, "lz/t1")
+    {"repo": "malformed"}, None,
+], ids=["changed-ref", "fork", "invalid-repo", "missing-head"])
+def test_pr_for_branch_rejects_changed_or_malformed_detail(gh: FakeGh, head_change):
+    if head_change is None:
+        branch, diagnostic = "lz/x", "malformed PR detail for #7"
+        gh.respond_pr_list([{"number": 7, "url": "u"}], branch=branch)
+    else:
+        branch, diagnostic = "lz/t1", "PR changed during branch lookup"
+        detail = rest_pr_json(pr_json())
+        detail["head"].update(head_change)
+        gh.respond(pr_list_key(), [{"number": 7}])
+        gh.respond(f"api repos/{REPO}/pulls/7", detail)
+    with pytest.raises(github.GhError, match=diagnostic):
+        github.pr_for_branch(REPO, branch)
 
 
 @pytest.mark.parametrize("mergeable,merge_state,expected", [
@@ -419,10 +422,11 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> 
     assert [(c["path"], c["line"], c["side"]) for c in comments] == [
         ("src/a.py", 10, "RIGHT"), ("src/b.py", 2, "RIGHT"), ("src/c.py", 5, "RIGHT"),
         ("src/a.py", 11, "RIGHT")]
-    assert comments[0]["body"].split("\n")[0] == github.finding_marker("critical", HEAD, FINDINGS[0])
-    assert comments[1]["body"].split("\n")[0] == github.finding_marker("important", HEAD, FINDINGS[1])
-    assert "loopzero:finding" not in comments[2]["body"]
-    assert comments[3]["body"].split("\n")[0] == github.finding_marker("important", HEAD, FINDINGS[3])
+    for comment, finding in zip(comments, FINDINGS, strict=True):
+        if finding.severity == "suggestion":
+            assert "loopzero:finding" not in comment["body"]
+        else:
+            assert comment["body"].splitlines()[0] == github.finding_marker(finding.severity, HEAD, finding)
     assert "No file location given by the reviewer; anchored here." in comments[3]["body"]
     assert "Global concern" in comments[3]["body"] and "no file" in comments[3]["body"]
     assert "Null deref" in comments[0]["body"] and "x may be None" in comments[0]["body"]
@@ -434,11 +438,10 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> 
     assert loose.title in body and loose.body in body
     assert len(body.encode("utf-8")) < 65_536 and result.raw == raw
     assert "Transcript truncated" not in body and "restricted local review receipt" in body
-    if raw:
-        assert raw not in body
+    assert not raw or raw not in body
+    assert "Raw reviewer output" not in body
     if family == "codex":
-        assert hashlib.sha256(raw.encode()).hexdigest() in body
-    assert "Raw reviewer output" not in body and (family != "codex" or "<summary>Review evidence notice<" in body)
+        assert hashlib.sha256(raw.encode()).hexdigest() in body and "<summary>Review evidence notice<" in body
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
     assert all("subject_type" not in c for c in comments)
 
@@ -479,19 +482,15 @@ def test_post_review_counts_only_lf_as_patch_line_break(gh: FakeGh) -> None:
     path = "src/a.py"
     patch = "@@ -1 +1,2 @@\n-old\n+left\u2028right\n+second\n"
     arm_review(gh, files=[{"filename": path, "patch": patch}])
-    findings = (
-        Finding("important", path, 2, "In diff", ""),
-        Finding("critical", path, 3, "Outside diff", ""),
-        Finding("suggestion", path, 3, "Off-diff suggestion", ""),
-    )
-
+    locations = [("important", 2, "In diff"), ("critical", 3, "Outside diff"), ("suggestion", 3, "Off-diff suggestion")]
+    findings = tuple(Finding(severity, path, line, title, "") for severity, line, title in locations)
     github.post_review(REPO, 7, HEAD, review(findings=findings))
-
     assert github._right_lines(patch) == ({1, 2}, 1)
-    comments = comments_posted(gh)
+    payload, = review_payloads(gh)
+    comments = payload["comments"]
     assert [(c["path"], c["line"]) for c in comments] == [(path, 2), (path, 1)]
     assert "Reviewer location src/a.py:3 is not in the diff" in comments[1]["body"]
-    assert "Off-diff suggestion" in review_payloads(gh)[0]["body"]
+    assert "Off-diff suggestion" in payload["body"]
 
 
 @pytest.mark.parametrize(("files", "severity", "anchor"), [
@@ -603,6 +602,13 @@ def test_gh_timeout_redacts_diagnostics(monkeypatch) -> None:
     assert info.value.__suppress_context__
 
 
+def arm_own_review_rejection(gh, action, *responses):
+    rejection = {"message": "Unprocessable Entity", "errors": [{"message": f"Can not {action} your own pull request"}],
+                 "documentation_url": "https://docs.github.com/rest"}
+    gh.respond(REVIEWS_KEY, {"stdout": json.dumps(rejection), "stderr": "gh: Unprocessable Entity (HTTP 422)\n",
+                           "exit": 1}, *responses)
+
+
 @pytest.mark.parametrize("verdict,scenario", [
     ("approve", "lookup"), ("request_changes", "lookup"), ("approve", "supplied"),
     ("approve", "fallback"), ("request_changes", "fallback"), ("approve", "app"),
@@ -615,10 +621,7 @@ def test_post_review_submits_comment(gh: FakeGh, app_token_helper, verdict: str,
         pr = github.PR(7, "url", HEAD, "main", True, "OPEN", "UNKNOWN")
     if scenario == "fallback":
         action = "approve" if verdict == "approve" else "request changes on"
-        rejection = {"message": "Unprocessable Entity", "errors": [{"message": f"Can not {action} your own pull request"}],
-                     "documentation_url": "https://docs.github.com/rest"}
-        gh.respond(REVIEWS_KEY, {"stdout": json.dumps(rejection), "stderr": "gh: Unprocessable Entity (HTTP 422)\n",
-                               "exit": 1}, {"stdout": '{"id": 2}', "exit": 0})
+        arm_own_review_rejection(gh, action, {"stdout": '{"id": 2}', "exit": 0})
     github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]), pr=pr)
     payloads = review_payloads(gh)
     assert payloads[-1]["event"] == "COMMENT"
@@ -646,20 +649,18 @@ def test_post_review_submits_comment(gh: FakeGh, app_token_helper, verdict: str,
 ], ids=["closed", "retargeted", "retargeted-before-fallback", "moved", "posting-fails"])
 def test_post_review_fails_closed(gh, live, rejection, attempts, diagnostic):
     arm_review(gh)
+    respond = gh.append if rejection == "own PR" else gh.respond
+    respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(**live)))
     if rejection == "own PR":
-        error = {"message": "Unprocessable Entity", "errors": [{"message": "Can not approve your own pull request"}]}
-        gh.respond(REVIEWS_KEY, {"stdout": json.dumps(error), "stderr": "gh: Unprocessable Entity (HTTP 422)\n", "exit": 1})
-        gh.respond_pr_view(pr_json(**live))
-    else:
-        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(**live)))
-        if rejection:
-            gh.fail(REVIEWS_KEY, "HTTP 500 server error")
+        arm_own_review_rejection(gh, "approve")
+    elif rejection:
+        gh.fail(REVIEWS_KEY, "HTTP 500 server error")
+    options = {}
+    if rejection != "server error":
+        pr = github.pr_from_rest(rest_pr_json(pr_json(isDraft=False)))
+        options = dict(pr=pr, token="", publisher="bot-user", base="main")
     with pytest.raises(github.GhError, match=diagnostic):
-        if rejection == "server error":
-            github.post_review(REPO, 7, HEAD, review())
-        else:
-            pr = github.PR(7, "url", HEAD, "main", False, "OPEN", "UNKNOWN", author="someone-else")
-            github.post_review(REPO, 7, HEAD, review(verdict="approve"), pr=pr, token="", publisher="bot-user", base="main")
+        github.post_review(REPO, 7, HEAD, review(verdict="approve" if options else "request_changes"), **options)
     assert len(calls_for(gh, REVIEWS_KEY)) == attempts
 
 
@@ -687,8 +688,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
                 "**important: Missing check**\n\nvalidate"),
         Finding("important", "src/c.py", 3, "From the App", "**important: From the App**"),
     ]
-    (call,) = gh.calls
-    argv = call["argv"]
+    (argv,) = (call["argv"] for call in gh.calls)
     assert argv[:2] == ["api", "graphql"]
     assert "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
     assert any(a.startswith("query=") and "author { __typename login }" in a for a in argv)
@@ -730,12 +730,6 @@ def test_open_blocking_findings_missing_pr_is_gh_error(gh: FakeGh, data: dict) -
     gh.respond("api graphql", data)
     with pytest.raises(github.GhError, match="PR #7 not found or not accessible"):
         github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
-
-
-def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
-    gh.respond_pr_list([{"number": 7, "url": "u"}], branch="lz/x")
-    with pytest.raises(github.GhError, match="malformed PR detail for #7"):
-        github.pr_for_branch(REPO, "lz/x")
 
 
 def test_api_get_and_login_helpers(fake_bin, tmp_path, monkeypatch) -> None:
@@ -835,22 +829,23 @@ def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
     assert gh.argv(1)[gh.argv(1).index("after=C1") - 1] == "-f"
 
 
-@pytest.mark.parametrize("cursors", [(None,), ("C1", "C2", "C1")])
-def test_open_blocking_findings_rejects_invalid_cursor(gh: FakeGh, cursors) -> None:
-    gh.respond("api graphql", *(threads_json(has_next=True, cursor=c) for c in cursors))
+@pytest.mark.parametrize("cursors", [(None,), ("C1", "C2", "C1"), ("C1",)], ids=["missing", "repeated", "reply"])
+def test_review_thread_reads_reject_invalid_cursor(gh: FakeGh, cursors):
+    reply = cursors == ("C1",)
+    if reply:
+        page = {"hasNextPage": True, "endCursor": "C1"}
+        gh.respond("api graphql", {"data": {"node": {"comments": {"pageInfo": page, "nodes": []}}}})
+    else:
+        gh.respond("api graphql", *(threads_json(has_next=True, cursor=c) for c in cursors))
     with pytest.raises(github.GhError, match="missing or repeated review thread cursor"):
-        github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
+        if reply:
+            github._has_thread_reply({"id": "T1", "comments": {"pageInfo": page}}, "reply")
+        else:
+            github.open_blocking_findings(REPO, 7, HEAD, PUBLISHERS)
     assert len(gh.calls) == len(cursors)
-
-
-def test_thread_reply_read_rejects_repeated_cursor(gh: FakeGh) -> None:
-    page = {"hasNextPage": True, "endCursor": "C1"}
-    gh.respond("api graphql", {"data": {"node": {"comments": {"pageInfo": page, "nodes": []}}}})
-    node = {"id": "T1", "comments": {"pageInfo": page}}
-    with pytest.raises(github.GhError, match="missing or repeated review thread cursor"):
-        github._has_thread_reply(node, "reply")
-    argv = gh.argv(0)
-    assert len(gh.calls) == 1 and argv[argv.index("after=C1") - 1] == argv[argv.index("thread=T1") - 1] == "-f"
+    if reply:
+        argv = gh.argv(0)
+        assert argv[argv.index("after=C1") - 1] == argv[argv.index("thread=T1") - 1] == "-f"
 
 
 # --- checks --------------------------------------------------------------------------------
@@ -868,8 +863,7 @@ def arm_check_pages(gh, *pages, statuses=()):
 def test_check_runs_merges_paginated_runs_and_statuses(gh: FakeGh) -> None:
     names = [f"job{i}" for i in range(99)]
     runs = [check_run("success", name=name) for name in names]
-    statuses = [{"context": f"legacy/{name}", "state": "failure"} for name in names]
-    statuses.append({"context": "Checks", "state": "failure"})
+    statuses = [{"context": name, "state": "failure"} for name in [*(f"legacy/{n}" for n in names), "Checks"]]
     second = [{"context": "required-page-two", "state": "success"}, {"context": "checks", "state": "success"}]
     arm_check_pages(gh, {"check_runs": [*runs, check_run("success")]},
                     {"check_runs": [check_run(None, name="lint", status="in_progress")]},
@@ -881,8 +875,7 @@ def test_check_runs_merges_paginated_runs_and_statuses(gh: FakeGh) -> None:
     requests = [(call["argv"][1].rsplit("/", 1)[-1], call["argv"][-2]) for call in gh.calls]
     assert requests == [("check-runs", "page=1"), ("check-runs", "page=2"),
                         ("statuses", "page=1"), ("statuses", "page=2")]
-    for call in gh.calls:
-        argv = call["argv"]
+    for argv in (call["argv"] for call in gh.calls):
         assert "-F" in argv and argv[argv.index("--method") + 1] == "GET"
 
 
@@ -944,8 +937,8 @@ def arm_workflow_check(gh: FakeGh, *checks: dict, statuses=(), threads=()) -> No
 
 def readiness(*, reviewed=HEAD, workflow_wait=False, required_ci=("checks",), review_grace=False, **metadata):
     pr = github.pr_from_rest(rest_pr_json(pr_json(**metadata)))
-    return github.readiness(REPO, pr, "main", required_ci, reviewed, workflow_wait=workflow_wait,
-                            review_grace=review_grace, publishers=PUBLISHERS)
+    return github.readiness(REPO, pr, "main", required_ci, reviewed,
+                            workflow_wait=workflow_wait, review_grace=review_grace, publishers=PUBLISHERS)
 
 
 def failed_check(conclusion="failure", **fields):
@@ -1062,12 +1055,15 @@ def test_readiness_defers_only_replaceable_failure(gh, check, runs, statuses, wa
         assert [c["argv"][-2] for c in gh.calls if "actions/runs" in c["argv"][1]] == ["page=1", "page=2"]
 
 
-@pytest.mark.parametrize("conclusion", [None, "skipped", "neutral"])
-def test_readiness_skips_actions_runs_without_a_failed_required_check(gh, conclusion):
-    if conclusion is None:
-        arm_workflow_check(gh, check_run("success"), failed_check(name="optional"))
-    else:
-        arm_workflow_check(gh, failed_check(conclusion))
+@pytest.mark.parametrize("conclusion", [None, "skipped", "neutral", "failure"])
+def test_readiness_reads_actions_only_for_failed_required_check(gh, conclusion):
+    checks = (check_run("success"), failed_check(name="optional")) if conclusion is None else (failed_check(conclusion),)
+    arm_workflow_check(gh, *checks)
+    if conclusion == "failure":
+        gh.fail(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", "HTTP 403: Actions read denied")
+        with pytest.raises(github.GhError, match="Actions read denied"):
+            readiness(workflow_wait=True)
+        return
     result = readiness(workflow_wait=True)
     if conclusion is None:
         assert result.ready
@@ -1075,15 +1071,6 @@ def test_readiness_skips_actions_runs_without_a_failed_required_check(gh, conclu
         assert result.reasons == (f"required check 'checks' is {conclusion}",)
         assert result.waitable_failures == ()
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
-
-
-def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
-    arm_workflow_check(gh, failed_check())
-    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
-               {"stdout": "", "stderr": "HTTP 403: Actions read denied", "exit_code": 1})
-
-    with pytest.raises(github.GhError, match="Actions read denied"):
-        readiness(workflow_wait=True)
 
 
 @pytest.mark.parametrize(("metadata", "reason"), [
@@ -1107,8 +1094,7 @@ def test_delete_remote_branch_checks_encoded_ref(gh: FakeGh, remote_head: str | 
     else:
         gh.respond(get, {"object": {"sha": remote_head}})
     assert github.delete_remote_branch(REPO, "lz/fix#516?x%", HEAD) is (remote_head is None)
-    assert gh.argv(0) == [*get.split(), "--include"]
-    assert len(gh.calls) == 1
+    assert [call["argv"] for call in gh.calls] == [[*get.split(), "--include"]]
 
 
 def test_delete_remote_branch_scopes_operator_tokens(gh: FakeGh, fake_tool, monkeypatch) -> None:
@@ -1427,16 +1413,14 @@ def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, stat
     (100, True, False, None),
 ])
 def test_readiness_at_check_suite_limit(gh: FakeGh, monkeypatch, unrelated, legacy_success, check_failure, reason):
-    arm_readiness(gh)
-    if legacy_success:
-        gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses",
-                   [{"context": "required-ci", "state": "success"}])
-    runs = [{"name": "unrelated", "conclusion": "success", "check_suite": {"id": suite}}
+    gh.respond("api graphql", threads_json())
+    statuses = [{"context": "required-ci", "state": "success"}] if legacy_success else []
+    runs = [check_run("success", name="unrelated", check_suite={"id": suite})
             for suite in range(2, unrelated + 2)]
     if check_failure:
-        runs.append({"name": "required-ci", "conclusion": "failure", "check_suite": {"id": 1}})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
-               *({"check_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
+        runs.append(failed_check(name="required-ci", check_suite={"id": 1}))
+    arm_check_pages(gh, *({"check_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)),
+                    statuses=(statuses,))
     result = readiness(required_ci=("required-ci",))
 
     reasons = {
@@ -1497,7 +1481,7 @@ def test_repeated_rest_reads_revalidate_by_etag_and_login_is_read_once(gh, app_t
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot"}}})
     comments = f"repos/{REPO}/issues/1/comments"
     gh.respond(f"api {comments}", {})
-    dates: list[str] = []
+    dates = []
     assert github.api_get(endpoint) == {"n": 7}
     assert github._gh("api", endpoint, conditional=True, dates=dates) == '{"n": 7}'
     assert dates == [date]
