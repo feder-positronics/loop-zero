@@ -39,8 +39,7 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
         (git_repo / path).write_text("unrelated file\n")
         if sync == "staged-non-utf8":
             git(git_repo, "add", "--", path)
-        done = run(git_repo, base)
-        assert done.returncode == 0, done.stderr
+        assert run(git_repo, base).returncode == 0
     git(git_repo, "checkout", "-b", "authored")
     if sync == "rename":
         git(git_repo, "mv", "workflow.toml", "retired.toml")
@@ -65,10 +64,13 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
         assert "without guide update or reasoned Architecture-Review trailer" in done.stderr
     if sync == "squash":
         git_repo = git_repo.rename(git_repo.with_name(f"{git_repo.name} "))
-        (git_repo / "README.md").write_text("<!-- TODO\n[hidden](missing.md)\n-->\n")
-        assert run(git_repo, base, "--links-only").returncode == 0
-        (git_repo / "README.md").write_text("[Guide][guide]\n\n[guide]: absent.md\n")
-        assert run(git_repo, base, "--links-only").returncode == 1
+        badge = "[![Guide](https://img.shields.io/badge/docs-guide-blue)]"
+        for markdown, invalid in (("<!-- TODO\n[hidden](missing.md)\n-->\n", False),
+                                  ("[Guide][guide]\n\n[guide]: absent.md\n", True),
+                                  (f"{badge}(docs/guide.md)", True), (f"{badge}(docs/README.md)", False),
+                                  ("[![Guide](missing.svg)](docs/README.md)", True)):
+            (git_repo / "README.md").write_text(markdown)
+            assert run(git_repo, base, "--links-only").returncode == int(invalid), markdown
 
 
 @pytest.mark.parametrize("markdown", ["[ref](absent.md)", "[ref](../README.md#absent)", "[ref](<Design (legacy).md>)",

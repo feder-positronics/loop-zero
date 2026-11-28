@@ -84,8 +84,10 @@ def link_errors(root):
         text = re.sub(r"(<!--.*?-->)|\\[\\`]|(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n).)*?(?<!`)\2(?!`)",
                       lambda span: re.sub(r"[^\n]", "x", span[0]) if span.lastindex else span[0],
                       source, flags=re.DOTALL)
-        links = list(re.finditer(
-            r'''!?\[[^\]]*\]\(\s*(?:<([^<>\n]+)>(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*|([^)]+))\)''',
+        inline_target = r'''\(\s*(?:<([^<>\n]+)>(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*|([^)]+))\)'''
+        links = list(re.finditer(r"!?\[[^\]]*\]" + inline_target, text))
+        links.extend(re.finditer(
+            r"\[!\[[^\]\n]*\]\((?:<[^<>\n]+>|[^<()\n]|\([^()\n]*\))*\)\]" + inline_target,
             text))
         links.extend(re.finditer(
             r'''^ {0,3}\[(?!\^)[^\]\n]+\]:[ \t]*(?:<([^<>\n]+)>|([^\s<>]+))'''
