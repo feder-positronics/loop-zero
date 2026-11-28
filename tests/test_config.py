@@ -127,3 +127,4 @@ def test_base_fetch_failure_retains_redacted_git_diagnostic(tmp_path, monkeypatc
         config._remote_workflow(tmp_path, "main", None, refresh=True, require_ci=False, read_timeout=lambda budget: budget)
     assert "[REDACTED]@example.com" in str(exc.value)
     assert "example-token" not in str(exc.value)
+    assert "Verify network connectivity and access to origin/main, then rerun the command." in str(exc.value)
