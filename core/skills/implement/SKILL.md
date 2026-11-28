@@ -9,10 +9,9 @@ Read [the contract](../../CONTRACT.md), `.loopzero/task.md`, repository guidance
 and affected interfaces. Confirm the task worktree and branch. Keep
 [keys and login tokens out of output](../../CREDENTIALS.md#keep-credentials-out-of-output).
 Follow the full [credential conventions](../../CREDENTIALS.md) before API-key
-integration and [delegation guidance](../../../docs/DELEGATION.md) before
-launching subagents or commissioning delegates.
-
-As an unattended worker, follow [the worker role's blocker route](../../../docs/DELEGATION.md#team-roles).
+integration and [model selection](../../../docs/DELEGATION.md#resolve-the-model-before-delegation)
+and [briefs](../../../docs/DELEGATION.md#briefs-and-ownership) before delegating.
+Unattended workers follow the [blocker route](../../../docs/DELEGATION.md#worker).
 
 Before the first code edit, record observable criteria in task Acceptance and
 freeze them. Change Acceptance only with a recorded reason in Notes, before
@@ -24,17 +23,16 @@ before the first code edit: threats, invariants and chosen approach.
 When deduplicating tests, list their distinct assertions before editing,
 keep each in a surviving test, and record where in the PR body.
 
-Use [write-tests](../write-tests/SKILL.md) to prove the bounded acceptance.
+Use [write-tests](../write-tests/SKILL.md) when adding or changing tests.
 Map migration, authorization, locking/concurrency and policy edge cases to tests
 or evidence in Acceptance. Observe required UI and runtime behavior under actual
 permissions, with visual proof for UI changes per [Reporting](../../CONTRACT.md#reporting).
 Leave unobserved acceptance open with a next-action owner. Record revision,
 observations, trade-offs and limits in Notes or human Validation.
-Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../../CONTRACT.md#check-reuse-and-delivery-priority).
+Follow the [receipt reuse rules](../../CONTRACT.md#check-reuse-and-delivery-priority).
 
 Run commands expected to exceed about two minutes as [long-running jobs](../../../docs/DELEGATION.md#long-running-jobs)
-and follow the brief's [waiting and output rules](../../../docs/DELEGATION.md#briefs-and-ownership).
-Do not report done before the job's `LOG.exit` exists, unless you report it killed and failed.
+and follow the brief's waiting and output limits.
 
 Keep receipts, evidence, review artifacts and handoffs on the PR, issue or named durable scratch;
 reserve `/tmp` for running-command logs, builds and browser runs. At task finish, leave leftover
@@ -42,10 +40,10 @@ worktrees and generated files to the [retention job](../../../docs/DELEGATION.md
 or repository instructions; with no named job or unverified conditions, preserve them and report cleanup to the owner.
 For confirmed-abandoned tasks outside its scope, give the owner the [manual procedure](../../../SETUP.md#removing-an-abandoned-task-worktree).
 
-Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
-[review budget](../../CONTRACT.md#review-budget) for each pushed head, including base updates after review.
-Keep review suggestions within scope. Finish planned test, documentation and
-generated-file edits before primary review.
+Finish planned tests, docs and generated files before primary review.
+Apply the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
+[review budget](../../CONTRACT.md#review-budget) to every pushed head.
+Keep review suggestions within scope.
 Before the first draft push and check, rebase onto `origin/<base>` (`[repo].base`,
 default `main`). Keep unrelated base updates out of a pending delta.
 For a stack, follow [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).

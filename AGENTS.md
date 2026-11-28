@@ -2,16 +2,13 @@
 
 - Follow the [delivery contract](core/CONTRACT.md).
 - Use the relevant [delivery skill](core/skills/README.md).
-- Follow [model selection and delegation](docs/DELEGATION.md) for bounded
-  subagent work. Read the task repository's `models.toml` to resolve model and
-  effort before delegation; select both explicitly when the runtime supports it.
+- Before delegating, follow [model selection](docs/DELEGATION.md#resolve-the-model-before-delegation)
+  and [briefs](docs/DELEGATION.md#briefs-and-ownership).
 - Before committing changes to delivery interfaces (including commands, their
   options and configuration), state, trust boundaries, review/readiness or
   ownership, read the [architecture guide](docs/ARCHITECTURE.md). Edit it only
   when a boundary it describes moves. When `loopzero check` reports a watched
   change and the guide still holds, add a commit trailer
   `Architecture-Review: unchanged;` followed by the specific reason.
-- Claude sessions here do not add commit or PR attribution automatically
-  (`.claude/settings.json`). Add `Co-Authored-By` for each model that actually
-  wrote the change, Claude included; committing another writer's patch is not
-  writing.
+- Add [truthful model attribution](core/CONTRACT.md#review-budget) yourself;
+  Claude does not add it automatically here.

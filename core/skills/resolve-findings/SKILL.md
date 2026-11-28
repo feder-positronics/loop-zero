@@ -5,16 +5,16 @@ description: Verify existing PR findings, fix commissioned blockers or hand off 
 
 # Resolve Findings
 
-Read the PR acceptance, exact threads, affected code and current head. Verify
-each finding's premise on that head; use
-[staleness re-verification](reference.md#staleness-re-verification) as needed.
-Follow the contract's [findings rule](../../CONTRACT.md#findings).
+Read the PR acceptance, exact threads, affected code, reviewed SHA and current
+head. Reopen each premise on the current head using the smallest reproduction
+or current acceptance evidence. Classify it as reproducible, fixed by a named
+commit or unsupported. Follow the contract's [findings rule](../../CONTRACT.md#findings).
 
 Fix valid blocking findings within commissioned scope or hand off bounded repairs
 and validation through [response handoff](reference.md#response-handoff).
-Explain repaired, inapplicable or unsupported findings in-thread with verified
-evidence using `loopzero resolve`. For security defects,
-post only the disposition.
+Use `loopzero resolve <id> "<fix commit or evidence-backed reason>"` in-thread:
+resolve factual rejections now and fixes after verification on the pushed head,
+before readiness and merge. Post only the disposition for security defects.
 If a finding cites outdated acceptance, verify the authorized criteria against
 the current head and resolve the mistaken premise with that evidence.
 Requester-reserved, irreversible or acceptance/scope/cost changes and external
