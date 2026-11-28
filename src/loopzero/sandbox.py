@@ -523,7 +523,7 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
     except _proc.ProcTimeout:
         raise SandboxUnavailable(f"bwrap namespace creation timed out after {GIT_TIMEOUT:g}s. Retry once, then ask the host operator to check bubblewrap if it still times out.") from None
     if probe.exit_code != 0:
-        remedy = "\nAsk the host operator to check bubblewrap with the error above before retrying."
+        remedy = "\nAsk the host operator to check bubblewrap before retrying."
         probe_error = probe.stderr.lower()
         if any(word in probe_error for word in ("permission", "user namespace", "userns")):
             remedy = ("\nRun outside the enclosing agent sandbox or ask the host operator "

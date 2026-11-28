@@ -649,7 +649,7 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
         print(f"--- {github.redact_credentials(result.command)} (exit {result.exit_code}) ---", file=sys.stderr)
         tail = _proc.tail(result.tail)
         shortened |= (preview := _check_failure_preview(tail)) != tail
-        print(preview, file=sys.stderr)
+        print(f"{preview}\nFix the failed stage, then rerun `loopzero check`.", file=sys.stderr)
         if not config.network and (result.command.startswith("uv sync --offline --locked")
                                    or OFFLINE_FAILURE_RE.search(tail)):
             env = sandbox.check_environment(config)
@@ -672,7 +672,7 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
     elif report.ok:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
-    print("PASS" if report.ok else "Fix the failed stage above, then rerun `loopzero check`.\nFAIL")
+    print("PASS" if report.ok else "FAIL")
     return 0 if report.ok else 1
 
 
@@ -822,7 +822,7 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
             reviews = _pr_reviews(config.repo, pr.number)
         # Exact read-back above may confirm an older published note; a new post needs the current form.
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
-            raise CliError("saved fallback note is not in the published form; run without --repost")
+            raise CliError("saved fallback note is not in the published form. Run `loopzero review` without `--repost`.")
         allowed, reviewed = _select_review_round(config, pr, head, reviews)
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget. Run `loopzero review` without `--repost`.")
@@ -924,7 +924,7 @@ def _repost_reviewer_families(
     excluded = [family for family in config.reviewers if family in authors]
     if result.fallback and result.family not in excluded:
         raise CliError(f"saved review claims a same-family fallback, but {result.family} is not a configured "
-                       "reviewer family that contributed to this PR lineage; run without --repost")
+                       "reviewer family that contributed to this PR lineage. Run `loopzero review` without `--repost`.")
     if not result.fallback and not candidates:
         raise IndependentReviewerUnavailable(
             "saved review has no same-family fallback disclosure, but every configured family "
@@ -1243,7 +1243,7 @@ def _load_review(
                 raise ValueError("retired paired review")
         result = ReviewResult(**{**data, "findings": findings})
     except FileNotFoundError:
-        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost") from None
+        raise CliError(f"no saved {kind} review for {head[:12]} at {path}. Run `loopzero review` without `--repost`.") from None
     except (KeyError, OSError, TypeError, ValueError) as exc:
         raise CliError(f"{path} is not runner-produced: invalid saved review. Run `loopzero review` without `--repost`.") from exc
     if not runners.validate_runner_result(result):

@@ -1102,7 +1102,7 @@ def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
 
 @pytest.mark.parametrize(("metadata", "reason"), [
     ({"mergeStateStatus": "BEHIND"}, "PR #7 is behind main. Run `git fetch origin main`, `git merge origin/main`, `loopzero check` and `loopzero pr` before retrying readiness."),
-    ({"mergeable": "CONFLICTING"}, "PR #7 has merge conflicts with main. Fetch and merge origin/main, resolve conflicts, then run `loopzero check` and `loopzero pr`."),
+    ({"mergeable": "CONFLICTING"}, "PR #7 has merge conflicts with main. Run `git fetch origin main` and `git merge origin/main`. Resolve conflicts, run `loopzero check` and `loopzero pr`, then follow the review guidance from `loopzero ready`."),
     ({"state": "MERGED"}, "PR #7 is MERGED, not open"),
 ], ids=["behind-base", "merge-conflict", "merged-pr"])
 def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> None:

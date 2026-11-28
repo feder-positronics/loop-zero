@@ -1423,7 +1423,7 @@ def behind_reason(pr: PR) -> str:
 
 def mergeability_blocker(pr: PR) -> str | None:
     if pr.mergeable == "CONFLICTING":
-        return f"PR #{pr.number} has merge conflicts with {pr.base_ref}. Fetch and merge {shlex.quote(f'origin/{pr.base_ref}')}, resolve conflicts, then run `loopzero check` and `loopzero pr`."
+        return f"PR #{pr.number} has merge conflicts with {pr.base_ref}. Run `git fetch origin {shlex.quote(pr.base_ref)}` and `git merge {shlex.quote(f'origin/{pr.base_ref}')}`. Resolve conflicts, run `loopzero check` and `loopzero pr`, then follow the review guidance from `loopzero ready`."
     if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
         return MERGEABILITY_PENDING
     return None

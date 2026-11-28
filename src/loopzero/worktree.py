@@ -325,7 +325,7 @@ def task_text(wt: Path) -> str:
 
 def base_sha(wt: Path) -> str:
     if not (match := _BASE_SECTION.search(task_text(wt))):
-        raise WorktreeError(f"no '<branch> @ <sha>' line in the Base section of {task_file(wt)}. Restore the task's starting base branch and commit there.")
+        raise WorktreeError(f"no '<branch> @ <sha>' line in the Base section of {task_file(wt)}. Restore that line in the task file using the base branch and SHA from task creation.")
     return match.group(1)
 
 

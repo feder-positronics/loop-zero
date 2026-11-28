@@ -1912,7 +1912,7 @@ def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_sta
     prior_calls = len(gh.calls)
     expected = {"missing": "no saved primary review", "stale": f"not HEAD {head[:12]}",
                 "hand-written": "not runner-produced", "retired": "invalid saved review"}
-    expect_cli(capsys, 1, "review", "--repost", stdout="", stderr_contains=(expected[saved_state], "without --repost" if saved_state == "missing" else "without `--repost`"))
+    expect_cli(capsys, 1, "review", "--repost", stdout="", stderr_contains=(expected[saved_state], "Run `loopzero review` without `--repost`"))
     assert all(not (fake_bin / f"{family}.stdin").exists() for family in ("claude", "codex"))
     assert not any(map(posted, gh.calls[prior_calls:]))
 
