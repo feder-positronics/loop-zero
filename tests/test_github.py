@@ -1133,7 +1133,7 @@ def _queue_json(queued: bool) -> dict:
 
 def arm_merge(gh: FakeGh, queue: dict, *details: dict) -> None:
     gh.respond("pr merge", "")
-    gh.respond(f"api repos/{REPO}/pulls/7", *details)
+    gh.respond(f"api repos/{REPO}/pulls/7", merge_json(), *details)
     gh.respond("api graphql", queue)
 
 
@@ -1156,7 +1156,7 @@ def test_merge_fails_without_proof_of_admission_or_landing(gh, case, strategy, d
     if case == "command error":
         gh.fail("pr merge", "head commit mismatch")
     with pytest.raises(github.MergeFailed, match=diagnostic) as info:
-        github.merge(REPO, 7, strategy, HEAD)
+        github.merge(REPO, 7, strategy, HEAD, "main")
     calls = [c["argv"][:2] for c in gh.calls]
     assert ["api", "-X"] not in calls
     if case == "command error":
@@ -1182,9 +1182,9 @@ def test_merge_reports_queue_admission_or_landing(gh, monkeypatch, strategy, que
         gh.fail("api graphql", "HTTP 502")
     if strategy == "queue":
         gh.respond("api graphql", _queue_json(False), accepted)
-    assert github.merge(REPO, 7, strategy, HEAD) == ("d" * 40 if landed else None)
+    assert github.merge(REPO, 7, strategy, HEAD, "main") == ("d" * 40 if landed else None)
     if strategy == "queue":
-        assert github.merge(REPO, 7, strategy, HEAD) is None
+        assert github.merge(REPO, 7, strategy, HEAD, "main") is None
     writes = [c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"]]
     assert len(writes) == 1
     if strategy == "squash":
