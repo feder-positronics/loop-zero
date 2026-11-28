@@ -180,8 +180,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    configured base branch. Passing keyed receipts also bind the declared file bytes.
    The saved stage key pairs a byte digest with its execution digest. Only stage reuse
    compares the execution digest, which binds the exact base revision. Older keyed
-   receipts require a fresh check. Configured inputs must match readable, regular
-   worktree files to yield a byte digest. A missing base revision still permits
+   receipts require a fresh check. Configured inputs bind file bytes and symlink
+   text in real worktree directories. Declare target files separately when a
+   check reads through a symlink. A missing base revision still permits
    a byte digest and disables stage reuse. Source-check waiters check for policy
    changes on every poll.
    Local readiness and hosted eligibility share the mergeability verdict.
@@ -196,7 +197,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    Readiness keeps the highest run ID for each check name, GitHub App and
    producer (Actions workflow when identified, otherwise check suite).
    It combines verdicts by required name and keeps only the newest commit status
-   per case-insensitive context.
+   per case-insensitive context. A failed verdict takes precedence over a skipped
+   check run with the same required name.
    A positive `ready --wait`
    budget covers the first readiness read, the live PR reread before draft activation,
    and revalidation after taking a PR out of draft.

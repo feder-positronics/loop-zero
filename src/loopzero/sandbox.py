@@ -340,9 +340,13 @@ def _hash_inputs(config: Config, worktree: Path, command: str, base: str | None,
             if name.startswith('"'):
                 name = os.fsdecode(ast.literal_eval("b" + name))
             path = root / name
-            if (metadata.split()[1] not in {"100644", "100755"}
-                    or path.resolve(strict=True) != path
-                    or not stat.S_ISREG(path.lstat().st_mode)):
+            if path.parent.resolve(strict=True) != path.parent:
+                return None
+            mode, file_type = metadata.split()[1], path.lstat().st_mode
+            if mode == "120000" and stat.S_ISLNK(file_type):
+                contents.append(hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest())
+                continue
+            if mode not in {"100644", "100755"} or not stat.S_ISREG(file_type):
                 return None
             with path.open("rb") as stream:
                 contents.append(hashlib.file_digest(stream, "sha256").hexdigest())

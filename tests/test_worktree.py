@@ -282,14 +282,17 @@ def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path)
     from loopzero.runners import render_patch, split_diff
 
     base = _commit_files(git_repo, dict.fromkeys(("attr.py", "nul.py", "gone.py", "padded.py", "carriage.py"), b"old\n"))
+    git(git_repo, "clone", "-q", ".", "a-sub")
     git(git_repo, "update-index", "--add", "--cacheinfo", f"160000,{base},a-sub")
     _commit_files(git_repo, {
         ".gitattributes": b"attr.py -diff\nnul.py binary\n", "attr.py": b"new = 'attr hunk'\n",
         "nul.py": b"new = 'nul hunk'\x00\n", "image.png": b"\x89PNG\r\n\x1a\n\x00\xff\xfe",
         "gone.py": None, "padded.py": b"new = 'padded hunk'\n++ /dev/null\n" + b"x\n" * 300,
         "carriage.py": b"new \rdiff --git a/carriage.py b/carriage.py\rdeleted file mode 100644\r" + b"y\n" * 300,
-        ".gitmodules": b'[submodule "a-sub"]\n\tpath = a-sub\n\tignore = all\n'})
+        ".gitmodules": b'[submodule "a-sub"]\n\tpath = a-sub\n\tignore = dirty\n'})
     assert not worktree.is_dirty(git_repo) and worktree.head(git_repo) != base
+    (git_repo / "a-sub/README.md").write_text("uncommitted submodule edit")
+    assert worktree.is_dirty(git_repo)
     (git_repo / "attr.py").write_text("uncommitted edit")
     assert worktree.is_dirty(git_repo)
     diff = worktree.diff_since(git_repo, base)
