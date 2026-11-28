@@ -1139,6 +1139,7 @@ def arm_merge(gh: FakeGh, queue: dict, *details: dict) -> None:
 
 @pytest.mark.parametrize("case,strategy,diagnostic", [
     ("command error", "rebase", "mismatch"),
+    ("hold", "squash", "merge-authority hold"), ("hold", "queue", "merge-authority hold"),
     ("missing", "merge", "GitHub queue lookup for PR #7: queue status could not be verified"),
     ("not queued", "merge", "neither merged nor queued"),
     ("other head", "queue", "head changed or unavailable"),
@@ -1151,14 +1152,19 @@ def test_merge_fails_without_proof_of_admission_or_landing(gh, case, strategy, d
     if case == "other head":
         queue["data"]["repository"]["pullRequest"]["headRefOid"] = "b" * 40
         gh.respond("api graphql", queue)
+    elif case == "hold":
+        gh.respond(f"api repos/{REPO}/pulls/7", merge_json() | {"labels": [{"name": "hold"}]})
+        gh.respond("api graphql", _queue_json(False))
     elif case != "invalid strategy":
         arm_merge(gh, queue, merge_json(), merge_json())
     if case == "command error":
         gh.fail("pr merge", "head commit mismatch")
-    with pytest.raises(github.MergeFailed, match=diagnostic) as info:
+    with pytest.raises(github.GhError, match=diagnostic) as info:
         github.merge(REPO, 7, strategy, HEAD, "main")
     calls = [c["argv"][:2] for c in gh.calls]
     assert ["api", "-X"] not in calls
+    if case == "hold":
+        assert ["pr", "merge"] not in calls
     if case == "command error":
         assert "--rebase" in info.value.command and "mismatch" in info.value.tail
     if case in {"invalid strategy", "other head"}:

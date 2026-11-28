@@ -3590,9 +3590,10 @@ def landed_snapshot(head, sha="e" * 40):
     return merge_json(state="MERGED", head=head, sha=sha)
 
 
-def arm_landed_pr(gh, head, sha, *, landed_head=None, branch="lz/t1", number=7):
-    arm_pr(gh, head, branch=branch, number=number, state="MERGED", isDraft=False)
-    gh.append(f"api repos/{REPO}/pulls/{number}", merge_json(state="MERGED", head=landed_head or head, sha=sha))
+def arm_landed_pr(gh, head, sha, *, landed_head=None, branch="lz/t1", number=7, base="main"):
+    arm_pr(gh, head, branch=branch, number=number, state="MERGED", isDraft=False, baseRefName=base)
+    landed = merge_json(state="MERGED", head=landed_head or head, sha=sha) | {"base": {"ref": base}}
+    gh.append(f"api repos/{REPO}/pulls/{number}", landed)
 
 
 @pytest.mark.parametrize("command,conclusion,severity", [
@@ -3626,34 +3627,6 @@ def lose_native_merge_reply(monkeypatch):
         return result
 
     monkeypatch.setattr(github, "_gh", transport)
-
-
-@pytest.mark.parametrize("strategy", ["squash", "queue"])
-def test_native_merge_rechecks_hold_after_readiness(wt, gh, capsys, head, strategy):
-    if strategy == "queue":
-        publish_workflow(wt, WORKFLOW.replace('merge = "squash"', 'merge = "queue"'))
-    arm_approved_pr(gh, head, wt, isDraft=False)
-    gh.respond("api graphql", threads_json(), native_queue(False, head))
-    gh.append(f"api repos/{REPO}/pulls/7", {**merge_json(head=head), "labels": [{"name": "hold"}]})
-    gh.respond("pr merge", "")
-    code, _, err = run(capsys, "merge")
-    assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
-    assert code == 1 and "merge-authority hold" in err and wt.exists()
-
-
-@pytest.mark.parametrize("already_merged", [False, True])
-def test_merge_rejects_landing_on_another_base(wt, gh, capsys, head, already_merged):
-    landed = {**landed_snapshot(head), "base": {"ref": "release"}}
-    if already_merged:
-        arm_pr(gh, head, state="MERGED", isDraft=False, baseRefName="release")
-    else:
-        arm_squash_merge(gh, head, wt)
-    gh.append(f"api repos/{REPO}/pulls/7", landed)
-    gh.respond("api -X", "")
-    expect_cli(capsys, 1, "merge", stderr_contains=("release", "main"))
-    assert wt.exists()
-    assert any(c["argv"][:2] == ["pr", "merge"] for c in gh.calls) is not already_merged
-    assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
 
 
 @pytest.mark.parametrize("lost_reply", [False, True])
@@ -4212,21 +4185,20 @@ def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head
     assert all(call["argv"][:2] != ["api", "-X"] for call in gh.calls)
 
 
-@pytest.mark.parametrize("changed", [False, True])
-def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
-    wt: Path, repo: Path, gh: FakeGh, capsys, changed, monkeypatch
-) -> None:
+@pytest.mark.parametrize("rejection", ["", "head changed", "retargeted to release"])
+def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(wt, repo, gh, capsys, rejection, monkeypatch):
     collision, wt = wt, wt.with_name(wt.name + " ")
     git(repo, "worktree", "move", str(collision), str(wt))
     git(repo, "worktree", "add", "-qb", "lz/other", str(collision), "lz/t1")
     monkeypatch.chdir(wt)
     for branch, number in (("lz/t1", 7), ("lz/other", 8)):
-        arm_landed_pr(gh, head_of(wt), "e" * 40, landed_head="f" * 40 if changed else None,
-                      branch=branch, number=number)
-    out, err = expect_cli(capsys, int(changed), "merge")
-    assert collision.exists() and wt.exists() is changed
-    if changed:
-        assert "head changed" in err
+        arm_landed_pr(gh, head_of(wt), "e" * 40, landed_head="f" * 40 if rejection == "head changed" else None,
+                      branch=branch, number=number, base="release" if rejection.startswith("retargeted") else "main")
+    out, err = expect_cli(capsys, int(bool(rejection)), "merge")
+    assert collision.exists() and wt.exists() is bool(rejection)
+    if rejection:
+        assert rejection in err
+        assert not any("/git/ref/heads/" in " ".join(call["argv"]) for call in gh.calls)
     else:
         assert not err and f"PR #7 was already merged as {'e' * 12}" in out and out.endswith("e" * 40 + "\n")
 
@@ -4319,26 +4291,20 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
-@pytest.mark.parametrize("outcome", [
-    "merged", "ejected", "landed-on-ejection", "head-changed-early", "head-changed-late",
-    "closed-then-merged", "still-closed", "retargeted",
+@pytest.mark.parametrize("outcome,evidence", [
+    ("merged", "open open landed"), ("ejected", "open open open"), ("landed-on-ejection", "open open landed"),
+    ("head-changed-early", "moved-open moved-landed"), ("head-changed-late", "open moved-landed"),
+    ("closed-then-merged", "open closed landed"), ("still-closed", "open closed closed"),
+    ("retargeted-in-queue", "open retargeted"), ("retargeted-after-write", "wrong-base-landing"),
 ])
-def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
-    wt: Path, gh: FakeGh, capsys, monkeypatch, head, outcome
-) -> None:
-    opened, closed = open_pr_snapshot(head), merge_json(state="CLOSED", head=head)
-    landed = landed_snapshot(head)
+def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(wt, gh, capsys, monkeypatch, head, outcome, evidence):
+    opened, landed = open_pr_snapshot(head), landed_snapshot(head)
     snapshots = {
-        "merged": (opened, opened, landed),
-        "ejected": (opened, opened, opened),
-        "landed-on-ejection": (opened, opened, landed),
-        "head-changed-early": (open_pr_snapshot("f" * 40), landed_snapshot("f" * 40)),
-        "head-changed-late": (opened, landed_snapshot("f" * 40)),
-        "closed-then-merged": (opened, closed, landed),
-        "still-closed": (opened, closed, closed),
-        "retargeted": (opened, {**opened, "base": {"ref": "release"}}),
+        "open": opened, "closed": merge_json(state="CLOSED", head=head), "landed": landed,
+        "moved-open": open_pr_snapshot("f" * 40), "moved-landed": landed_snapshot("f" * 40),
+        "retargeted": opened | {"base": {"ref": "release"}}, "wrong-base-landing": landed | {"base": {"ref": "release"}},
     }
-    arm_squash_merge(gh, head, wt, *snapshots[outcome])
+    arm_squash_merge(gh, head, wt, *(snapshots[state] for state in evidence.split()))
     ejected = outcome in {"ejected", "landed-on-ejection"}
     gh.respond("api graphql", threads_json(), native_queue(True, head), native_queue(not ejected, head))
     gh.respond("api -X", "")
@@ -4350,8 +4316,9 @@ def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
     if outcome.startswith("head-changed"):
         assert code == 1 and "PR head changed" in err
         assert wt.exists(), "no cleanup after an unreviewed head"
-    elif outcome == "retargeted":
+    elif outcome.startswith("retargeted"):
         assert code == 1 and "retargeted to release" in err and "rerun" in err and wt.exists()
+        assert not any("/git/ref/heads/" in " ".join(call["argv"]) for call in gh.calls)
     elif outcome == "still-closed":
         assert code == 1 and "closed without a verified merge" in err and wt.exists()
     elif ejected:
