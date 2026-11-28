@@ -1159,7 +1159,6 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
             parsed = _parse_thread(node, None, publishers)
             if parsed is None or parsed[0] != finding_id:
                 continue
-            thread_id = node["id"]
             _, finding = parsed
             confirmed = _has_thread_reply(node, reply)
             if node.get("isResolved"):
@@ -1170,14 +1169,14 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
                 # Two calls on purpose: fields of one mutation are not transactional, and a
                 # thread must never be resolved unless its reply was confirmed.
                 posted = _gh_json("api", "graphql", "-f", f"query={_REPLY_MUTATION}",
-                                  "-f", f"thread={thread_id}", "-f", f"body={reply}")
+                                  "-f", f"thread={node['id']}", "-f", f"body={reply}")
                 try:
                     posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
                 except (KeyError, TypeError) as exc:
                     raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
             try:
                 response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
-                               "-f", f"thread={thread_id}", retry_idempotent=True)
+                               "-f", f"thread={node['id']}", retry_idempotent=True)
                 thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
                 if thread["isResolved"] is not True:
                     raise ValueError("GitHub did not return isResolved=true")
@@ -1484,7 +1483,7 @@ def readiness(
 
 
 def mark_ready(repo: str, number: int) -> None:
-    _gh("pr", "ready", str(number), "--repo", repo, retry_idempotent=_read_scope.get() is None)
+    _gh("pr", "ready", str(number), "--repo", repo, timeout=read_timeout(120), retry_idempotent=_read_scope.get() is None)
 
 
 _QUEUE_QUERY = (
@@ -1499,15 +1498,21 @@ class ClosedUnmerged(GhError):
 
 def merged_sha(
     repo: str, number: int, *, expected_head: str | None = None, check_hold: bool = False,
+    expected_base: str | None = None,
 ) -> str | None:
-    """The verified merge commit, or None while open. Admission may check the hold label."""
     argv = ("gh", "api", f"repos/{repo}/pulls/{number}")
     view = api_get(argv[2])
     if not isinstance(view, dict) or type(merged := view.get("merged")) is not bool:
         raise GhError(argv, "invalid PR merge evidence")
     if expected_head and (not isinstance(view.get("head"), dict)
                           or view["head"].get("sha") != expected_head):
-        raise GhError(argv, "PR head changed before merge verification")
+        raise GhError(argv, "PR head changed before merge verification; sync the branch and run loopzero ready")
+    if expected_base is not None:
+        base = view.get("base")
+        if not isinstance(base, dict) or not isinstance(ref := base.get("ref"), str):
+            raise GhError(argv, "invalid PR base evidence; inspect the PR before retrying")
+        if ref != expected_base:
+            raise GhError(argv, f"PR retargeted to {ref}; restore {expected_base} before rerunning loopzero merge --wait")
     state = view.get("state")
     if merged and state == "closed":
         if is_sha(sha := view.get("merge_commit_sha")):
@@ -1517,12 +1522,10 @@ def merged_sha(
             raise GhError(argv, hold)
         return None  # An open PR's merge_commit_sha is only a test merge.
     error = ClosedUnmerged if not merged and state == "closed" else GhError
-    raise error(argv, "PR closed without a verified merge or invalid merge evidence")
+    raise error(argv, "PR closed without a verified merge or invalid merge evidence; inspect the PR before retrying")
 
 
 def merge_pending(repo: str, number: int, head_sha: str) -> bool:
-    """True when GitHub holds the PR for merging: queued, or accepted as an auto-merge
-    request that it moves into the queue shortly after (observed ~1 minute, #180)."""
     args = _pull_query(repo, number, _QUEUE_QUERY)
     try:
         pr = _gh_json(*args)["data"]["repository"]["pullRequest"]
@@ -1530,9 +1533,9 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
         auto = pr.get("autoMergeRequest")
         if type(queued) is not bool or (auto is not None and not isinstance(auto, dict)):
             raise ValueError("invalid queue fields")
-    except ReadDeadline:
-        raise
-    except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
+    except (GhError, KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, GhUnavailable):
+            raise
         raise MergeFailed(("gh", "api", "graphql"),
                           f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
                           f"Check the PR's queue or merge state before retrying.\n{str(exc)[-300:]}") from exc
@@ -1541,22 +1544,22 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
     return queued or bool(auto)
 
 
-def _merge_evidence(repo: str, number: int, head_sha: str) -> tuple[str | None, bool, MergeFailed | None]:
-    """Read the merge SHA, queued state and queue error after a merge request."""
+def _merge_evidence(repo: str, number: int, head_sha: str) -> tuple[str | None, bool, GhError | ProcTimeout | None]:
     if sha := merged_sha(repo, number, expected_head=head_sha):
         return sha, False, None
     queue_error = None
     try:
         if merge_pending(repo, number, head_sha):
             return None, True, None
-    except MergeFailed as exc:
+    except (MergeFailed, GhUnavailable, ProcTimeout) as exc:
+        if isinstance(exc, ReadDeadline):
+            raise
         queue_error = exc
     # The queue may have landed the PR between the two reads.
     return merged_sha(repo, number, expected_head=head_sha), False, queue_error
 
 
 def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
-    """Merge at exactly this head, returning None if GitHub queued the PR."""
     if strategy not in ("squash", "merge", "rebase", "queue"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
     # A merge queue owns the method; gh rejects an explicit --squash/--merge/--rebase.
@@ -1569,7 +1572,6 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         _gh(*argv, timeout=300)
     except (GhError, ProcTimeout, OSError) as exc:
         write_error = exc
-    # A direct merge already in flight still needs verification and cleanup.
     scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
     try:
         sha, queued, queue_error = _merge_evidence(repo, number, head_sha)
@@ -1578,7 +1580,6 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     except (GhError, ProcTimeout) as exc:
         if strategy == "queue" or isinstance(exc, (MergeFailed, ClosedUnmerged)):
             raise
-        # A direct merge reports its own verification failure, never a queue timeout.
         raise MergeFailed(("gh", *argv), f"PR #{number} merge could not be verified: {exc}") from exc
     finally:
         _read_scope.reset(scope)
