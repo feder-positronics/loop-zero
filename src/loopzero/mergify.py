@@ -413,6 +413,10 @@ class QueueAttempt:
     departure: Departure | None = None
     admission: str | None = None
 
+    @property
+    def was_admitted(self) -> bool:
+        return self.confirmed or self.departure is not None
+
 
 def queue_attempt(repo: str, number: int, head: str, queue: str) -> QueueAttempt:
     login, requested, confirmed = github.login(token=""), False, False
