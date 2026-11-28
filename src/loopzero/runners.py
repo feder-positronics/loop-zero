@@ -729,13 +729,12 @@ def _codex_evidence(result):  # noqa: C901 - one check per Codex evidence field
             or sum(e.get("type") == "turn.completed" for e in events) != 1
         ):
             raise RunnerBadOutput("codex: incomplete/mixed native terminal evidence")
-        last_message = next((i for i in reversed(range(len(events)))
-                             if events[i].get("type") == "item.completed"
-                             and isinstance(item := events[i].get("item"), dict)
-                             and item.get("type") == "agent_message"), None)
-        if (last_message is None or _evidence_json(events[last_message]["item"].get("text"))
-                != _evidence_json(envelope["final_message"])):
+        messages = [(index, event["item"].get("text")) for index, event in enumerate(events)
+                    if event.get("type") == "item.completed" and isinstance(event.get("item"), dict)
+                    and event["item"].get("type") == "agent_message"]
+        if not messages or _evidence_json(messages[-1][1]) != _evidence_json(envelope["final_message"]):
             raise RunnerBadOutput("codex: native final verdict is missing")
+        last_message = messages[-1][0]
         if any(e.get("type") == "item.completed" and e.get("item", {}).get("type") == "command_execution"
                for e in events[last_message + 1:]):
             raise RunnerBadOutput("codex: native verdict precedes inspection")
@@ -948,7 +947,8 @@ def _review_codex(
             "--output-schema", f"{sandbox.SANDBOX_HOME}/schema.json",
             "--output-last-message", f"{sandbox.SANDBOX_HOME}/last.json", "-",
         ]
-        configured = {"model": model or None, "effort": effort or None}  # explicit -m/-c above
+        requested = {"model": model, "effort": effort}
+        configured = {key: value or None for key, value in requested.items()}  # explicit flags above
         done = _run(argv, cwd=cwd, prompt=prompt, timeout=timeout, family="codex",
                     env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV))
         message_bytes = _read_codex_file(last_file)
@@ -971,7 +971,7 @@ def _review_codex(
     if review_context is not None:
         envelope["review_context"] = review_context
     raw = json.dumps(envelope, separators=(",", ":"))
-    provenance["requested_settings"] = [{"model": model, "effort": effort}]
+    provenance["requested_settings"] = [requested]
     banner_model = _CODEX_MODEL_RE.search(done.stderr)
     review = parse_review(payload, family="codex", head=head, kind=kind, raw=raw, excerpt=message)
     return replace(review, model=model or (banner_model.group(1) if banner_model else None),
