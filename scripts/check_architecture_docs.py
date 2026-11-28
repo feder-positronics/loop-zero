@@ -80,9 +80,10 @@ def link_errors(root):
     for name in DOCS:
         path = root / name
         source = "\n".join(outside_fences(path.read_text()))
-        # Mask code without introducing Markdown syntax or crossing blank lines.
-        text = re.sub(r"\\[\\`]|(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)",
-                      lambda span: re.sub(r"[^\n]", "x", span[0]) if span[1] else span[0], source)
+        # Mask comments and inline code while keeping offsets into the source.
+        text = re.sub(r"(<!--.*?-->)|\\[\\`]|(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n).)*?(?<!`)\2(?!`)",
+                      lambda span: re.sub(r"[^\n]", "x", span[0]) if span.lastindex else span[0],
+                      source, flags=re.DOTALL)
         links = list(re.finditer(
             r'''!?\[[^\]]*\]\(\s*(?:<([^<>\n]+)>(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*|([^)]+))\)''',
             text))
