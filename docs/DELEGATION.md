@@ -89,9 +89,9 @@ Wait for the exit file or for the unit to stop:
 until test -f LOG.exit || ! systemctl --user is-active --quiet NAME; do sleep 30; done
 ```
 
-After the wait, a missing `LOG.exit` means the job was killed, timed out or
-cancelled. To cancel, check `LOG.exit` first and run `systemctl --user stop NAME`
-if the file is absent.
+Report completion only once `LOG.exit` exists. After the wait, a missing file
+means the job failed (killed, timed out or cancelled). To cancel, run
+`systemctl --user stop NAME` only if the exit file is absent.
 
 ### Leftover cleanup
 
@@ -136,11 +136,6 @@ A schedule firing or a relayed go-ahead grants no new authority.
   and the answer is easy to predict, it decides on the owner's behalf. Format
   owner-facing asks and rulings under [Reporting](../core/CONTRACT.md#reporting).
   It keeps no watch and sends no status.
-- **Owner orders:** an order from the human owner is an open issue labelled
-  `p0`. Whoever receives it labels or opens that issue, comments which owner
-  carries it, and replies with its link in the same turn. PRs reference it with
-  `Refs`, not `Closes`: the issue closes only with a comment holding the result
-  or blocker.
 - **Status thread:** a schedule that host policy sets runs it as a fresh
   session. Each run
   rebuilds from GitHub and T3 records, tells the human owner what is done, not
@@ -153,16 +148,21 @@ A schedule firing or a relayed go-ahead grants no new authority.
   and allocated host capacity without per-launch coordinator permission. Reports
   on the tracking issue; messages the coordinator only for blockers.
 - **Worker:** see [Worker](#worker).
-- **QA:** a round files reproducible defects in commissioned states, with every
-  occurrence. A retest checks every recorded occurrence at the exact merged
-  revision; the issue closes only on PASS, so repairs use `Refs`. A missing
-  fixture or credential is a blocker, never a PASS.
 - **Lean warden:** keeps the delivery system lean: loop-zero improvement,
   host delivery tooling (test slots, remote hosts, CLI upgrades) and workflow
   health. Reports to the decisions owner.
 - **Monitor and watchdog:** detect regressions and idle work; send one message
   or nudge per new finding, and never decide for an owner. A periodic review
   first asks why an existing mechanism failed and repairs it before adding one.
+
+### Issue closure owners
+
+- **Owner orders:** label or open a `p0` issue for the human owner's order,
+  name its owner in a comment and reply with its link in the same turn.
+  PRs use `Refs`; close only with a comment holding the result or blocker.
+- **QA:** file reproducible defects in commissioned states with every occurrence.
+  Retest every occurrence at the exact merged revision. Repairs use `Refs`;
+  close only on PASS. Missing fixtures or credentials block PASS.
 
 ### Worker
 
@@ -373,9 +373,8 @@ profile. Avoid blind retries or repeating successful work for reassurance.
 
 ## Author lineage and independent review
 
-The contract's [review budget](../core/CONTRACT.md#review-budget) governs
-authorship and reviewer selection. When applying a supplied patch
-verbatim, credit the patch's writer.
+Follow the contract's [review budget](../core/CONTRACT.md#review-budget),
+including credit for the writer of a supplied patch.
 
 ## Briefs and ownership
 
@@ -413,9 +412,8 @@ Check the repository's queue rules before setting a readiness-only finish point.
 If leaving draft auto-queues the PR and the brief must stop before admission,
 keep it in draft and hand back the check and review evidence.
 
-Follow the [Worker role](#worker) for blockers. An owner continues the
-work a pending decision does not block and reports the blocker and next owner;
-silence is not approval.
+Follow [Worker](#worker) for blockers. Continue independent work while a
+decision is pending; report the blocker and next owner. Silence grants no approval.
 
 Before each preassigned follow-up, re-read live issue/PR state and dispatch
 ownership, record the finished item's current head and evidence directly on its
