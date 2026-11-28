@@ -601,7 +601,8 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def _check_failure_preview(tail: str, limit: int = 1536) -> str:
+def _check_failure_preview(tail: str) -> str:
+    limit = 1536
     if len(tail.encode()) <= limit:
         return tail
     edge = limit // 8
