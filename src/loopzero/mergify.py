@@ -423,9 +423,17 @@ def queue_attempt(repo: str, number: int, head: str, queue: str) -> QueueAttempt
     requested_at = ""
     comments = github.paged(f"repos/{repo}/issues/{number}/comments")
     departure, retry = _departure(comments, repo, number, head, queue)
-    for item in _comments_by(comments, login):
+    for item in comments:
+        author = user.get("login") if isinstance(user := item.get("user"), dict) else None
         body = str(item.get("body") or "")
         lines, requeue = body.splitlines(), _queue_command(body, queue)
+        if author != login:
+            if isinstance(author, str) and requeue and _marker(REQUEST, head, queue) in lines:
+                with suppress(github.GhError):
+                    permission = github.api_get(f"repos/{repo}/collaborators/{quote(author, safe='')}/permission")
+                    if isinstance(permission, dict) and permission.get("permission") in ("write", "maintain", "admin"):
+                        requested, requested_at, confirmed = True, str(item.get("created_at") or ""), False
+            continue
         marked = any(line.startswith(f"<!-- {REQUEST} ") for line in lines)
         if _marker(REQUEST, head, queue) in lines or (not marked and requeue and (confirmed or item is retry)):
             requested, requested_at = True, str(item.get("created_at") or "")
