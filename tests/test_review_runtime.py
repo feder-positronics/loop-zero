@@ -11,7 +11,7 @@ from loopzero import cli, eligibility, runners
 from tests import test_cli, test_runners
 from tests.test_cli import expect_cli, posted, prepare_review
 from tests.test_runners import (
-    APPROVE, _fake_claude, _fake_codex, _native_codex_result, _review, replace_codex_events,
+    APPROVE, _fake_claude, _fake_codex, _native_codex_result, _review,
 )
 
 repo, wt, gh, head = test_cli.repo, test_cli.wt, test_cli.gh, test_cli.head
@@ -92,8 +92,7 @@ def test_legacy_startup_never_publishes(wt, gh, fake_bin, capsys, row, repost):
     else:
         # Fall through to the configured Codex route and inject the fatal native event.
         _fake_claude(fake_bin, "{}", exit_code=1)
-        script = _fake_codex(fake_bin, json.dumps(APPROVE))
-        replace_codex_events(script, [envelope(row)["events"][1]], prepend=True)
+        _fake_codex(fake_bin, json.dumps(APPROVE), leading_events=[envelope(row)["events"][1]])
         expect_cli(capsys, 4, "review", stderr_contains=("Code Mode",))
         assert not list((wt / ".loopzero").glob("review-*.json"))
     assert not any(map(posted, gh.calls))
@@ -130,12 +129,12 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, mode):
     markers = cli._pr_markers([review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
     accepted = mode in ("clean", "quoted", "unrelated_error", "quoted_error", "projected_quote")
     assert bool(markers) is accepted
-    script = _fake_codex(fake_bin, json.dumps(APPROVE))
+    events = [{"type": "item.completed", "item": {
+        "type": "command_execution", "status": "completed", "exit_code": 0,
+    }}] if mode == "after_tool" else []
     if mode not in ("clean", "projected_quote"):
-        events = [{"type": "item.completed", "item": {
-            "type": "command_execution", "status": "completed", "exit_code": 0,
-        }}] if mode == "after_tool" else []
-        replace_codex_events(script, [*events, fatal], prepend=True)
+        events.append(fatal)
+    _fake_codex(fake_bin, json.dumps(APPROVE), leading_events=events)
     if accepted:
         assert _review("codex", tmp_path).verdict == "approve"
     else:

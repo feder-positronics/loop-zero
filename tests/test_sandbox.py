@@ -60,10 +60,9 @@ if home_source:
         home_source + arg.removeprefix("/tmp/home") if arg.startswith("/tmp/home/") else arg
         for arg in command
     ]
-    if env.get("CODEX_HOME") == "/tmp/home":
-        env["CODEX_HOME"] = home_source
-    if env.get("HOME") == "/tmp/home":
-        env["HOME"] = home_source
+    for key in ("CODEX_HOME", "HOME"):
+        if env.get(key) == "/tmp/home":
+            env[key] = home_source
 os.chdir(options[options.index("--chdir") + 1])
 os.execvpe(command[0], command, env)
 '''
@@ -108,7 +107,6 @@ def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
     command = "git -c user.name=test -c user.email=test@example.com commit --allow-empty -m drift"
 
     report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
-
     after = git(git_repo, "rev-parse", "HEAD").strip()
     assert after != before
     assert report.head == before and report.dirty is True and report.ok is False
@@ -391,6 +389,17 @@ def _real_bwrap_works() -> bool:
         return False
 
 
+def interrupt_after_checkpoint(repo, config, *, verify_first_exit=False):
+    def checkpoint(report):
+        if verify_first_exit:
+            assert report.results[0].exit_code == 0
+        _save_report(repo, report)
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        sandbox.run_checks(config, repo, checkpoint=checkpoint)
+
+
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
 class TestRealSandbox:
     @pytest.mark.parametrize("interrupt", [False, True])
@@ -404,12 +413,7 @@ class TestRealSandbox:
         commit_file(git_repo, "consumer.txt", "new\n", "Update consumer input")
 
         if interrupt:
-            def checkpoint(report):
-                _save_report(git_repo, report)
-                raise KeyboardInterrupt
-
-            with pytest.raises(KeyboardInterrupt):
-                sandbox.run_checks(config, git_repo, checkpoint=checkpoint)
+            interrupt_after_checkpoint(git_repo, config)
 
         report = sandbox.run_checks(config, git_repo)
         assert report.ok
@@ -553,13 +557,7 @@ class TestRealSandbox:
             writable=(str(uv_cache),),
         )
         if interrupt:
-            def checkpoint(report):
-                assert report.results[0].exit_code == 0
-                _save_report(git_repo, report)
-                raise KeyboardInterrupt
-
-            with pytest.raises(KeyboardInterrupt):
-                sandbox.run_checks(cfg, git_repo, checkpoint=checkpoint)
+            interrupt_after_checkpoint(git_repo, cfg, verify_first_exit=True)
 
         report = sandbox.run_checks(cfg, git_repo)
         assert report.ok, report

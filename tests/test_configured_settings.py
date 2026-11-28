@@ -15,7 +15,6 @@ from tests.test_runners import (
     _fake_codex,
     _review,
     fake_bwrap,  # noqa: F401
-    replace_codex_events,
 )
 
 
@@ -27,9 +26,8 @@ def test_refused_stream_fresh_launch_records_only_explicit_flags(fake_bin, tmp_p
     context = raw.pop("review_context")
     if mode == "failed-read":
         raw["events"][3]["item"]["exit_code"] = 1
-    script = _fake_codex(fake_bin, raw["final_message"], version="codex-cli 0.165.0",
-                         stderr="model: other-model" if mode == "reported-conflict" else "")
-    replace_codex_events(script, raw["events"])
+    _fake_codex(fake_bin, raw["final_message"], version="codex-cli 0.165.0", events=raw["events"],
+                stderr="model: other-model" if mode == "reported-conflict" else "")
     pins = {} if mode == "default" else {"model": "gpt-6.2-astra", "effort": "medium"}
     if mode in ("model-only", "effort-only"):
         pins.pop("effort" if mode == "model-only" else "model")
