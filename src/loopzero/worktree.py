@@ -417,6 +417,9 @@ def cleanup(wt: Path, expected_head: str, *, keep_branch: bool = False) -> None:
             raise WorktreeError("local branch changed during merge cleanup")
         if is_dirty(wt):
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
+        if keep_branch and (ignored := git(wt, "ls-files", "--others", "--ignored", "--exclude-standard",
+                                           "--", ".", ":(exclude,top).loopzero/")):
+            raise WorktreeError(f"worktree contains ignored paths, refusing to remove: {ignored}")
         _require_no_nested_worktree(wt, gd)
         git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
     if keep_branch:
