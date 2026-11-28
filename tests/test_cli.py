@@ -93,7 +93,7 @@ def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
     checkout = init_git_repo(seed / "repo")
     commit_file(checkout, "workflow.toml", WORKFLOW, "config")
     origin = seed / "origin.git"
-    git(checkout, "init", "-q", "--bare", "-b", "main", str(origin))
+    git(checkout, "init", "-q", "--bare", "--template=", "-b", "main", str(origin))
     git(origin, "config", "receive.autogc", "false")
     git(checkout, "remote", "add", "origin", str(origin))
     git(checkout, "push", "-q", "origin", "main")
@@ -119,7 +119,7 @@ def repo(git_seed: Path, tmp_path: Path, fake_tool, monkeypatch, request: pytest
     """A private copy of both Git repositories and a per-case fake bwrap."""
     checkout = tmp_path / "repo"
     seed_checkout = "prepared" if "wt" in request.fixturenames else "repo"
-    shutil.copytree(git_seed / seed_checkout, checkout)
+    shutil.copytree(git_seed / seed_checkout, checkout, ignore=shutil.ignore_patterns("*.sample"))
     origin = shutil.copytree(git_seed / "origin.git", tmp_path / "origin.git")
     git(checkout, "remote", "set-url", "origin", str(origin))
     run_command, git_command = github.run, cli._git

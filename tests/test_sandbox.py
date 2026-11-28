@@ -30,7 +30,7 @@ from loopzero.types import Config, ResourceLimits
 
 from .conftest import commit_file, git
 
-FAKE_BWRAP = '''#!/usr/bin/python3
+FAKE_BWRAP = '''#!/usr/bin/python3 -S
 import os
 import sys
 
@@ -1115,17 +1115,17 @@ print("-----END PRIVATE KEY-----")
 ])
 def test_check_output_redaction_across_capture_boundaries(git_repo, bwrap_log, monkeypatch, timed_out, output, canary):
     monkeypatch.setenv("MULTILINE_SECRET", "private-first-line\r\nprivate-second-line")
-    code = f"""
-import os
-import sys
-import time
-
-{output}
-print("ordinary diagnostic", flush=True)
-if sys.argv[1] == "True":
-    time.sleep(30)
-"""
-    command = shlex.join([sys.executable, "-c", code, str(timed_out)])
+    code = f'import os, signal\n{output}\nprint("ordinary diagnostic", flush=True)'
+    if timed_out:
+        code += "\nos.close(1)\nos.close(2)\nsignal.pause()"
+        capture = sandbox._proc._read_output_tail
+        def expire_when_drained(process, *args):
+            wait = process.wait
+            with monkeypatch.context() as patch:
+                patch.setattr(process, "wait", lambda *, timeout: wait(timeout=0))
+                return capture(process, *args)
+        monkeypatch.setattr(sandbox._proc, "_read_output_tail", expire_when_drained)
+    command = shlex.join([sys.executable, "-c", code])
     config = make_config(env_allowlist=("PATH", "MULTILINE_SECRET"))
     result = sandbox._run_one(config, git_repo, ["bwrap", "--chdir", str(git_repo), "--"], command, 2)
     assert result.exit_code == (sandbox.TIMEOUT_EXIT if timed_out else 0)
