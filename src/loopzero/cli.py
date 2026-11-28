@@ -378,8 +378,7 @@ def _check_report_problem(
     if require_pass and not report.ok:
         return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
                 "Retry unchanged only if the failure was transient.")
-    expected = config.checks if report.ok else config.checks[:len(commands)]
-    if commands != expected:
+    if report.ok and commands != config.checks:
         return "check receipt's plan differs from the trusted workflow. Run `loopzero check` with the current workflow."
     if report.settings_sha256 is None or all(
         report.settings_sha256 != sandbox.settings_fingerprint(config, legacy_allowlist=names)
@@ -832,8 +831,9 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
         if report is not None and not report.ok:
             required = set(config.required_ci) - {eligibility.CONTEXT}
             checks = github._check_signals(config.repo, head)[0] if required else {}
-            if not required or any(checks.get(name) != "success" for name in required):
-                raise CliError("required hosted checks must pass on this head. Fix the failure, then run `loopzero check`.")
+            blocked = [f"{name} ({checks.get(name, 'missing')})" for name in sorted(required) if checks.get(name) != "success"]
+            if not required or blocked:
+                raise CliError(f"hosted checks must pass on this head or rerun `loopzero check`: {', '.join(blocked) or 'no required hosted checks before review'}")
         result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
                              runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
         final_head, final_dirty = worktree.head(wt), worktree.is_dirty(wt)

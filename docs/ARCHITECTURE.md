@@ -131,7 +131,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
 4. `review` requires a matching check receipt before launching a native review
    of the exact authored SHA. A failed receipt requires green required hosted
    checks on that SHA, excluding the review eligibility status that depends on
-   the review itself. The owner queue route still governs queue admission.
+   the review itself. Local preparation and preflight failures can record a
+   different command sequence, so hosted checks supply the pass verdict.
+   The owner queue route still governs queue admission.
    Reposting saved output can recover publication
    without launching a new review. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion
