@@ -361,6 +361,16 @@ usage limit), report it and ask the owner whether to wait or explicitly approve
 a substitute; availability of another provider is not permission. Checking
 audit findings with the other provider before acting is a separate step.
 
+Gemini 4 Neon at High is a peer option to Astra and Fable for critical
+analysis and an option for substantial coding of the kind suited to Opus.
+Use `root_cause_analysis` for a failure whose cause is still unknown. Prefer
+Neon when the user prompts Antigravity directly, and use the profile default
+for agent-driven diagnosis. Google supports directly prompted Antigravity
+sessions in ACP editors such as T3 Code. With a consumer Antigravity login,
+select Neon only for that direct use, including when supervised delegation
+would be possible in the runtime.
+[Google's Antigravity delegation guidance](https://discuss.ai.google.dev/t/tos-clarification-is-human-supervised-codex-to-antigravity-acp-delegation-permitted/200697)
+
 ## Profiles are starting points
 
 Profile names describe task shape, not measured cost or speed. Preserve owner

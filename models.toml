@@ -2,8 +2,11 @@
 # provider preferences below are owner rules (2026-09-30). Profile names do not rank cost or speed.
 # Read before delegation; check runtime support and pass model/effort explicitly.
 # Effort: avoid max/ultra; xhigh only where it measurably helps.
-# Owner order 2026-11-27 (#2224): builders, finishers, CI fixes and audits run on
-# OpenAI; Anthropic only for UI design and cross-family review. No Anthropic fallback.
+# OpenAI remains the default for builders, finishers, CI fixes and audits.
+# Anthropic is reserved for UI design and cross-family review or consultation.
+# Gemini 4 Neon is an explicit option for substantial coding and critical
+# analysis, with root-cause diagnosis as its specialty. Antigravity consumer
+# plans require directly prompted sessions. See docs/DELEGATION.md.
 # Values pass through; runtimes resolve aliases. Alternatives are explicit choices,
 # not automatic retries or replacements for an explicitly requested model.
 version = 1
@@ -28,6 +31,11 @@ provider = "openai"
 model = "gpt-6.2-astra"
 effort = "medium"
 
+[[profiles.standard.alternatives]]
+provider = "antigravity"
+model = "gemini-4-neon"
+effort = "high"
+
 [profiles.deep]
 provider = "openai"
 model = "gpt-6.2-astra"
@@ -39,8 +47,24 @@ provider = "anthropic"
 model = "claude-fable-5-2"
 effort = "low"
 
+[[profiles.deep.alternatives]]
+provider = "antigravity"
+model = "gemini-4-neon"
+effort = "high"
+
+# Prefer Neon for directly prompted diagnosis. Astra is the agent-driven default.
+[profiles.diagnosis]
+provider = "openai"
+model = "gpt-6.2-astra"
+effort = "medium"
+
+[[profiles.diagnosis.alternatives]]
+provider = "antigravity"
+model = "gemini-4-neon"
+effort = "high"
+
 # Exhaustive defect/gap search: thorough, potentially noisy; OpenAI only, so do not
-# choose an Anthropic alternative. If no OpenAI route is available, ask the owner.
+# choose another provider. If no OpenAI route is available, ask the owner.
 [profiles.audit]
 provider = "openai"
 model = "gpt-6.2-sol"
@@ -70,6 +94,7 @@ mechanical = "fast"
 bounded_implementation = "fast" # One settled behavior with direct acceptance.
 implementation = "standard" # Several connected decisions.
 investigation = "standard"
+root_cause_analysis = "diagnosis"
 planning = "deep"
 architecture = "deep"
 review = "deep"
