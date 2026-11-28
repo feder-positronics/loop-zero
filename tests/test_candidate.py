@@ -48,10 +48,13 @@ def batch(batch_id, *, parents, number, sources, children):
     }
 
 
-def status() -> dict:
+def status(*, lineage="stacked", extra_source=None, candidate_id="candidate") -> dict:
+    parents = [] if lineage == "single" else ["parent"]
+    sources = [102, 101] if extra_source else [102]
+    child = batch(candidate_id, parents=parents, number=900, sources=sources, children=[])
+    outer = batch("outer", parents=[], number=None, sources=[], children=[child])
     parent = batch("parent", parents=[], number=899, sources=[101], children=None)
-    candidate = batch("candidate", parents=["parent"], number=900, sources=[102], children=[])
-    return {"batches": [parent, batch("outer", parents=[], number=None, sources=[], children=[candidate])]}
+    return {"batches": [parent, outer] if lineage == "stacked" else [outer]}
 
 
 def pull(number: int, sha: str) -> dict:
@@ -92,11 +95,8 @@ def payloads(candidate_event: dict, *sources) -> dict[str, object]:
     return values
 
 
-def run_attestation(
-    candidate_event: dict | None = None, *,
-    status_reads: list[dict] | None = None, github_payloads: dict[str, object] | None = None,
-    github_get=None, mergify_status=None, source_policy=lambda _number, _source: None, run=attest_candidate,
-):
+def run_attestation(candidate_event=None, *, status_reads=None, github_payloads=None,
+                    github_get=None, mergify_status=None, source_policy=lambda _n, _s: None, run=attest_candidate):
     candidate_event = candidate_event or event()
     reads = cycle(status_reads or [status()])
     values = github_payloads or payloads(candidate_event)
@@ -109,10 +109,10 @@ def run_attestation(
 
 
 def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
-    seen: list[int] = []
-    sources = run_attestation(source_policy=lambda number, _: seen.append(number))
+    seen = Mock()
+    sources = run_attestation(source_policy=seen)
     assert sources == expected_sources((101, "1" * 40), (102, "2" * 40))
-    assert seen == [101, 102]
+    assert [args[0] for args, _ in seen.call_args_list] == [101, 102]
 
 
 @pytest.mark.parametrize("location,replacement,diagnostic", [
@@ -180,12 +180,11 @@ def test_same_head_source_still_requires_policy():
     values[pull_path(102)]["head"]["sha"] = head
     values[f"/repos/owner/repo/compare/{head}...{head}"] = dict(status="identical", merge_base_commit={"sha": head})
 
-    def policy(number, _source):
-        if number == 102:
-            raise CandidateError("source policy blocked same-head source")
-
-    with pytest.raises(CandidateError, match="source policy blocked same-head source"):
+    blocked = CandidateError("source policy blocked same-head source")
+    policy = Mock(side_effect=[None, blocked])
+    with pytest.raises(CandidateError, match=str(blocked)):
         run_attestation(incoming, github_payloads=values, source_policy=policy)
+    assert [args[0] for args, _ in policy.call_args_list] == [101, 102]
 
 
 @pytest.fixture(scope="session")
@@ -249,14 +248,7 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
                main_after=None, extra_source=None, lineage="vanished", base_branch="main"):
         candidate_event = event(head)
         values = payloads(candidate_event, (101, extra_source or parent), (102, source))
-        queue = status()
-        candidate_batch = queue["batches"][1]["sub_batches"][0]
-        if lineage != "stacked":
-            queue["batches"].pop(0)
-        if lineage == "single":
-            candidate_batch["parent_ids"].clear()
-        if extra_source:
-            candidate_batch["pull_requests"].append({"number": 101})
+        queue = status(lineage=lineage, extra_source=extra_source)
         for number in (102, 900):
             values[pull_path(number)]["base"]["ref"] = base_branch
         reads = cycle([main_head, main_after or main_head])
@@ -411,12 +403,12 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
     values["/repos/owner/repo/git/ref/heads/main"] = {"object": {"sha": main}}
 
     def get(path):
-        result = deepcopy(values[path])
+        row = deepcopy(values[path])
         if path == pull_path(101):
             assert lineage.call_count > 0
             if timing == "initial" or read_count(101) == 2:
-                result.update(state="closed", merged=True)
-        return result
+                row.update(state="closed", merged=True)
+        return row
 
     fetch = Mock(side_effect=get)
 
@@ -433,13 +425,13 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(candidate, "_verify_tree", verify)
+    attest = partial(run_attestation, candidate_event, github_get=fetch, mergify_status=lineage, source_policy=policy)
     if isinstance(timing, type):
         with pytest.raises(timing, match="policy implementation error"):
-            run_attestation(candidate_event, github_get=fetch, mergify_status=lineage, source_policy=policy)
+            attest()
         assert seen == [101] and read_count(101) == 1 and not sleeps
         return
-    assert run_attestation(candidate_event, github_get=fetch, mergify_status=lineage,
-                           source_policy=policy) == expected_sources((102, source))
+    assert attest() == expected_sources((102, source))
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
     assert read_count(900) == (4 if timing == "metadata" else 3)
     verify.assert_called_once_with("owner/repo", main, head, [source])
@@ -519,6 +511,7 @@ def test_membership_drift_is_a_retryable_race():
 def test_rebuild_wait(monkeypatch, no_retry_delay, second, stop):
     clock, sleeps, reads, values, seen = no_retry_delay, [], [], payloads(event()), []
     ambiguous = {"batches": [{"id": str(i), "queue_pull_request_number": 900} for i in range(2 * second)]}
+    replacement = status(candidate_id="replacement")
     def sleep(delay):
         sleeps.append(delay)
         clock[0] += 100 if stop == "oversleep" else delay
@@ -529,12 +522,9 @@ def test_rebuild_wait(monkeypatch, no_retry_delay, second, stop):
         if stop == "slow":
             clock[0] += 100
         if stop == "changed" and len(reads) >= 6:
-            settled = status()
-            settled["batches"][1]["sub_batches"][0]["id"] = "replacement"
-            return settled
-        if (second and len(reads) == 1) or (stop == "settled" and len(reads) > 1 + second):
-            return status()
-        return ambiguous
+            return replacement
+        settled = stop == "settled" and len(reads) > 1 + second
+        return status() if settled or (second and len(reads) == 1) else ambiguous
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     run = partial(run_attestation, github_payloads=values, mergify_status=read_status,
                   source_policy=lambda n, _: seen.append(n))
