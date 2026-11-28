@@ -203,12 +203,20 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
     import yaml
 
     class _ConfigLoader(yaml.SafeLoader):
-        def construct_mapping(self, node, deep=False):
-            self.flatten_mapping(node)
-            keys = [self.construct_object(key, deep=True) for key, _ in node.value]
-            if len(keys) != len(set(keys)):
-                raise yaml.YAMLError("duplicate configuration key")
-            return super().construct_mapping(node, deep=deep)
+        def __init__(self, stream):
+            super().__init__(stream)
+            self.checked_mappings = set()
+
+        def flatten_mapping(self, node):
+            if node not in self.checked_mappings:
+                self.checked_mappings.add(node)
+                merge_tag, value_tag = "tag:yaml.org,2002:merge", "tag:yaml.org,2002:value"
+                keys = [object if key.tag == merge_tag else self.construct_scalar(key) if key.tag == value_tag
+                        else self.construct_object(key, deep=True)
+                        for key, _ in node.value]
+                if len(keys) != len(set(keys)):
+                    raise yaml.YAMLError("duplicate configuration key")
+            super().flatten_mapping(node)
 
     repo_path = f"repos/{repo}"
     path = f"{repo_path}/contents/.mergify.yml?ref={quote('refs/heads/' + branch, safe='')}"

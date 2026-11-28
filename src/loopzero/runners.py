@@ -935,7 +935,7 @@ def _review_claude(
     provenance["requested_settings"] = [{"model": model, "effort": effort}]
     provenance["configured_settings"] = [configured]
     return replace(
-        parse_review(payload, family="claude", head=head, kind=kind, raw=raw, excerpt=json.dumps(payload)),
+        parse_review(payload, family="claude", head=head, kind=kind, raw=json.dumps(envelope), excerpt=json.dumps(payload)),
         model=reported_model or model, effort=effort,
         duration_s=done.duration_s, provenance=provenance,
     )
@@ -1222,9 +1222,9 @@ def _validated_evidence(result: ReviewResult) -> tuple[bool, dict | None]:
 
 def families_from_trailer(value: str) -> set[str]:
     """Every reviewer family a ``Co-Authored-By`` value names."""
-    lowered = value.lower()
-    words = {"claude": ("claude", "anthropic"), "codex": ("codex", "gpt", "openai")}
-    return {family for family, names in words.items() if any(name in lowered for name in names)}
+    tokens = set(re.findall(r"[^\W\d_]+", value.lower()))
+    words = {"claude": ("claude", "anthropic"), "codex": ("codex", "gpt", "chatgpt", "openai")}
+    return {family for family, names in words.items() if tokens.intersection(names)}
 
 
 def author_families(cwd: Path, head: str, base: str) -> set[str]:

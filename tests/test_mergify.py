@@ -133,6 +133,10 @@ UNSAFE_CONFIGS = [
 @pytest.mark.parametrize("text,options,accepted", [
     (SAFE_CONFIG, {"mode": "parallel"}, False),
     (ONE_CHECK.replace("main}", "main, batch_size: 8}"), {}, True),
+    (ONE_CHECK.replace("{name: main}", "{<<: {name: other, batch_size: 1}, name: main, batch_size: 8}"), {}, True),
+    (ONE_CHECK.replace("{name: main}", "{<<: [&defaults {<<: {name: base}, name: other, batch_size: 1}, *defaults], "
+                       "name: main, batch_size: 8}"), {}, True),
+    (ONE_CHECK.replace("{name: main}", "{<<: {name: other, name: main, batch_size: 8}}"), {}, False),
     *((text, {}, False) for text in UNSAFE_CONFIGS),
     (SAFE_CONFIG, {"default": "other"}, False),
     (SAFE_CONFIG, {"changed": True}, False),
