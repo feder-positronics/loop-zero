@@ -135,6 +135,11 @@ def _codex_probes(version):
     return f'''if [ "$1" = --version ]; then printf '%s\\n' {shlex.quote(version)}; exit 0; fi\n'''
 
 
+def _real_claude(path, guard):
+    payload = shlex.quote(json.dumps(_claude_envelope(APPROVE)))
+    write_fake_tool(path.parent, path.name, f"set -eu\ncat >/dev/null\n{guard}\nprintf '%s\\n' {payload}\n")
+
+
 def _real_codex(path, guard, *, version="codex-cli 0.161.0"):
     write_fake_tool(path.parent, path.name, _codex_probes(version) + textwrap.dedent(f"""
         set -eu
@@ -467,9 +472,7 @@ def test_real_claude_environment_auth_hides_host_state(repo,
         f"test ! -e {shlex.quote(str(path))} || "
         "{ echo 'host state exposed' >&2; exit 70; }" for path in hidden
     )
-    write_fake_tool(fake_bin, "claude", f"""
-        set -eu
-        cat >/dev/null
+    _real_claude(fake_bin / "claude", f"""
         {checks}
         test "${{CLAUDE_CODE_OAUTH_TOKEN-}}" = {shlex.quote(oauth)} || exit 71
         test "${{ANTHROPIC_API_KEY-}}" = {shlex.quote(api)} || exit 72
@@ -482,7 +485,6 @@ def test_real_claude_environment_auth_hides_host_state(repo,
         printf private > "$HOME/.claude/history.jsonl"
         printf private > "$HOME/.claude/.config.json"
         printf private > "$HOME/.claude.json"
-        printf '%s\\n' {shlex.quote(json.dumps(_claude_envelope(APPROVE)))}
     """)
     (fake_bin / "bwrap").unlink()  # Real kernel namespace, overriding the autouse fake.
     result = _review("claude", repo)
@@ -507,22 +509,18 @@ def test_real_file_auth_preserves_host_writes(repo, fake_bin, tmp_path, monkeypa
     state.write_text("synthetic global state")
     set_host_state(monkeypatch, host)
     if family == "claude":
-        write_fake_tool(fake_bin, family, f"""
-            set -eu
-            cat >/dev/null
+        _real_claude(fake_bin / family, """
             printf refreshed > "$HOME/.claude/.credentials.json"
             printf updated > "$HOME/.claude.json"
-            printf '%s\\n' {shlex.quote(json.dumps(_claude_envelope(APPROVE)))}
         """)
     else:
         # Forwarding this variable must not change Codex's existing file bind.
         monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-r2")
-    (fake_bin / "bwrap").unlink()
-    if family == "codex":
         _real_codex(fake_bin / family, """
             test "$OPENAI_API_KEY" = synthetic-openai-r2 || exit 71
             printf refreshed > "$HOME/.codex/auth.json"
         """)
+    (fake_bin / "bwrap").unlink()
     assert _review(family, repo).verdict == "approve"
     assert auth.read_text() == "refreshed"
     assert state.read_text() == ("updated" if family == "claude" else "synthetic global state")
@@ -658,36 +656,28 @@ def test_claude_classifies_error_envelopes(fake_bin, tmp_path, monkeypatch, exit
         assert "Token [REDACTED]." in str(raised.value)
 
 
-@pytest.mark.parametrize("family,message", [
-    ("claude", "OAuth access token has expired"),
-    ("claude", "Failed to authenticate"),
-    ("codex", "401 Unauthorized"),
-    ("codex", "token expired"),
-    ("codex", "Please run codex login"),
+AUTH_FINDING = {"severity": "suggestion", "path": "auth.py", "line": 7,
+                "title": "Handle 401 Unauthorized", "body": "Log 'Not logged in' clearly."}
+
+
+@pytest.mark.parametrize("family,message,exit_code,finding", [
+    *((family, message, exit_code, False) for family, messages in (
+        ("claude", ("OAuth access token has expired", "Failed to authenticate")),
+        ("codex", ("401 Unauthorized", "token expired", "Please run codex login")),
+    ) for message in messages for exit_code in (0, 1)),
+    ("claude", None, 0, True), ("codex", "warning: not authenticated to telemetry", 0, True),
 ])
-@pytest.mark.parametrize("exit_code", [0, 1])
-def test_auth_phrases_only_fail_on_nonzero_exit(fake_bin: Path, tmp_path: Path, family, message, exit_code) -> None:
-    _fake_review(fake_bin, family, exit_code=exit_code, diagnostic=message)
+def test_auth_phrases_respect_exit_code_and_message_source(fake_bin, tmp_path, family, message, exit_code, finding):
+    payload = APPROVE | {"findings": [AUTH_FINDING]} if finding else APPROVE
+    _fake_review(fake_bin, family, payload, exit_code=exit_code, diagnostic=message)
     if exit_code:
         with pytest.raises(RunnerAuthFailed):
             _review(family, tmp_path)
     else:
-        assert _review(family, tmp_path).verdict == "approve"
-
-
-AUTH_WORDS = {
-    "verdict": "approve",
-    "findings": [{"severity": "suggestion", "path": "auth.py", "line": 7,
-                  "title": "Handle 401 Unauthorized", "body": "Log 'Not logged in' clearly."}],
-}
-
-
-@pytest.mark.parametrize("family", ["claude", "codex"])
-def test_success_with_auth_words_is_not_auth_failure(fake_bin, tmp_path, family):
-    diagnostic = "warning: not authenticated to telemetry" if family == "codex" else None
-    _fake_review(fake_bin, family, AUTH_WORDS, diagnostic=diagnostic)
-    result = _review(family, tmp_path)
-    assert result.verdict == "approve" and result.findings[0].title == "Handle 401 Unauthorized"
+        result = _review(family, tmp_path)
+        assert result.verdict == "approve"
+        if finding:
+            assert result.findings[0].title == "Handle 401 Unauthorized"
 
 
 @pytest.mark.parametrize("family,phrase,error,exit_code", [
@@ -856,9 +846,7 @@ def test_review_mounts_only_implicit_runtime_files(repo, fake_bin, tmp_path, fak
             _real_codex(native, guard + shlex.quote(str(helper)) + " || exit 71",
                         version="codex-cli 0.164.0")
         else:
-            native.write_text("#!/bin/sh\ncat >/dev/null\n" + guard + "printf '%s\\n' "
-                              + shlex.quote(json.dumps(_claude_envelope(APPROVE))) + "\n")
-        native.chmod(0o755)
+            _real_claude(native, guard)
     else:
         _fake_review(fake_bin, family).replace(native)
     (fake_bin / family).symlink_to(native)
