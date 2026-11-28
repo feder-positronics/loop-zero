@@ -160,8 +160,12 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    fingerprint covers execution and stage reuse settings without recording raw
    environment values. For local sandbox receipts it omits inherited `PATH`,
    `LANG`, `LC_ALL`, `TERM`, and `HEAVY_SLOT_GRANTED_CORES` so readiness can
-   run in a different host environment. Explicit settings and stage reuse keys
-   still bind these values. A receipt for input-keyed checks binds the
+   run in a different host environment. The receipt also ignores whether the
+   inherited CPU grant is allowlisted. Explicit settings and stage reuse keys
+   still bind these values. Both keys disregard allowlist order, duplicate names,
+   and unset names outside the default allowlist. Readiness can also match the
+   prior raw allowlist hash against the current names, with or without the
+   inherited CPU grant. A receipt for input-keyed checks binds the
    configured base branch. Only the
    stage reuse key binds the exact base revision. Source-check waiters check for policy
    changes on every poll.
