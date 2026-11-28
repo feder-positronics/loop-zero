@@ -59,7 +59,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
     fake.respond_pr_view(pr_json(), branch="lz/x")
     arm_workflow_check(fake)
     fake.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
-    fake.append(f"api repos/{REPO}/pulls/7", merged)
+    fake.append(f"api repos/{REPO}/pulls/7", merge_json(), merged)
     fake.respond("api graphql ready", "")
     fake.respond("pr merge", "")
     fake.fail(f"api repos/{REPO}/git/ref/heads/lz/x", "gh: Not Found (HTTP 404)")
@@ -77,7 +77,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
         github.open_blocking_findings(REPO, 7, HEAD, ("bot-user",))
         github._check_signals(REPO, HEAD)
         github.mark_ready(REPO, 7, "PR_7")
-        github.merge(REPO, 7, "squash", HEAD)
+        github.merge(REPO, 7, "squash", HEAD, "main")
         github.delete_remote_branch(REPO, "lz/x", HEAD)
     return fake.calls
 

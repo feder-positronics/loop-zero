@@ -1573,8 +1573,7 @@ def posted_review(gh: FakeGh) -> dict:
 def arm_squash_merge(gh: FakeGh, head: str, wt: Path, *snapshots, branch: str = "lz/t1") -> None:
     arm_approved_pr(gh, head, wt, isDraft=False, branch=branch)
     gh.respond("pr merge", "")
-    if snapshots:
-        gh.append(f"api repos/{REPO}/pulls/7", *snapshots)
+    gh.append(f"api repos/{REPO}/pulls/7", merge_json(head=head), *snapshots)
 
 
 def arm_approved_pr(
@@ -3629,6 +3628,34 @@ def lose_native_merge_reply(monkeypatch):
     monkeypatch.setattr(github, "_gh", transport)
 
 
+@pytest.mark.parametrize("strategy", ["squash", "queue"])
+def test_native_merge_rechecks_hold_after_readiness(wt, gh, capsys, head, strategy):
+    if strategy == "queue":
+        publish_workflow(wt, WORKFLOW.replace('merge = "squash"', 'merge = "queue"'))
+    arm_approved_pr(gh, head, wt, isDraft=False)
+    gh.respond("api graphql", threads_json(), native_queue(False, head))
+    gh.append(f"api repos/{REPO}/pulls/7", {**merge_json(head=head), "labels": [{"name": "hold"}]})
+    gh.respond("pr merge", "")
+    code, _, err = run(capsys, "merge")
+    assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
+    assert code == 1 and "merge-authority hold" in err and wt.exists()
+
+
+@pytest.mark.parametrize("already_merged", [False, True])
+def test_merge_rejects_landing_on_another_base(wt, gh, capsys, head, already_merged):
+    landed = {**landed_snapshot(head), "base": {"ref": "release"}}
+    if already_merged:
+        arm_pr(gh, head, state="MERGED", isDraft=False, baseRefName="release")
+    else:
+        arm_squash_merge(gh, head, wt)
+    gh.append(f"api repos/{REPO}/pulls/7", landed)
+    gh.respond("api -X", "")
+    expect_cli(capsys, 1, "merge", stderr_contains=("release", "main"))
+    assert wt.exists()
+    assert any(c["argv"][:2] == ["pr", "merge"] for c in gh.calls) is not already_merged
+    assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
+
+
 @pytest.mark.parametrize("lost_reply", [False, True])
 @pytest.mark.parametrize("branch,changed", [
     *((branch, False) for branch in TASK_BRANCHES), ("lz/t1", True),
@@ -5298,7 +5325,7 @@ def test_queue_wait_budget_boundaries(monkeypatch):
     assert cli._queue_wait(1, poll, bounded=True) == "e" * 40  # a landing verified in time survives scope exit
     monkeypatch.setattr(github, "merge", lambda *_: setattr(clock, "now", 50))
     monkeypatch.setattr(cli, "_wait_for_merge", lambda _config, _pr, timeout: budgets.append(timeout))
-    cli._merge_and_follow(SimpleNamespace(repo=REPO, merge_strategy="queue"), pr, 60, 60)
+    cli._merge_and_follow(SimpleNamespace(repo=REPO, merge_strategy="queue", base_branch="main"), pr, 60, 60)
     assert budgets == [10]  # the follow budget is what the merge write left
     closed = [github.ClosedUnmerged(("gh",), "closed")]
     monkeypatch.setattr(github, "merged_sha", lambda *_args, **_kwargs: "e" * 40)
