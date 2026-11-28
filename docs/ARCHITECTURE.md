@@ -345,7 +345,7 @@ repository's managed worktree directory with the marker written to its task
 file by `start`. After a merge, removal allows ignored loop-zero state and
 known generated artifact directories. Other ignored paths are reported and
 keep the worktree in place. Cleanup refuses to remove nested worktrees.
-Git removal uses force only for closed PRs with initialized tracked submodules
+Git removal uses force only for initialized tracked submodules
 whose Git directories belong to the task checkout. Ignored paths and commits
 reachable from local refs or reflogs but absent from remote-tracking refs block
 submodule removal. A Git ref lock keeps the

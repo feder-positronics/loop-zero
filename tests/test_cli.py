@@ -4295,13 +4295,14 @@ def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(wt, repo, gh, 
     git(repo, "worktree", "move", str(collision), str(wt))
     git(repo, "worktree", "add", "-qb", "lz/other", str(collision), "lz/t1")
     monkeypatch.chdir(wt)
+    git(wt, "-c", "protocol.file.allow=always", "submodule", "add", str(repo), "module")
+    git(wt, "commit", "-qm", "Add initialized submodule")
     for branch, number in (("lz/t1", 7), ("lz/other", 8)):
         arm_landed_pr(gh, head_of(wt), "e" * 40, landed_head="f" * 40 if rejection == "head changed" else None,
                       branch=branch, number=number, base="release" if rejection.startswith("retargeted") else "main")
-    out, err = expect_cli(capsys, int(bool(rejection)), "merge")
+    out, err = expect_cli(capsys, int(bool(rejection)), "merge", stderr_contains=(rejection,) if rejection else ())
     assert collision.exists() and wt.exists() is bool(rejection)
     if rejection:
-        assert rejection in err
         assert not any("/git/ref/heads/" in " ".join(call["argv"]) for call in gh.calls)
     else:
         assert not err and f"PR #7 was already merged as {'e' * 12}" in out and out.endswith("e" * 40 + "\n")

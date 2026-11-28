@@ -378,7 +378,7 @@ def _lock_verified_ref(wt: Path, ref: str, expected_head: str) -> Iterator[None]
                 transaction.kill()
 
 
-def _require_no_nested_worktree(wt: Path, git_dir: Path, *, allow_submodules: bool) -> bool:
+def _require_no_nested_worktree(wt: Path, git_dir: Path) -> bool:
     root = wt.resolve()
     records = git(git_dir, f"--git-dir={git_dir}", "worktree", "list", "--porcelain", "-z",
                    paths=True)
@@ -391,7 +391,7 @@ def _require_no_nested_worktree(wt: Path, git_dir: Path, *, allow_submodules: bo
     def fail_scan(exc: OSError) -> None:
         raise WorktreeError(f"could not inspect nested worktrees in {wt}: {exc}") from exc
 
-    links = git(wt, "ls-files", "-z", "--format=%(objectmode) %(path)", paths=True) if allow_submodules else ""
+    links = git(wt, "ls-files", "-z", "--format=%(objectmode) %(path)", paths=True)
     gitfiles = {path for entry in links.split("\0")
                 if entry.startswith("160000 ") and (path := root / entry[7:] / ".git").is_file()}
     modules = Path(git(wt, "rev-parse", "--absolute-git-dir", paths=True)).resolve() / "modules"
@@ -422,7 +422,7 @@ def cleanup(wt: Path, expected_head: str, *, keep_branch: bool = False) -> None:
             raise WorktreeError("local branch changed during merge cleanup")
         if is_dirty(wt):
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-        force = ("--force",) if _require_no_nested_worktree(wt, gd, allow_submodules=keep_branch) else ()
+        force = ("--force",) if _require_no_nested_worktree(wt, gd) else ()
         generated = () if keep_branch else (
             ":(exclude,top).venv/", ":(exclude,top).pytest_cache/", ":(exclude,top).mypy_cache/",
             ":(exclude,top).ruff_cache/", ":(exclude,glob,top)**/__pycache__/**",
