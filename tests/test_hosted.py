@@ -77,6 +77,7 @@ def approval(head=HEAD, *, state="APPROVED"):
 
 
 @pytest.mark.parametrize("case,states", [
+    ("landed", []), ("landed with refresh", ["failure"]),
     ("manual", ["pending", "success"]), ("manual retry", ["success"]), ("manual first retry", ["failure"]), ("restore", ["pending", "failure"]),
     ("newer success", ["pending"]), ("newer pending", ["pending"]), ("newer same marker", ["pending"]), ("write lost", ["pending", "failure"]),
     ("stale marker", ["pending", "failure"]), ("many markers", ["pending", "failure"]), ("other publisher marker", ["pending", "failure"]),
@@ -90,7 +91,7 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
         publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(state="MERGED" if case.endswith("retry") else "OPEN")))
         marker["description"] = "Refreshing source review evidence"
         old.update(state="success", description="Previously eligible")
-    history = {"restore": [marker, old], "manual": [marker, old], "manual retry": [marker, old], "manual first retry": [marker],
+    history = {"landed": [], "landed with refresh": [marker, old], "restore": [marker, old], "manual": [marker, old], "manual retry": [marker, old], "manual first retry": [marker],
                "newer success": [old | {"id": 12, "state": "success"}, marker, old],
                "newer pending": [marker | {"id": 12, "description": "Awaiting trusted review"}, marker, old],
                "newer same marker": [marker | {"id": 12}, marker, old],
@@ -103,6 +104,17 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
     publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", history)
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [approval()])
     publisher.respond_pr_view(*([pr_json()] if case == "manual" else []), pr_json(state="MERGED"))
+    if case.startswith("landed"):
+        body = json.dumps({"head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"},
+                           "merged": True, "title": "before\u2028after"}, ensure_ascii=False)
+        publisher.respond(f"api repos/{REPO}/pulls/7", f"HTTP/2.0 200 OK\r\nX-GitHub-Request-Id: GHREQ-456\r\n\r\n{body}")
+        if states:
+            publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 12})
+        posted = check_source(publisher, states)
+        assert publisher.argv(0)[-1] == "--include"
+        if states:
+            assert posted[0]["description"] == old["description"]
+        return
     if case == "write lost":
         publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 11},
                           {"stdout": "", "exit": 1, "stderr": "HTTP 422"})
@@ -244,26 +256,6 @@ def test_hosted_review_coverage_after_source_head_changes(
     statuses = check_source(publisher, ["pending", state])
     if state == "failure":
         assert "source #7: no review recorded" in statuses[-1]["description"]
-
-
-@pytest.mark.parametrize("unfinished_refresh", [False, True])
-def test_landed_source_refresh_preserves_settled_verdict(publisher, unfinished_refresh):
-    body = json.dumps({
-        "head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"},
-        "merged": True, "title": "before\u2028after",
-    }, ensure_ascii=False)
-    publisher.respond(f"api repos/{REPO}/pulls/7", f"HTTP/2.0 200 OK\r\nX-GitHub-Request-Id: GHREQ-456\r\n\r\n{body}")
-    if unfinished_refresh:
-        context = {"context": "Loop-zero Eligibility"}
-        prior = context | {"id": 1, "state": "failure", "description": "Blocking finding"}
-        refresh = context | {"id": 11, "state": "pending", "description": "Refreshing live source review evidence"}
-        publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [refresh, prior])
-        publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {"id": 12})
-        posted = check_source(publisher, ["failure"])
-        assert posted[0]["description"] == prior["description"]
-    else:
-        check_source(publisher, [])
-    assert publisher.argv(0)[-1] == "--include"
 
 
 @pytest.mark.parametrize("state,readback", [

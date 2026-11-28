@@ -103,9 +103,8 @@ def _review_policy(kind: str, *, split: bool) -> str:
     scopes = {"primary": "This is the primary review of the whole change.",
               "delta": "This is a delta review: only review the diff in the material message, "
                        "which covers the commits since the previous review."}
-    if kind not in ("primary", "delta"):
+    if not isinstance(kind, str) or (scope := scopes.get(kind)) is None:
         raise ValueError(f"unknown review kind {kind!r}; expected 'primary' or 'delta'")
-    scope = scopes[kind]
     if split:
         scope = (f"This is one chunk of the {kind} review. The fragment field gives its position. "
                  "Report defects in this chunk only, and do not judge whether the whole change is "
@@ -844,7 +843,7 @@ def _review_claude(
 ) -> ReviewResult:
     requested = {"model": model, "effort": effort}
     argv = [
-        "claude", "-p", "--append-system-prompt", policy,
+        "-p", "--append-system-prompt", policy,
         *(["--model", model] if model else []),
         *(["--effort", effort] if effort else []),
         "--output-format", "json", "--json-schema", json.dumps(REVIEW_SCHEMA, separators=(",", ":")),
@@ -854,11 +853,9 @@ def _review_claude(
         "--disallowedTools", "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
     with sandbox.private_review_home() as home:
-        auth_binds = _auth_binds("claude", home)
-        prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths, auth_binds)
-        argv[0] = str(binary)
+        prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths, _auth_binds("claude", home))
         configured = {key: value or None for key, value in requested.items()}  # explicit flags above
-        done = _run([*prefix, *argv], cwd=cwd, prompt=prompt, timeout=timeout, family="claude",
+        done = _run([*prefix, str(binary), *argv], cwd=cwd, prompt=prompt, timeout=timeout, family="claude",
                     env_allowlist=(*config.env_allowlist, *CLAUDE_AUTH_ENV))
     raw = done.stdout
     try:
@@ -929,8 +926,7 @@ def _review_codex(
         schema_file = home / "schema.json"
         last_file = home / "last.json"
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
-        auth_binds = _auth_binds("codex", home)
-        prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
+        prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, _auth_binds("codex", home))
         skill_overrides = _codex_repository_skill_overrides(cwd)  # before Codex runs at all
         argv = [
             *prefix, str(binary), "exec",

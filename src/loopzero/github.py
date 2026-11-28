@@ -374,10 +374,6 @@ def _remember_response(dates, used, selected, key, headers, body):
     dates[:] = [headers.get("date", "")]
     if used is not None:
         used[:] = [selected]
-    _remember_etag(key, headers, body)
-
-
-def _remember_etag(key: tuple[tuple[str, ...], int] | None, headers: dict[str, str], body: str) -> None:
     if key and (etag := headers.get("etag")):
         _etag_cache.pop(key, None)
         size = len(body.encode())
@@ -868,20 +864,14 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     if result.chunk_count > 1:
         lines.append(f"\nReviewed in {result.chunk_count} chunks with the same model family.")
     lines.extend(_review_settings_lines(result, include_configured=settings_layout == "current"))
-    blocker_prefix, findings = _unplaced_findings(unplaced)
-    return blocker_prefix + "\n".join(lines + findings) + _review_transcript(result, legacy_display)
-
-
-def _unplaced_findings(unplaced: list[Finding]) -> tuple[str, list[str]]:
-    if not unplaced:
-        return "", []
-    blocked = any(f.severity in BLOCKING for f in unplaced)
-    lines = ["\nFindings without a commentable line:\n"]
+    if unplaced:
+        lines.append("\nFindings without a commentable line:\n")
     for finding in unplaced:
         where = f" ({finding.path}:{finding.line})" if finding.path else ""
         line = f"- **{finding.severity}**: {finding.title}{where} — {finding.body}".rstrip(" —")
         lines.append(runners._redact_keys(None, line))
-    return (BODY_BLOCKERS if blocked else ""), lines
+    blocker_prefix = BODY_BLOCKERS if any(f.severity in BLOCKING for f in unplaced) else ""
+    return blocker_prefix + "\n".join(lines) + _review_transcript(result, legacy_display)
 
 
 def _review_settings_lines(result: ReviewResult, *, include_configured: bool) -> list[str]:
@@ -1399,15 +1389,13 @@ def readiness(
     publishers: tuple[str, ...],
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
-    reasons: list[str] = []
-    if pr.state != "OPEN":
-        reasons.append(f"PR #{pr.number} is {pr.state}, not open")
-    if pr.base_ref != base_branch:
-        reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}. Retarget the PR on GitHub and retry.")
-    if blocker := mergeability_blocker(pr):
-        reasons.append(blocker)
-    if pr.merge_state == "BEHIND" and not allow_behind:
-        reasons.append(behind_reason(pr))
+    reasons = list(filter(None, (
+        f"PR #{pr.number} is {pr.state}, not open" if pr.state != "OPEN" else None,
+        f"PR targets {pr.base_ref}, configured base is {base_branch}. Retarget the PR on GitHub and retry."
+        if pr.base_ref != base_branch else None,
+        mergeability_blocker(pr),
+        behind_reason(pr) if pr.merge_state == "BEHIND" and not allow_behind else None,
+    )))
     if review_blocker or not reviewed_head:
         reasons.append(review_blocker or MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
@@ -1420,30 +1408,28 @@ def readiness(
         repo, pr.head_sha, review_at, review_grace, required_ci,
         workflow_wait and stale_verdict_grace, workflow_wait=workflow_wait,
     ) if required_ci else ({}, (), (), False))
-    failures = {
-        name: f"required check '{name}' is {checks[name]}" for name in required_ci
-        if name in checks and checks[name] != "success"
-    }
-    check_reasons = {}
+    check_reasons, waitable_failures = {}, []
+    missing_state = "capped" if capped else "missing"
     for name in required_ci:
-        if name not in checks or name in failures:
-            reasons.append(reason := failures.get(name) or _missing_check_reason(name, pr.head_sha, capped))
-            check_reasons[reason] = (name, checks.get(name) or ("capped" if capped else "missing"))
+        if (state := checks.get(name, missing_state)) != "success":
+            reason = (f"required check '{name}' is {state}" if name in checks
+                      else _missing_check_reason(name, pr.head_sha, capped))
+            check_reasons[reason] = (name, state)
+            reasons.append(reason)
+            if name in stale or (workflow_wait and review_grace and state in _FAILED_VERDICTS):
+                waitable_failures.append(reason)
     return Readiness(
         ready=not reasons, reasons=tuple(reasons), checks=check_reasons,
-        waitable_failures=tuple(failures[name] for name in required_ci if name in stale
-                               or (workflow_wait and review_grace and checks.get(name) in _FAILED_VERDICTS)),
+        waitable_failures=tuple(waitable_failures),
         stale_verdicts=tuple(name for name in required_ci if name in stale_verdicts),
         has_pending_checks="pending" in checks.values(),
     )
 
 
 def mark_ready(repo: str, number: int, node_id: str = "") -> None:
-    if node_id:
-        _gh("api", "graphql", "-f", "query=mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}",
-            "-f", f"id={node_id}", timeout=read_timeout(120))
-    else:
-        _gh("pr", "ready", str(number), "--repo", repo, timeout=read_timeout(120))
+    args = ("api", "graphql", "-f", "query=mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}",
+            "-f", f"id={node_id}") if node_id else ("pr", "ready", str(number), "--repo", repo)
+    _gh(*args, timeout=read_timeout(120))
 
 
 _QUEUE_QUERY = (

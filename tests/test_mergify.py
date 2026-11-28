@@ -131,7 +131,7 @@ UNSAFE_CONFIGS = [
 
 
 @pytest.mark.parametrize("text,options,accepted", [
-    (SAFE_CONFIG, {"mode": "parallel"}, False),
+    (SAFE_CONFIG, {}, True), (SAFE_CONFIG, {"mode": "parallel"}, False),
     (ONE_CHECK.replace("main}", "main, batch_size: 8}"), {}, True),
     (ONE_CHECK.replace("{name: main}", "{<<: {name: other, batch_size: 1}, name: main, batch_size: 8}"), {}, True),
     (ONE_CHECK.replace("{name: main}", "{<<: [&defaults {<<: {name: base}, name: other, batch_size: 1}, *defaults], "
@@ -147,15 +147,11 @@ UNSAFE_CONFIGS = [
                          ("sha", "z" * 40), ("content", None), ("content", "!"))),
 ])
 def test_configured_validates_canonical_github_config(queue_api, text, options, accepted):
-    queue_api(text, **options)
+    calls = queue_api(text, **options)
     assert mergify.configured("acme/widgets", "main", "main") == accepted
-
-
-def test_queue_proof_checks_default_branch_once_after_checking_file_identity(queue_api):
-    calls = queue_api(SAFE_CONFIG)
-    assert mergify.configured("acme/widgets", "main", "main")
-    config = "repos/acme/widgets/contents/.mergify.yml?ref=refs%2Fheads%2Fmain"
-    assert calls == [config, config, "repos/acme/widgets"]
+    if accepted:
+        config = "repos/acme/widgets/contents/.mergify.yml?ref=refs%2Fheads%2Fmain"
+        assert calls == [config, config, "repos/acme/widgets"]
 
 
 def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
