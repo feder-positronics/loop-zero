@@ -72,9 +72,13 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
 
 @pytest.mark.parametrize("markdown", ["[ref](absent.md)", "[ref](../README.md#absent)", "[ref](<Design (legacy).md>)",
                                      "[ref](#explicit)", "[ref](../README.md 'title')",
-                                     "~~~md\n[ref](missing.md)\n~~~", "[ref](#absent-heading)"])
+                                     "~~~md\n[ref](missing.md)\n~~~", "[ref](#absent-heading)",
+                                     "`[ref](missing.md)`", "`` `[ref](missing.md)` ``", "[`ref`](code`name`.md)",
+                                     "API\n===\n\n[ref](#api)", "API\n---\n\n[ref](#api)",
+                                     "# Alpha\n# Alpha-1\n# Alpha\n\n[ref](#alpha-2)"])
 def test_local_links_even_with_guide_update(git_repo, base, markdown):
     (git_repo / "docs/Design (legacy).md").touch()
+    (git_repo / "docs/code`name`.md").touch()
     (git_repo / "docs/ARCHITECTURE.md").write_text(f'<a id="explicit"></a>\n```md\n# Absent heading\n```\n{markdown}\n')
     done = run(git_repo, base)
     assert (done.returncode, "invalid local" in done.stderr) == (int("absent" in markdown), "absent" in markdown)

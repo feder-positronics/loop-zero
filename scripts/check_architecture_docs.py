@@ -58,11 +58,18 @@ def outside_fences(text):
 def anchors(text):
     text = "\n".join(outside_fences(text))
     seen, result = {}, set()
-    for heading in re.findall(r"^#{1,6}\s+(.+?)(?:\s+#+)?$", text, re.MULTILINE):
+    headings = re.findall(r"^ {0,3}(?:#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*|"
+                          r"(\S[^\n]*?)[ \t]*\n {0,3}(?:=+|-+)[ \t]*)$", text, re.MULTILINE)
+    for atx, setext in headings:
+        heading = atx or setext
         slug = re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
         count = seen.get(slug, 0)
-        seen[slug] = count + 1
-        result.add(f"{slug}-{count}" if count else slug)
+        anchor = f"{slug}-{count}" if count else slug
+        while anchor in result:
+            count += 1
+            anchor = f"{slug}-{count}"
+        seen[slug] = count
+        result.add(anchor)
     result.update(value for _, value in re.findall(
         r'''<a\b[^>]*?\s(?:id|name)\s*=\s*(["'])([^"'<>]+)\1''', text, re.IGNORECASE))
     return result
@@ -72,16 +79,22 @@ def link_errors(root):
     errors = []
     for name in DOCS:
         path = root / name
-        text = "\n".join(outside_fences(path.read_text()))
-        links = re.findall(
+        source = "\n".join(outside_fences(path.read_text()))
+        # Mask code without introducing Markdown syntax or crossing blank lines.
+        text = re.sub(r"\\[\\`]|(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)",
+                      lambda span: re.sub(r"[^\n]", "x", span[0]) if span[1] else span[0], source)
+        links = list(re.finditer(
             r'''!?\[[^\]]*\]\(\s*(?:<([^<>\n]+)>(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*|([^)]+))\)''',
-            text)
-        links.extend(re.findall(
+            text))
+        links.extend(re.finditer(
             r'''^ {0,3}\[(?!\^)[^\]\n]+\]:[ \t]*(?:<([^<>\n]+)>|([^\s<>]+))'''
             r'''(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$''',
             text, re.MULTILINE))
-        for angled, raw in links:
-            target = angled or re.split(r"""[ \t]+(?=["'])""", raw.strip(), maxsplit=1)[0]
+        for link in links:
+            group = 1 if link[1] else 2
+            target = source[link.start(group):link.end(group)]
+            if group == 2:
+                target = re.split(r"""[ \t]+(?=["'])""", target.strip(), maxsplit=1)[0]
             parsed = urlsplit(target)
             if parsed.scheme or parsed.netloc:
                 continue
