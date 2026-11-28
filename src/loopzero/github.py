@@ -445,9 +445,9 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     if rate_limited:
         guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api or headers
                     else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
+    elif "gh auth login" in tail or "not logged in" in tail.lower():
+        raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
     else:
-        if "gh auth login" in tail or "not logged in" in tail.lower():
-            raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
     error = GhUnavailable if transient else GhError
     confirmed_limit = rate_limited and status in {"200", "403", "429"}
@@ -528,13 +528,6 @@ def _gh_json(*args: str, token: str | None = None, **kwargs) -> object:
                       token=token or "") from None
 
 
-def record_full_page(endpoint: str, rows: list, seen: set[bytes]) -> None:
-    digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).digest()
-    if digest in seen:
-        raise GhError(("gh", "api", endpoint), "GitHub repeated a full page")
-    seen.add(digest)
-
-
 def _iter_paged(endpoint: str, key: str | None = None, **kwargs) -> Iterator[dict]:
     """Yield validated rows of a list (or of `key` in an envelope) until the last of at most 100 pages."""
     seen: set[bytes] = set()
@@ -547,7 +540,10 @@ def _iter_paged(endpoint: str, key: str | None = None, **kwargs) -> Iterator[dic
                 or not all(isinstance(row, dict) for row in chunk)):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
         if len(chunk) == PAGE:
-            record_full_page(endpoint, chunk, seen)
+            digest = hashlib.sha256(json.dumps(chunk, sort_keys=True).encode()).digest()
+            if digest in seen:
+                raise GhError(("gh", "api", endpoint), "GitHub repeated a full page")
+            seen.add(digest)
         yield from chunk
         if len(chunk) < PAGE:
             return
@@ -804,13 +800,12 @@ def pr_view(repo: str, number: int) -> PR:
 
 
 def create_draft_pr(repo: str, branch: str, base: str, title: str, body: str) -> PR:
-    detail = _api(
-        f"repos/{repo}/pulls", {"head": branch, "base": base, "title": title,
-                               "body": body, "draft": True})
+    endpoint = f"repos/{repo}/pulls"
+    detail = _api(endpoint, {"head": branch, "base": base, "title": title, "body": body, "draft": True})
     pr = pr_from_rest(detail)
     if (pr.state != "OPEN" or not pr.is_draft or pr.base_ref != base
             or not _matches_branch(detail["head"], repo, branch)):
-        raise GhError(("gh", "api", f"repos/{repo}/pulls"), "created PR differs from request")
+        raise GhError(("gh", "api", endpoint), "created PR differs from request")
     return pr
 
 
@@ -853,7 +848,7 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         header = runners.encode_codex_evidence(evidence)
         if not marker or marker[1] != result.head or marker[2] != result.kind:
             raise runners.RunnerBadOutput("codex: invalid/oversized leading machine block")
-        prefix = first + "\n" + header + (separator + rest if separator else "")
+        prefix = first + "\n" + header + separator + rest
         _, span = runners.leading_review_block(prefix)
         if len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
             raise runners.RunnerBadOutput("codex: oversized leading machine block. To publish a review, split the PR and review the smaller changes.")
@@ -861,10 +856,8 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     summary = ", ".join(f"{severities.count(s)} {s}" for s in ("critical", "important", "suggestion"))
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
     lines = [prefix.rstrip("\n")] if prefix else []
-    lines.append(
-        f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
-        f"{duration}: **{result.verdict}** ({summary})"
-    )
+    lines.append(f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
+                 f"{duration}: **{result.verdict}** ({summary})")
     if result.fallback:
         lines.append(f"\nSame-family fallback: {result.fallback}. Cross-family review is preferred.")
     if result.chunk_count > 1:
@@ -926,16 +919,13 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     first_added: int | None = None
     current = None
     for raw in patch.removesuffix("\n").split("\n"):
-        hunk = _HUNK_RE.match(raw)
-        if hunk:
+        if hunk := _HUNK_RE.match(raw):
             current = int(hunk.group(1))
-            continue
-        if current is None or raw.startswith(("-", "\\")):
-            continue
-        lines.add(current)
-        if raw.startswith("+") and first_added is None:
-            first_added = current
-        current += 1
+        elif current is not None and not raw.startswith(("-", "\\")):
+            lines.add(current)
+            if raw.startswith("+") and first_added is None:
+                first_added = current
+            current += 1
     return lines, first_added
 
 
@@ -946,15 +936,13 @@ def _diff_map(repo: str, number: int, head_sha: str,
     commentable: dict[str, set[int]] = {}
     anchor: dict | None = None
     endpoint = f"repos/{repo}/pulls/{number}/files"
-    rows = _iter_paged(endpoint) if remaining or blocking else ()
     _count = 0
-    for _count, entry in enumerate(rows, 1):
+    for _count, entry in enumerate(_iter_paged(endpoint) if remaining or blocking else (), 1):
         path = entry["filename"]
         lines, first_added = _right_lines(entry.get("patch") or "")
         commentable[path] = lines
         if lines and anchor is None:
-            line = first_added if first_added is not None else min(lines)
-            anchor = {"path": path, "line": line, "side": "RIGHT"}
+            anchor = {"path": path, "line": first_added if first_added is not None else min(lines), "side": "RIGHT"}
         remaining.discard(path)
         if not remaining and (not blocking or anchor is not None):
             return commentable, anchor
@@ -1043,14 +1031,9 @@ def post_review(
         post({**payload, "event": "COMMENT"})
 
 
-def _title_of(text: str) -> str:
-    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
-    title_line = next((ln for ln in lines if ln.startswith("**")), lines[0] if lines else "")
-    return re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
-
-
-def _thread_marker(node: dict, publishers: tuple[str, ...]) -> re.Match[str] | None:
-    """The v=1 marker opening a thread's first comment, if a review publisher wrote it."""
+def _parse_thread(node: dict, current_head: str | None,
+                  publishers: tuple[str, ...]) -> tuple[str, Finding] | None:
+    """Read a blocking finding from the first comment by a trusted publisher."""
     comments = node.get("comments", {}).get("nodes") or []
     if not comments:
         return None
@@ -1061,22 +1044,17 @@ def _thread_marker(node: dict, publishers: tuple[str, ...]) -> re.Match[str] | N
         login += "[bot]"
     if not login or login.casefold() not in {p.casefold() for p in publishers}:
         return None
-    # The publisher writes the marker as the whole first line, exactly as finding_marker does.
-    return MARKER_RE.fullmatch((comments[0].get("body") or "").partition("\n")[0])
-
-
-def _parse_thread(node: dict, current_head: str | None,
-                  publishers: tuple[str, ...]) -> tuple[str, Finding] | None:
-    match = _thread_marker(node, publishers)
-    if not match or match.group("severity") not in BLOCKING:
+    first_line, _, rest = (comments[0].get("body") or "").partition("\n")
+    match = MARKER_RE.fullmatch(first_line)
+    if not match or (severity := match["severity"]) not in BLOCKING:
         return None
-    body = node["comments"]["nodes"][0]["body"]
-    marker_head = match.group("head")
-    if current_head is not None and marker_head != current_head and node.get("isOutdated"):
+    if current_head is not None and match["head"] != current_head and node.get("isOutdated"):
         return None
-    rest = body[match.end():].strip()
-    return match.group("id"), Finding(severity=match.group("severity"), path=node.get("path"), line=node.get("line"),
-                                      title=_title_of(rest), body=rest)
+    rest = rest.strip()
+    lines = rest.splitlines()
+    heading = next((line for line in lines if line.startswith("**")), lines[0] if lines else "")
+    title = re.sub(r"^\*\*\w+:\s*|\*\*$", "", heading).strip()
+    return match["id"], Finding(severity, node.get("path"), node.get("line"), title, rest)
 
 
 _REPLY_MUTATION = (
@@ -1091,11 +1069,8 @@ _RESOLVE_MUTATION = (
 def open_findings(repo: str, number: int,
                   publishers: tuple[str, ...]) -> list[tuple[str, str, Finding]]:
     """(marker id, thread id, finding) for every unresolved blocking thread, any head."""
-    return [
-        (parsed[0], node["id"], parsed[1])
-        for node in _review_threads(repo, number)
-        if (parsed := _parse_thread(node, None, publishers))
-    ]
+    return [(parsed[0], node["id"], parsed[1]) for node in _review_threads(repo, number)
+            if (parsed := _parse_thread(node, None, publishers))]
 
 
 _THREAD_REPLIES_QUERY = """
@@ -1437,8 +1412,8 @@ def readiness(
         reasons.append(review_blocker or MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}. Run `loopzero review` for the current head.")
-    for f in open_blocking_findings(repo, pr.number, None if ancestor_review or not reviewed_head else pr.head_sha,
-                                    publishers):
+    finding_head = None if ancestor_review or not reviewed_head else pr.head_sha
+    for f in open_blocking_findings(repo, pr.number, finding_head, publishers):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}. Run `loopzero resolve` to list finding IDs and address the review.")
     checks, stale, stale_verdicts, capped = (_check_signals(
@@ -1493,8 +1468,7 @@ def merged_sha(
                           or view["head"].get("sha") != expected_head):
         raise GhError(argv, "PR head changed before merge verification; sync the branch and run loopzero ready")
     if expected_base is not None:
-        base = view.get("base")
-        if not isinstance(base, dict) or not isinstance(ref := base.get("ref"), str):
+        if not isinstance(base := view.get("base"), dict) or not isinstance(ref := base.get("ref"), str):
             raise GhError(argv, "invalid PR base evidence; inspect the PR before retrying")
         if ref != expected_base:
             raise GhError(argv, f"PR retargeted to {ref}; restore {expected_base} before rerunning loopzero merge --wait")
@@ -1611,7 +1585,11 @@ def commit_status(repo: str, head: str, context: str, state: str, description: s
         _api(endpoint, {"state": state, "context": context, "description": description}, timeout=timeout)
     except GhError as exc:
         validation_error = re.search(r"\bHTTP 422\b|^method=POST endpoint=\S+ status=422\b", exc.tail)
-        if validation_error and _status_limit_reached(repo, head, context):
+        at_limit = False
+        if validation_error:  # A validation error alone does not prove exhaustion.
+            with suppress(GhError, ProcTimeout, OSError):
+                at_limit = sum(1 for _ in context_statuses(repo, head, context)) >= 1_000
+        if at_limit:
             raise StatusLimitReached(
                 exc.command, f"{head} context {context!r} reached GitHub's 1,000-status limit. "
                 "Push a fresh head and obtain review evidence for it before refreshing eligibility."
@@ -1621,10 +1599,3 @@ def commit_status(repo: str, head: str, context: str, state: str, description: s
 
 def context_statuses(repo: str, head: str, context: str) -> Iterator[dict]:
     return (r for r in _iter_paged(f"repos/{repo}/commits/{head}/statuses") if str(r.get("context", "")).casefold() == context.casefold())
-
-
-def _status_limit_reached(repo: str, head: str, context: str) -> bool:
-    # A validation error alone does not prove exhaustion.
-    with suppress(GhError, ProcTimeout, OSError):
-        return sum(1 for _ in context_statuses(repo, head, context)) >= 1_000
-    return False
