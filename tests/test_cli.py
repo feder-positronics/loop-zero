@@ -58,6 +58,10 @@ REPO = "acme/widgets"
 URL = f"https://github.com/{REPO}/pull/7"
 FAILED_CHECK_HINT = f". Inspect {URL}/checks. Fix reproducible failures before retrying. Rerun the failed job only for a transient failure. Once green, run `loopzero ready --wait`."
 MERGIFY_QUEUE_FIXTURE = json.loads((Path(__file__).with_name("fixtures") / "mergify-queue.json").read_text())
+def commit_pr_read(head: str) -> list[str]:
+    return ["api", f"repos/{REPO}/commits/{head}/pulls"]
+
+
 BRANCH_READ = branch_head_key().split()
 PR_LIST_READ = pr_list_key().split()
 LOOKUP_CALLS = [BRANCH_READ, PR_LIST_READ, ["api", f"repos/{REPO}/pulls/7"]]
@@ -492,14 +496,13 @@ def test_check_skips_closed_pr_history(wt, gh, capsys, head, state):
               created_at="2026-11-25T00:00:00Z")] if state else []
     )
     commit_read = f"api repos/{REPO}/commits/{head}/pulls --method GET"
-    gh.respond(branch_head_key(), {"commit": {"sha": head}})
     gh.respond(commit_read, associated)
     gh.respond_pr_list([pr_json(headRefOid=head, state=state)] if state else [])
 
     out, _ = expect_cli(capsys, 0, "check", stderr="")
     assert out.endswith("PASS\n")
     assert [c["argv"][:2] for c in gh.calls] == [
-        BRANCH_READ, commit_read.split()[:2], PR_LIST_READ,
+        commit_pr_read(head), PR_LIST_READ,
     ]
 
 
@@ -508,7 +511,10 @@ def test_check_skips_closed_pr_history(wt, gh, capsys, head, state):
 ])
 def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, tmp_path, pushed, refresh_timeout, stage_exit):
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
-    arm_pr(gh, head_of(wt))
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(" ".join([*commit_pr_read(head), "--method", "GET"]),
+               [dict(rest_pr_json(pr_json(headRefOid=head)), created_at="2026-11-25T00:00:00Z")])
     if not pushed:
         git(wt, "commit", "-q", "--allow-empty", "-m", "unpushed change")
     options = ()
@@ -526,7 +532,8 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, tmp_
     code, out, err = run(capsys, *options, "check")
     assert (code, out.splitlines()[-1]) == ((1, "FAIL") if stage_exit else (0, "PASS"))
     extra = [["api", endpoint]] * (2 - refresh_timeout) if pushed else []
-    assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS + extra
+    lookup = LOOKUP_CALLS[2:] if pushed else LOOKUP_CALLS[1:]
+    assert [call["argv"][:2] for call in gh.calls] == [commit_pr_read(head_of(wt)), *lookup, *extra]
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert report["head"] == head_of(wt) and report["dirty"] is False
     assert report["results"][0]["exit_code"] == stage_exit
@@ -595,7 +602,8 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
     before = len(gh.calls)
     expect_cli(capsys, 0, command)
     history = HISTORY_CALLS if command == "pr" else []
-    assert [c["argv"][:2] for c in gh.calls[before:]] == history + LOOKUP_CALLS + LOOKUP_CALLS[-1:]
+    lookup = LOOKUP_CALLS if command == "pr" else [commit_pr_read(original_head), *LOOKUP_CALLS[1:]]
+    assert [c["argv"][:2] for c in gh.calls[before:]] == history + lookup + LOOKUP_CALLS[-1:]
 
 
 def test_delayed_check_preserves_review_summary(wt, gh, fake_bin, tmp_path, monkeypatch):
@@ -644,7 +652,10 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
     gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=body)])
     out, _ = expect_cli(capsys, exit_code, command, stderr_contains=("malformed loopzero checks block", "PR description on GitHub"))
     history = HISTORY_CALLS if command == "pr" else []
-    assert [c["argv"][:2] for c in gh.calls] == history + LOOKUP_CALLS + (LOOKUP_CALLS[-1:] if command == "check" else [])
+    calls = history + LOOKUP_CALLS if command == "pr" else [
+        commit_pr_read(head_of(wt)), *LOOKUP_CALLS[1:], LOOKUP_CALLS[-1],
+    ]
+    assert [c["argv"][:2] for c in gh.calls] == calls
     if command == "check":
         assert out.endswith("PASS\n")
         assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["exit_code"] == 0
@@ -985,8 +996,9 @@ def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys, token, 
     assert_contains(err, REPO, f"HTTP {status}")
     if detail:
         assert_contains(err, "PR #7", endpoint, "branch", "lz/t1", f"rerun `{command}`")
-        assert [call["argv"] for call in gh.calls] == [
-            [*BRANCH_READ, "--include"], [*PR_LIST_READ, "--include"], ["api", endpoint, "--include"],
+        assert gh.calls[0]["argv"][:2] == commit_pr_read(head_of(wt))
+        assert [call["argv"] for call in gh.calls[1:]] == [
+            [*PR_LIST_READ, "--include"], ["api", endpoint, "--include"],
         ]
     else:
         hint = token == "app-token" and status == 404
@@ -1561,11 +1573,17 @@ def assert_claude_review_material(fake_bin, head, kind, task, expected_diff):
 def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys, branch, git_calls) -> None:
     git(wt, "branch", "-m", branch)
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES, branch=branch)
+    lookup = commit_pr_read(head)
+    gh.respond(" ".join([*lookup, "--method", "GET"]),
+               [dict(rest_pr_json(pr_json(headRefOid=head), branch=branch),
+                     created_at="2026-11-25T00:00:00Z")])
     task = (wt / ".loopzero/task.md").read_text()
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).encode("utf-8")
     git_calls.clear()
     out, _ = expect_cli(capsys, 5, "review", stderr="")
     assert_one_workflow_read(git_calls)
+    assert [call["argv"][:2] for call in gh.calls[:2]] == [lookup, LOOKUP_CALLS[-1]]
+    assert all("/branches/" not in call["argv"][1] for call in gh.calls)
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
         f"primary review by claude on {head[:12]}: request_changes "
