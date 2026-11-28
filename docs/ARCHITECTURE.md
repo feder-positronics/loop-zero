@@ -35,7 +35,11 @@ Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
 reviews, finding threads, check statuses and merge state. PR body writers hold
 the same-host repository-and-PR lock from the live read through the update.
 Review publication holds that lock for its round recheck, POST, read-back, and
-body summary. Check coalescing and receipts retain the worktree-local lock.
+body summary. Draft activation, Mergify request and confirmation comments, and
+finding replies hold the same PR lock across their live state checks and writes.
+Mergify admission takes the worktree-local lock first to protect receipt
+validation, and queue polling holds neither lock. Check coalescing and receipts
+retain the worktree-local lock.
 CI and branch protection
 provide the hosted enforcement. Readiness is a checklist over these sources,
 not a tamper-proof security boundary: repository writers can edit PR evidence,
