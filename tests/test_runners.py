@@ -869,10 +869,12 @@ def test_claude_settings_and_merged_calls_preserve_native_evidence(fake_bin, tmp
         envelope = _claude_envelope(
             APPROVE, session_id=session, modelUsage={f"reported-{session}": {}} if reported else {},
         )
-        _fake_claude(fake_bin, envelope)
+        _fake_claude(fake_bin, f"Reviewer wrapper ready\n{json.dumps(envelope)}" if reported else envelope)
         result = _review("claude", tmp_path, model=model, effort=effort)
+        assert result.verdict == "approve"
         assert result.provenance["requested_settings"] == [{"model": model, "effort": effort}]
         assert json.loads(result.raw) == envelope
+        assert runners.validate_runner_result(result)
         assert runners.validate_runner_result(merge_reviews([result]))
         results.append(result)
     results[0].provenance.pop("requested_settings")
@@ -1130,6 +1132,7 @@ def _commit(repo: Path, message: str) -> str:
         ("Co-Authored-By: GPT-5 <bot@example.com>", "codex"),
         ("Co-Authored-By: OpenAI Assistant <bot@example.com>", "codex"),
         ("Co-Authored-By: Jane Doe <jane@example.com>", None),
+        ("Co-Authored-By: Claudette Martin <cmartin@example.org>", None),
         ("", None),
         ("Co-Authored-By: Claude <noreply@anthropic.com>\n\nArchitecture-Review: unchanged; x", "claude"),
         ("Co-Authored-By: Claude <noreply@anthropic.com>\nprose after the writer line", "claude"),
