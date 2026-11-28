@@ -5,8 +5,8 @@ description: Deliver a bounded task or PR slice with behavior proof. Use work-is
 
 # Implement
 
-Read task text, repository guidance and affected interfaces. Follow the
-[delivery steps](../../CONTRACT.md#the-six-steps) in the task worktree.
+Confirm the intended worktree and branch. Read task text, repo guidance and
+affected interfaces. Follow the [delivery steps](../../CONTRACT.md#the-six-steps).
 Keep [credentials out of output](../../CREDENTIALS.md#keep-credentials-out-of-output)
 and read the full conventions before API-key integration. Follow
 [model selection](../../../docs/DELEGATION.md#resolve-the-model-before-delegation),
@@ -15,8 +15,8 @@ and read the full conventions before API-key integration. Follow
 
 Freeze observable task Acceptance before code edits. Record reasons for changes
 in Notes before implementing them. After authorized retargeting, sync PR
-Acceptance before review. Before touching guards, auth, permissions, sessions,
-secrets or trust boundaries, record threats, invariants and approach in Notes.
+Acceptance before review. If the task touches guards, auth, permissions, sessions, secrets or trust
+boundaries, record threats, invariants and approach in Notes before any code edit.
 Before deduplicating tests, list distinct assertions. Retain each and identify
 its surviving test in the PR.
 
