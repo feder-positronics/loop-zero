@@ -1311,7 +1311,9 @@ def test_progress_output_precedes_the_stderr_verdict_in_one_file(tmp_path: Path)
 def test_pr_updates_existing_open_pr(wt, gh, capsys, corrupt_report, git_calls):
     if corrupt_report:
         (wt / ".loopzero" / "checks.json").write_text('{"results": "nope"}')
-    arm_pr_body_patch(gh, head_of(wt))
+    task = cli.worktree.task_file(wt)
+    task.write_text(task.read_text().replace("## Validation\n", "## Validation  \n"))
+    arm_pr_body_patch(gh, head_of(wt), body="# T1\n\n## Validation  \nLive staging evidence\n")
     merged = closed_history_row(pr_json(number=8, state="MERGED", baseRefName="release", url=URL[:-1] + "8"))
     gh.respond(branch_history_key(), [merged])
     gh.respond(f"api repos/{REPO}/pulls/8", merged)
@@ -1321,7 +1323,7 @@ def test_pr_updates_existing_open_pr(wt, gh, capsys, corrupt_report, git_calls):
     assert not any(call[:2] == ["merge-base", "--is-ancestor"] for call in git_calls)
     assert ("warning: ignoring unreadable" in err) == corrupt_report
     assert [c['argv'][:2] for c in gh.calls] == HISTORY_CALLS + [['api', f'repos/{REPO}/pulls/8']] + LOOKUP_CALLS + [['api', f'repos/{REPO}/pulls/7']] * 2
-    assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
+    assert_contains(gh.calls[-1]["--input"], "(no `loopzero check` run recorded)", "Live staging evidence")
 
 
 @pytest.mark.parametrize("probe,diagnostic", [
@@ -2175,6 +2177,7 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
         (wt / ".gitmodules").write_text('[submodule "dep"]\npath = dep\nurl = ../dep\nignore = all\n')
         git(wt, "add", ".gitmodules")
         git(wt, "update-index", "--add", "--cacheinfo", f"160000,{reviewed},dep")
+        (wt / "dep").mkdir()
         commit_file(wt, "topic.py", "topic = 2\n", "topic repair")
         base = git(repo, "rev-parse", "main" if case == "verified" else "main^").strip()
     blocker = case in {"second parent", "empty with blocker"}

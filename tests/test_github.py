@@ -1060,10 +1060,12 @@ def test_readiness_defers_only_replaceable_failure(gh, check, runs, statuses, wa
         assert [c["argv"][-2] for c in gh.calls if "actions/runs" in c["argv"][1]] == ["page=1", "page=2"]
 
 
-@pytest.mark.parametrize("conclusion", [None, "skipped", "neutral", "failure"])
-def test_readiness_reads_actions_only_for_failed_required_check(gh, conclusion):
+@pytest.mark.parametrize("conclusion,status", [
+    (None, None), ("skipped", None), ("neutral", None), ("failure", None), ("skipped", "failure"),
+])
+def test_readiness_reads_actions_only_for_failed_required_check(gh, conclusion, status):
     checks = (check_run("success"), failed_check(name="optional")) if conclusion is None else (failed_check(conclusion),)
-    arm_workflow_check(gh, *checks)
+    arm_workflow_check(gh, *checks, statuses=[{"context": "checks", "state": status}] if status else [])
     if conclusion == "failure":
         gh.fail(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", "HTTP 403: Actions read denied")
         with pytest.raises(github.GhError, match="Actions read denied"):
@@ -1073,7 +1075,7 @@ def test_readiness_reads_actions_only_for_failed_required_check(gh, conclusion):
     if conclusion is None:
         assert result.ready
     else:
-        assert result.reasons == (f"required check 'checks' is {conclusion}",)
+        assert result.reasons == (f"required check 'checks' is {status or conclusion}",)
         assert result.waitable_failures == ()
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 

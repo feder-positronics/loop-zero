@@ -343,7 +343,7 @@ def base_sha(wt: Path) -> str:
 
 
 def is_dirty(wt: Path) -> bool:
-    return bool(git(Path(wt), "status", "--porcelain", "--untracked-files=all"))
+    return bool(git(Path(wt), "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"))
 
 
 def diff_since(wt: Path, sha: str) -> bytes:

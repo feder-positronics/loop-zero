@@ -1363,7 +1363,8 @@ def _check_run_order(run: dict) -> int:
 def _aggregate_signal(states: list[str]) -> str:
     if all(state == "success" for state in states):
         return "success"
-    return next((state for state in states if state not in _NONFAILING_CHECKS), "pending")
+    failure = next((state for state in states if state in _FAILED_VERDICTS), None)
+    return failure or next((state for state in states if state not in _NONFAILING_CHECKS), "pending")
 
 
 def behind_reason(pr: PR) -> str:
