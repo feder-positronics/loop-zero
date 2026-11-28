@@ -532,7 +532,6 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, tmp_
         options = ("--config", str(private))
         inject_check_timeout(monkeypatch, b"local check ghs_FAKE0123 output")
     endpoint = f"repos/{REPO}/pulls/7"
-    gh.respond(f"api {endpoint} --method PATCH", {})
     if refresh_timeout:
         timeout = cli._proc.ProcTimeout(f"PATCH {endpoint} timed out")
         monkeypatch.setattr(github, "update_body", Mock(side_effect=timeout))
@@ -572,8 +571,8 @@ LIVE_PR_BODY = (
       for command in ("check", "pr") for newline in ("\n", "\r\n")),
     ("check", "# PR\n\n## Evidence\nRetained browser proof.\n", True),
     ("check", "# PR\n\n## Checks\nLegacy summary.\n\n## Validation  \nHuman evidence.\n\n## Review\nApproved.\n", True),
-    ("check", "# PR\n\n## Validation", True),
-], ids=["check-lf", "check-crlf", "pr-lf", "pr-crlf", "new-head-evidence", "new-head-legacy-and-validation", "bare-validation"])
+    *(("check", "# PR\n\n## Validation" + suffix, True) for suffix in ("", " ##")),
+], ids=["check-lf", "check-crlf", "pr-lf", "pr-crlf", "new-head-evidence", "new-head-legacy-and-validation", "bare-validation", "closing-hashes"])
 def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advance):
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     original_head = head_of(wt)
@@ -612,26 +611,29 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
     assert [c["argv"][:2] for c in gh.calls[before:]] == history + lookup + LOOKUP_CALLS[-1:]
 
 
-@pytest.mark.parametrize("change", ["reorder", "conflict", "insert", "legacy"])
+@pytest.mark.parametrize("change", ["reorder", "conflict", "insert", "legacy-task", "legacy-live", "legacy-match"])
 def test_pr_sync_orders_published_sections(wt, gh, capsys, head, change):
     task = cli.worktree.task_file(wt)
     migration, backup = "## Migration\n- [ ] Run migration.\n\n", "## Prerequisites\nTake backup.\n\n"
     original = task.read_text()
     live = cli._sync_task_narrative(original + migration + ("" if change == "insert" else backup), "")
-    task.write_text(original + backup + migration)
-    if change == "legacy":
+    task.write_text(original + (migration + backup if change == "legacy-live" else backup + migration))
+    if change.startswith("legacy"):
         live = live.replace("loopzero:task-sync ordered ", "loopzero:task-sync ")
-    if (conflict := change == "conflict"):
-        live = live.replace(migration, "").replace("## Acceptance", migration + "## Acceptance")
+    if change in {"conflict", "legacy-live", "legacy-match"}:
+        moved, anchor = (migration, "## Acceptance") if change == "conflict" else (backup, migration)
+        live = live.replace(moved.rstrip(), "").replace(anchor, moved + anchor)
     arm_pr_body_patch(gh, head, body=live.replace("- [ ] Run migration.", "- [x] Run migration."))
-    expect_cli(capsys, int(conflict), "pr", stderr_contains=("section order",) if conflict else ())
+    conflict = change in {"conflict", "legacy-task", "legacy-live"}
+    expected = ("section order", "Prerequisites", "Migration") if change.startswith("legacy") else ("section order",)
+    expect_cli(capsys, int(conflict), "pr", stderr_contains=expected if conflict else ())
     if not conflict:
         body = json.loads(gh.calls[-1]["--input"])["body"]
         assert body.index("Take backup.") < body.index("Run migration.")
-        assert "- [x] Run migration." in body
+        assert_contains(body, "- [x] Run migration.", "loopzero:task-sync ordered ")
         arm_pr_body_patch(gh, head, body=body)
         expect_cli(capsys, 0, "pr")
-        assert gh.calls[-1]["argv"][:2] == ["api", f"repos/{REPO}/pulls/7"] and "--input" not in gh.calls[-1]
+    assert gh.calls[-1]["argv"][:2] == ["api", f"repos/{REPO}/pulls/7"] and "--input" not in gh.calls[-1]
 
 
 @pytest.mark.parametrize("change", ["task-preamble", "live-preamble", "notes-collision"])
@@ -1470,10 +1472,9 @@ def test_pr_uses_lease_for_rewritten_open_pr(wt, repo, gh, fake_tool, tmp_path, 
     if case == "hook-fails":
         hook = fake_tool("pre-push", "echo 'lint failed in widget.py' >&2\nexit 1\n")
         git(wt, "config", "core.hooksPath", str(hook.parent))
-    gh.respond_pr_list([pr_json(headRefOid=moved if case == "shared-object" else old)])
+    arm_pr_body_patch(gh, moved if case == "shared-object" else old)
     if moved is None:
         pushes = trace_pushes(fake_tool, tmp_path)
-        gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
         gh.respond_pr_view(pr_json(headRefOid=head))
     code, out, err = run(capsys, "pr")
     if moved:

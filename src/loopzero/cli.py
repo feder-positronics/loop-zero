@@ -497,7 +497,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = existing.replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(rf"{_SECTION_START}Validation[ \t]*(?:\n|\Z)(.*?){_SECTION_END}", _outside_fences(body), re.DOTALL | re.MULTILINE)
+    match = re.search(rf"{_SECTION_START}Validation(?:[ \t]+#+)?[ \t]*(?:\n|\Z)(.*?){_SECTION_END}", _outside_fences(body), re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = body[match.start(1):match.end(1)]
@@ -538,12 +538,14 @@ def _section_order(local, live, baseline, digest, unordered):
     order = list(live)
     by_key = {digest(repr(part)): part for part in local.keys() & live.keys()}
     previous_order = [by_key[key] for key in baseline if key in by_key]
-    shared = set(previous_order)
+    shared = set(by_key.values() if unordered else previous_order)
     task_order = [part for part in local if part in shared]
+    live_order = [part for part in live if part in shared]
     # Legacy fingerprints describe shared text but cannot establish a prior order.
-    if unordered or task_order != previous_order:
-        if not unordered and [part for part in live if part in shared] not in (previous_order, task_order):
-            raise CliError("PR description conflict in section order: "
+    if task_order != live_order and (unordered or task_order != previous_order):
+        if unordered or live_order != previous_order:
+            headings = ", ".join(part[0] for part, other in zip(task_order, live_order, strict=True) if part != other)
+            raise CliError(f"PR description conflict in section order{f' ({headings})' if unordered else ''}: "
                            "reconcile .loopzero/task.md with the GitHub PR body and rerun loopzero pr")
         reordered = iter(task_order)
         order = [next(reordered) if part in shared else part for part in order]
