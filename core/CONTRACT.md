@@ -18,9 +18,14 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    [long-running job](../docs/DELEGATION.md#long-running-jobs). On resume, read
    the PR's Validation or the saved receipt.
 3. `loopzero pr` pushes and opens a **draft** PR from the task text plus
-   generated Validation checks. Later calls sync narrative, preserving live
-   Validation, Review and extra sections; `check` refreshes only its checks
-   block. Drafts need no approving review.
+   generated Validation checks. Later calls compare the preamble and each
+   narrative section with its last shared text. A task-only edit, addition or
+   removal publishes, a PR-only change stays, and matching changes are accepted.
+   Different changes to the same part stop sync with its name so the author
+   can reconcile the two copies. On the first sync of an older PR without
+   content fingerprints, overlapping live text stays and current task text
+   becomes the comparison baseline. Sync preserves live Validation and Review,
+   and `check` refreshes only its checks block. Drafts need no approving review.
 4. `loopzero review` requires an exact-head check receipt before launching a
    native review and posting its inline findings to GitHub. A failed receipt
    matching the trusted plan requires green required hosted checks on that head,

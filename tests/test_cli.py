@@ -591,14 +591,13 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
         assert all(text in updated for text in evidence if text in live)
         return
 
+    assert "## Acceptance\n- Updated acceptance on GitHub." in body
     if command == "check":
-        assert "## Acceptance\n- Updated acceptance on GitHub." in body
         report = cli._load_report(wt)
         results = tuple(replace(stage, duration_s=999.0) for stage in report.results)
         cli._save_report(wt, replace(report, results=results))
     else:
         assert "The feature prints its greeting." in body
-        assert "Updated acceptance on GitHub" not in body
     assert_contains(body, "Browser: original failure reproduced; corrected image returns 200.",
                     "- primary, claude, aaaaaaaaaaaa, request_changes", "- delta, claude, bbbbbbbbbbbb, approve",
                     "## Evidence\nProduction probe returned 100 records.", FENCED_EXAMPLE, LIVE_PR_BODY.split("## Acceptance")[0])
@@ -609,6 +608,45 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
     history = HISTORY_CALLS if command == "pr" else []
     lookup = LOOKUP_CALLS if command == "pr" else [commit_pr_read(original_head), *LOOKUP_CALLS[1:]]
     assert [c["argv"][:2] for c in gh.calls[before:]] == history + lookup + LOOKUP_CALLS[-1:]
+
+
+@pytest.mark.parametrize("change", ["task-preamble", "live-preamble", "notes-collision"])
+def test_pr_sync_uses_last_published_task_text(wt, gh, capsys, head, change):
+    task = cli.worktree.task_file(wt)
+    original = task.read_text().replace("## Notes\n", "").replace(
+        "## Context and goal", "Deploy Tuesday.\n\n## Context and goal"
+    )
+    task.write_text(original)
+    arm_new_draft(gh, head)
+    arm_draft_validation(gh, wt, head, body=cli._sync_task_narrative(original, ""))
+    expect_cli(capsys, 0, "pr")
+    published = json.loads(gh.calls[-1]["--input"])["body"]
+    edited = original.replace("The feature prints its greeting.", "The feature prints a new greeting.")
+    live = published
+    if change == "notes-collision":
+        live += "\n## Notes\nOwner evidence only on GitHub.\n"
+        edited += "\n## Notes\nDeployment details from the task.\n"
+    elif change == "live-preamble":
+        live = published.replace("Deploy Tuesday.", "Deploy Thursday.")
+    else:
+        edited = edited.replace("Deploy Tuesday.", "Deploy Thursday.")
+    task.write_text(edited)
+    arm_pr_body_patch(gh, head, body=live)
+    before = len(gh.calls)
+    if change == "notes-collision":
+        expect_cli(capsys, 1, "pr", stderr_contains=("Notes", "conflict"))
+        assert not any("--input" in call for call in gh.calls[before:])
+    else:
+        expect_cli(capsys, 0, "pr")
+        synced = json.loads(gh.calls[-1]["--input"])["body"]
+        assert_contains(synced, "Deploy Thursday.", "The feature prints a new greeting.")
+        assert "Deploy Tuesday." not in synced
+        if change == "live-preamble":
+            task.write_text(edited.replace("Deploy Tuesday.", "Deploy Friday."))
+            arm_pr_body_patch(gh, head, body=synced)
+            before = len(gh.calls)
+            expect_cli(capsys, 1, "pr", stderr_contains=("preamble", "conflict"))
+            assert not any("--input" in call for call in gh.calls[before:])
 
 
 def test_delayed_check_preserves_review_summary(wt, gh, fake_bin, tmp_path, monkeypatch):
@@ -5223,7 +5261,8 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
               "Recorded validation\n<!-- loopzero:checks:end -->\n")
     task = wt / ".loopzero/task.md"
     prefix = task.read_text().split("## Validation")[0] if create else ""
-    prose = prefix + "x" * (65536 + extra - len(cli._sync_task_narrative(prefix, "")) - len(suffix))
+    sample = cli._sync_task_narrative(prefix + "x", "").rstrip() if create else "x"
+    prose = prefix + "x" * (1 + 65536 + extra - len(sample) - len(suffix))
     published = cli._sync_task_narrative(prose, "") if create else prose
     head = head_of(wt)
     if create:
@@ -5245,7 +5284,7 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
     else:
         assert err == ""
         assert len(writes) == 1 + create  # the draft, then its validation
-        assert json.loads(writes[-1]["--input"])["body"] == published + suffix
+        assert json.loads(writes[-1]["--input"])["body"] == published.rstrip() + suffix
 
 
 def merge_wait(monkeypatch, capsys, wait, fake):
