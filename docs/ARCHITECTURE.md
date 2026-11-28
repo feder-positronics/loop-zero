@@ -341,8 +341,9 @@ file by `start`. After a merge, removal allows ignored loop-zero state and
 known generated artifact directories. Other ignored paths are reported and
 keep the worktree in place. Cleanup refuses to remove nested worktrees.
 Git removal uses force only for closed PRs with initialized tracked submodules
-whose Git directories belong to the task checkout. Ignored paths inside those
-submodules also block removal. A Git ref lock keeps the
+whose Git directories belong to the task checkout. Ignored paths and commits
+reachable from local refs or reflogs but absent from remote-tracking refs block
+submodule removal. A Git ref lock keeps the
 worktree at the final PR head during removal. After a merge, cleanup deletes
 the local branch only if it still points at that head.
 Hosted eligibility trusts the configured publisher's projection and live identity,

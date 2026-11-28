@@ -397,18 +397,19 @@ def _require_no_nested_worktree(wt: Path, git_dir: Path, *, allow_submodules: bo
         raise WorktreeError(f"could not inspect nested worktrees in {wt}: {exc}") from exc
 
     links = git(wt, "ls-files", "-z", "--format=%(objectmode) %(path)", paths=True) if allow_submodules else ""
-    submodules = {root / entry[7:] for entry in links.split("\0") if entry.startswith("160000 ")}
-    modules = Path(git(wt, "rev-parse", "--absolute-git-dir", paths=True)) / "modules"
-    initialized = False
+    gitfiles = {path for entry in links.split("\0")
+                if entry.startswith("160000 ") and (path := root / entry[7:] / ".git").is_file()}
+    modules = Path(git(wt, "rev-parse", "--absolute-git-dir", paths=True)).resolve() / "modules"
     for path, directories, files in root.walk(on_error=fail_scan):
         if path != root and (".git" in files or ".git" in directories):
-            if path not in submodules or not Path(git(
+            if path / ".git" not in gitfiles or not Path(git(
                 path, "rev-parse", "--absolute-git-dir", paths=True)).resolve().is_relative_to(modules):
                 raise WorktreeError(f"nested Git worktree at {path}, refusing to remove: {wt}")
             if ignored := git(path, "ls-files", "--others", "--ignored", "--exclude-standard"):
                 raise WorktreeError(f"submodule {path} contains ignored paths, refusing to remove: {ignored}")
-            initialized = True
-    return initialized
+            if git(path, "rev-list", "--max-count=1", "--all", "--reflog", "--not", "--remotes"):
+                raise WorktreeError(f"submodule {path} contains local history, refusing to remove: {wt}")
+    return bool(gitfiles)
 
 
 def cleanup(wt: Path, expected_head: str, *, keep_branch: bool = False) -> None:
