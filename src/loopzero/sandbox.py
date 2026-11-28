@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, replace
 from os.path import commonpath
 from pathlib import Path
@@ -33,6 +33,7 @@ CHECK_TAIL_BYTES = 16 * 1024
 FIRST_HEARTBEAT_DELAY = 30.0
 HEARTBEAT_INTERVAL = 300.0
 SANDBOX_HOME = "/tmp/home"
+CPU_GRANT_ENV = "HEAVY_SLOT_GRANTED_CORES"
 # Only these system directories are exposed read-only by default; home tool paths
 # require explicit `[checks] ro_paths`. Host homes, sockets and processes stay hidden.
 SYSTEM_RO = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt")
@@ -259,10 +260,8 @@ def _previous(config: Config, worktree: Path, settings_sha256: str,
 
 def _check_base(config: Config, worktree: Path) -> str:
     if config.inputs:
-        try:
+        with suppress(config_mod.ConfigError, WorktreeError):
             return config.trusted_base_revision or config_mod.base_revision(worktree, config.base_branch)
-        except (config_mod.ConfigError, WorktreeError):
-            pass
     return ""
 
 
@@ -273,16 +272,17 @@ def _execution_settings(config: Config, base: str) -> dict:
     allowlist.extend(sorted((allowed - set(Config.env_allowlist)) & os.environ.keys()))
     return {"network": config.network, "env_allowlist": allowlist, "sandbox_ro": config.sandbox_ro,
             "writable": config.writable, "scratch": config.scratch, "env": config.env, "limits": asdict(config.limits),
-            "local_shell": CHECK_SHELL, "check_runner": [], "environment": check_environment(config),
+            "local_shell": CHECK_SHELL, "environment": check_environment(config),
+            "check_runner": [],  # Historical field kept for existing receipts.
             **({"base": base} if config.inputs else {})}
 
 
-def settings_fingerprint(config: Config) -> str:
+def settings_fingerprint(config: Config, *, legacy_allowlist: tuple[str, ...] | None = None) -> str:
     settings = _execution_settings(config, config.base_branch)
     # Inherited host settings can differ at readiness. Stage reuse still binds them.
-    grant = "HEAVY_SLOT_GRANTED_CORES"
-    settings["env_allowlist"] = [name for name in settings["env_allowlist"] if name != grant]
-    for name in {"PATH", "LANG", "LC_ALL", "TERM", grant} - dict(config.env).keys():
+    settings["env_allowlist"] = (legacy_allowlist if legacy_allowlist is not None else
+                                 [name for name in settings["env_allowlist"] if name != CPU_GRANT_ENV])
+    for name in {"PATH", "LANG", "LC_ALL", "TERM", CPU_GRANT_ENV} - dict(config.env).keys():
         settings["environment"].pop(name, None)
     return hashlib.sha256(json.dumps([settings, config.inputs], sort_keys=True).encode()).hexdigest()
 

@@ -3448,17 +3448,31 @@ def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatc
     assert run(capsys, "ready", "--wait=60")[0] == exit_code and clock.fetch_timeout == 60 - clock.sleeps[0]
 
 
-def test_ready_accepts_receipt_after_forwarding_worker_cpu_grant(wt, gh, head, capsys, monkeypatch, tmp_path):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_ready_accepts_receipt_after_forwarding_worker_cpu_grant(wt, gh, head, capsys, monkeypatch, tmp_path, legacy):
     config = tmp_path / "check-policy.toml"
     args = ("--config", str(config))
     config.write_text(WORKFLOW)
     arm_approved_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
     expect_cli(capsys, 0, *args, "check")
 
-    allowlist = (*cli.Config.env_allowlist, "HEAVY_SLOT_GRANTED_CORES")
+    allowlist = cli.Config.env_allowlist
+    if legacy:
+        monkeypatch.delenv("ZZ_LZ_UNUSED", raising=False)
+        allowlist = ("HOME", "PATH", "LANG", "LC_ALL", "TERM", "ZZ_LZ_UNUSED")
+        report = cli._load_report(wt)
+        cli._save_report(wt, cli.dataclasses.replace(
+            report, settings_sha256="a5b223bb4bbb56165079349faf1232ec5863a473560bcebe461c9eedba9cbb6d",
+        ))
+        config.write_text(WORKFLOW.replace("[checks]", f"[checks]\nenv_allowlist = {json.dumps(allowlist)}"))
+        expect_cli(capsys, 0, *args, "ready")
+    allowlist += ("HEAVY_SLOT_GRANTED_CORES",)
     config.write_text(WORKFLOW.replace("[checks]", f"[checks]\nenv_allowlist = {json.dumps(allowlist)}"))
     monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "2")
     expect_cli(capsys, 0, *args, "ready")
+    if legacy:
+        monkeypatch.setenv("ZZ_LZ_UNUSED", "now supplied")
+        expect_cli(capsys, 1, *args, "ready")
 
 
 @pytest.mark.parametrize("worker", ["legacy", "different-environment", "matching"])

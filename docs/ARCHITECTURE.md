@@ -157,7 +157,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    run in a different host environment. The receipt also ignores whether the
    inherited CPU grant is allowlisted. Explicit settings and stage reuse keys
    still bind these values. Both keys disregard allowlist order, duplicate names,
-   and unset names outside the default allowlist. A receipt for input-keyed checks binds the
+   and unset names outside the default allowlist. Readiness can also match the
+   prior raw allowlist hash against the current names, with or without the
+   inherited CPU grant. A receipt for input-keyed checks binds the
    configured base branch. Only the
    stage reuse key binds the exact base revision. Source-check waiters check for policy
    changes on every poll.
