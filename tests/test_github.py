@@ -174,7 +174,7 @@ def rest_pr_json(data: dict, *, branch: str = "lz/t1") -> dict:
 
 def merge_json(state="OPEN", head=HEAD, sha=None) -> dict:
     return {"state": "open" if state == "OPEN" else "closed", "merged": state == "MERGED",
-            "head": {"sha": head}, "merge_commit_sha": sha}
+            "head": {"sha": head}, "base": {"ref": "main"}, "merge_commit_sha": sha}
 
 
 def threads_json(*nodes: dict, has_next: bool = False, cursor: str | None = None) -> dict:

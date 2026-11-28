@@ -3019,8 +3019,42 @@ def test_ready_keeps_required_check_signals_from_both_apps(wt, gh, capsys, head,
     assert ("required check 'checks' is failure" in out) is not rerun
 
 
-@pytest.mark.parametrize("budget,activation", [(0, False), (1, False), (1, True)])
-def test_ready_bounds_reads_before_activation(wt, gh, capsys, monkeypatch, head, budget, activation):
+@pytest.mark.parametrize("outcome", ["retry", "applied", "blocker", "moved", "exhausted", "quota"])
+def test_ready_recovers_ambiguous_activation(wt, gh, capsys, monkeypatch, head, outcome):
+    arm_approved_pr(gh, head, wt, "skipped")
+    clock = poll_clock(monkeypatch)
+    attempts = []
+
+    def activate(*_):
+        attempts.append(clock.now)
+        if outcome == "applied" or (outcome == "retry" and len(attempts) == 2):
+            arm_pr(gh, head, isDraft=False)
+            arm_named_check(gh, head, conclusion="success")
+        if outcome == "blocker":
+            arm_named_check(gh, head, conclusion="failure")
+        if outcome == "moved":
+            arm_pr(gh, "f" * 40)
+        if not (outcome == "retry" and len(attempts) == 2):
+            detail = "secondary rate limit" if outcome == "quota" else "HTTP 502"
+            raise github.GhUnavailable(("gh", "pr", "ready"), detail)
+
+    monkeypatch.setattr(github, "mark_ready", activate)
+    receipt = wt / ".loopzero/checks.json"
+    before = receipt.read_bytes()
+    code, out, err = run(capsys, "ready", "--wait=60")
+    assert attempts == ([0, 5] if outcome in {"retry", "exhausted"} else [0])
+    assert receipt.read_bytes() == before
+    assert code == {"blocker": 1, "moved": 1, "exhausted": 2, "quota": 2}.get(outcome, 0)
+    if code == 2:
+        assert "Run `loopzero ready --wait`" in err
+    if code == 0:
+        assert f"ready: {URL}" in out
+
+
+@pytest.mark.parametrize("command,budget,activation", [
+    ("ready", 0, False), ("ready", 1, False), ("ready", 1, True), ("merge", 1, False),
+])
+def test_wait_bounds_initial_reads(wt, gh, capsys, monkeypatch, head, budget, activation, command):
     arm_approved_pr(gh, head, wt, isDraft=bool(budget))
     gh.respond("pr ready", "")
     clock = poll_clock(monkeypatch)
@@ -3034,7 +3068,7 @@ def test_ready_bounds_reads_before_activation(wt, gh, capsys, monkeypatch, head,
         return pr
 
     monkeypatch.setattr(github, read.__name__, slow_read)
-    out, _ = expect_cli(capsys, 3 if budget else 0, "ready", f"--wait={budget}", stderr="")
+    out, _ = expect_cli(capsys, 3 if budget else 0, command, f"--wait={budget}", stderr="")
     assert limits == [budget or 120]
     assert ("timed out" in out) is bool(budget)
     assert not any(call["argv"][:2] == ["pr", "ready"] for call in gh.calls)
@@ -4200,7 +4234,7 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
 
 @pytest.mark.parametrize("outcome", [
     "merged", "ejected", "landed-on-ejection", "head-changed-early", "head-changed-late",
-    "closed-then-merged", "still-closed",
+    "closed-then-merged", "still-closed", "retargeted",
 ])
 def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
     wt: Path, gh: FakeGh, capsys, monkeypatch, head, outcome
@@ -4215,6 +4249,7 @@ def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
         "head-changed-late": (opened, landed_snapshot("f" * 40)),
         "closed-then-merged": (opened, closed, landed),
         "still-closed": (opened, closed, closed),
+        "retargeted": (opened, {**opened, "base": {"ref": "release"}}),
     }
     arm_squash_merge(gh, head, wt, *snapshots[outcome])
     ejected = outcome in {"ejected", "landed-on-ejection"}
@@ -4228,6 +4263,8 @@ def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
     if outcome.startswith("head-changed"):
         assert code == 1 and "PR head changed" in err
         assert wt.exists(), "no cleanup after an unreviewed head"
+    elif outcome == "retargeted":
+        assert code == 1 and "retargeted to release" in err and "rerun" in err and wt.exists()
     elif outcome == "still-closed":
         assert code == 1 and "closed without a verified merge" in err and wt.exists()
     elif ejected:
@@ -4751,7 +4788,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
             monkeypatch.chdir(repo)
     if outcome == "timeout":
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
-        assert clock.sleeps == ([30, 60, 120, 36, 4] if jitter == 1 else [27, 54, 108, 56, 5])
+        assert clock.sleeps == ([30, 60, 120, 36, 4] if jitter == 1 else [30, 54, 108, 53, 5])
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert queue_requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
@@ -5228,7 +5265,7 @@ def test_direct_merge_verifies_after_queue_wait_deadline(wt, gh, capsys, monkeyp
 
 
 def test_queue_wait_budget_boundaries(monkeypatch):
-    clock, budgets, pr = poll_clock(monkeypatch), [], SimpleNamespace(number=7, head_sha="a" * 40)
+    clock, budgets, pr = poll_clock(monkeypatch), [], SimpleNamespace(number=7, head_sha="a" * 40, base_ref="main")
     def poll(_remaining):
         github.read_timeout(0)
         clock.now = 1
