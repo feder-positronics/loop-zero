@@ -482,7 +482,9 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
 
 _CHECKS_START = "<!-- loopzero:checks:start -->"
 _CHECKS_END = "<!-- loopzero:checks:end -->"
-_TASK_EVIDENCE = re.compile(r"^## (Validation|Review)[ \t]*(?:\n|\Z).*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+_SECTION_START = r"^ {0,3}## "
+_SECTION_END = rf"(?={_SECTION_START}|\Z)"
+_TASK_EVIDENCE = re.compile(rf"{_SECTION_START}(Validation|Review)[ \t]*(?:\n|\Z).*?{_SECTION_END}", re.MULTILINE | re.DOTALL)
 
 
 def _outside_fences(body: str) -> str:
@@ -495,7 +497,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = existing.replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(r"^## Validation[ \t]*\n(.*?)(?=^## |\Z)", _outside_fences(body), re.DOTALL | re.MULTILINE)
+    match = re.search(rf"{_SECTION_START}Validation[ \t]*\n(.*?){_SECTION_END}", _outside_fences(body), re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = body[match.start(1):match.end(1)]
@@ -534,7 +536,7 @@ def _seed_task_evidence(task: str, body: str) -> str:
 
 def _sync_task_narrative(task: str, existing: str) -> str:
     """Explicit pr updates task-owned prose; live evidence stays authoritative."""
-    pattern = re.compile(r"^## ([^\n]*)(?:\n|\Z).*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    pattern = re.compile(rf"{_SECTION_START}([^\n]*)(?:\n|\Z).*?{_SECTION_END}", re.MULTILINE | re.DOTALL)
     existing = existing.replace("\r\n", "\n")
     task_prose = _outside_fences(task)
     owned = {m[1].rstrip(" \t"): task[m.start():m.end()] for m in pattern.finditer(task_prose)
@@ -580,7 +582,7 @@ def _require_pr_details(wt: Path, task: str) -> None:
 def _append_review(body: str, result: ReviewResult) -> str:
     """Append one compact review record under Review, replacing its placeholder."""
     line = f"- {result.kind}, {result.family}, {result.head[:12]}, {result.verdict}"
-    match = re.search(r"^## Review[ \t]*\n(.*?)(?=^## |\Z)", _outside_fences(body), re.DOTALL | re.MULTILINE)
+    match = re.search(rf"{_SECTION_START}Review[ \t]*\n(.*?){_SECTION_END}", _outside_fences(body), re.DOTALL | re.MULTILINE)
     if not match:
         return f"{body.rstrip()}\n\n## Review\n{line}\n"
     existing = re.sub(r"^\(filled by `loopzero review`\)[ \t]*(?:\n+|$)", "", body[match.start(1):match.end(1)]).rstrip()

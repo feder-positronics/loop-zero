@@ -220,7 +220,7 @@ def window_stats(start, end, pulls, outcomes, orders, p0, checks):
         )
         result.update(orders_accepted=len(accepted), order_to_acceptance_median_hours=median,
                       order_to_acceptance_p90_hours=p90)
-    if p0 is not None:
+    if p0 is not None and histories_complete(p0, end):
         open_orders = open_at(p0, end)
         result.update(open_p0=len(open_orders), oldest_open_p0_hours=max(
             ((end - timestamp(i["created_at"])) / HOUR for i in open_orders), default=UNKNOWN))
@@ -231,8 +231,17 @@ def window_stats(start, end, pulls, outcomes, orders, p0, checks):
 
 
 def open_at(issues, end):
-    return [i for i in issues if timestamp(i["created_at"]) < end and
-            (not i.get("closed_at") or timestamp(i["closed_at"]) >= end)]
+    def still_open(issue):
+        if "state_changes" in issue:
+            changes = issue["state_changes"]
+            return changes is not None and next((kind == "reopened" for when, kind in changes if when < end), True)
+        return not issue.get("closed_at") or timestamp(issue["closed_at"]) >= end
+
+    return [issue for issue in issues if timestamp(issue["created_at"]) < end and still_open(issue)]
+
+
+def histories_complete(issues, end):
+    return all(issue["state_changes"] is not None or timestamp(issue["created_at"]) >= end for issue in issues)
 
 
 def weekly_sample(repo, start, end, pulls, orders, open_orders, stalls, *, stalls_complete=True):
@@ -339,7 +348,7 @@ def issue_progress(inputs, repo, issue, end):
 def stalled_p0s(inputs, args, p0, end):
     if args.stall_hours is None or p0 is None:
         return [], False
-    stalls, complete = [], True
+    stalls, complete = [], histories_complete(p0, end)
     for issue in sorted(open_at(p0, end), key=lambda row: row["number"]):
         name = f"p0/#{issue['number']}/activity"
         latest = inputs.read(name, lambda order=issue: issue_progress(
@@ -387,8 +396,24 @@ def load_github(inputs, args, lower):
             inputs, args.repo, args.label_outcome, since=stamp(lower)), list),
         inputs.read("order_issues", lambda: load_issues(
             inputs, args.repo, args.label_order, since=stamp(lower)), list),
-        inputs.read("p0_issues", lambda: load_issues(inputs, args.repo, args.label_p0), list),
+        inputs.read("p0_issues", lambda: list(load_p0(inputs, args)), list),
     )
+
+
+def load_p0(inputs, args):
+    def state_changes(issue):
+        timeline = pages(inputs, f"repos/{args.repo}/issues/{issue['number']}/timeline")
+        if timeline is None:
+            raise ValueError("issue timeline unavailable")
+        changes = [(timestamp(event["created_at"]), event["event"]) for event in timeline
+                   if event.get("event") in {"closed", "reopened"}]
+        # Reverse chronological order, with the last event first for tied timestamps.
+        return sorted(reversed(changes), key=lambda change: change[0], reverse=True)
+
+    for issue in load_issues(inputs, args.repo, args.label_p0):
+        if timestamp(issue["created_at"]) < args.end:
+            changes = inputs.read(f"p0/#{issue['number']}/state", lambda row=issue: state_changes(row), list)
+            yield dict(issue, state_changes=changes)
 
 
 def load_issues(inputs, repo, label, state="all", **params):

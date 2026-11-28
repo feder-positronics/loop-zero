@@ -65,6 +65,7 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
         assert "without guide update or reasoned Architecture-Review trailer" in done.stderr
     if sync == "squash":
         git_repo = git_repo.rename(git_repo.with_name(f"{git_repo.name} "))
+        (git_repo / "README.md").write_text("<!-- TODO\n[hidden](missing.md)\n-->\n")
         assert run(git_repo, base, "--links-only").returncode == 0
         (git_repo / "README.md").write_text("[Guide][guide]\n\n[guide]: absent.md\n")
         assert run(git_repo, base, "--links-only").returncode == 1
