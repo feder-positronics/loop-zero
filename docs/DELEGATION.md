@@ -89,9 +89,9 @@ Wait for the exit file or for the unit to stop:
 until test -f LOG.exit || ! systemctl --user is-active --quiet NAME; do sleep 30; done
 ```
 
-After the wait, a missing `LOG.exit` means the job was killed, timed out or
-cancelled. To cancel, check `LOG.exit` first and run `systemctl --user stop NAME`
-if the file is absent.
+Report completion only once `LOG.exit` exists. After the wait, a missing file
+means the job failed (killed, timed out or cancelled). To cancel, run
+`systemctl --user stop NAME` only if the exit file is absent.
 
 ### Leftover cleanup
 

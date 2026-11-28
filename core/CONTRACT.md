@@ -155,9 +155,10 @@ draft is the queue request, whatever tool does it: after a receipt refusal, post
 the one reason first, or fix the cause and rerun `loopzero check`.
 
 The PR owner repairs or reverts an attributed main regression. For a shared
-critical product, build or deployment hazard, revert within 1 h under consumer
-rollback rules. Assign a repair owner to non-critical monitoring failures
-outside the change without freezing unrelated merges. Required proof still applies.
+critical product, build or deployment hazard, revert the culprit first within
+1 h under consumer rollback rules. Assign a repair owner to non-critical monitoring
+failures outside the change without freezing unrelated merges. Exact-SHA review,
+receipts, owner queue conditions and merge-authority holds still apply.
 
 <a id="gate-execution-and-delivery-priority"></a>
 
@@ -211,12 +212,11 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   edits to each automatic remerge. The reviewed commit must be on the first-parent history, and merged parents
   must come from the verified base. Unresolved primary findings still count under Blockers.
 - Default: one writing model family per PR, including delegates and repairs;
-  another may advise read-only and review independently. Before committing
-  imported work, record every actual writing delegate in truthful
-  `Co-Authored-By` trailers; the committer does not replace the writer.
-  Preserve every actual contributor's truthful trailers through squash/amend.
-  Missing attribution
-  stays unknown; never invent it.
+  another may advise read-only and review independently. Before committing, add
+  truthful `Co-Authored-By` trailers for every model that wrote the change,
+  including your own if it wrote any of it. Applying someone else's patch
+  does not make you its writer. Preserve truthful contributor trailers through
+  squash/amend. Missing attribution stays unknown; never invent it.
 - Primary and delta prefer families absent from recognized trailers across
   all commits/trailers from configured-base merge-base through HEAD,
   including repairs. Narrower diffs, prose and a main-author-only HEAD cannot
