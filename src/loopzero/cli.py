@@ -524,28 +524,33 @@ def _seed_task_evidence(task: str, body: str) -> str:
     return "\n\n".join([body.rstrip(), *missing]) + "\n" if missing else body
 
 
-def _without_task_evidence(task: str) -> str:
-    for section in reversed(list(_TASK_EVIDENCE.finditer(_outside_fences(task)))):
-        task = task[:section.start()] + task[section.end():]
-    return task
-
-
 def _sync_task_narrative(task: str, existing: str) -> str:
     """Explicit pr updates task-owned prose; live evidence stays authoritative."""
     pattern = re.compile(r"^## ([^\n]*)(?:\n|\Z).*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
     existing = existing.replace("\r\n", "\n")
     task_prose = _outside_fences(task)
-    owned = {m[1]: task[m.start():m.end()] for m in pattern.finditer(task_prose)
+    owned = {m[1].rstrip(" \t"): task[m.start():m.end()] for m in pattern.finditer(task_prose)
              if m[1].rstrip(" \t") not in {"Validation", "Review"}}
     prefix = task[:first.start()] if (first := pattern.search(task_prose)) else task
+    live_prose = _outside_fences(existing)
+    prior = re.search(r"^<!-- loopzero:task-sections ([0-9a-f ]+) -->$", live_prose, re.MULTILINE)
+
+    def section_id(name: str) -> str:
+        return hashlib.sha256(name.encode()).hexdigest()[:16]
+
+    if owned:
+        prefix = prefix.rstrip() + "\n\n<!-- loopzero:task-sections " + " ".join(map(section_id, owned)) + " -->\n\n"
 
     def replace(match: re.Match[str]) -> str:
         section = existing[match.start():match.end()]
-        replacement = owned.pop(match.group(1), section)
+        name = match[1].rstrip(" \t")
+        if name not in owned and prior and section_id(name) in prior[1].split():
+            return ""
+        replacement = owned.pop(name, section)
         trailing = section[len(section.rstrip()):]
         return replacement.rstrip() + trailing
 
-    content = "".join(map(replace, pattern.finditer(_outside_fences(existing))))
+    content = "".join(map(replace, pattern.finditer(live_prose)))
     for section in owned.values():
         content = content.rstrip() + "\n\n" + section
     return prefix + content.lstrip("\n")
@@ -567,7 +572,7 @@ def _require_pr_details(wt: Path, task: str) -> None:
 def _append_review(body: str, result: ReviewResult) -> str:
     """Append one compact review record under Review, replacing its placeholder."""
     line = f"- {result.kind}, {result.family}, {result.head[:12]}, {result.verdict}"
-    match = re.search(r"^## Review\n(.*?)(?=^## |\Z)", _outside_fences(body), re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Review[ \t]*\n(.*?)(?=^## |\Z)", _outside_fences(body), re.DOTALL | re.MULTILINE)
     if not match:
         return f"{body.rstrip()}\n\n## Review\n{line}\n"
     existing = re.sub(r"^\(filled by `loopzero review`\)[ \t]*(?:\n+|$)", "", body[match.start(1):match.end(1)]).rstrip()
@@ -704,7 +709,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
                        "run `loopzero start <new-task-slug>` from the main checkout")
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
     created = pr is None
-    existing = task if created else _sync_task_narrative(task, pr.body)
+    existing = _sync_task_narrative(task, pr.body if pr else "")
     _pr_body(wt, head, config, _seed_task_evidence(task, existing))  # refuse an unusable body before pushing
     force_lease = False
     git_branch = os.fsdecode(branch.encode("utf-8", "surrogateescape"))
@@ -724,8 +729,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _git(wt, "config", f"branch.{git_branch}.remote", "origin")
     _git(wt, "config", f"branch.{git_branch}.merge", f"refs/heads/{git_branch}")
     if pr is None:
-        prose = _without_task_evidence(task)
-        pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), prose)
+        pr = github.create_draft_pr(config.repo, branch, config.base_branch, _pr_title(wt, branch), existing)
     with github.pr_lock(config.repo, pr.number):
         live = github.pr_view(config.repo, pr.number)
         if live.state != "OPEN":
@@ -1379,7 +1383,7 @@ def _ready(  # noqa: C901 - wait and draft activation paths share one readiness 
                                       mergify_deadline=deadline)
     assert readiness is not None
     wait = partial(_wait_with_deadline, wt, config, timeout=args.wait, started=started, args=args,
-                   allow_skipped=True, initial_read_time=time.monotonic() - started)
+                   allow_merged=True, allow_skipped=True, initial_read_time=time.monotonic() - started)
     if kicked := bool(waiting := _draft_checks_waiting(config, pr, readiness)):
         _mark_ready(wt, config, pr.number, pr.head_sha, args, deadline)
         if args.wait is None:
@@ -1392,12 +1396,15 @@ def _ready(  # noqa: C901 - wait and draft activation paths share one readiness 
                            initial=None if kicked else readiness)) is None:
             return 3
         pr, readiness, kicked = waited
-    if readiness.ready and pr.is_draft and not kicked:
+    if readiness is not None and readiness.ready and pr.is_draft and not kicked:
         _mark_ready(wt, config, pr.number, pr.head_sha, args, deadline)
         if args.wait is not None:
             if (waited := wait(pr, kicked=True)) is None:
                 return 3
             pr, readiness, _ = waited
+    if readiness is None:
+        print(f"merged: {pr.url}")
+        return 0
     for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
     if not readiness.ready:
@@ -1884,10 +1891,6 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
     except github.ReadDeadline:
         print("timed out while checking merge readiness")
         return 3
-    if pr.state == "CLOSED":
-        print(f"PR #{pr.number} closed without merging", file=sys.stderr)
-        _cleanup(wt, pr, closed=True)
-        return 1
     if readiness is not None and args.wait is not None and _pending_checks(readiness):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
                                      args=args, allow_merged=True, initial=readiness,
@@ -1895,6 +1898,10 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
         if waited is None:
             return 3
         pr, readiness, _ = waited
+    if pr.state == "CLOSED":
+        print(f"PR #{pr.number} closed without merging", file=sys.stderr)
+        _cleanup(wt, pr, closed=True)
+        return 1
     if readiness is None:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha, expected_base=config.base_branch)
         if sha is None:
