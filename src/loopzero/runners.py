@@ -108,17 +108,17 @@ def _review_policy(kind: str, *, split: bool) -> str:
     """Fixed native instructions; only the validated review scope varies."""
     if kind not in ("primary", "delta"):
         raise ValueError(f"unknown review kind {kind!r}; expected 'primary' or 'delta'")
-    scope = {
-        "primary": "This is the primary review of the whole change.",
-        "delta": ("This is a delta review: only review the diff in the material message, which covers "
-                  "the commits since the previous review."),
-    }[kind]
     if split:
         scope = (
             f"This is one chunk of the {kind} review. The fragment field gives its position. "
             "Report defects in this chunk only, and do not judge whether the whole change is "
             "complete or flag work missing from this chunk."
         )
+    elif kind == "primary":
+        scope = "This is the primary review of the whole change."
+    else:
+        scope = ("This is a delta review: only review the diff in the material message, which covers "
+                 "the commits since the previous review.")
     return " ".join((
         "You are an independent code reviewer. Read only: do not edit files.",
         scope,
@@ -284,7 +284,7 @@ def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Conf
     return Config(
         repo="review/sandbox", base_branch="main", checks=(), required_ci=(),
         merge_strategy="squash", reviewers=(family,), network=True, env_allowlist=BASE_ENV,
-        sandbox_ro=ro_paths or (str(binary.resolve().parent),), writable=(), scratch=(), env=(),
+        sandbox_ro=ro_paths or (str(binary.resolve().parent),), scratch=(),
     )
 
 
@@ -658,10 +658,9 @@ def _valid_codex_evidence(value):  # noqa: C901 - one check per evidence field
 
 
 def valid_codex_evidence(value):
-    try:
+    with contextlib.suppress(KeyError, TypeError, ValueError):
         return bool(_valid_codex_evidence(value))
-    except KeyError, TypeError, ValueError:
-        return False
+    return False
 
 
 def encode_codex_evidence(value):
@@ -1226,10 +1225,9 @@ def _validated_evidence(result: ReviewResult) -> tuple[bool, dict | None]:
         return False, None
     if (result.findings, result.verdict) != _review_outcome(parsed):
         return False, None
-    try:
+    with contextlib.suppress(RunnerBadOutput, ValueError, KeyError, TypeError, AttributeError):
         return True, _codex_evidence(result) if result.family == "codex" else None
-    except (RunnerBadOutput, ValueError, KeyError, TypeError, AttributeError):
-        return False, None
+    return False, None
 
 
 def families_from_trailer(value: str) -> set[str]:
