@@ -233,7 +233,7 @@ def open_at(issues, end):
             (not i.get("closed_at") or timestamp(i["closed_at"]) >= end)]
 
 
-def weekly_sample(repo, start, end, pulls, orders, open_orders, stalls):
+def weekly_sample(repo, start, end, pulls, orders, open_orders, stalls, *, stalls_complete=True):
     oldest = sorted(open_at(open_orders or [], end), key=lambda row: (
         timestamp(row["created_at"]), row["number"]))
     accepted = sorted(
@@ -269,7 +269,7 @@ def weekly_sample(repo, start, end, pulls, orders, open_orders, stalls):
         "pool_sizes": {
             "merged_control": len(merged) if pulls is not None else UNKNOWN,
             "slowest_accepted": len(accepted) if orders is not None else UNKNOWN,
-            "stalled_p0": len(stalled) if stalls is not None else UNKNOWN,
+            "stalled_p0": len(stalled) if stalls_complete and stalls is not None else UNKNOWN,
             "oldest_open_order": len(oldest) if open_orders is not None else UNKNOWN,
         },
     }
@@ -336,16 +336,18 @@ def issue_progress(inputs, repo, issue, end):
 
 def stalled_p0s(inputs, args, p0, end):
     if args.stall_hours is None or p0 is None:
-        return None
-    stalls = []
+        return [], False
+    stalls, complete = [], True
     for issue in sorted(open_at(p0, end), key=lambda row: row["number"]):
         name = f"p0/#{issue['number']}/activity"
         latest = inputs.read(name, lambda order=issue: issue_progress(
             inputs, args.repo, order, end), dt.datetime)
-        if latest is not None and (end - latest) / HOUR >= args.stall_hours:
+        if latest is None:
+            complete = False
+        elif (end - latest) / HOUR >= args.stall_hours:
             stalls.append({"kind": "stalled_p0", "issue": issue["number"],
                            "last_activity": stamp(latest), "hours": (end - latest) / HOUR})
-    return stalls
+    return stalls, complete
 
 
 def find_alerts(inputs, args, metrics, p0, host, end):
@@ -354,7 +356,8 @@ def find_alerts(inputs, args, metrics, p0, host, end):
         if value != UNKNOWN and not minimum <= value <= maximum:
             inputs.alerts.append({"kind": "outside_band", "metric": key, "value": value,
                                   "min": minimum, "max": maximum})
-    inputs.alerts.extend(stalled_p0s(inputs, args, p0, end) or [])
+    stalls, _ = stalled_p0s(inputs, args, p0, end)
+    inputs.alerts.extend(stalls)
     owners = host.get("owners", {})
     if not isinstance(owners, dict):
         owners = {}
@@ -499,7 +502,7 @@ def main(argv=None):
     if open_orders is not None:
         # Include recent orders that closed after a historical report's end.
         open_orders = list({row["number"]: row for row in [*(orders or []), *open_orders]}.values())
-    stalls = stalled_p0s(inputs, args, p0, end)
+    stalls, stalls_complete = stalled_p0s(inputs, args, p0, end)
     inputs.save()
     trend = [metrics[name] for name in names]
     report = {
@@ -507,7 +510,7 @@ def main(argv=None):
         "trend_4_weeks": trend, "custom_window": metrics.get("custom_window"),
         "alerts": inputs.alerts,
         "weekly_sample": weekly_sample(args.repo, weekly[-1][0], end, pulls, orders,
-                                       open_orders, stalls),
+                                       open_orders, stalls, stalls_complete=stalls_complete),
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     print_table(trend)
