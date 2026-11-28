@@ -1541,8 +1541,8 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
     return queued or bool(auto)
 
 
-def _merge_evidence(repo: str, number: int, head_sha: str) -> tuple[str | None, bool, GhError | ProcTimeout | None]:
-    if sha := merged_sha(repo, number, expected_head=head_sha):
+def _merge_evidence(repo: str, number: int, head_sha: str, base: str) -> tuple[str | None, bool, GhError | ProcTimeout | None]:
+    if sha := merged_sha(repo, number, expected_head=head_sha, expected_base=base):
         return sha, False, None
     queue_error = None
     try:
@@ -1553,10 +1553,10 @@ def _merge_evidence(repo: str, number: int, head_sha: str) -> tuple[str | None, 
             raise
         queue_error = exc
     # The queue may have landed the PR between the two reads.
-    return merged_sha(repo, number, expected_head=head_sha), False, queue_error
+    return merged_sha(repo, number, expected_head=head_sha, expected_base=base), False, queue_error
 
 
-def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
+def merge(repo: str, number: int, strategy: str, head_sha: str, base: str) -> str | None:
     if strategy not in ("squash", "merge", "rebase", "queue"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
     # A merge queue owns the method; gh rejects an explicit --squash/--merge/--rebase.
@@ -1564,6 +1564,9 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     argv = ("pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha)
     if strategy == "queue" and merge_pending(repo, number, head_sha):
         return None
+    if sha := merged_sha(repo, number, expected_head=head_sha, expected_base=base, check_hold=True):
+        return sha
+    read_timeout(0)
     write_error = None
     try:
         _gh(*argv, timeout=300)
@@ -1571,7 +1574,7 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         write_error = exc
     scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
     try:
-        sha, queued, queue_error = _merge_evidence(repo, number, head_sha)
+        sha, queued, queue_error = _merge_evidence(repo, number, head_sha, base)
         if strategy == "queue":
             read_timeout(0)  # Queue evidence read after the wait budget is a timeout.
     except (GhError, ProcTimeout) as exc:

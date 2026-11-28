@@ -1639,7 +1639,7 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
 def _merge_and_follow(
     config: Config, pr: github.PR, deadline: float | None, admit_by: float | None,
 ) -> str | None:
-    merge = partial(github.merge, config.repo, pr.number, config.merge_strategy, pr.head_sha)
+    merge = partial(github.merge, config.repo, pr.number, config.merge_strategy, pr.head_sha, config.base_branch)
     if deadline is None:
         return merge()
     with suppress(github.ReadDeadline):
@@ -1873,7 +1873,7 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
             return 3
         pr, readiness, _ = waited
     if readiness is None:
-        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha, expected_base=config.base_branch)
         if sha is None:
             raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet. Verify it on GitHub, then rerun `loopzero merge --wait` to finish cleanup.")
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
@@ -1888,9 +1888,6 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
         if not readiness.ready:
             hint = _merge_check_hint(config, pr, readiness)
             raise CliError("not ready to merge: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
-        if admit_by is not None and time.monotonic() > admit_by:
-            print(f"timed out before merging PR #{pr.number}")
-            return 3
         _require_receipt(wt, config, pr.head_sha)
         sha = _merge_and_follow(config, pr, deadline, admit_by)
         if sha is None:

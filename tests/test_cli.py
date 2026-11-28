@@ -1539,8 +1539,7 @@ def posted_review(gh: FakeGh) -> dict:
 def arm_squash_merge(gh: FakeGh, head: str, wt: Path, *snapshots, branch: str = "lz/t1") -> None:
     arm_approved_pr(gh, head, wt, isDraft=False, branch=branch)
     gh.respond("pr merge", "")
-    if snapshots:
-        gh.append(f"api repos/{REPO}/pulls/7", *snapshots)
+    gh.append(f"api repos/{REPO}/pulls/7", merge_json(head=head), *snapshots)
 
 
 def arm_approved_pr(
@@ -3593,6 +3592,34 @@ def lose_native_merge_reply(monkeypatch):
         return result
 
     monkeypatch.setattr(github, "_gh", transport)
+
+
+@pytest.mark.parametrize("strategy", ["squash", "queue"])
+def test_native_merge_rechecks_hold_after_readiness(wt, gh, capsys, head, strategy):
+    if strategy == "queue":
+        publish_workflow(wt, WORKFLOW.replace('merge = "squash"', 'merge = "queue"'))
+    arm_approved_pr(gh, head, wt, isDraft=False)
+    gh.respond("api graphql", threads_json(), native_queue(False, head))
+    gh.append(f"api repos/{REPO}/pulls/7", {**merge_json(head=head), "labels": [{"name": "hold"}]})
+    gh.respond("pr merge", "")
+    code, _, err = run(capsys, "merge")
+    assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
+    assert code == 1 and "merge-authority hold" in err and wt.exists()
+
+
+@pytest.mark.parametrize("already_merged", [False, True])
+def test_merge_rejects_landing_on_another_base(wt, gh, capsys, head, already_merged):
+    landed = {**landed_snapshot(head), "base": {"ref": "release"}}
+    if already_merged:
+        arm_pr(gh, head, state="MERGED", isDraft=False, baseRefName="release")
+    else:
+        arm_squash_merge(gh, head, wt)
+    gh.append(f"api repos/{REPO}/pulls/7", landed)
+    gh.respond("api -X", "")
+    expect_cli(capsys, 1, "merge", stderr_contains=("release", "main"))
+    assert wt.exists()
+    assert any(c["argv"][:2] == ["pr", "merge"] for c in gh.calls) is not already_merged
+    assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
 
 
 @pytest.mark.parametrize("lost_reply", [False, True])
