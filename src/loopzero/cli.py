@@ -1482,7 +1482,11 @@ def _verify_wait_snapshot(
     if current_head != head:
         raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}; sync the branch and run loopzero ready")
     latest = _load_config(args, wt, previous=previous, refresh=True)
-    if latest == config:
+    if latest == config or (
+        dataclasses.replace(latest, env_allowlist=config.env_allowlist) == config
+        and (set(latest.env_allowlist) == set(config.env_allowlist)
+             or sandbox.settings_fingerprint(latest) == sandbox.settings_fingerprint(config))
+    ):
         return latest
     retry = "retry with the current settings" if _current_check_report(wt, latest, head) else "run loopzero check and retry"
     raise CliError(f"workflow settings changed while waiting; {retry}")
