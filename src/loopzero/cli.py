@@ -538,7 +538,7 @@ def _section_order(local, live, baseline, digest, unordered):
     order = list(live)
     by_key = {digest(repr(part)): part for part in local.keys() & live.keys()}
     previous_order = [by_key[key] for key in baseline if key in by_key]
-    shared = set(by_key.values() if unordered else previous_order)
+    shared = set(previous_order)
     task_order = [part for part in local if part in shared]
     live_order = [part for part in live if part in shared]
     # Legacy fingerprints describe shared text but cannot establish a prior order.
@@ -585,7 +585,8 @@ def _sync_task_narrative(task: str, existing: str) -> str:
     baseline = {}
     has_baseline = bool(prior and prior[2] is not None)
     if prior:
-        live[None, 0] = (prefix[:prior.start()] + prefix[prior.end():]).rstrip()
+        before, after = prefix[:prior.start()], prefix[prior.end():]
+        live[None, 0] = (before.removesuffix("\n\n") + after if before else after.removeprefix("\n\n")).rstrip()
         baseline = dict(pair.split(":") for pair in (prior[2] or "").split())
 
     content = []

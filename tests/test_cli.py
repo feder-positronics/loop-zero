@@ -611,7 +611,7 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
     assert [c["argv"][:2] for c in gh.calls[before:]] == history + lookup + LOOKUP_CALLS[-1:]
 
 
-@pytest.mark.parametrize("change", ["reorder", "conflict", "insert", "legacy-task", "legacy-live", "legacy-match"])
+@pytest.mark.parametrize("change", ["reorder", "conflict", "insert", "legacy-task", "legacy-live", "legacy-match", "legacy-evidence"])
 def test_pr_sync_orders_published_sections(wt, gh, capsys, head, change):
     task = cli.worktree.task_file(wt)
     migration, backup = "## Migration\n- [ ] Run migration.\n\n", "## Prerequisites\nTake backup.\n\n"
@@ -620,9 +620,11 @@ def test_pr_sync_orders_published_sections(wt, gh, capsys, head, change):
     task.write_text(original + (migration + backup if change == "legacy-live" else backup + migration))
     if change.startswith("legacy"):
         live = live.replace("loopzero:task-sync ordered ", "loopzero:task-sync ")
-    if change in {"conflict", "legacy-live", "legacy-match"}:
+    if change in {"conflict", "legacy-live", "legacy-match", "legacy-evidence"}:
         moved, anchor = (migration, "## Acceptance") if change == "conflict" else (backup, migration)
         live = live.replace(moved.rstrip(), "").replace(anchor, moved + anchor)
+    if change == "legacy-evidence":
+        live += "\n" + original[original.index("## Validation"):]
     arm_pr_body_patch(gh, head, body=live.replace("- [ ] Run migration.", "- [x] Run migration."))
     conflict = change in {"conflict", "legacy-task", "legacy-live"}
     expected = ("section order", "Prerequisites", "Migration") if change.startswith("legacy") else ("section order",)
@@ -636,12 +638,11 @@ def test_pr_sync_orders_published_sections(wt, gh, capsys, head, change):
     assert gh.calls[-1]["argv"][:2] == ["api", f"repos/{REPO}/pulls/7"] and "--input" not in gh.calls[-1]
 
 
-@pytest.mark.parametrize("change", ["task-preamble", "live-preamble", "notes-collision"])
+@pytest.mark.parametrize("change", ["task-preamble", "live-preamble", "shared-preamble", "notes-collision"])
 def test_pr_sync_uses_last_published_task_text(wt, gh, capsys, head, change):
     task = cli.worktree.task_file(wt)
-    original = task.read_text().replace("## Notes\n", "").replace(
-        "## Context and goal", "Deploy Tuesday.\n\n## Context and goal"
-    )
+    preamble = "" if change == "shared-preamble" else "Deploy Tuesday.\n\n"
+    original = task.read_text().replace("## Notes\n", "").replace("## Context and goal", preamble + "## Context and goal")
     task.write_text(original)
     arm_new_draft(gh, head)
     arm_draft_validation(gh, wt, head, body=cli._sync_task_narrative(original, ""))
@@ -655,7 +656,9 @@ def test_pr_sync_uses_last_published_task_text(wt, gh, capsys, head, change):
     elif change == "live-preamble":
         live = published.replace("Deploy Tuesday.", "Deploy Thursday.")
     else:
-        edited = edited.replace("Deploy Tuesday.", "Deploy Thursday.")
+        edited = edited.replace(preamble + "## Context and goal", "Deploy Thursday.\n\n## Context and goal")
+        if change == "shared-preamble":
+            live = published.replace("## Context and goal", "Deploy Thursday.\n\n## Context and goal")
     task.write_text(edited)
     arm_pr_body_patch(gh, head, body=live)
     before = len(gh.calls)
