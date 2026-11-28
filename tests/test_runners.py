@@ -10,11 +10,13 @@ import stat
 import signal
 import subprocess
 import sys
+import textwrap
 import tomllib
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from select import select
+from unittest.mock import Mock
 
 import pytest
 
@@ -38,8 +40,6 @@ from loopzero.sandbox import SANDBOX_HOME, SandboxUnavailable
 
 from .conftest import git
 from .test_sandbox import FAKE_BWRAP, _pairs, _real_bwrap_works
-
-FIXTURES = Path(__file__).with_name("fixtures")
 
 APPROVE = {"verdict": "approve", "findings": []}
 CHANGES = {
@@ -113,48 +113,86 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0, capture_e
     """Fake ``claude`` that checks argv shape, dumps argv and prints ``stdout``."""
     text = stdout if isinstance(stdout, str) else json.dumps(stdout)
     capture = f'env > "{bin_dir}/claude.env"' if capture_env else ":"
-    script = (FIXTURES / "fake-claude.sh.in").read_text()
-    return write_fake_tool(bin_dir, "claude", script.format(
-        bin_dir=bin_dir, capture=capture, stdout=text, exit_code=exit_code,
-    ))
+    return write_fake_tool(
+        bin_dir,
+        "claude",
+        f"""
+        printf '%s\\0' "$@" > "{bin_dir}/claude.argv"
+        cat > "{bin_dir}/claude.stdin"
+        {capture}
+        for required in "-p" "--output-format json" "--permission-mode plan" "--json-schema"; do
+          case " $* " in *" $required "*) continue;; esac
+          echo "missing $required" >&2
+          exit 64
+        done
+        printf '%s\\n' {shlex.quote(text)}
+        exit {exit_code}
+        """,
+    )
 
 
 def _codex_probes(version):
-    return f'''if [ "$1" = --version ]; then printf '%s\\n' {shlex.quote(version)}; exit 0; fi
-'''
+    return f'''if [ "$1" = --version ]; then printf '%s\\n' {shlex.quote(version)}; exit 0; fi\n'''
 
 
 def _real_codex(path, guard, *, version="codex-cli 0.161.0"):
-    script = (FIXTURES / "fake-codex-auth.sh.in").read_text()
-    body = script.format(guard=guard, last_message=shlex.quote(json.dumps(APPROVE)))
-    write_fake_tool(path.parent, path.name, _codex_probes(version) + body)
+    write_fake_tool(path.parent, path.name, _codex_probes(version) + textwrap.dedent(f"""
+        set -eu
+        cat >/dev/null
+        {guard}
+        while [ "$1" != --output-last-message ]; do shift; done
+        printf '%s' {shlex.quote(json.dumps(APPROVE))} > "$2"
+        echo '{{"thread_id":"synthetic-r2","usage":{{"total_tokens":1}}}}'
+    """))
 
 
-def _fake_codex(
-    bin_dir: Path,
-    last_message: str,
-    *,
-    exit_code: int = 0,
-    stderr: str = "",
-    version: str = "codex-cli 0.161.0",
-    rollout: str | None = None,
-) -> Path:
-    """Fake ``codex`` that checks argv shape and writes ``last_message`` to -o file."""
-    rollout_script = "" if rollout is None else (
-        'mkdir -p "$codex_home/sessions/2026/10/30"\n'
-        "printf '%s\\n' " + shlex.quote(rollout)
-        + ' > "$codex_home/sessions/2026/10/30/rollout-test-$sid.jsonl"'
-    )
-    final_event = {"type": "item.completed", "item": {
-        "id": "final", "type": "agent_message", "text": last_message,
-    }}
-    script = (FIXTURES / "fake-codex.sh.in").read_text()
-    return write_fake_tool(bin_dir, "codex", script.format(
-        bin_dir=bin_dir, version_probe=_codex_probes(version).rstrip("\n"),
-        stderr=stderr, last_message=last_message, rollout_script=rollout_script,
-        final_event=shlex.quote(json.dumps(final_event)),
-        exit_code=exit_code,
-    ))
+def _fake_codex(bin_dir, last_message, *, exit_code=0, stderr="", version="codex-cli 0.161.0",
+                rollout=None, events=None, leading_events=()):
+    return write_fake_tool(bin_dir, "codex", f"""#!/usr/bin/python3
+import argparse, json, os, shutil, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print({version!r})
+    sys.exit()
+bin_dir = Path({str(bin_dir)!r})
+home = Path(os.environ.get("CODEX_HOME") or os.environ.get("HOME", "") + "/.codex")
+(bin_dir / "codex.argv").write_bytes(b"".join(os.fsencode(arg) + b"\\0" for arg in args))
+(bin_dir / "codex.home").write_text(str(home))
+if (home / "config.toml").exists():
+    (bin_dir / "codex.config").write_text("yes\\n")
+(bin_dir / "codex.stdin").write_bytes(sys.stdin.buffer.read())
+parser = argparse.ArgumentParser(allow_abbrev=False)
+parser.add_argument("--sandbox", choices=["danger-full-access"])
+parser.add_argument("--output-last-message", type=Path, required=True)
+parser.add_argument("--output-schema", type=Path, required=True)
+if not args or args[0] != "exec":
+    parser.error("expected exec subcommand")
+options, _ = parser.parse_known_args(args[1:])
+shutil.copyfile(options.output_schema, bin_dir / "codex.schema")
+if {stderr!r}:
+    print({stderr!r}, file=sys.stderr)
+options.output_last_message.write_text({last_message!r} + "\\n")
+counter = bin_dir / "codex.calls"
+count = int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(str(count))
+session = "codex-session-123" if count == 1 else f"codex-session-123-{{count}}"
+if {rollout!r} is not None:
+    path = home / f"sessions/2026/10/30/rollout-test-{{session}}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str({rollout!r}) + "\\n")
+events = {events!r}
+if events is None:
+    events = [
+        {{"type": "thread.started", "thread_id": session}},
+        {{"type": "item.completed", "item": {{"id": "final", "type": "agent_message", "text": {last_message!r}}}}},
+        {{"type": "turn.completed", "usage": {{"input_tokens": 123, "output_tokens": 2}}}},
+    ]
+for event in [*{leading_events!r}, *events]:
+    print(json.dumps(event))
+sys.exit({exit_code})
+""")
 
 
 def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
@@ -184,14 +222,6 @@ def test_fake_codex_does_not_read_or_overwrite_auth(fake_bin, tmp_path, override
     )
     assert auth.read_text() == sentinel
     assert not (fake_bin / "codex.auth").exists()
-
-
-def replace_codex_events(script: Path, events, *, prepend=False) -> None:
-    text = script.read_text()
-    start = text.index("echo '{\"type\":\"thread.started\"")
-    lines = "\n".join(json.dumps(event) for event in events)
-    suffix = text[start:] if prepend else "exit 0\n"
-    script.write_text(text[:start] + f"printf '%s\\n' {shlex.quote(lines)}\n" + suffix)
 
 
 def _fake_review(bin_dir, family, payload=APPROVE, *, exit_code=0, diagnostic=None):
@@ -437,11 +467,23 @@ def test_real_claude_environment_auth_hides_host_state(repo,
         f"test ! -e {shlex.quote(str(path))} || "
         "{ echo 'host state exposed' >&2; exit 70; }" for path in hidden
     )
-    script = (FIXTURES / "fake-claude-env-auth.sh.in").read_text()
-    write_fake_tool(fake_bin, "claude", script.format(
-        checks=checks, oauth=shlex.quote(oauth), api=shlex.quote(api),
-        stdout=shlex.quote(json.dumps(_claude_envelope(APPROVE))),
-    ))
+    write_fake_tool(fake_bin, "claude", f"""
+        set -eu
+        cat >/dev/null
+        {checks}
+        test "${{CLAUDE_CODE_OAUTH_TOKEN-}}" = {shlex.quote(oauth)} || exit 71
+        test "${{ANTHROPIC_API_KEY-}}" = {shlex.quote(api)} || exit 72
+        test "${{CLAUDE_CONFIG_DIR-}}" = '' || exit 73
+        for value in "$CLAUDE_CODE_OAUTH_TOKEN" "$ANTHROPIC_API_KEY"; do
+          case "$value" in ''|' ') continue;; esac
+          case "$*" in *"$value"*) exit 74;; esac
+        done
+        mkdir -p "$HOME/.claude"
+        printf private > "$HOME/.claude/history.jsonl"
+        printf private > "$HOME/.claude/.config.json"
+        printf private > "$HOME/.claude.json"
+        printf '%s\\n' {shlex.quote(json.dumps(_claude_envelope(APPROVE)))}
+    """)
     (fake_bin / "bwrap").unlink()  # Real kernel namespace, overriding the autouse fake.
     result = _review("claude", repo)
     assert result.verdict == "approve"
@@ -1002,11 +1044,9 @@ def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict |
 def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap, has_stderr, size):
     from loopzero.cli import _review_failure
 
-    def timeout(*args, **kwargs):
-        diagnostic = "connecting\r" + "界" * size + "waiting for proxy"
-        stdout, stderr = ("partial reviewer output", diagnostic) if has_stderr else (diagnostic, "")
-        raise runners._proc.ProcTimeout("timed out", stdout, stderr=stderr)
-
+    diagnostic = "connecting\r" + "界" * size + "waiting for proxy"
+    stdout, stderr = ("partial reviewer output", diagnostic) if has_stderr else (diagnostic, "")
+    timeout = Mock(side_effect=runners._proc.ProcTimeout("timed out", stdout, stderr=stderr))
     _fake_claude(fake_bin, {})
     monkeypatch.setattr(runners, "_git_dirs", lambda cwd, env: (cwd, cwd))
     monkeypatch.setattr(runners.sandbox, "probe", lambda config, cwd, prefix: None)

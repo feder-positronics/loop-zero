@@ -2,6 +2,7 @@
 
 import copy
 import json
+from unittest.mock import Mock
 
 import pytest
 
@@ -106,14 +107,9 @@ def test_plain_review_surfaces_receipt_after_interruption_before_post(
 ):
     head = support.prepare_review(wt, gh, fake_bin)
     record_claude_runs(fake_bin)
-    original = github.post_review
-
-    def interrupt(*args, **kwargs):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(github, "post_review", interrupt)
-    assert run(capsys, "review")[0] == 130
-    monkeypatch.setattr(github, "post_review", original)
+    with monkeypatch.context() as before_post:
+        before_post.setattr(github, "post_review", Mock(side_effect=KeyboardInterrupt))
+        assert run(capsys, "review")[0] == 130
 
     path = cli._review_file(wt, head, "primary")
     saved = path.read_bytes()
@@ -302,18 +298,16 @@ def test_interrupted_explicit_repost_recovers_repost_body(wt, gh, fake_bin, monk
 
 @pytest.mark.parametrize("failure,budget", [("timeout", 0.5), ("transient", 0.5), ("transient", 10), ("write", 0.5)])
 def test_recovery_transport_retries_only_within_deadline(monkeypatch, failure, budget):
-    timeouts, sleeps = [], []
-    def request(argv, **kwargs):
-        timeouts.append(kwargs["timeout"])
-        if failure in {"timeout", "write"}:
-            raise _proc.ProcTimeout("timeout")
-        return _proc.Completed(1, "", "HTTP 503", 0)
+    sleeps = []
+    request = Mock(return_value=_proc.Completed(1, "", "HTTP 503", 0),
+                   side_effect=_proc.ProcTimeout("timeout") if failure != "transient" else None)
     monkeypatch.setattr(github, "run", request)
     monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
-    monkeypatch.setattr(github.time, "monotonic", lambda: 10.0 + sum(sleeps) + int(failure == "write" and bool(timeouts)))
+    monkeypatch.setattr(github.time, "monotonic", lambda: 10.0 + sum(sleeps) + int(failure == "write" and bool(request.call_count)))
     error = github.GhError if failure == "transient" else _proc.ProcTimeout
     with pytest.raises(error), github.bounded_reads(10 + budget, retry=True):
         github.mark_ready("acme/widgets", 7) if failure == "write" else github.api_get("repos/acme/widgets/pulls/7/reviews")
+    timeouts = [call.kwargs["timeout"] for call in request.call_args_list]
     assert (timeouts, sleeps) == (([10, 5], [5]) if budget == 10 else ([0.5], []))
 
 

@@ -48,6 +48,7 @@ class FakeGh:
     def __init__(self, fake_bin: Path, tmp_path: Path) -> None:
         self.calls_file = tmp_path / "gh-calls.json"
         self.scenario_file = tmp_path / "gh-scenario.json"
+        self.calls_file.write_text("[]")
         self.scenario_file.write_text("{}")
         replay_source = Path(__file__).with_name("fake_gh.py").read_text()
         write_fake_tool(fake_bin, "gh",
@@ -68,10 +69,9 @@ class FakeGh:
             if argv[0] != "gh":
                 return run_process(argv, cwd=cwd, env_allowlist=env_allowlist,
                                    extra_env=extra_env, **kwargs)
-            env = build_env(env_allowlist, extra_env)
             code, stdout, stderr = replay(
-                argv[1:], str(self.calls_file), str(self.scenario_file), str(cwd), env,
-            )
+                argv[1:], str(self.calls_file), str(self.scenario_file), str(cwd),
+                build_env(env_allowlist, extra_env))
             return Completed(code, stdout, stderr, 0)
 
         monkeypatch.setattr(github, "run", run)
@@ -89,22 +89,19 @@ class FakeGh:
 
     def respond_pr_list(self, *snapshots: list[dict], branch: str = "lz/t1") -> None:
         """Arm explicit REST list and selected detail responses for successive lookups."""
-        open_pages, closed_pages = [], []
-        details: dict[int, list[dict]] = {}
+        open_pages, closed_pages, selected = [], [], []
         for snapshot in snapshots:
-            selected = next((p for p in snapshot if p.get("state", "OPEN") == "OPEN"), None)
-            open_pages.append([{"number": selected["number"]}] if selected else [])
-            if selected is None:
-                selected = snapshot[0] if snapshot else None
-                closed_pages.append([{"number": selected["number"]}] if selected else [])
-            if selected is not None:
-                number = selected["number"]
-                details.setdefault(number, []).append(rest_pr_json(selected, branch=branch))
+            opened = next((pr for pr in snapshot if pr.get("state", "OPEN") == "OPEN"), None)
+            open_pages.append([{"number": opened["number"]}] if opened else [])
+            if opened:
+                selected.append(opened)
+            else:
+                closed_pages.append([{"number": snapshot[0]["number"]}] if snapshot else [])
+                selected.extend(snapshot[:1])
         self.append(pr_list_key(branch), *open_pages)
         if closed_pages:
             self.append(pr_list_key(branch, "closed"), *closed_pages)
-        for number, responses in details.items():
-            self.append(f"api repos/{REPO}/pulls/{number}", *responses)
+        self.respond_pr_view(*selected, branch=branch)
 
     def respond_pr_view(self, *responses: dict, branch: str = "lz/t1") -> None:
         for response in responses:
@@ -118,18 +115,14 @@ class FakeGh:
     def _response(response: object, *, exit: int = 0, stderr: str = "") -> dict[str, Any]:
         if isinstance(response, dict) and "stdout" in response:
             return dict(response)
-        return {
-            "stdout": response if isinstance(response, str) else json.dumps(response),
-            "stderr": stderr, "exit_code": exit,
-        }
+        stdout = response if isinstance(response, str) else json.dumps(response)
+        return dict(stdout=stdout, stderr=stderr, exit_code=exit)
 
     def fail(self, key: str, stderr: str, exit: int = 1) -> None:
         self.respond(key, {"stdout": "", "stderr": stderr, "exit": exit})
 
     @property
     def calls(self) -> list[dict]:
-        if not self.calls_file.exists():
-            return []
         return json.loads(self.calls_file.read_text())
 
     def argv(self, index: int) -> list[str]:
@@ -144,12 +137,11 @@ def gh(fake_bin: Path, tmp_path: Path, monkeypatch) -> FakeGh:
 
 
 def pr_json(**over: object) -> dict:
-    base = {
+    return {
         "number": 7, "url": f"https://github.com/{REPO}/pull/7", "headRefOid": HEAD,
         "baseRefName": "main", "isDraft": True, "state": "OPEN", "mergeable": "MERGEABLE",
-        "author": {"login": "someone-else"},
+        "author": {"login": "someone-else"}, **over,
     }
-    return {**base, **over}
 
 
 def rest_pr_json(data: dict, *, branch: str = "lz/t1") -> dict:
@@ -331,9 +323,7 @@ def test_pr_for_branch_rejects_changed_or_foreign_detail(gh: FakeGh, head_change
     (None, None, ("UNKNOWN", "UNKNOWN")),
     (True, "behind", ("MERGEABLE", "BEHIND")),
 ])
-def test_pr_view_maps_rest_merge_evidence(
-    gh: FakeGh, mergeable, merge_state, expected
-) -> None:
+def test_pr_view_maps_rest_merge_evidence(gh: FakeGh, mergeable, merge_state, expected) -> None:
     detail = rest_pr_json(pr_json(labels=[{"name": "hold"}]))
     detail["mergeable"], detail["mergeable_state"] = mergeable, merge_state
     gh.respond(f"api repos/{REPO}/pulls/7", detail)
@@ -350,8 +340,7 @@ def test_pr_view_maps_rest_merge_evidence(
     {"mergeable": "false"}, {"number": 8}, {"user": ["malformed"]},
 ])
 def test_pr_view_rejects_malformed_or_mismatched_rest_detail(gh: FakeGh, invalid: dict) -> None:
-    detail = rest_pr_json(pr_json()) | invalid
-    gh.respond(f"api repos/{REPO}/pulls/7", detail)
+    gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json()) | invalid)
 
     with pytest.raises(github.GhError):
         github.pr_view(REPO, 7)
@@ -926,15 +915,13 @@ def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
      "pagination exceeds 100 pages"),
 ])
 def test_list_pagination_rejects_wrong_shapes_and_endless_pages(monkeypatch, pages, error) -> None:
-    responses = iter(pages)
-    monkeypatch.setattr(github, "_gh_json", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(github, "_gh_json", Mock(side_effect=pages))
     with pytest.raises(github.GhError, match=error):
         github.paged(f"repos/{REPO}/pulls/7/reviews")
 
 
 @pytest.mark.parametrize("user", [{"login": 123}, "bot", {}])
 def test_malformed_review_login_is_untrusted(user) -> None:
-    from loopzero import eligibility
     assert eligibility.review_login({"user": user}) == ""
 
 

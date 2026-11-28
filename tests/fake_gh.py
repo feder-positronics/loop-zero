@@ -10,21 +10,16 @@ def replay(
 ) -> tuple[int, str, str]:
     record = dict(argv=argv, token=env.get("GH_TOKEN"),
                   config=[env.get(k) for k in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME")])
-    input_files = {}
+    inputs = {}
     for flag in ("--input", "--body-file"):
         if flag in argv:
             with open(os.path.join(cwd, argv[argv.index(flag) + 1])) as payload:
-                content = payload.read()
-            record[flag] = content
-            input_files[flag] = content
-    record["input_files"] = input_files
-    log = []
-    if os.path.exists(calls):
-        with open(calls) as call_log:
-            log = json.load(call_log)
-    log.append(record)
-    with open(calls, "w") as call_log:
-        call_log.write(json.dumps(log))
+                inputs[flag] = payload.read()
+    record.update(inputs, input_files=inputs)
+    with open(calls, "r+") as call_log:
+        log = json.load(call_log)
+        call_log.seek(0)
+        json.dump([*log, record], call_log)
 
     with open(scenario) as scenario_file:
         plan = json.load(scenario_file)
@@ -47,6 +42,6 @@ def replay(
             sha = key.split("/commits/", 1)[1].split("/", 1)[0]
             return 1, "", f"gh: No commit found for SHA: {sha} (HTTP 422)\n"
         return 97, "", f"fake gh: no response for {key}\n"
-    index = sum(1 for call in log[:-1] if response_key(call["argv"]) == key)
+    index = sum(1 for call in log if response_key(call["argv"]) == key)
     resp = responses[min(index, len(responses) - 1)]
     return resp.get("exit_code", resp.get("exit", 0)), resp.get("stdout", ""), resp.get("stderr", "")
