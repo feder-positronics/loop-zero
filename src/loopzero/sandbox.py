@@ -130,7 +130,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             is_check = ordinal > len(preparations)
             if progress:
                 progress(command)
-            key = _input_key(config, worktree, command, "" if dirty else base,
+            key = _input_key(config, worktree, command, "" if dirty else base or None,
                              status=status, workflow=workflow)
             old = previous.get(command)
             if key and old and old.input_key == key and ordinal > last_run:
@@ -346,7 +346,7 @@ def _hash_inputs(config: Config, worktree: Path, command: str, base: str | None,
         return None
     prefix = hashlib.sha256(json.dumps([blobs, contents]).encode()).hexdigest() + ":"
     stage = [command, installed_version(), _execution_settings(config, base), blobs, contents] if base is not None else None
-    return prefix + hashlib.sha256(json.dumps(stage, sort_keys=True).encode()).hexdigest() if stage else prefix
+    return prefix + hashlib.sha256(json.dumps(stage, sort_keys=True).encode()).hexdigest() if stage is not None else prefix
 
 
 @contextmanager
