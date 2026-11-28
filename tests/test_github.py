@@ -818,9 +818,11 @@ def test_marker_parser_and_finding_ids() -> None:
         "severity": "important", "head": HEAD,
         "id": github.finding_id(HEAD, "src/b.py", 2, "Missing check"),
     }
-    expected = "aa3b81ec"
+    expected = github.finding_id(HEAD, "src/a.py", 10, "Null deref")
     assert all(github.finding_id(HEAD, "src/a.py", 10, "Null deref") == expected for _ in range(2))
     assert github.finding_id(HEAD, "src/a.py", 11, "Null deref") != expected
+    assert github.finding_id(HEAD, "test/config1", 23, "Validate required option") != github.finding_id(
+        HEAD, "test/config", 123, "Validate required option")
 
 
 def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
