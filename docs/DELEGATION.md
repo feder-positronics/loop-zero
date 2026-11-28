@@ -367,8 +367,8 @@ Use `root_cause_analysis` for a failure whose cause is still unknown. Prefer
 Neon when the user prompts Antigravity directly, and use the profile default
 for agent-driven diagnosis. Google supports directly prompted Antigravity
 sessions in ACP editors such as T3 Code. With a consumer Antigravity login,
-select Neon only for that direct use, including when supervised delegation
-would be possible in the runtime.
+select Neon only for direct use. This restriction also applies when a human
+supervises delegation.
 [Google's Antigravity delegation guidance](https://discuss.ai.google.dev/t/tos-clarification-is-human-supervised-codex-to-antigravity-acp-delegation-permitted/200697)
 
 ## Profiles are starting points

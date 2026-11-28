@@ -2,7 +2,8 @@
 # provider preferences below are owner rules (2026-09-30). Profile names do not rank cost or speed.
 # Read before delegation; check runtime support and pass model/effort explicitly.
 # Effort: avoid max/ultra; xhigh only where it measurably helps.
-# OpenAI remains the default for builders, finishers, CI fixes and audits.
+# OpenAI remains the default for builders and the only provider for finishers,
+# CI fixes and audits.
 # Anthropic is reserved for UI design and cross-family review or consultation.
 # Gemini 4 Neon is an explicit option for substantial coding and critical
 # analysis, with root-cause diagnosis as its specialty. Antigravity consumer
