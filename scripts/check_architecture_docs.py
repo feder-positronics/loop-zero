@@ -61,7 +61,7 @@ def anchors(text):
     headings = re.findall(r"^ {0,3}(?:#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*|"
                           r"(\S[^\n]*?)[ \t]*\n {0,3}(?:=+|-+)[ \t]*)$", text, re.MULTILINE)
     for atx, setext in headings:
-        heading = atx or setext
+        heading = re.sub(r"(?<!\\)\[([^\]\n]*)\]\((?:[^()\n]|\([^()\n]*\))*\)", r"\1", atx or setext)
         slug = re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
         count = seen.get(slug, 0)
         anchor = f"{slug}-{count}" if count else slug
@@ -98,7 +98,8 @@ def link_errors(root):
             parsed = urlsplit(target)
             if parsed.scheme or parsed.netloc:
                 continue
-            dest = (path.parent / unquote(parsed.path)).resolve() if parsed.path else path
+            parent = root if parsed.path.startswith("/") else path.parent
+            dest = (parent / unquote(parsed.path.removeprefix("/"))).resolve() if parsed.path else path
             if not dest.is_relative_to(root) or not dest.exists():
                 errors.append(f"{name}: invalid local link {target}")
             elif (parsed.fragment and dest.is_file() and dest.suffix == ".md"

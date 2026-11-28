@@ -95,7 +95,7 @@ def _attest(cfg: Config, event: dict) -> None:
 
 
 def _run(cfg: Config) -> int:
-    if cfg.repo != os.environ.get("GITHUB_REPOSITORY") or not cfg.review_publishers:
+    if cfg.repo.lower() != os.environ.get("GITHUB_REPOSITORY", "").lower() or not cfg.review_publishers:
         raise LoopZeroError("trusted repository configuration or review publishers missing")
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     number = event_number(event)

@@ -511,10 +511,10 @@ settings and commands. A failed stage replaces an existing receipt immediately.
 Final worktree validation is required before publishing a pass.
 
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
-Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
-command, installed version and pinned source revision, sandbox configuration and
-the resolved base SHA. A stage runs
-fresh when a matched path cannot be identified as a readable regular file.
+Keys bind committed paths and object IDs, checked-out file bytes, command,
+installed version and pinned source revision, sandbox configuration and the
+resolved base SHA. An initialized submodule must be at its recorded commit.
+A stage runs fresh when a matched input cannot be verified.
 An unmatched pathspec also runs fresh. Readiness accepts its unkeyed passing
 stage only if the lookup succeeds and still matches no files on the same head.
 A base advance prevents reuse in a fresh check. Readiness can still accept

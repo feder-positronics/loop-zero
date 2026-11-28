@@ -3563,6 +3563,17 @@ def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatc
     assert run(capsys, "ready", "--wait=60")[0] == exit_code and clock.fetch_timeout == 60 - clock.sleeps[0]
 
 
+def test_ready_accepts_clean_submodule_inputs(wt, repo, gh, capsys):
+    publish_workflow(wt, WORKFLOW.replace("[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]'))
+    git(wt, "-c", "protocol.file.allow=always", "submodule", "add", str(repo), "dep")
+    git(wt, "commit", "-qm", "add submodule")
+    arm_approved_pr(gh, head_of(wt), wt, isDraft=False, readiness={"local_exit": None})
+    expect_cli(capsys, 0, "check")
+    expect_cli(capsys, 0, "ready")
+    (wt / "dep" / "workflow.toml").write_text("dirty")
+    expect_cli(capsys, 1, "ready")
+
+
 @pytest.mark.parametrize("prior_hash", [None, "55d37760fc170d550b75a2d25d8e1c5bee0e519724b2c1b19aeda5a2713bbb47"])
 def test_ready_accepts_receipt_after_forwarding_worker_cpu_grant(wt, capsys, monkeypatch, check_environment, prior_hash):
     path, _, args = check_environment

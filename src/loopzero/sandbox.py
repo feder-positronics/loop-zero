@@ -343,6 +343,11 @@ def _hash_inputs(config: Config, worktree: Path, command: str, base: str | None,
             if path.parent.resolve(strict=True) != path.parent:
                 return None
             mode, file_type = metadata.split()[1], path.lstat().st_mode
+            if mode == "160000" and stat.S_ISDIR(file_type):
+                if (not (path / ".git").exists() or _git(config, path, "rev-parse", "HEAD").strip() != metadata.split()[3]
+                        or _git(config, path, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none").strip()):
+                    return None
+                continue
             if mode == "120000" and stat.S_ISLNK(file_type):
                 contents.append(hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest())
                 continue
@@ -350,7 +355,7 @@ def _hash_inputs(config: Config, worktree: Path, command: str, base: str | None,
                 return None
             with path.open("rb") as stream:
                 contents.append(hashlib.file_digest(stream, "sha256").hexdigest())
-    except (OSError, ValueError, SyntaxError, RuntimeError):
+    except (OSError, ValueError, SyntaxError, RuntimeError, SandboxUnavailable, _proc.ProcTimeout):
         return None
     prefix = hashlib.sha256(json.dumps([blobs, contents]).encode()).hexdigest() + ":"
     stage = [command, installed_version(), _execution_settings(config, base), blobs, contents] if base is not None else None
