@@ -67,9 +67,10 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, 
         badge = "[![Guide](https://img.shields.io/badge/docs-guide-blue)]"
         for markdown, invalid in (("<!-- TODO\n[hidden](missing.md)\n-->\n", False),
                                   ("[Guide][guide]\n\n[guide]: absent.md\n", True),
-                                  (f"{badge}(docs/guide.md)", True), (f"{badge}(docs/README.md)", False)):
+                                  (f"{badge}(docs/guide.md)", True), (f"{badge}(docs/README.md)", False),
+                                  ("[![Guide](missing.svg)](docs/README.md)", True)):
             (git_repo / "README.md").write_text(markdown)
-            assert run(git_repo, base, "--links-only").returncode == int(invalid)
+            assert run(git_repo, base, "--links-only").returncode == int(invalid), markdown
 
 
 @pytest.mark.parametrize("markdown", ["[ref](absent.md)", "[ref](../README.md#absent)", "[ref](<Design (legacy).md>)",

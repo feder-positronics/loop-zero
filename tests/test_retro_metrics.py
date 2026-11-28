@@ -17,7 +17,7 @@ def issue(number, created, closed=None, reason=None):
 
 @pytest.fixture
 def sources(tmp_path, monkeypatch, request):
-    commit_rows, commit_total, *review_data = getattr(request, "param", (1, 1))
+    commit_rows, commit_total, commit_date, overrides = getattr(request, "param", (1, 1, RECENT, {}))
     rows = {
         "pulls": [dict(issue(n, created, closed), merged_at=closed)
                   for n, created, closed in [(1, "2026-05-26T06:00:00Z", SINCE), (2, SINCE, END)]],
@@ -37,9 +37,9 @@ def sources(tmp_path, monkeypatch, request):
                                  "pull_request": {"url": f"https://api.github.com/repos/{REPO}/pulls/3"}}},
         }],
         "pulls/3": {"commits": commit_total},
-        "pulls/3/commits": [{"commit": {"committer": {"date": SINCE if hasattr(request, "param") else RECENT}}}] * commit_rows,
+        "pulls/3/commits": [{"commit": {"committer": {"date": commit_date}}}] * commit_rows,
         **{path: [] for path in ("issues/3/comments", "pulls/3/reviews", "pulls/3/comments")},
-        **(review_data[0] if review_data else {}),
+        **overrides,
     }
     if commit_rows == 0:
         rows.update(p0=[issue(1, SINCE)], orders_open=[])
@@ -147,7 +147,7 @@ def test_stall_and_dead_owner_modes_record_and_replay(record, alerts):
         assert not findings and {"kind": "stalled_p0", "number": 4} in report["weekly_sample"]["items"]
 
 
-@pytest.mark.parametrize("sources", [(0, None)], indirect=True)
+@pytest.mark.parametrize("sources", [(0, None, SINCE, {})], indirect=True)
 def test_missing_and_failed_sources_do_not_report_zero(sources, record, capsys, tmp_path):
     calls, args = sources
     assert retro_metrics.main(args) == 1 and calls == []
@@ -172,12 +172,12 @@ def test_invalid_band_is_usage_error(capsys):
 
 
 @pytest.mark.parametrize(("sources", "detail_reads", "verdict"), [
-    ((101, None), 0, "stalled"), ((250, 250), 1, "stalled"),
-    ((250, 251), 1, "unknown"), ((250, None), 1, "unknown"),
-    ((1, 1, {"pulls/3/reviews": [{"state": "CHANGES_REQUESTED", "submitted_at": RECENT}]}), 0, "active"),
-    ((1, 1, {"pulls/3/comments": [{"created_at": RECENT}]}), 0, "active"),
-    ((1, 1, {"pulls/3/reviews": None}), 0, "unknown"),
-    ((1, 1, {"pulls/3/comments": None}), 0, "unknown"),
+    ((101, None, SINCE, {}), 0, "stalled"), ((250, 250, SINCE, {}), 1, "stalled"),
+    ((250, 251, SINCE, {}), 1, "unknown"), ((250, None, SINCE, {}), 1, "unknown"),
+    ((1, 1, SINCE, {"pulls/3/reviews": [{"state": "CHANGES_REQUESTED", "submitted_at": RECENT}]}), 0, "active"),
+    ((1, 1, SINCE, {"pulls/3/comments": [{"created_at": RECENT}]}), 0, "active"),
+    ((1, 1, SINCE, {"pulls/3/reviews": None}), 0, "unknown"),
+    ((1, 1, SINCE, {"pulls/3/comments": None}), 0, "unknown"),
 ], indirect=["sources"])
 def test_stalled_issue_checks_linked_pr_activity(sources, detail_reads, verdict, record):
     calls, _ = sources
