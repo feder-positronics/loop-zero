@@ -337,12 +337,12 @@ def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypat
         assert "bwrap binary missing" in diagnosis and "sudo apt install bubblewrap" in diagnosis
 
 
-def test_probe_timeout_reports_only_the_timeout(git_repo, monkeypatch):
+def test_probe_timeout_reports_recovery_without_private_diagnostic(git_repo, monkeypatch):
     monkeypatch.setattr(sandbox._proc, "run", Mock(side_effect=sandbox._proc.ProcTimeout("private probe diagnostic")))
     with pytest.raises(sandbox.SandboxUnavailable) as info:
         sandbox.probe(make_config(), git_repo, ["bwrap", "--"])
 
-    assert str(info.value) == f"bwrap namespace creation timed out after {sandbox.GIT_TIMEOUT:g}s"
+    assert str(info.value) == f"bwrap namespace creation timed out after {sandbox.GIT_TIMEOUT:g}s. Retry once, then ask the host operator to check bubblewrap if it still times out."
     assert info.value.__suppress_context__
 
 

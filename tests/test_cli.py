@@ -1586,7 +1586,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
         f"primary review by claude on {head[:12]}: request_changes "
-        "(0 critical, 1 important, 1 suggestion)\n"
+        "(0 critical, 1 important, 1 suggestion). Inspect the PR review and run `loopzero resolve` to list open findings.\n"
     )
     post = next(filter(posted, gh.calls))
     payload = json.loads(post["--input"])
@@ -1912,7 +1912,7 @@ def test_repost_refuses_invalid_saved_review(wt, gh, fake_bin, capsys, saved_sta
     prior_calls = len(gh.calls)
     expected = {"missing": "no saved primary review", "stale": f"not HEAD {head[:12]}",
                 "hand-written": "not runner-produced", "retired": "invalid saved review"}
-    expect_cli(capsys, 1, "review", "--repost", stdout="", stderr_contains=(expected[saved_state],))
+    expect_cli(capsys, 1, "review", "--repost", stdout="", stderr_contains=(expected[saved_state], "without --repost" if saved_state == "missing" else "without `--repost`"))
     assert all(not (fake_bin / f"{family}.stdin").exists() for family in ("claude", "codex"))
     assert not any(map(posted, gh.calls[prior_calls:]))
 
@@ -2134,7 +2134,7 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
         elif case == "rewritten":
             assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
             assert "git reflog" in err and "open a new PR" in err
-            assert "run `loopzero pr`, then `loopzero review` before merging main" in err
+            assert "merge `origin/main` into the restored branch" in err and "`loopzero check`, `loopzero pr` and `loopzero review`" in err
         elif case == "empty with blocker":
             assert "empty delta leaves blocking findings in the review body" in err
         elif case == "empty":
@@ -2657,7 +2657,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head, body_
     arm_named_check(gh, head, status="completed", conclusion="failure", check_suite={"id": 10})
     out, _ = expect_cli(capsys, 1, "ready")
     out = out.replace(FAILED_CHECK_HINT, "")
-    context = ("Blocking findings in the review body. The review budget is exhausted." if body_blocker
+    context = ("Blocking findings in the review body need fixes. The review budget is exhausted." if body_blocker
                else f"The review budget is exhausted and {head[:12]} has no eligible review.")
     assert without_accepted_receipt(out).splitlines() == [
         f"not ready: {context} Open a replacement PR for changes that need review. "
@@ -2709,7 +2709,7 @@ def test_ready_reads_required_ci_from_selected_workflow(wt, repo, declared):
 
 
 @pytest.mark.parametrize("retargeted,reason", [
-    (True, "PR targets release, configured base is main"),
+    (True, "PR targets release, configured base is main. Retarget the PR on GitHub and retry."),
     (False, f"required check 'checks' is failure{FAILED_CHECK_HINT}"),
 ], ids=["retargeted", "trust-base-required-ci"])
 def test_ready_explains_trusted_policy_blocker(wt, gh, capsys, head, retargeted, reason):
@@ -3359,8 +3359,8 @@ def test_ready_rechecks_the_live_pr_before_the_first_activation(wt, gh, capsys, 
     ("head", "check receipt is for aaaaaaaaaaaa."),
     ("failed", "check receipt records a failed stage."), ("dirty", "check receipt was recorded in a dirty worktree."),
     ("plan", "check receipt's plan differs from the trusted workflow."),
-    ("legacy", "check receipt is missing its settings fingerprint."),
-    ("incompatible", "check receipt has an incompatible settings fingerprint."),
+    ("legacy", "check receipt is missing its settings fingerprint. Rerun `loopzero check`"),
+    ("incompatible", "check receipt has an incompatible settings fingerprint. Rerun `loopzero check`"),
     ("empty", "check receipt is incomplete."), ("checkpoint", "check receipt is incomplete."),
 ])
 def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, command, condition, reason):
@@ -3521,7 +3521,7 @@ def test_ready_respects_latest_review_state(wt, gh, capsys, state, head):
     ready = state == "COMMENTED"
     out, _ = expect_cli(capsys, 0 if ready else 1, "ready")
     assert without_accepted_receipt(out) == (f"ready: {URL}\n" if ready else
-                                             "not ready: no review recorded for the current head\n")
+                                             "not ready: no review recorded for this head. Run `loopzero review`.\n")
     if state == "forged":
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
 
@@ -3549,7 +3549,7 @@ def test_open_finding_blocks_delivery(wt, gh, capsys, head, command, conclusion,
     arm_approved_pr(
         gh, head, wt, conclusion, isDraft=command == "ready", readiness={"threads": (finding,)},
     )
-    reason = f"open {severity} finding at src/a.py:3: Off by one"
+    reason = f"open {severity} finding at src/a.py:3: Off by one. Run `loopzero resolve` to list finding IDs and address the review."
     out, err = expect_cli(capsys, 1, command)
     if command == "ready":
         assert f"not ready: {reason}" in out and err == ""
@@ -4103,7 +4103,7 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
 def test_commands_refuse_closed_or_mismatched_pr(wt, gh, capsys, command, closed):
     if closed:
         arm_pr(gh, head_of(wt), state="CLOSED")
-        expect_cli(capsys, 1, command, stderr_contains=("PR #7 is CLOSED, not open",))
+        expect_cli(capsys, 1, command, stderr_contains=("PR #7 is CLOSED", "Reopen a closed unmerged PR",))
     else:
         arm_pr(gh, "0" * 40, isDraft=False)
         expect_cli(capsys, 1, command, stdout="", stderr_contains=("push or pull first",))

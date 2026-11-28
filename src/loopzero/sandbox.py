@@ -446,17 +446,17 @@ def _validate_scratch(
     for entry in entries:
         parts = Path(entry).parts
         if not parts or entry in ("", ".") or Path(entry).is_absolute() or ".." in parts:
-            raise SandboxUnavailable(f"unsafe scratch destination {entry!r}")
+            raise SandboxUnavailable(f"unsafe scratch destination {entry!r}. Use a relative path inside the worktree in `checks.scratch`.")
         destination = worktree.joinpath(*parts)
         if parts[0] == ".git" or any(
             destination == path or destination.is_relative_to(path) for path in (common_dir, git_dir)
         ):
-            raise SandboxUnavailable(f"scratch destination touches Git metadata: {entry!r}")
+            raise SandboxUnavailable(f"scratch destination touches Git metadata: {entry!r}. Choose a scratch path outside Git metadata in `checks.scratch`.")
         current = worktree
         for part in parts:
             current /= part
             if current.is_symlink():
-                raise SandboxUnavailable(f"scratch destination has symlink component: {entry!r}")
+                raise SandboxUnavailable(f"scratch destination has symlink component: {entry!r}. Choose a path with no symlink components in `checks.scratch`.")
 
 
 def _cap_limit(requested: int, resource_limit: int) -> int:
@@ -521,9 +521,9 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
             "sudo apt install bubblewrap"
         ) from exc
     except _proc.ProcTimeout:
-        raise SandboxUnavailable(f"bwrap namespace creation timed out after {GIT_TIMEOUT:g}s") from None
+        raise SandboxUnavailable(f"bwrap namespace creation timed out after {GIT_TIMEOUT:g}s. Retry once, then ask the host operator to check bubblewrap if it still times out.") from None
     if probe.exit_code != 0:
-        remedy = ""
+        remedy = "\nAsk the host operator to check bubblewrap with the error above before retrying."
         probe_error = probe.stderr.lower()
         if any(word in probe_error for word in ("permission", "user namespace", "userns")):
             remedy = ("\nRun outside the enclosing agent sandbox or ask the host operator "
