@@ -136,15 +136,6 @@ def build_env(env_allowlist: Sequence[str], extra_env: Mapping[str, str] | None 
     return {**{key: os.environ[key] for key in env_allowlist if key in os.environ}, **(extra_env or {})}
 
 
-def _redact_capture(text: str, forms: Sequence[str], lead: int, clipped: bool, key_open: bool | None) -> str:
-    # The first record can start inside a token or a forwarded multiline value.
-    skip = (text.find("\n", lead) + 1 or len(text)) if clipped else 0
-    if key_open:
-        end = _KEY_END.search(text)
-        skip = max(skip, end.end() if end else len(text))
-    return redact(text, forms, *SECRET_PATTERNS, skip=skip)
-
-
 def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float, forms: Sequence[str] | None = None) -> str:
     stream = proc.stdout
     assert stream is not None
@@ -177,7 +168,11 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float, f
 
     def finish() -> str:
         append(decode(b"", final=True))
-        return suffix if forms is None else _redact_capture(suffix, forms, lead, clipped, key_open)[-limit:]
+        # The first record can start inside a token or a forwarded multiline value.
+        skip = (suffix.find("\n", lead) + 1 or len(suffix)) if clipped else 0
+        end = _KEY_END.search(suffix) if key_open else None
+        skip = max(skip, end.end() if end else len(suffix)) if key_open else skip
+        return suffix if forms is None else redact(suffix, forms, *SECRET_PATTERNS, skip=skip)[-limit:]
 
     try:
         with selectors.DefaultSelector() as selector:

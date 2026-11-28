@@ -28,7 +28,7 @@ from urllib.parse import quote
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
 from loopzero import config as config_mod
-from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult, is_check_exit_code
+from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewConfig, ReviewResult, is_check_exit_code
 
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
@@ -377,11 +377,11 @@ def _check_report_problem(
     commands = tuple(result.command for result in report.results)
     if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
         return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
-    if require_pass and not report.ok:
-        return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
-                "Retry unchanged only if the failure was transient.")
     expected = (config.checks,)
     if not report.ok:
+        if require_pass:
+            return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
+                    "Retry unchanged only if the failure was transient.")
         missing, preparations = sandbox.check_preflight(config, wt)
         expected = ((missing.command,),) if missing else (config.checks[:len(commands)], preparations)
     if commands not in expected:
@@ -993,14 +993,12 @@ def _matches_publication(result: ReviewResult, publication: dict) -> bool:
 def _has_recoverable_review(
     wt: Path, config: Config, head: str, kind: str, publication: dict,
 ) -> bool:
-    other_kind = "delta" if kind == "primary" else "primary"
-    if not _review_file(wt, head, kind).exists() or _review_file(wt, head, other_kind).exists():
+    if not _review_file(wt, head, kind).exists() or _review_file(wt, head, "delta" if kind == "primary" else "primary").exists():
         return False
     try:
         result, _ = _load_review(wt, head, kind, publication=publication)
         candidates, excluded = _repost_reviewer_families(wt, config, head, result)
-        fallback_valid = not result.fallback or _published_fallback(result.fallback, candidates, excluded)
-        return fallback_valid and _matches_publication(result, publication)
+        return (not result.fallback or _published_fallback(result.fallback, candidates, excluded)) and _matches_publication(result, publication)
     except (CliError, runners.RunnerBadOutput):
         return False
 
@@ -1099,7 +1097,7 @@ def _delta_patch(wt: Path, config: Config, since: str | None, head: str, number:
             "Back up your branch, restore that tip and replay later fixes. Fetch the base and "
             f"merge `{shlex.quote(f'origin/{config.base_branch}')}` into the restored branch, then run `loopzero check`, `loopzero pr` and `loopzero review`, or open a new PR."
         )
-    merged = worktree.merges_since(wt, since)
+    merged = bool(worktree.git(wt, "rev-list", "--first-parent", "--reverse", "--merges", f"{since}..HEAD"))
     if not merged:
         patch = worktree.diff_since(wt, since)  # Empty after an empty commit or a reverted change.
     else:
@@ -1141,40 +1139,31 @@ def _run_review(  # noqa: C901 - reviewer fallback across families
     candidates = [family for family in config.reviewers if family not in authors]
     errors: dict[str, tuple[str, str]] = {}
     excluded = [family for family in config.reviewers if family in authors]
-    def select(family: str) -> Callable[..., ReviewResult]:
-        settings = config.review.get(family)
-        chosen = effort or (settings.effort if settings else None)
-        if settings and chosen and settings.allowed_efforts and chosen not in settings.allowed_efforts:
-            raise CliError(
-                f"effort {chosen!r} is not allowed for {family}; "
-                f"expected one of {settings.allowed_efforts}"
-            )
-        return partial(
-            runners.review_with, family, cwd=wt, head=head, kind=kind, task_text=task,
-            reviewer_ro_paths=config.reviewer_ro_paths,
-            model=model or (settings.model if settings else None), effort=chosen,
-            review_context=({"repo": config.repo, "pr": number, "publisher": publisher,
-                             "head": head, "kind": kind, "base": since,
-                             "diff_sha256": hashlib.sha256(patch).hexdigest(),
-                             "diff_bytes": len(patch)} if family == "codex" else None),
-        )
-    selected: dict[str, Callable[..., ReviewResult]] = {}
-    unusable: dict[str, str] = {}
+    review = partial(runners.review_with, cwd=wt, head=head, kind=kind, task_text=task,
+                     reviewer_ro_paths=config.reviewer_ro_paths)
     attempts = candidates + excluded
+    selected: dict[str, Callable[..., ReviewResult] | CliError] = {}
     for family in attempts:
-        try:
-            selected[family] = select(family)
-        except CliError as exc:
+        settings = config.review.get(family, ReviewConfig())
+        chosen = effort or settings.effort
+        if chosen and settings.allowed_efforts and chosen not in settings.allowed_efforts:
+            problem = CliError(f"effort {chosen!r} is not allowed for {family}; expected one of {settings.allowed_efforts}")
             if candidates and family == candidates[0]:
-                raise
-            unusable[family] = str(exc)
+                raise problem
+            selected[family] = problem
+            continue
+        context = ({"repo": config.repo, "pr": number, "publisher": publisher, "head": head, "kind": kind,
+                    "base": since, "diff_sha256": hashlib.sha256(patch).hexdigest(), "diff_bytes": len(patch)}
+                   if family == "codex" else None)
+        selected[family] = partial(review, family, model=model or settings.model, effort=chosen, review_context=context)
     if runtime_source:
         print(runtime_source)
     fallback = ""
     reasons: list[str] = []  # published; runner detail stays in local stderr and failures
     for index, family in enumerate(attempts):
-        if family in unusable:
-            errors[family] = unusable[family], ""
+        launch = selected[family]
+        if isinstance(launch, CliError):
+            errors[family] = str(launch), ""
             reasons.append(f"{family}: unavailable")
             continue
         if family in excluded and not fallback:
@@ -1183,11 +1172,11 @@ def _run_review(  # noqa: C901 - reviewer fallback across families
             print(f"same-family fallback: {fallback}", file=sys.stderr)
         try:
             try:
-                result = selected[family](diff=diff)
+                result = launch(diff=diff)
             except runners.RunnerPromptTooLong:
                 chunks = runners.split_diff(diff)
                 print(f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks", file=sys.stderr)
-                chunk_results = [selected[family](diff=chunk, chunk=(index, len(chunks)))
+                chunk_results = [launch(diff=chunk, chunk=(index, len(chunks)))
                                  for index, chunk in enumerate(chunks, 1)]
                 result = runners.merge_reviews(chunk_results)
             break
@@ -1195,7 +1184,7 @@ def _run_review(  # noqa: C901 - reviewer fallback across families
             reason, detail, fallback_reason = _review_failure(family, exc)
             errors[family] = detail, exc.tail if isinstance(exc, runners.RunnerMalformedOutput) else ""
             reasons.append(f"{family}: {fallback_reason}")
-            if any(next_family in selected for next_family in attempts[index + 1:]):
+            if any(not isinstance(selected[name], CliError) for name in attempts[index + 1:]):
                 print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
@@ -1296,17 +1285,18 @@ def _load_review(
 
 
 def _pr_readiness(
-    wt: Path, config: Config, branch: str, *, allow_merged: bool = False, workflow_wait: bool = False,
-    mergify_deadline: float | None = None,
+    wt: Path, config: Config, branch: str | None = None, *, allow_merged: bool = False,
+    workflow_wait: bool = False, mergify_deadline: float | None = None,
 ) -> tuple[github.PR, github.Readiness | None]:
-    head = worktree.head(wt)
-    _require_task_branch(config, branch)
-    pr = _require_pr(config, branch, allow_finished=allow_merged, head_sha=head)
-    _require_pushed(pr, head)
-    return pr, None if pr.state != "OPEN" else _readiness(
-        wt, config, pr, head, workflow_wait=workflow_wait, announce_receipt=True,
-        mergify_deadline=mergify_deadline,
-    )
+    with github.bounded_reads(mergify_deadline, token=None, retry=True) if mergify_deadline is not None else nullcontext():
+        branch = worktree.branch(wt) if branch is None else branch
+        head = worktree.head(wt)
+        _require_task_branch(config, branch)
+        pr = _require_pr(config, branch, allow_finished=allow_merged, head_sha=head)
+        _require_pushed(pr, head)
+        return pr, None if pr.state != "OPEN" else _readiness(
+            wt, config, pr, head, workflow_wait=workflow_wait, announce_receipt=True, mergify_deadline=mergify_deadline,
+        )
 
 
 CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup"
@@ -1395,13 +1385,12 @@ def cmd_ready(args: argparse.Namespace) -> int:
 def _ready(  # noqa: C901 - wait and draft activation paths share one readiness flow
     args: argparse.Namespace, wt: Path, config: Config, started: float, deadline: float | None,
 ) -> int:
-    with github.bounded_reads(deadline, token=None, retry=True) if deadline is not None else nullcontext():
-        pr, readiness = _pr_readiness(wt, config, worktree.branch(wt), workflow_wait=args.wait is not None,
-                                      mergify_deadline=deadline)
+    pr, readiness = _pr_readiness(wt, config, workflow_wait=args.wait is not None, mergify_deadline=deadline)
     assert readiness is not None
     wait = partial(_wait_with_deadline, wt, config, timeout=args.wait, started=started, args=args,
                    allow_merged=True, allow_skipped=True, initial_read_time=time.monotonic() - started)
-    if kicked := bool(waiting := _draft_checks_waiting(config, pr, readiness)):
+    waiting = _draft_checks_waiting(config, pr, readiness)
+    if kicked := bool(waiting):
         _mark_ready(wt, config, pr.number, pr.head_sha, args, deadline)
         if args.wait is None:
             pending = f"; {github.MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
@@ -1507,17 +1496,15 @@ def _wait_with_deadline(
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     wait = partial(_wait_for_checks, wt, config, pr, timeout, kicked=kicked, started=started, shown=shown,
                    args=args, allow_merged=allow_merged, allow_skipped=allow_skipped, initial=initial)
-    if timeout == 0:
-        return wait()
     deadline = started + timeout
     try:
-        with github.bounded_reads(deadline, token=None, retry=True, check_on_exit=False):
-            waited = wait(bounded=True, initial_read_time=initial_read_time)
-            if waited is not None:
+        with github.bounded_reads(deadline, token=None, retry=True, check_on_exit=False) if timeout else nullcontext():
+            waited = wait(bounded=bool(timeout), initial_read_time=initial_read_time if timeout else 0)
+            if timeout and waited is not None:
                 github.read_timeout(0)
             return waited
     except (github.ReadDeadline, _proc.ProcTimeout) as exc:
-        if isinstance(exc, _proc.ProcTimeout) and time.monotonic() < deadline:
+        if not timeout or (isinstance(exc, _proc.ProcTimeout) and time.monotonic() < deadline):
             raise
     _print_check_wait_timeout(pr, args)
     return None
@@ -1612,10 +1599,9 @@ def _wait_for_checks(
                                     allow_merged=allow_merged)
         pending = _pending_checks(readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft))
         if pending or readiness.ready:
-            _print_wait_changes(shown, visible := _by_check(readiness, pending))
+            _print_wait_changes(shown, shown := _by_check(readiness, pending))
         if not pending:
             return current, readiness, kicked
-        shown = visible
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
             print("waiting: required check verdict predates the review; awaiting refresh: "
@@ -1901,10 +1887,8 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
     deadline = None if args.wait is None else started + args.wait
     admit_by = deadline if args.wait else None
     try:
-        with github.bounded_reads(admit_by, token=None, retry=True) if admit_by is not None else nullcontext():
-            pr, readiness = _pr_readiness(
-                wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None, mergify_deadline=admit_by,
-            )
+        pr, readiness = _pr_readiness(wt, config, branch, allow_merged=True, workflow_wait=args.wait is not None,
+                                      mergify_deadline=admit_by)
     except github.ReadDeadline:
         print("timed out while checking merge readiness")
         return 3

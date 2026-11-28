@@ -449,12 +449,23 @@ class TestRealSandbox:
         assert report.results[0].reused_from is None
         assert report.results[1].tail.strip() == "new"
 
-    @pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode"))
-    def test_real_sandbox_rejects_hidden_git_alternates_before_checks(self, git_repo, tmp_path, layout):
+    @pytest.mark.parametrize("layout,visible", [
+        *((layout, False) for layout in ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode")),
+        *((layout, True) for layout in ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured")),
+    ])
+    def test_real_sandbox_uses_only_visible_git_alternates(self, git_repo, tmp_path, layout, visible):
         shared = tmp_path / "shared"
         git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
         objects = git_repo / ".git/objects"
         worktree = shared
+        if visible:
+            roots = (str(objects),) if layout == "configured" else ()
+            if not roots:
+                shutil.copytree(objects, shared / layout)
+                (shared / ".git/objects/info/alternates").write_text(f"../../{layout}\n")
+            report = sandbox.run_checks(make_config(checks=("git show HEAD:README.md",), sandbox_ro=roots), shared)
+            assert report.ok and report.results[0].tail == "hello"
+            return
         if layout == "relative":
             (shared / ".git/objects/info/alternates").write_text(os.path.relpath(objects, shared / ".git/objects") + "\n")
         elif layout == "linked":
@@ -483,22 +494,6 @@ class TestRealSandbox:
         assert "alternate" in message.lower() and "sandbox" in message.lower()
         assert "transfer this task branch" in message.lower() and "standalone clone" in message.lower()
         assert "rerun loopzero check at the same commit" in message.lower()
-
-    @pytest.mark.parametrize("visibility", ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured"))
-    def test_real_sandbox_allows_visible_git_alternates(self, git_repo, tmp_path, visibility):
-        shared = tmp_path / "shared"
-        git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
-        config = make_config(checks=("git show HEAD:README.md",))
-        if visibility != "configured":
-            shutil.copytree(git_repo / ".git/objects", shared / visibility)
-            (shared / ".git/objects/info/alternates").write_text(f"../../{visibility}\n")
-        else:
-            config = make_config(checks=config.checks, sandbox_ro=(str(git_repo / ".git/objects"),))
-
-        report = sandbox.run_checks(config, shared)
-
-        assert report.ok
-        assert report.results[0].tail == "hello"
 
     def test_real_sandbox_denies_writes(self, git_repo):
         denied = (
@@ -867,7 +862,9 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     key = sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     assert key is not None
     first = cache_check(cfg, clean=True)
-    original_tails = tuple(replace(r, tail=f"{r.tail} tests/test_example.py:12 fake-cached-token") for r in first.results)
+    marker = "CHECK_INTEGRATION_SHARD []"
+    original_tails = tuple(replace(r, tail=f"{'x' * 20_000}\n{r.tail} tests/test_example.py:12 fake-cached-token\n{marker}")
+                           for r in first.results)
     _save_report(git_repo, replace(first, results=original_tails))
     if change in {'other', 'input', 'shared', 'dirty_tree'}:
         path = 'README.md' if change in {'input', 'dirty_tree'} else 'src.py' if change == 'other' else change
@@ -911,9 +908,10 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     assert [r.command for r in report.results] == list(cfg.checks)
     assert all(bool(r.reused_from) == (change == 'other') for r in report.results)
     if change == 'other':
-        assert [r.tail for r in report.results] == [
-            'one tests/test_example.py:12 [REDACTED]', 'two tests/test_example.py:12 [REDACTED]',
+        assert [r.tail.splitlines()[-2:] for r in report.results] == [
+            ["one tests/test_example.py:12 [REDACTED]", marker], ["two tests/test_example.py:12 [REDACTED]", marker],
         ]
+        assert first.ok and all(r.reused_from == first.head and len(r.tail.encode()) <= 16 * 1024 for r in report.results)
     assert any('reused ' in m for m in messages) == (change == 'other')
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
@@ -1018,24 +1016,6 @@ def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, base, c
     git(git_repo, "update-ref", base_ref, new_base)
     report = sandbox.run_checks(config, git_repo)
     assert report.results[0].reused_from is None and _current_check_report(git_repo, config, head) is not None
-
-
-def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fetched_base, receipt_path):
-    marker = "CHECK_INTEGRATION_SHARD []"
-    command = f"echo '{marker}'"
-    config = make_config(checks=(command,), inputs={command: ("README.md",)})
-    original = sandbox.run_checks(config, git_repo)
-    legacy = replace(original.results[0], tail=f"{'x' * 20_000}\n{marker}")
-    _save_report(git_repo, replace(original, results=(legacy,)))
-
-    git(git_repo, "commit", "--allow-empty", "-m", "advance head")
-    _save_report(git_repo, sandbox.run_checks(config, git_repo))
-
-    receipt = json.loads(receipt_path.read_text())
-    [result] = receipt["results"]
-    assert original.ok and result["reused_from"] == original.head
-    assert marker in result["tail"].splitlines()
-    assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
 
 def test_input_blobs_keep_git_output_byte_for_byte(git_repo):

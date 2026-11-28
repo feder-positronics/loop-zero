@@ -49,14 +49,14 @@ def git(cwd: Path, *args: str, env_allowlist: tuple[str, ...] = GIT_ENV, timeout
 
 def branch_name(repo_root: Path, slug: str) -> str:
     """Return `lz/<slug>` after git itself confirms it is a well-formed branch name."""
-    if not slug or "/" in slug or slug.startswith("."):
-        raise WorktreeError(f"invalid slug: {slug!r}. Choose a task slug such as `fix-check-output`.")
-    name = f"lz/{slug}"
-    done = run(["git", "check-ref-format", "--branch", name], cwd=repo_root,
-               env_allowlist=GIT_ENV, timeout=30)
-    if done.exit_code != 0:
-        raise WorktreeError(f"invalid slug: {slug!r} ({done.stderr.strip()}). Choose a task slug such as `fix-check-output`.")
-    return name
+    name, detail = f"lz/{slug}", ""
+    if slug and "/" not in slug and not slug.startswith("."):
+        done = run(["git", "check-ref-format", "--branch", name], cwd=repo_root,
+                   env_allowlist=GIT_ENV, timeout=30)
+        if done.exit_code == 0:
+            return name
+        detail = f" ({done.stderr.strip()})"
+    raise WorktreeError(f"invalid slug: {slug!r}{detail}. Choose a task slug such as `fix-check-output`.")
 
 
 def title_from_slug(slug: str) -> str:
@@ -352,11 +352,6 @@ def diff_since(wt: Path, sha: str) -> bytes:
     diff = git(Path(wt), "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
                 "--ignore-submodules=none", "--submodule=short", sha, "HEAD", preserve_newlines=True)
     return diff.encode("utf-8", errors="surrogateescape")
-
-
-def merges_since(wt: Path, sha: str) -> list[str]:
-    """First-parent merges between ``sha`` and HEAD, oldest first."""
-    return git(Path(wt), "rev-list", "--first-parent", "--reverse", "--merges", f"{sha}..HEAD").split()
 
 
 @contextmanager

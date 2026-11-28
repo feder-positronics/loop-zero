@@ -39,7 +39,7 @@ from loopzero.runners import (
 from loopzero.sandbox import SANDBOX_HOME, SandboxUnavailable
 
 from .conftest import git
-from .test_sandbox import FAKE_BWRAP, _pairs, _real_bwrap_works
+from .test_sandbox import FAKE_BWRAP, _pairs, _real_bwrap_works, make_config
 
 APPROVE = {"verdict": "approve", "findings": []}
 CHANGES = {
@@ -529,7 +529,7 @@ def test_reviewer_does_not_bind_missing_auth_paths(repo, fake_bin, tmp_path, fak
 
 @pytest.mark.parametrize("repo_name", ["repo", "repo\ncommon", "repo\rcommon"], ids=["ordinary", "newline", "carriage-return"])
 def test_linked_worktree_and_git_directory_are_read_only(
-    git_repo: Path, tmp_path: Path, fake_bin: Path, monkeypatch, repo_name: str,
+    git_repo: Path, tmp_path: Path, fake_bin: Path, fake_bwrap, monkeypatch, repo_name: str,
 ) -> None:
     if git_repo.name != repo_name:
         git_repo = git_repo.rename(tmp_path / repo_name)
@@ -539,10 +539,9 @@ def test_linked_worktree_and_git_directory_are_read_only(
     captured = []
     bwrap_argv = sandbox.bwrap_argv
 
-    def record(config, cwd, home, common_dir, git_dir, **kwargs):
+    def record(config, cwd, home, common_dir, git_dir, *args, **kwargs):
         assert (common_dir, git_dir) == (common, common / "worktrees" / linked.name)
-        assert sandbox._git_dir(config, cwd, "--git-common-dir") == common
-        argv = bwrap_argv(config, cwd, home, common_dir, git_dir, **kwargs)
+        argv = bwrap_argv(config, cwd, home, common_dir, git_dir, *args, **kwargs)
         captured.extend(argv)
         return argv
 
@@ -551,6 +550,7 @@ def test_linked_worktree_and_git_directory_are_read_only(
     assert _review("claude", linked).verdict == "approve"
     binds = _pairs(captured, "--ro-bind")
     assert all((str(path),) * 2 in binds for path in (linked.resolve(), common))
+    assert sandbox.run_checks(make_config(), linked).ok
 
 
 @pytest.mark.parametrize("severities,verdict", [

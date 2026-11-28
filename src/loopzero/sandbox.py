@@ -73,9 +73,7 @@ def _private_directories():
 
 def _enter_private_directory(stack: ExitStack, prefix: str) -> Path:
     with _proc.defer_sigterm():
-        directory = tempfile.TemporaryDirectory(prefix=prefix)
-        stack.callback(directory.cleanup)
-    return Path(directory.name)
+        return Path(stack.enter_context(tempfile.TemporaryDirectory(prefix=prefix)))
 
 
 @contextmanager
@@ -92,8 +90,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     """Run until a check fails, reporting commands via progress and stage metadata via status."""
     worktree = worktree.resolve()
     if shutil.which("bwrap") is None:
-        raise SandboxUnavailable(
-            "bwrap binary missing: bwrap not found on PATH\nsudo apt install bubblewrap")
+        raise SandboxUnavailable("bwrap binary missing: bwrap not found on PATH\nsudo apt install bubblewrap")
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
     dirty = bool(_git(config, worktree, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none").strip())
     tracked_diff = _tracked_diff(config, worktree) if dirty else ()
@@ -101,8 +98,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     settings_sha256 = settings_fingerprint(config)
     previous, resuming = (_previous(config, worktree, settings_sha256, head)
                           if config.inputs and base and not dirty else ({}, False))
-    common_dir = _git_dir(config, worktree, "--git-common-dir")
-    git_dir = _git_dir(config, worktree, "--git-dir")
+    common_dir, git_dir = ((worktree / _git(config, worktree, "rev-parse", flag, paths=True)).resolve()
+                           for flag in ("--git-common-dir", "--git-dir"))
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
     with _proc.unwind_on_sigterm(), _private_directories() as stack:
@@ -636,7 +633,3 @@ def _git_reason(tail: str) -> str:
     if "ambiguous argument 'HEAD'" in tail:
         return "this branch has no commit yet; make the first commit before running checks"
     return next((line for line in tail.splitlines() if line.startswith("fatal:")), _proc.tail(tail, 1))
-
-
-def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
-    return (worktree / _git(config, worktree, "rev-parse", flag, paths=True)).resolve()
