@@ -7,7 +7,7 @@ import textwrap
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from shutil import copytree
+from shutil import copytree, ignore_patterns
 
 import pytest
 
@@ -29,9 +29,9 @@ def isolate_github_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.fixture(autouse=True)
-def isolated_reviewer_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give tests disposable user and reviewer state outside their checkouts."""
-    home = tmp_path_factory.mktemp("test-home")
+def isolated_reviewer_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path.parent / "test-homes" / tmp_path.name
+    home.mkdir(mode=0o700, parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
@@ -83,7 +83,7 @@ def git_repo_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture
 def git_repo(tmp_path: Path, git_repo_seed: Path) -> Path:
-    return copytree(git_repo_seed, tmp_path / "repo")
+    return copytree(git_repo_seed, tmp_path / "repo", ignore=ignore_patterns("*.sample"))
 
 
 @pytest.fixture
