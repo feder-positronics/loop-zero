@@ -94,6 +94,11 @@ def bwrap_argv(log: Path) -> list[str]:
     return log.read_text().splitlines()
 
 
+def review_summary(head, kind="primary", *, verdict="approve", family="claude"):
+    return (f"loopzero {kind} review by {family} on `{head}`, unknown: "
+            f"**{verdict}** (0 critical, 0 important, 0 suggestion)")
+
+
 def write_fake_tool(directory: Path, name: str, body: str) -> Path:
     path = directory / name
     body = textwrap.dedent(body)

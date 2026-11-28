@@ -15,7 +15,7 @@ import pytest
 from loopzero import cli, eligibility, github, runners
 from loopzero.types import CheckReport, CheckResult, Config
 from tests import test_cli, test_runners
-from tests.conftest import commit_file, git, git_environment
+from tests.conftest import commit_file, git, git_environment, review_summary
 
 fake_bwrap = test_runners.fake_bwrap
 gh = test_cli.gh
@@ -583,7 +583,8 @@ def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
 def test_legacy_truncated_transcript_remains_unknown():
     head = "a" * 40
     rendered = (cli.review_marker(head, "primary")
-                + "\nloopzero primary review by codex: **approve** (0 critical)\n<details><summary>Raw reviewer output</summary>\n\n```\n[Transcript truncated] not JSON\n```\n</details>")
+                + f"\n{review_summary(head, family='codex')}\n<details><summary>Raw reviewer output</summary>"
+                + "\n\n```\n[Transcript truncated] not JSON\n```\n</details>")
     legacy = row(SYNTHETIC_NATIVE, rendered) | {"id": 1}
     assert eligibility.review_projection(legacy, head, "acme/widgets", 7) == (False, None)
     assert eligible(legacy) is legacy
@@ -630,7 +631,7 @@ def test_raw_leading_utf8_span_at_limit_and_overflow(separator, overflow, tighte
         padded = marker[:-3] + " " * (8192 + overflow - len(span.encode("utf-8"))) + marker[-3:]
         span = separator.join((padded, header, adjudication))
         assert len(span.encode("utf-8")) == 8192 + overflow
-    rendered = span + separator + f"loopzero {result.kind} review by codex: **approve** (0 critical)"
+    rendered = span + separator + review_summary(result.head, result.kind, family="codex")
     present, evidence = projection(result, rendered)
     assert present and (evidence is not None) is (overflow == 0)
     if not tightened:

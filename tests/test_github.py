@@ -232,12 +232,13 @@ def test_missing_gh_raises_typed_error(fake_bin: Path, monkeypatch: pytest.Monke
     assert "required token scope: repo" in str(info.value)
 
 
-def test_mark_ready_retries_a_transient_failure(gh: FakeGh, monkeypatch) -> None:
+@pytest.mark.parametrize("node_id,endpoint", [("PR_7", "api graphql ready"), ("", "pr ready")])
+def test_mark_ready_does_not_replay_an_ambiguous_write(gh: FakeGh, monkeypatch, node_id, endpoint) -> None:
     monkeypatch.setattr(github, "_retry_sleep", lambda _delay: None)
-    gh.respond("api graphql ready", {"stdout": "", "stderr": "gh: HTTP 502: Bad Gateway\n", "exit": 1})
-    gh.respond("pr ready", "")
-    github.mark_ready(REPO, 7, "PR_7")
-    assert [call["argv"][:2] for call in gh.calls] == [["api", "graphql"], ["pr", "ready"]]
+    gh.respond(endpoint, {"stdout": "", "stderr": "gh: HTTP 502: Bad Gateway\n", "exit": 1})
+    with pytest.raises(github.GhUnavailable):
+        github.mark_ready(REPO, 7, node_id)
+    assert [call["argv"][:2] for call in gh.calls] == [endpoint.split()[:2]]
 
 
 def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:

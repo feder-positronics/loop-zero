@@ -614,6 +614,19 @@ CLAUDE_EXPIRED_OAUTH = {
 }
 
 
+@pytest.mark.parametrize("family,key", [("claude", "ANTHROPIC_API_KEY"), ("codex", "OPENAI_API_KEY")])
+def test_review_rejects_credentials_in_decoded_findings(monkeypatch, family, key):
+    credential = "synthetic-forwarded-credential"
+    monkeypatch.setenv(key, credential)
+    payload = {"verdict": "approve", "findings": [
+        {"severity": "suggestion", "path": None, "line": None, "title": credential, "body": "example"},
+    ]}
+    raw = json.dumps(payload).replace(credential, "".join(f"\\u{ord(ch):04x}" for ch in credential))
+    with pytest.raises(RunnerBadOutput, match="contains a forwarded credential") as exc:
+        runners.parse_review(json.loads(raw), family=family, head="a" * 40, kind="primary", raw=raw)
+    assert credential not in str(exc.value) and "\\u0073" not in str(exc.value)
+
+
 @pytest.mark.parametrize("exit_code", [0, 1])
 @pytest.mark.parametrize("output,error,diagnostic", [
     (_claude_envelope(APPROVE), RunnerBadOutput, "forwarded credential|exited"),

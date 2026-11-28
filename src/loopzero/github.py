@@ -1493,14 +1493,10 @@ def readiness(
 
 def mark_ready(repo: str, number: int, node_id: str = "") -> None:
     if node_id:
-        try:
-            _gh("api", "graphql", "-f", "query=mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}",
-                "-f", f"id={node_id}", timeout=read_timeout(120))
-            return
-        except (GhUnavailable, ProcTimeout) as exc:
-            if _read_scope.get() is not None or getattr(exc, "confirmed_rate_limit", False):
-                raise
-    _gh("pr", "ready", str(number), "--repo", repo, timeout=read_timeout(120), retry_idempotent=_read_scope.get() is None)
+        _gh("api", "graphql", "-f", "query=mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}",
+            "-f", f"id={node_id}", timeout=read_timeout(120))
+    else:
+        _gh("pr", "ready", str(number), "--repo", repo, timeout=read_timeout(120))
 
 
 _QUEUE_QUERY = (

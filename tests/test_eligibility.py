@@ -5,12 +5,11 @@ from contextlib import nullcontext
 import pytest
 
 from loopzero import cli, eligibility, github, runners
-from tests.conftest import git
+from tests.conftest import git, review_summary
 from tests.test_runners import _native_codex_result
 
 HEAD, OTHER = "a" * 40, "c" * 40
 REPO, NUMBER, PUBLISHERS = "acme/widgets", 7, ("bot",)
-SUMMARY = "loopzero primary review by claude: **approve** (0 critical, 0 important, 0 suggestion)"
 
 
 def codex_review(*, marker=None, evidence_head=HEAD, commit_id=HEAD):
@@ -45,13 +44,25 @@ def test_lone_codex_evidence_line_is_present_but_never_evidence():
 
 def legacy_review(commit_id, reviewed=HEAD):
     return {"id": 2, "commit_id": commit_id, "user": {"login": "bot"}, "state": "APPROVED",
-            "body": f"{cli.review_marker(reviewed, 'primary')}\n{SUMMARY}"}
+            "body": f"{cli.review_marker(reviewed, 'primary')}\n{review_summary(reviewed)}"}
 
 
 def test_review_counts_only_when_github_recorded_it_on_the_head():
     current = legacy_review(HEAD)
     assert eligibility.eligible_review([current], HEAD, PUBLISHERS) is current
     assert eligibility.eligible_review([legacy_review(OTHER)], HEAD, PUBLISHERS) is None
+
+
+@pytest.mark.parametrize("line", [
+    "Prose quotes **approve**.",
+    "    " + review_summary(HEAD),
+    "loopzero primary review by somebody: **approve** (example)",
+    review_summary(OTHER),
+])
+def test_comment_needs_a_complete_summary_for_eligibility_and_review_budget(line):
+    review = legacy_review(HEAD) | {"state": "COMMENTED", "body": f"{cli.review_marker(HEAD, 'primary')}\n{line}"}
+    assert eligibility.eligible_review([review], HEAD, PUBLISHERS) is None
+    assert cli._pr_markers([review], HEAD, PUBLISHERS, repo=REPO, number=NUMBER) == []
 
 
 def test_ancestor_review_must_itself_be_eligible_at_its_commit(monkeypatch):

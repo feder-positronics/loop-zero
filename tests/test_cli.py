@@ -28,7 +28,7 @@ import pytest
 from loopzero import cli, config, github, hosted, mergify
 from loopzero._proc import Completed
 from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
-from tests.conftest import commit_file, git, init_git_repo
+from tests.conftest import commit_file, git, init_git_repo, review_summary
 from tests.test_github import (
     FakeGh,
     branch_head_key,
@@ -267,7 +267,7 @@ def test_publication_recovery_rechecks_pr_and_publisher(wt, gh, head, changed, p
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
         login: str = LOGIN, verdict: str = "approve") -> dict:
     """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""
-    return {"body": f"{marker(head, kind)}\nloopzero {kind} review by claude: **{verdict}** (0 critical)", "state": state,
+    return {"body": f"{marker(head, kind)}\n{review_summary(head, kind, verdict=verdict)}", "state": state,
             "commit_id": commit or head, "user": {"login": login}}
 
 

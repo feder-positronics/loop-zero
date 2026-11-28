@@ -207,7 +207,9 @@ def _pr_markers(reviews: list[dict], head: str,
                 runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1]):
             continue
         match = eligibility.leading_marker(body)
-        if not match or review.get("commit_id") != match.group(1):
+        if not match or review.get("commit_id") != match[1] or (
+            review.get("state") == "COMMENTED" and not eligibility.published_verdict(body, match[1], match[2])
+        ):
             continue
         if not trusted:
             trusted = {github.login().casefold()}

@@ -214,9 +214,10 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
     diagnostic = _tail(raw if excerpt is None else excerpt)
     if not isinstance(payload, dict):
         raise RunnerMalformedOutput(f"{family}: review is not a JSON object", diagnostic)
-    if (invalid_keys := set(payload) != {"verdict", "findings"}) or _redact_keys(family, raw, match_shapes=False) != raw:
-        problem = "has unexpected or missing keys" if invalid_keys else "contains a forwarded credential"
-        raise RunnerMalformedOutput(f"{family}: review {problem}", diagnostic)
+    output = raw + "\n" + json.dumps(payload)
+    if (has_credential := _redact_keys(family, output, match_shapes=False) != output) or set(payload) != {"verdict", "findings"}:
+        problem = "contains a forwarded credential" if has_credential else "has unexpected or missing keys"
+        raise RunnerMalformedOutput(f"{family}: review {problem}", "[REDACTED]" if has_credential else diagnostic)
     verdict, items = payload["verdict"], payload["findings"]
     if (not isinstance(verdict, str) or verdict not in ("approve", "request_changes")
             or not isinstance(items, list)):
