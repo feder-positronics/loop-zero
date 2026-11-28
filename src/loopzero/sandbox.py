@@ -95,7 +95,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         raise SandboxUnavailable(
             "bwrap binary missing: bwrap not found on PATH\nsudo apt install bubblewrap")
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+    dirty = bool(_git(config, worktree, "status", "--porcelain", "--untracked-files=all").strip())
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config)
     previous, resuming = (_previous(config, worktree, settings_sha256, head)
@@ -164,7 +164,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             if result.exit_code != 0:
                 break
     final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+    final_dirty = bool(_git(config, worktree, "status", "--porcelain", "--untracked-files=all").strip())
     if (final_head, final_dirty) != (head, dirty):
         results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
                     f"HEAD before: {head}; HEAD after: {final_head}; "
