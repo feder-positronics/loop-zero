@@ -39,6 +39,9 @@ def sources(tmp_path, monkeypatch, request):
     }
     if commit_rows == 0:
         rows["p0"] = [issue(1, SINCE)]
+        if commit_total is None:
+            del rows["orders"]
+            rows["orders_open"] = []
     calls = []
 
     def collect(argv, *, input, **kwargs):
@@ -147,21 +150,20 @@ def test_stall_and_dead_owner_modes_record_and_replay(record, alerts):
 
 
 @pytest.mark.parametrize("sources", [(0, None)], indirect=True)
-def test_missing_and_failed_sources_do_not_report_zero(sources, record, capsys):
+def test_missing_and_failed_sources_do_not_report_zero(sources, record, capsys, tmp_path):
     calls, args = sources
     assert retro_metrics.main(args) == 1 and calls == []
-    missing = capsys.readouterr()
-    assert not missing.out and "no readable snapshot" in missing.err and "--record" in missing.err
-    args[args.index("--label-order") + 1] = "missing"
+    assert not (missing := capsys.readouterr()).out and "no readable snapshot" in missing.err and "--record" in missing.err
     args[args.index("--check-receipts") + 1] = "/no-such-receipt-test-file"
     report, _ = record("--stall-hours", "1", replay=False)
-    assert report["weekly_sample"]["pool_sizes"]["stalled_p0"] == "UNKNOWN"
+    assert all(report["weekly_sample"]["pool_sizes"][kind] == "UNKNOWN" for kind in ("stalled_p0", "oldest_open_order"))
     assert any(a.get("source") == "p0/#1/activity" for a in report["alerts"])
     for key in ("orders_accepted", "checks_passed", "checks_failed", *retro_metrics.HOST_KEYS):
         assert report["custom_window"][key] == "UNKNOWN"
         assert any(a["source"] == f"custom_window/{key}" for a in report["alerts"])
-    assert report["custom_window"]["outcomes_closed"] == 1
-    assert report["previous_7_days"]["outcomes_closed"] == 0
+    assert [report[window]["outcomes_closed"] for window in ("custom_window", "previous_7_days")] == [1, 0]
+    assert retro_metrics.main([*args, "--record", "--frozen-inputs", str(tmp_path / "inputs.json/child")]) == 1
+    assert "inputs.json/child" in capsys.readouterr().err
 
 
 def test_invalid_band_is_usage_error(capsys):

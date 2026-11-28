@@ -40,7 +40,23 @@ def interface(text, names):
     return nodes
 
 
+def outside_fences(text):
+    fence = ""
+    for line in text.splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if marker:
+            run, rest = marker.groups()
+            if not fence and (run[0] == "~" or "`" not in rest):
+                fence = run
+                continue
+            if fence and run.startswith(fence) and not rest.strip():
+                fence = ""
+                continue
+        yield line if not fence else ""
+
+
 def anchors(text):
+    text = "\n".join(outside_fences(text))
     seen, result = {}, set()
     for heading in re.findall(r"^#{1,6}\s+(.+?)(?:\s+#+)?$", text, re.MULTILINE):
         slug = re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
@@ -56,14 +72,12 @@ def link_errors(root):
     errors = []
     for name in DOCS:
         path = root / name
-        text = path.read_text()
-        # Ignore fenced examples before reading inline links.
-        text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+        text = "\n".join(outside_fences(path.read_text()))
         links = re.findall(
             r'''!?\[[^\]]*\]\(\s*(?:<([^<>\n]+)>(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*|([^)]+))\)''',
             text)
         for angled, raw in links:
-            target = angled or raw.strip().split(' "', 1)[0]
+            target = angled or re.split(r"""[ \t]+(?=["'])""", raw.strip(), maxsplit=1)[0]
             parsed = urlsplit(target)
             if parsed.scheme or parsed.netloc:
                 continue
@@ -114,7 +128,7 @@ def main():
                         help="Validate links after merge, without the authored-history review gate")
     args = parser.parse_args()
     try:
-        root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel").strip()).resolve()
+        root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel").removesuffix("\n")).resolve()
         if args.links_only:
             errors = link_errors(root)
         else:
