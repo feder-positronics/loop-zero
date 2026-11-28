@@ -400,9 +400,9 @@ def load_github(inputs, args, lower):
     )
 
 
-def load_p0(inputs, args):
+def with_histories(inputs, repo, issues, end, source):
     def state_changes(issue):
-        timeline = pages(inputs, f"repos/{args.repo}/issues/{issue['number']}/timeline")
+        timeline = pages(inputs, f"repos/{repo}/issues/{issue['number']}/timeline")
         if timeline is None:
             raise ValueError("issue timeline unavailable")
         changes = [(timestamp(event["created_at"]), event["event"]) for event in timeline
@@ -410,10 +410,14 @@ def load_p0(inputs, args):
         # Reverse chronological order, with the last event first for tied timestamps.
         return sorted(reversed(changes), key=lambda change: change[0], reverse=True)
 
-    for issue in load_issues(inputs, args.repo, args.label_p0):
-        if timestamp(issue["created_at"]) < args.end:
-            changes = inputs.read(f"p0/#{issue['number']}/state", lambda row=issue: state_changes(row), list)
+    for issue in issues:
+        if timestamp(issue["created_at"]) < end:
+            changes = inputs.read(f"{source}/#{issue['number']}/state", lambda row=issue: state_changes(row), list)
             yield dict(issue, state_changes=changes)
+
+
+def load_p0(inputs, args):
+    return with_histories(inputs, args.repo, load_issues(inputs, args.repo, args.label_p0), args.end, "p0")
 
 
 def load_issues(inputs, repo, label, state="all", **params):
@@ -532,6 +536,9 @@ def main(argv=None):
     elif open_orders is not None:
         # Include recent orders that closed after a historical report's end.
         open_orders = list({row["number"]: row for row in [*orders, *open_orders]}.values())
+        open_orders = list(with_histories(inputs, args.repo, open_at(open_orders, end), end, "order"))
+        if not histories_complete(open_orders, end):
+            open_orders = None
     stalls, stalls_complete = stalled_p0s(inputs, args, p0, end)
     if not inputs.save():
         return 1

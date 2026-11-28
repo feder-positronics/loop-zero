@@ -558,7 +558,7 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, tmp_
 
 FENCED_EXAMPLE = "~~~~markdown\n## Context and goal\n<!-- loopzero:checks:start -->\nExample\n<!-- loopzero:checks:end -->\n~~~~"
 LIVE_PR_BODY = (
-    "# Owner-edited title\n\n## Acceptance\n- Updated acceptance on GitHub.\n\n"
+    "# Owner-edited title\n\nRollback: restore the previous release.\n\n## Acceptance\n- Updated acceptance on GitHub.\n\n"
     f"## Validation\n{FENCED_EXAMPLE}\n\n"
     "Browser: original failure reproduced; corrected image returns 200.\n\n"
     "## Review\n- primary, claude, aaaaaaaaaaaa, request_changes\n"
@@ -592,7 +592,7 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
         return
 
     if command == "check":
-        assert body.startswith("# Owner-edited title\n\n## Acceptance\n- Updated acceptance on GitHub.")
+        assert "## Acceptance\n- Updated acceptance on GitHub." in body
         report = cli._load_report(wt)
         results = tuple(replace(stage, duration_s=999.0) for stage in report.results)
         cli._save_report(wt, replace(report, results=results))
@@ -601,7 +601,7 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
         assert "Updated acceptance on GitHub" not in body
     assert_contains(body, "Browser: original failure reproduced; corrected image returns 200.",
                     "- primary, claude, aaaaaaaaaaaa, request_changes", "- delta, claude, bbbbbbbbbbbb, approve",
-                    "## Evidence\nProduction probe returned 100 records.", FENCED_EXAMPLE)
+                    "## Evidence\nProduction probe returned 100 records.", FENCED_EXAMPLE, LIVE_PR_BODY.split("## Acceptance")[0])
     assert "## Validation\n<!-- loopzero:checks:start -->\n" in body
     gh.respond_pr_list([pr_json(headRefOid=original_head, body=body)])
     before = len(gh.calls)
