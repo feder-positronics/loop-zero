@@ -534,19 +534,26 @@ def _seed_task_evidence(task: str, body: str) -> str:
     return "\n\n".join([body.rstrip(), *missing]) + "\n" if missing else body
 
 
-def _section_order(local, live, baseline, digest):
-    order = list(dict.fromkeys([*live, *local]))
+def _section_order(local, live, baseline, digest, unordered):
+    order = list(live)
     by_key = {digest(repr(part)): part for part in local.keys() & live.keys()}
     previous_order = [by_key[key] for key in baseline if key in by_key]
     shared = set(previous_order)
     task_order = [part for part in local if part in shared]
-    if task_order == previous_order:
-        return order
-    if [part for part in live if part in shared] not in (previous_order, task_order):
-        raise CliError("PR description conflict in section order: "
-                       "reconcile .loopzero/task.md with the GitHub PR body and rerun loopzero pr")
-    reordered = iter(task_order)
-    return [next(reordered) if part in shared else part for part in order]
+    # Legacy fingerprints describe shared text but cannot establish a prior order.
+    if unordered or task_order != previous_order:
+        if not unordered and [part for part in live if part in shared] not in (previous_order, task_order):
+            raise CliError("PR description conflict in section order: "
+                           "reconcile .loopzero/task.md with the GitHub PR body and rerun loopzero pr")
+        reordered = iter(task_order)
+        order = [next(reordered) if part in shared else part for part in order]
+    # Insert before the next task heading without shifting the live headings relative to each other.
+    following = None
+    for part in reversed(local):
+        if part not in live:
+            order.insert(order.index(following) if following else len(order), part)
+        following = part
+    return order
 
 
 def _sync_task_narrative(task: str, existing: str) -> str:
@@ -582,7 +589,7 @@ def _sync_task_narrative(task: str, existing: str) -> str:
     content = []
     fingerprints = {}
     empty = digest("")
-    for part in _section_order(local, live, baseline if prior and prior[1] else {}, digest):
+    for part in _section_order(local, live, baseline, digest, unordered=has_baseline and not prior[1]):
         name, _ = part
         current, proposed = live.get(part, ""), local.get(part, "")
         if name in {"Validation", "Review"}:

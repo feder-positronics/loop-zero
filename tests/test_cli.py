@@ -612,20 +612,26 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
     assert [c["argv"][:2] for c in gh.calls[before:]] == history + lookup + LOOKUP_CALLS[-1:]
 
 
-@pytest.mark.parametrize("conflict", [False, True])
-def test_pr_sync_reorders_published_sections(wt, gh, capsys, head, conflict):
+@pytest.mark.parametrize("change", ["reorder", "conflict", "insert", "legacy"])
+def test_pr_sync_orders_published_sections(wt, gh, capsys, head, change):
     task = cli.worktree.task_file(wt)
-    migration, backup = "## Migration\nRun migration.\n\n", "## Prerequisites\nTake backup.\n\n"
-    original = task.read_text() + migration + backup
-    live = cli._sync_task_narrative(original, "")
-    task.write_text(original.replace(migration + backup, backup + migration))
-    if conflict:
+    migration, backup = "## Migration\n- [ ] Run migration.\n\n", "## Prerequisites\nTake backup.\n\n"
+    original = task.read_text()
+    live = cli._sync_task_narrative(original + migration + ("" if change == "insert" else backup), "")
+    task.write_text(original + backup + migration)
+    if change == "legacy":
+        live = live.replace("loopzero:task-sync ordered ", "loopzero:task-sync ")
+    if (conflict := change == "conflict"):
         live = live.replace(migration, "").replace("## Acceptance", migration + "## Acceptance")
-    arm_pr_body_patch(gh, head, body=live)
+    arm_pr_body_patch(gh, head, body=live.replace("- [ ] Run migration.", "- [x] Run migration."))
     expect_cli(capsys, int(conflict), "pr", stderr_contains=("section order",) if conflict else ())
     if not conflict:
         body = json.loads(gh.calls[-1]["--input"])["body"]
         assert body.index("Take backup.") < body.index("Run migration.")
+        assert "- [x] Run migration." in body
+        arm_pr_body_patch(gh, head, body=body)
+        expect_cli(capsys, 0, "pr")
+        assert gh.calls[-1]["argv"][:2] == ["api", f"repos/{REPO}/pulls/7"] and "--input" not in gh.calls[-1]
 
 
 @pytest.mark.parametrize("change", ["task-preamble", "live-preamble", "notes-collision"])
