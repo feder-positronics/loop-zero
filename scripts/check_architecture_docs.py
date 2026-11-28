@@ -47,6 +47,8 @@ def anchors(text):
         count = seen.get(slug, 0)
         seen[slug] = count + 1
         result.add(f"{slug}-{count}" if count else slug)
+    result.update(value for _, value in re.findall(
+        r'''<a\b[^>]*?\s(?:id|name)\s*=\s*(["'])([^"'<>]+)\1''', text, re.IGNORECASE))
     return result
 
 
@@ -57,9 +59,11 @@ def link_errors(root):
         text = path.read_text()
         # Ignore fenced examples before reading inline links.
         text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
-        links = re.findall(r"!?\[[^\]]*\]\(([^)]+)\)", text)
-        for raw in links:
-            target = raw.strip().split(' "', 1)[0].strip("<>")
+        links = re.findall(
+            r'''!?\[[^\]]*\]\(\s*(?:<([^<>\n]+)>(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*|([^)]+))\)''',
+            text)
+        for angled, raw in links:
+            target = angled or raw.strip().split(' "', 1)[0]
             parsed = urlsplit(target)
             if parsed.scheme or parsed.netloc:
                 continue
@@ -74,7 +78,7 @@ def link_errors(root):
 
 def check(root, base):
     git(root, "rev-parse", "--verify", f"{base}^{{commit}}")
-    tracked = git(root, "diff", "--name-only", "-z", base, text=False)
+    tracked = git(root, "diff", "--no-renames", "--name-only", "-z", base, text=False)
     untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z", text=False)
     changed = set(os.fsdecode(tracked).split("\0"))
     changed.update(os.fsdecode(untracked).split("\0"))

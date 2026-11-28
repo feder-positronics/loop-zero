@@ -37,6 +37,8 @@ def sources(tmp_path, monkeypatch, request):
         "pulls/3/commits": [{"commit": {"committer": {"date": "2026-05-28T21:00:00Z"}}}] * commit_rows,
         "issues/3/comments": [],
     }
+    if commit_rows == 0:
+        rows["p0"] = [issue(1, SINCE)]
     calls = []
 
     def collect(argv, *, input, **kwargs):
@@ -56,8 +58,8 @@ def sources(tmp_path, monkeypatch, request):
                 path = query.split("labels=")[1].split("&")[0]
                 if path == "orders" and "state=open" in query:
                     path = "orders_open"
-                if path not in rows:
-                    raise subprocess.CalledProcessError(1, argv)
+            if path not in rows:
+                raise subprocess.CalledProcessError(1, argv)
             data = rows[path]
             if path == "pulls/3/commits":
                 offset = (int(query.rsplit("=", 1)[1]) - 1) * 100
@@ -144,6 +146,7 @@ def test_stall_and_dead_owner_modes_record_and_replay(record, alerts):
         assert not findings and {"kind": "stalled_p0", "number": 4} in report["weekly_sample"]["items"]
 
 
+@pytest.mark.parametrize("sources", [(0, None)], indirect=True)
 def test_missing_and_failed_sources_do_not_report_zero(sources, record, capsys):
     calls, args = sources
     assert retro_metrics.main(args) == 1 and calls == []
@@ -151,7 +154,9 @@ def test_missing_and_failed_sources_do_not_report_zero(sources, record, capsys):
     assert not missing.out and "no readable snapshot" in missing.err and "--record" in missing.err
     args[args.index("--label-order") + 1] = "missing"
     args[args.index("--check-receipts") + 1] = "/no-such-receipt-test-file"
-    report, _ = record(replay=False)
+    report, _ = record("--stall-hours", "1", replay=False)
+    assert report["weekly_sample"]["pool_sizes"]["stalled_p0"] == "UNKNOWN"
+    assert any(a.get("source") == "p0/#1/activity" for a in report["alerts"])
     for key in ("orders_accepted", "checks_passed", "checks_failed", *retro_metrics.HOST_KEYS):
         assert report["custom_window"][key] == "UNKNOWN"
         assert any(a["source"] == f"custom_window/{key}" for a in report["alerts"])
