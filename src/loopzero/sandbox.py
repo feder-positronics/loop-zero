@@ -418,7 +418,7 @@ def check_preflight(config: Config, worktree: Path) -> tuple[CheckResult | None,
             continue
         if (not path.is_absolute() and "/" in script and ".." not in path.parts
                 and not any(target.resolve().is_relative_to(Path(root)) for root in config.writable)
-                and not (target.is_file() or (python and (target / "__main__.py").is_file()))):
+                and not (target.is_file() or (python and target.is_dir()))):
             tail = _check_tail(
                 f"Check preflight: repo-local file {script!r} is absent from this task tree. "
                 "If trusted-base checks advanced, integrate the current configured base "

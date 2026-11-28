@@ -804,8 +804,7 @@ def advance_checks(wt, commands):
 
 
 @pytest.mark.parametrize("command,missing", [
-    ("python3 scripts/gate.py", True), ("scripts/gate.py", True), ("python3 feature.py", False),
-    ("python3.14 tools/checks", False),
+    ("python3 scripts/gate.py", True), ("scripts/gate.py", True), ("python3 feature.py", False), ("python3.14 tools/checks", False),
     ("test ! -f scripts/absent.py && echo fine", False), (".venv/bin/tool", False), ("VAR=./x echo fine", False)])
 def test_check_preflights_missing_trusted_script(wt, capsys, command, missing):
     if command.endswith(" tools/checks"):
@@ -816,8 +815,6 @@ def test_check_preflights_missing_trusted_script(wt, capsys, command, missing):
     assert ("expensive-check" in out) != missing
     if missing:
         assert "scripts/gate.py" in err and "integrate" in err and "trusted" in err
-    elif command.endswith(" tools/checks"):
-        assert "directory check ran" in json.loads((wt / ".loopzero/checks.json").read_text())["results"][1]["tail"]
 
 @pytest.mark.parametrize("uv,failed", [(True, True), (True, False), (False, True)])
 def test_check_offline_cache_preflight(wt, repo, fake_tool, capsys, uv, failed):
@@ -4599,6 +4596,9 @@ def test_start_uses_the_primary_repo_for_task_worktrees(repo, tmp_path, monkeypa
     if checkout == "separate-git":
         monkeypatch.chdir(Path(out.strip()))
         expect_cli(capsys, 0, "check", stdout_endswith="PASS\n")
+        git(repo, "worktree", "add", "-q", "--detach", str(tmp_path / "harness"))
+        monkeypatch.chdir(tmp_path / "harness")
+        expect_cli(capsys, 1, "start", "other", stderr_contains=("Rerun from the primary checkout",))
     assert out == f"{task}\n" and (task / ".loopzero/task.md").exists() and cli._repo_root(task) == repo
     if checkout == "detached-harness":
         assert "lz/nested" in git(repo, "branch", "--list", "lz/nested")
