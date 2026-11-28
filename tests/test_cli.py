@@ -571,9 +571,8 @@ LIVE_PR_BODY = (
     *((command, LIVE_PR_BODY.replace("\n", newline), False)
       for command in ("check", "pr") for newline in ("\n", "\r\n")),
     ("check", "# PR\n\n## Evidence\nRetained browser proof.\n", True),
-    ("check", "# PR\n\n## Validation\nHuman evidence.\n\n## Review\nApproved.\n", True),
-    ("check", "# PR\n\n## Checks\nLegacy summary.\n\n## Validation\nHuman evidence.\n", True),
-], ids=["check-lf", "check-crlf", "pr-lf", "pr-crlf", "new-head-evidence", "new-head-validation", "new-head-legacy"])
+    ("check", "# PR\n\n## Checks\nLegacy summary.\n\n## Validation  \nHuman evidence.\n\n## Review\nApproved.\n", True),
+], ids=["check-lf", "check-crlf", "pr-lf", "pr-crlf", "new-head-evidence", "new-head-legacy-and-validation"])
 def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advance):
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     original_head = head_of(wt)
@@ -588,9 +587,8 @@ def test_refresh_preserves_live_pr_evidence(wt, gh, capsys, command, live, advan
         updated = json.loads(gh.calls[-1]["--input"])["body"]
         assert original_head[:12] not in updated and head[:12] in updated
         assert updated.count("Recorded for") == 1 and updated.count("## Validation") == 1
-        for text in ("Retained browser proof.", "Human evidence.", "Approved.", "## Checks\nLegacy summary."):
-            if text in live:
-                assert text in updated
+        evidence = ("Retained browser proof.", "Human evidence.", "Approved.", "## Checks\nLegacy summary.")
+        assert all(text in updated for text in evidence if text in live)
         return
 
     if command == "check":
@@ -1728,7 +1726,7 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
         monkeypatch.setattr(github, "post_review", close_after_post)
     elif body_case == "receipt":
         assert cli.main(["check"]) == 0
-        stale = "# T1\n\n## Validation\n<!-- loopzero:checks:start -->\nRecorded for `aaaaaaaaaaaa`\n<!-- loopzero:checks:end -->\n"
+        stale = "# T1\n\n## Validation  \n<!-- loopzero:checks:start -->\nRecorded for `aaaaaaaaaaaa`\n<!-- loopzero:checks:end -->\n"
         example = "```markdown\n## Validation\nExample\n```"
         gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=example + "\n" + stale)))
     elif body_case == "existing-review":
@@ -1752,7 +1750,7 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
             assert updated.index(prior) < updated.index(line) < updated.index("## Notes")
             assert "(filled by `loopzero review`)" not in updated
         elif body_case == "receipt":
-            assert updated.startswith(example + "\n") and f"Recorded for `{head[:12]}`" in updated and "aaaaaaaaaaaa" not in updated
+            assert updated.startswith(example + "\n# T1\n\n## Validation  \n") and f"Recorded for `{head[:12]}`" in updated and "aaaaaaaaaaaa" not in updated
         else:
             assert updated == f"{live}\n## Review\n{line}\n"  # No receipt here: the live record is kept.
 

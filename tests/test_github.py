@@ -910,17 +910,22 @@ def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
         github._check_signals(REPO, HEAD)
 
 
-@pytest.mark.parametrize("pages,error", [
-    ([[{"id": 1}, "not a review"]], "invalid paginated response"),
-    ([{"check_runs": []}], "invalid paginated response"),  # an envelope where a list is due
-    ([[{"id": i} for i in range(github.PAGE + 1)]], "invalid paginated response"),
-    ([[{"id": page * github.PAGE + i} for i in range(github.PAGE)] for page in range(100)],
-     "pagination exceeds 100 pages"),
-])
-def test_list_pagination_rejects_wrong_shapes_and_endless_pages(monkeypatch, pages, error) -> None:
-    monkeypatch.setattr(github, "_gh_json", Mock(side_effect=pages))
-    with pytest.raises(github.GhError, match=error):
+@pytest.mark.parametrize("page", [[{"id": 1}, "not a review"], {"check_runs": []}, [{}] * (github.PAGE + 1)])
+def test_list_pagination_rejects_wrong_shapes(monkeypatch, page) -> None:
+    monkeypatch.setattr(github, "_gh_json", Mock(return_value=page))
+    with pytest.raises(github.GhError, match="invalid paginated response"):
         github.paged(f"repos/{REPO}/pulls/7/reviews")
+
+
+@pytest.mark.parametrize("last", [[], [{"id": 100 * github.PAGE}]])
+def test_list_pagination_at_limit(monkeypatch, last) -> None:
+    pages = [[{"id": page * github.PAGE + i} for i in range(github.PAGE)] for page in range(100)]
+    monkeypatch.setattr(github, "_gh_json", Mock(side_effect=[*pages, last]))
+    if last:
+        with pytest.raises(github.GhError, match="pagination exceeds 100 pages"):
+            github.paged(f"repos/{REPO}/pulls/7/reviews")
+    else:
+        assert github.paged(f"repos/{REPO}/pulls/7/reviews") == [row for page in pages for row in page]
 
 
 @pytest.mark.parametrize("user", [{"login": 123}, "bot", {}])
