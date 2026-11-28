@@ -11,6 +11,7 @@ import stat
 import time
 from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote
@@ -19,7 +20,7 @@ from . import github
 from .types import LoopZeroError, is_sha
 
 if TYPE_CHECKING:
-    from urllib.request import Request
+    from urllib.request import HTTPRedirectHandler, Request
 
 API = "https://api.mergify.com/v1"
 REQUEST = "loopzero:mergify-request"
@@ -81,13 +82,20 @@ class _RequestDeadline(Exception):
     """Bypass transport handlers that retry OSError."""
 
 
-@contextmanager
-def _open(request: Request, timeout: float = 30):
-    from urllib.request import HTTPRedirectHandler, build_opener
+@cache
+def _no_redirect_handler() -> type[HTTPRedirectHandler]:
+    from urllib.request import HTTPRedirectHandler
 
     class NoRedirect(HTTPRedirectHandler):
         def redirect_request(self, *_args, **_kwargs):
             raise MergifyError("Mergify API refused an HTTP redirect")
+
+    return NoRedirect
+
+
+@contextmanager
+def _open(request: Request, timeout: float = 30):
+    from urllib.request import build_opener
 
     timeout = github.read_timeout(timeout)
     def expire(_signum, _frame):
@@ -101,7 +109,7 @@ def _open(request: Request, timeout: float = 30):
             cleanup.callback(signal.setitimer, signal.ITIMER_REAL, 0)
             signal.setitimer(signal.ITIMER_REAL, timeout)
             try:
-                response = build_opener(NoRedirect).open(request, timeout=timeout)
+                response = build_opener(_no_redirect_handler()).open(request, timeout=timeout)
             except ValueError:
                 raise MergifyError("Mergify API request has an invalid URL or header") from None
             yield cleanup.enter_context(response)

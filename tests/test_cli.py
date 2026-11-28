@@ -12,6 +12,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from functools import partial
@@ -5251,7 +5253,7 @@ def mergify_opener(monkeypatch):
     monkeypatch.setattr(mergify, "_credential", lambda: "test-key")
 
     def install(open_request):
-        monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request))
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request))
 
     return install
 
@@ -5276,7 +5278,7 @@ def test_mergify_queue_retries_stop_at_merge_deadline(wt, gh, capsys, monkeypatc
     monkeypatch.setattr(mergify, "queue_attempt", lambda *_: mergify.QueueAttempt(True, True))
     def open_request(request, *, timeout):
         budgets.append(timeout)
-        raise mergify.urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, None)
+        raise urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, None)
     monkeypatch.setattr(mergify, "membership", lambda *_: admitted.append(True) or mergify.Membership())
     monkeypatch.setattr(mergify, "configured", lambda repo, *_: not admitted or mergify.api_get(repo, "/merge-queue/status") is not None)
     mergify_opener(open_request)
