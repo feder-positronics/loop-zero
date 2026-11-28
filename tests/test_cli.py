@@ -3492,6 +3492,21 @@ def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatc
     assert run(capsys, "ready", "--wait=60")[0] == exit_code and clock.fetch_timeout == 60 - clock.sleeps[0]
 
 
+@pytest.mark.parametrize("prior_hash", [None, "a5b223bb4bbb56165079349faf1232ec5863a473560bcebe461c9eedba9cbb6d"])
+def test_ready_accepts_receipt_after_forwarding_worker_cpu_grant(wt, capsys, monkeypatch, check_environment, prior_hash):
+    path, _, args = check_environment
+    monkeypatch.delenv("ZZ_LZ_UNUSED", raising=False)
+    allowlist = ("HOME", "PATH", "LANG", "LC_ALL", "TERM", "ZZ_LZ_UNUSED")
+    policy = WORKFLOW.replace("[checks]", "[checks]\nenv_allowlist = LZ_ALLOWLIST")
+    path.write_text(policy.replace("LZ_ALLOWLIST", json.dumps(allowlist)))
+    expect_cli(capsys, 0, *args, "check")
+    if prior_hash:
+        cli._save_report(wt, cli.dataclasses.replace(cli._load_report(wt), settings_sha256=prior_hash))
+    monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "2")
+    path.write_text(policy.replace("LZ_ALLOWLIST", json.dumps((*allowlist, "HEAVY_SLOT_GRANTED_CORES"))))
+    expect_cli(capsys, 0, *args, "ready")
+
+
 @pytest.mark.parametrize("worker", ["legacy", "different-environment", "matching"])
 def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
     policy = WORKFLOW.replace(
