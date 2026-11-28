@@ -107,8 +107,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    Local stages drain merged child output into a bounded capture window. They
    redact supported credential shapes and forwarded secrets before recording or
    displaying the tail, including on timeout. If the window starts inside an
-   oversized record, the stage omits the uncertain prefix. Cached stages from
-   earlier versions run again because their tails may have been cut before redaction.
+   oversized record, the stage omits the uncertain prefix. Older check receipts
+   require a fresh check because their tails may have been cut before redaction.
    Between stages, a locally observed trusted plan change stops the check
    before it runs more obsolete commands. This read makes no network request.
    Trusted-base commands remain authoritative;

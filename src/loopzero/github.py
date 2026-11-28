@@ -143,7 +143,6 @@ _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
 _READINESS_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.([0-9]+))?"
                                   r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
 _HTTP_DATE = re.compile(r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT")
-_CREDENTIAL_TOKEN_RE = re.compile("|".join(SECRET_PATTERNS))
 
 
 @contextmanager
@@ -217,11 +216,10 @@ def redact_credentials(value: str) -> str:
 
 
 def _redact_tokens(value: str, token: str = "") -> str:
-    value = redact(value, secret_forms((token, os.environ.get("GH_TOKEN", ""), os.environ.get("GITHUB_TOKEN", ""))))
+    value = redact(value, secret_forms((token, os.environ.get("GH_TOKEN", ""), os.environ.get("GITHUB_TOKEN", ""))), *SECRET_PATTERNS)
     value = re.sub(r"(?i)\b(authorization)\s*[:=]\s*"
                    r"(?:(?:basic|bearer|token)\s+)?[^\s,;]+", r"\1=[REDACTED]", value)
     value = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", value)
-    value = _CREDENTIAL_TOKEN_RE.sub("[REDACTED]", value)
     value = re.sub(r"(?i)\b(access_token|auth_token|token)\s*[:=]\s*"
                    r"[^\s,;]+", r"\1=[REDACTED]", value)
     value = re.sub(r"(?i)(https?://[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)

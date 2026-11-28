@@ -267,7 +267,7 @@ def _execution_settings(config: Config, base: str) -> dict:
     settings = {k: v for k, v in asdict(config).items() if k in {
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits"}}
     settings["local_shell"] = CHECK_SHELL
-    settings["check_runner"] = []  # Removed setting kept so existing receipts stay valid.
+    settings["check_runner"] = ["redacted-tail-v1"]
     if config.inputs:
         settings["base"] = base
     settings["environment"] = check_environment(config)
@@ -347,7 +347,7 @@ def _hash_inputs(config: Config, worktree: Path, command: str, base: str, blobs:
                 contents.append(hashlib.file_digest(stream, "sha256").hexdigest())
     except (OSError, ValueError, SyntaxError, RuntimeError):
         return None
-    payload = [command, installed_version(), _execution_settings(config, base), blobs, contents, "redacted-tail-v1"]
+    payload = [command, installed_version(), _execution_settings(config, base), blobs, contents]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -476,7 +476,6 @@ def _check_secrets(config: Config) -> list[str]:
 
 def _check_tail(text: str) -> str:
     encoded = text.rstrip("\n").encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
-    # A byte cut can start inside a multibyte character.
     return _proc.tail(encoded.decode("utf-8", errors="ignore"))
 
 

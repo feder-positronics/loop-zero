@@ -98,13 +98,12 @@ class Completed:
 
 
 def tail(text: str, lines: int = TAIL_LINES) -> str:
-    """Return the last `lines` lines of `text`, without a trailing newline."""
     return "\n".join(text.rstrip("\n").splitlines()[-lines:])
 
 
 _KEY_START = r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
 _KEY_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
-_KEY_BOUNDARY = re.compile(rf"({_KEY_START}|-----BEGIN [A-Z ]*+-{{0,4}}\Z)|{_KEY_END.pattern}")
+_KEY_BOUNDARY = re.compile(rf"({_KEY_START})|({_KEY_END.pattern})|-----BEGIN [A-Z ]*+-{{0,4}}\Z")
 SECRET_PATTERNS = (
     r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})",
     r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", r"\brt_[A-Za-z0-9_.-]{20,}", r"\bAKIA[0-9A-Z]{16}\b",
@@ -116,23 +115,26 @@ SECRET_PATTERNS = (
 def secret_forms(values: Iterable[str]) -> list[str]:
     """Stripped values with their JSON-escaped and URL-quoted forms, longest first."""
     stripped = filter(None, (value.strip() for value in values))
-    return sorted({form for value in stripped for form in (value, json.dumps(value)[1:-1], quote(value, safe=""))},
+    return sorted({form for value in stripped for form in (
+        value, value.replace("\r\n", "\n").replace("\r", "\n"), json.dumps(value)[1:-1], quote(value, safe=""))},
                   key=len, reverse=True)
 
 
 def redact(text: str, forms: Sequence[str], *patterns: str, skip: int = 0) -> str:
-    pattern = "|".join([*map(re.escape, forms), *patterns])
-    # A match starting in the discarded prefix may cover part of the retained text.
-    if skip:
-        skip = max(skip, max((m.end() for m in re.finditer(pattern, text) if m.start() < skip), default=0))
-    return re.sub(pattern, "[REDACTED]", text[skip:]) if pattern else text[skip:]
+    spans = sorted(match.span() for pattern in (*map(re.escape, forms), *patterns) for match in re.finditer(pattern, text))
+    parts = []
+    for start, end in spans:
+        if start >= skip:
+            parts.extend((text[skip:start], "[REDACTED]"))
+        skip = max(skip, end)
+    return "".join([*parts, text[skip:]])
 
 
 def build_env(env_allowlist: Sequence[str], extra_env: Mapping[str, str] | None = None) -> dict[str, str]:
     return {**{key: os.environ[key] for key in env_allowlist if key in os.environ}, **(extra_env or {})}
 
 
-def _redact_capture(text: str, forms: Sequence[str], lead: int, clipped: bool, key_open: bool) -> str:
+def _redact_capture(text: str, forms: Sequence[str], lead: int, clipped: bool, key_open: bool | None) -> str:
     # The first record can start inside a token or a forwarded multiline value.
     skip = (text.find("\n", lead) + 1 or len(text)) if clipped else 0
     if key_open:
@@ -153,7 +155,7 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float,
     newlines = 0
     lead = max(map(len, forms or ()), default=0)
     window = limit if forms is None else limit + 64 * 1024 + lead
-    clipped = key_open = False
+    clipped = key_open = False  # A key state of None means the opener is incomplete.
 
     def append(chunk: str) -> None:
         nonlocal suffix, newlines, clipped, key_open
@@ -162,8 +164,10 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float,
             text = suffix + "\n" * newlines + content
             if forms is not None and (cut := len(text) - window) > 0:
                 clipped = True
-                for marker in (m for m in _KEY_BOUNDARY.finditer(text) if m.start() < cut):
-                    key_open = marker[1] is not None
+                leader = "-----BEGIN " if key_open is None else ""
+                key_open = bool(key_open)
+                for marker in (m for m in _KEY_BOUNDARY.finditer(leader + text) if m.start() < cut + len(leader)):
+                    key_open = True if marker[1] else False if marker[2] else key_open or None
             suffix = text[-window:]
             newlines = 0
         newlines = min(window, newlines + len(chunk) - len(content))

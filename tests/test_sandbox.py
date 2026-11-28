@@ -75,10 +75,10 @@ def make_config(**overrides) -> Config:
 
 
 @pytest.mark.parametrize("inputs,expected", [
-    ({}, "93d09d9b25849bd98e9f24f82ca2aa26dee49b6f683c07fd2797a4998401f6df"),
-    ({"echo hello": (".",)}, "7c7a6b12ef710f9ef79c882d268e1e8879f97e85a7319771cb3800e2eb17e60c")])
+    ({}, "f7713e56ba051aaa822cf97799a51ec7c61f21488dd60f7a42b242a362589594"),
+    ({"echo hello": (".",)}, "41de782373c01d9e87e55f2f37df3b246124c556097ac06d02556165ce000c66")])
 def test_settings_fingerprint_is_stable_across_releases(inputs, expected):
-    # A changed digest makes ready refuse every receipt written by the previous release.
+    # This version deliberately rejects receipts created before stage redaction.
     config = make_config(env_allowlist=Config.env_allowlist, inputs=inputs)
     assert sandbox.settings_fingerprint(config) == expected
 
@@ -397,6 +397,23 @@ def interrupt_after_checkpoint(repo, config, *, verify_first_exit=False):
 
     with pytest.raises(KeyboardInterrupt):
         sandbox.run_checks(config, repo, checkpoint=checkpoint)
+
+
+def test_checkpoint_drops_tails_from_pre_redaction_receipts(
+    git_repo, bwrap_log, fetched_base, cache_check, receipt_path, monkeypatch,
+):
+    first, second = "echo first", "echo second"
+    config = make_config(checks=(first, second), inputs={"*": (".",)})
+    settings = sandbox._execution_settings
+    with monkeypatch.context() as legacy:
+        legacy.setattr(sandbox, "_execution_settings", lambda *args: settings(*args) | {"check_runner": []})
+        report = cache_check(config, clean=True)
+        assert all(stage.input_key for stage in report.results)
+        stage = replace(report.results[1], tail="unsafe-fragment-from-old-tail")
+        _save_report(git_repo, replace(report, results=(report.results[0], stage)))
+
+    interrupt_after_checkpoint(git_repo, config, verify_first_exit=True)
+    assert "unsafe-fragment-from-old-tail" not in receipt_path.read_text()
 
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
@@ -1079,6 +1096,9 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
 @pytest.mark.parametrize(("output", "canary"), [
     ('print("ghp_" + "q" * 40_000)', "q" * 10),
     ('print("ghp_" + "q" * 180_000)', "q" * 10),
+    ('print("https://ghp_FAKE0123456789:example-password@host")', "example-password"),
+    ('print(os.environ["MULTILINE_SECRET"])', "private-second-line"),
+    ('print("-----BEGIN " + "A" * 180_000)', "A" * 10),
     ('''
 print("-----BEGIN PRIVATE KEY-----")
 for _ in range(4_500):
@@ -1086,8 +1106,10 @@ for _ in range(4_500):
 print("-----END PRIVATE KEY-----")
 ''', "synthetic-private-material"),
 ])
-def test_check_output_redaction_across_capture_boundaries(git_repo, bwrap_log, timed_out, output, canary):
+def test_check_output_redaction_across_capture_boundaries(git_repo, bwrap_log, monkeypatch, timed_out, output, canary):
+    monkeypatch.setenv("MULTILINE_SECRET", "private-first-line\r\nprivate-second-line")
     code = f"""
+import os
 import sys
 import time
 
@@ -1097,7 +1119,8 @@ if sys.argv[1] == "True":
     time.sleep(30)
 """
     command = shlex.join([sys.executable, "-c", code, str(timed_out)])
-    result = sandbox._run_one(make_config(), git_repo, ["bwrap", "--chdir", str(git_repo), "--"], command, 2)
+    config = make_config(env_allowlist=("PATH", "MULTILINE_SECRET"))
+    result = sandbox._run_one(config, git_repo, ["bwrap", "--chdir", str(git_repo), "--"], command, 2)
     assert result.exit_code == (sandbox.TIMEOUT_EXIT if timed_out else 0)
     assert "ordinary diagnostic" in result.tail
     assert ("timed out" in result.tail) == timed_out
