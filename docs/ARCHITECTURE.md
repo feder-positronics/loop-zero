@@ -239,6 +239,7 @@ hidden; helper aliases into protected state and explicit state mounts fail close
 and explicit runtime paths get no such exception.
 Every command except `start` uses the workflow at one remote-tracking
 delivery revision selected by the workflow at Git's local `origin/HEAD`.
+Trusted revision resolution and workflow reads disable Git object replacement.
 Missing trusted refs or workflows block these commands. An explicit
 `--config` supplies validated policy for bootstrap or operator overrides.
 Runners validate the complete mount plan against private review state and

@@ -1133,12 +1133,13 @@ def _queue_json(queued: bool) -> dict:
 
 def arm_merge(gh: FakeGh, queue: dict, *details: dict) -> None:
     gh.respond("pr merge", "")
-    gh.respond(f"api repos/{REPO}/pulls/7", *details)
+    gh.respond(f"api repos/{REPO}/pulls/7", merge_json(), *details)
     gh.respond("api graphql", queue)
 
 
 @pytest.mark.parametrize("case,strategy,diagnostic", [
     ("command error", "rebase", "mismatch"),
+    ("hold", "squash", "merge-authority hold"), ("hold", "queue", "merge-authority hold"),
     ("missing", "merge", "GitHub queue lookup for PR #7: queue status could not be verified"),
     ("not queued", "merge", "neither merged nor queued"),
     ("other head", "queue", "head changed or unavailable"),
@@ -1151,14 +1152,19 @@ def test_merge_fails_without_proof_of_admission_or_landing(gh, case, strategy, d
     if case == "other head":
         queue["data"]["repository"]["pullRequest"]["headRefOid"] = "b" * 40
         gh.respond("api graphql", queue)
+    elif case == "hold":
+        gh.respond(f"api repos/{REPO}/pulls/7", merge_json() | {"labels": [{"name": "hold"}]})
+        gh.respond("api graphql", _queue_json(False))
     elif case != "invalid strategy":
         arm_merge(gh, queue, merge_json(), merge_json())
     if case == "command error":
         gh.fail("pr merge", "head commit mismatch")
-    with pytest.raises(github.MergeFailed, match=diagnostic) as info:
-        github.merge(REPO, 7, strategy, HEAD)
+    with pytest.raises(github.GhError, match=diagnostic) as info:
+        github.merge(REPO, 7, strategy, HEAD, "main")
     calls = [c["argv"][:2] for c in gh.calls]
     assert ["api", "-X"] not in calls
+    if case == "hold":
+        assert ["pr", "merge"] not in calls
     if case == "command error":
         assert "--rebase" in info.value.command and "mismatch" in info.value.tail
     if case in {"invalid strategy", "other head"}:
@@ -1182,9 +1188,9 @@ def test_merge_reports_queue_admission_or_landing(gh, monkeypatch, strategy, que
         gh.fail("api graphql", "HTTP 502")
     if strategy == "queue":
         gh.respond("api graphql", _queue_json(False), accepted)
-    assert github.merge(REPO, 7, strategy, HEAD) == ("d" * 40 if landed else None)
+    assert github.merge(REPO, 7, strategy, HEAD, "main") == ("d" * 40 if landed else None)
     if strategy == "queue":
-        assert github.merge(REPO, 7, strategy, HEAD) is None
+        assert github.merge(REPO, 7, strategy, HEAD, "main") is None
     writes = [c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"]]
     assert len(writes) == 1
     if strategy == "squash":
@@ -1202,7 +1208,7 @@ def test_eligibility_dispatch_retry_refuses_changed_head(monkeypatch):
     monkeypatch.setattr(github, "_eligibility_dispatched", lambda *_args: True)
 
     with pytest.raises(github.GhError, match="the PR or head changed after resolution"):
-        github.refresh_eligibility(REPO, pr, "lz/task", "main", PUBLISHERS)
+        github.refresh_eligibility(REPO, pr, "lz/task", "main", lambda: False)
 
 
 @pytest.mark.parametrize("args, attempts, error", [

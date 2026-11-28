@@ -78,7 +78,7 @@ def approval(head=HEAD, *, state="APPROVED"):
 
 @pytest.mark.parametrize("case,states", [
     ("restore", ["pending", "failure"]), ("newer success", ["pending"]), ("newer pending", ["pending"]),
-    ("stale marker", ["pending", "failure"]), ("write lost", ["pending", "failure"]),
+    ("newer same marker", ["pending"]), ("stale marker", ["pending", "failure"]), ("write lost", ["pending", "failure"]),
     ("many markers", ["pending", "failure"]), ("other publisher marker", ["pending", "failure"]),
     ("case-insensitive newer", ["pending"]), ("pending verdict like marker", ["pending", "pending"]), ("verdict worded like marker", ["pending", "failure"]),
 ])
@@ -89,6 +89,7 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
     history = {"restore": [marker, old], "stale marker": [marker, marker | {"id": 10}, old],
                "newer success": [old | {"id": 12, "state": "success"}, marker, old],
                "newer pending": [marker | {"id": 12, "description": "Awaiting trusted review"}, marker, old],
+               "newer same marker": [marker | {"id": 12}, marker, old],
                "write lost": [marker, old],
                "other publisher marker": [marker, marker | {"id": 9, "description": "Refreshing source review evidence"}, old],
                "pending verdict like marker": [marker, marker | {"id": 9, "description": "Refreshing sources"}, old],

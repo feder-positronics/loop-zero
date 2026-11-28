@@ -106,10 +106,9 @@ def _run(cfg: Config) -> int:
     candidate = (pr["head"]["ref"].startswith(candidate_mod.QUEUE_BRANCH_PREFIX)
                  or pr["user"]["login"] == candidate_mod.MERGIFY_BOT_LOGIN)
     if not (_candidate_event(event, head) if candidate else pr.get("merged") is not True):
-        # A landed source needs no new verdict; a late refresh must not turn it red.
         return 0 if candidate else _restore_landed(cfg.repo, head)
-    github.commit_status(cfg.repo, head, eligibility.CONTEXT, "pending",
-                                  "Refreshing live source review evidence")
+    pending = github.commit_status(cfg.repo, head, eligibility.CONTEXT, "pending",
+                                   "Refreshing live source review evidence")
     try:
         if candidate:
             retry(lambda: (_attest(cfg, event), _publication_snapshot(cfg.repo, number, head, None))[1])
@@ -131,18 +130,19 @@ def _run(cfg: Config) -> int:
         _mark_refresh_failed(cfg.repo, head, exc)
         raise
     if state is None:  # Landed mid-refresh: restore the verdict this run's pending status hid.
-        return _restore_landed(cfg.repo, head)
+        return _restore_landed(cfg.repo, head, pending.get("id") or 0)
     _publish_verdict(cfg.repo, head, state, message[:140])
     print(message)
     return 0  # A published "not eligible" verdict is the result, not a workflow failure.
 
 
-def _restore_landed(repo: str, head: str) -> int:
+def _restore_landed(repo: str, head: str, pending_id: int | None = None) -> int:
     # Also runs on a rerun, so a failed restore is retried instead of leaving the head pending.
     progress = {("pending", "Refreshing live source review evidence"), ("pending", "Refreshing source review evidence")}
     rows = github.context_statuses(repo, head, eligibility.CONTEXT)
-    if (top := next(rows, {})) and (top["state"], top.get("description")) in progress and (prior := next(
-            (r for r in rows if (r["state"], r.get("description")) not in progress), None)):
+    if ((top := next(rows, {})) and (pending_id is None or top.get("id") == pending_id)
+            and (top["state"], top.get("description")) in progress and (prior := next(
+                (r for r in rows if (r["state"], r.get("description")) not in progress), None))):
         _publish_verdict(repo, head, prior["state"], prior["description"])
     return 0
 

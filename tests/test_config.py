@@ -6,6 +6,7 @@ import pytest
 
 from loopzero import _proc, config
 from loopzero.types import Config, ResourceLimits, ReviewConfig
+from .conftest import commit_file, git
 
 MINIMAL = '[repo]\nname = "o/n"\n'
 COMMANDS = ("uv run pytest -q", "uv run ruff check .")
@@ -19,9 +20,7 @@ def write(tmp_path, text):
 
 
 def table(section, **settings):
-    # JSON strings, arrays, bools and integers are also valid TOML values.
-    rows = [f"{json.dumps(key)} = {json.dumps(value)}" for key, value in settings.items()]
-    return "\n".join([f"[{section}]", *rows, ""])
+    return f"[{section}]\n" + "".join(f"{json.dumps(key)} = {json.dumps(value)}\n" for key, value in settings.items())
 
 
 @pytest.mark.parametrize("strategy,queue", [("rebase", None), ("mergify", "main")])
@@ -33,10 +32,9 @@ def test_load_full_config(tmp_path, strategy, queue):
     delivery = dict(reviewers=("codex",), reviewer_ro_paths=("/opt/claude", "/opt/codex"))
     limits = dict(memory_mb=1024, file_mb=512)
     workflow = "".join((
-        table("repo", name="owner/name", base="develop"),
-        table("checks", commands=COMMANDS, ro_paths=["/nonexistent/cache", "/tmp/whatever/../cache"], **execution),
-        table("checks.env", **env), table("checks.limits", **limits),
-        table("checks.inputs", **CHECK_INPUTS),
+        table("repo", name="owner/name", base="develop"), table("checks", commands=COMMANDS,
+              ro_paths=["/nonexistent/cache", "/tmp/whatever/../cache"], **execution),
+        table("checks.env", **env), table("checks.limits", **limits), table("checks.inputs", **CHECK_INPUTS),
         table("delivery", merge=strategy, **({"mergify_queue": queue} if queue else {}), **delivery),
         table("delivery.review.codex", model=review.model, effort=review.effort, allowed_efforts=review.allowed_efforts),
     ))
@@ -49,8 +47,21 @@ def test_load_full_config(tmp_path, strategy, queue):
     assert config.load(write(tmp_path, padded)).checks[0] == " uv run pytest -q "
 
 
-def test_load_applies_defaults(tmp_path):
-    assert config.load(write(tmp_path, MINIMAL)) == Config(
+def test_trusted_load_applies_defaults_with_object_replacement_disabled(git_repo, monkeypatch):
+    commit_file(git_repo, "workflow.toml", MINIMAL, "base workflow")
+    git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(git_repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    run = _proc.run
+
+    def check_object_access(argv, **kwargs):
+        if argv[1] in {"rev-parse", "show"}:
+            assert (kwargs.get("extra_env") or {}).get("GIT_NO_REPLACE_OBJECTS") == "1"
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(_proc, "run", check_object_access)
+    trusted = config.load_trusted(git_repo)
+    assert trusted.trusted_base_revision == git(git_repo, "rev-parse", "HEAD").strip()
+    assert trusted == config.load(git_repo / "workflow.toml") == Config(
         repo="o/n", base_branch="main", checks=(), required_ci=(), merge_strategy="squash",
         reviewers=("claude", "codex"), network=False, env_allowlist=("PATH", "HOME", "LANG", "LC_ALL", "TERM"),
         sandbox_ro=(), writable=(), reviewer_ro_paths=(),
@@ -59,12 +70,8 @@ def test_load_applies_defaults(tmp_path):
     )
 
 
-def test_missing_file(tmp_path):
-    with pytest.raises(config.ConfigError, match="config file not found"):
-        config.load(tmp_path / "nope.toml")
-
-
 @pytest.mark.parametrize("text,message", [
+    (None, "config file not found"),
     ("[repo\n", "invalid TOML"),
     ("[checks]\ncommands = []\n", "missing required key repo.name"),
     ('repo = "o/n"\n', r"\[repo\] must be a table"),
@@ -110,14 +117,15 @@ def test_missing_file(tmp_path):
     *((MINIMAL + table("checks.env", **{key: "/x"}), f"must not override {key}") for key in ("PATH", "HOME")),
 ])
 def test_invalid_content(tmp_path, text, message):
+    path = tmp_path / "workflow.toml" if text is None else write(tmp_path, text)
     with pytest.raises(config.ConfigError, match=message) as info:
-        config.load(write(tmp_path, text))
-    assert str(info.value).startswith(str(tmp_path / "workflow.toml"))
+        config.load(path)
+    assert str(info.value).startswith(str(path))
 
 
-@pytest.mark.parametrize("path", ["/home/me/.local/bin", "/opt/tool", "/srv/cache<2026>/uv"])
-def test_ro_path_boundary(tmp_path, path):
-    assert config.load(write(tmp_path, MINIMAL + table("checks", ro_paths=[path]))).sandbox_ro == (path,)
+def test_ro_path_boundary(tmp_path):
+    paths = ("/home/me/.local/bin", "/opt/tool", "/srv/cache<2026>/uv")
+    assert config.load(write(tmp_path, MINIMAL + table("checks", ro_paths=paths))).sandbox_ro == paths
 
 
 def test_base_fetch_failure_retains_redacted_git_diagnostic(tmp_path, monkeypatch):

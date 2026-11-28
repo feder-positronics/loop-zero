@@ -1573,8 +1573,7 @@ def posted_review(gh: FakeGh) -> dict:
 def arm_squash_merge(gh: FakeGh, head: str, wt: Path, *snapshots, branch: str = "lz/t1") -> None:
     arm_approved_pr(gh, head, wt, isDraft=False, branch=branch)
     gh.respond("pr merge", "")
-    if snapshots:
-        gh.append(f"api repos/{REPO}/pulls/7", *snapshots)
+    gh.append(f"api repos/{REPO}/pulls/7", merge_json(head=head), *snapshots)
 
 
 def arm_approved_pr(
@@ -3591,9 +3590,10 @@ def landed_snapshot(head, sha="e" * 40):
     return merge_json(state="MERGED", head=head, sha=sha)
 
 
-def arm_landed_pr(gh, head, sha, *, landed_head=None, branch="lz/t1", number=7):
-    arm_pr(gh, head, branch=branch, number=number, state="MERGED", isDraft=False)
-    gh.append(f"api repos/{REPO}/pulls/{number}", merge_json(state="MERGED", head=landed_head or head, sha=sha))
+def arm_landed_pr(gh, head, sha, *, landed_head=None, branch="lz/t1", number=7, base="main"):
+    arm_pr(gh, head, branch=branch, number=number, state="MERGED", isDraft=False, baseRefName=base)
+    landed = merge_json(state="MERGED", head=landed_head or head, sha=sha) | {"base": {"ref": base}}
+    gh.append(f"api repos/{REPO}/pulls/{number}", landed)
 
 
 @pytest.mark.parametrize("command,conclusion,severity", [
@@ -4185,21 +4185,20 @@ def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head
     assert all(call["argv"][:2] != ["api", "-X"] for call in gh.calls)
 
 
-@pytest.mark.parametrize("changed", [False, True])
-def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
-    wt: Path, repo: Path, gh: FakeGh, capsys, changed, monkeypatch
-) -> None:
+@pytest.mark.parametrize("rejection", ["", "head changed", "retargeted to release"])
+def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(wt, repo, gh, capsys, rejection, monkeypatch):
     collision, wt = wt, wt.with_name(wt.name + " ")
     git(repo, "worktree", "move", str(collision), str(wt))
     git(repo, "worktree", "add", "-qb", "lz/other", str(collision), "lz/t1")
     monkeypatch.chdir(wt)
     for branch, number in (("lz/t1", 7), ("lz/other", 8)):
-        arm_landed_pr(gh, head_of(wt), "e" * 40, landed_head="f" * 40 if changed else None,
-                      branch=branch, number=number)
-    out, err = expect_cli(capsys, int(changed), "merge")
-    assert collision.exists() and wt.exists() is changed
-    if changed:
-        assert "head changed" in err
+        arm_landed_pr(gh, head_of(wt), "e" * 40, landed_head="f" * 40 if rejection == "head changed" else None,
+                      branch=branch, number=number, base="release" if rejection.startswith("retargeted") else "main")
+    out, err = expect_cli(capsys, int(bool(rejection)), "merge")
+    assert collision.exists() and wt.exists() is bool(rejection)
+    if rejection:
+        assert rejection in err
+        assert not any("/git/ref/heads/" in " ".join(call["argv"]) for call in gh.calls)
     else:
         assert not err and f"PR #7 was already merged as {'e' * 12}" in out and out.endswith("e" * 40 + "\n")
 
@@ -4292,26 +4291,20 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
-@pytest.mark.parametrize("outcome", [
-    "merged", "ejected", "landed-on-ejection", "head-changed-early", "head-changed-late",
-    "closed-then-merged", "still-closed", "retargeted",
+@pytest.mark.parametrize("outcome,evidence", [
+    ("merged", "open open landed"), ("ejected", "open open open"), ("landed-on-ejection", "open open landed"),
+    ("head-changed-early", "moved-open moved-landed"), ("head-changed-late", "open moved-landed"),
+    ("closed-then-merged", "open closed landed"), ("still-closed", "open closed closed"),
+    ("retargeted-in-queue", "open retargeted"), ("retargeted-after-write", "wrong-base-landing"),
 ])
-def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
-    wt: Path, gh: FakeGh, capsys, monkeypatch, head, outcome
-) -> None:
-    opened, closed = open_pr_snapshot(head), merge_json(state="CLOSED", head=head)
-    landed = landed_snapshot(head)
+def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(wt, gh, capsys, monkeypatch, head, outcome, evidence):
+    opened, landed = open_pr_snapshot(head), landed_snapshot(head)
     snapshots = {
-        "merged": (opened, opened, landed),
-        "ejected": (opened, opened, opened),
-        "landed-on-ejection": (opened, opened, landed),
-        "head-changed-early": (open_pr_snapshot("f" * 40), landed_snapshot("f" * 40)),
-        "head-changed-late": (opened, landed_snapshot("f" * 40)),
-        "closed-then-merged": (opened, closed, landed),
-        "still-closed": (opened, closed, closed),
-        "retargeted": (opened, {**opened, "base": {"ref": "release"}}),
+        "open": opened, "closed": merge_json(state="CLOSED", head=head), "landed": landed,
+        "moved-open": open_pr_snapshot("f" * 40), "moved-landed": landed_snapshot("f" * 40),
+        "retargeted": opened | {"base": {"ref": "release"}}, "wrong-base-landing": landed | {"base": {"ref": "release"}},
     }
-    arm_squash_merge(gh, head, wt, *snapshots[outcome])
+    arm_squash_merge(gh, head, wt, *(snapshots[state] for state in evidence.split()))
     ejected = outcome in {"ejected", "landed-on-ejection"}
     gh.respond("api graphql", threads_json(), native_queue(True, head), native_queue(not ejected, head))
     gh.respond("api -X", "")
@@ -4323,8 +4316,9 @@ def test_merge_wait_preserves_reviewed_head_and_cleans_only_landed_work(
     if outcome.startswith("head-changed"):
         assert code == 1 and "PR head changed" in err
         assert wt.exists(), "no cleanup after an unreviewed head"
-    elif outcome == "retargeted":
+    elif outcome.startswith("retargeted"):
         assert code == 1 and "retargeted to release" in err and "rerun" in err and wt.exists()
+        assert not any("/git/ref/heads/" in " ".join(call["argv"]) for call in gh.calls)
     elif outcome == "still-closed":
         assert code == 1 and "closed without a verified merge" in err and wt.exists()
     elif ejected:
@@ -4356,26 +4350,28 @@ REPLY_ACCEPTED = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id":
 THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
 
 
-@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "retry", "unknown", "missing", "missing-required"])
-def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh: FakeGh, capsys, monkeypatch, outcome) -> None:
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "outdated", "inherited", "denied", "applied", "retry", "unknown", "missing", "missing-required"])
+def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh: FakeGh, capsys, monkeypatch, outcome, head) -> None:
     if outcome == "missing-required":
         publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', 'required_ci = ["Loop-zero Eligibility"]'))
     sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
     finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
     listing, backoffs = threads_json({**finding_pr, "path": "src/Łódź.py"}), []
-    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
-               listing if outcome == "remaining" else threads_json())
+    outdated = threads_json(dict(_finding_thread("a1b2c3d4", "a" * 40), isOutdated=True))
+    remaining = outdated if outcome in {"outdated", "inherited"} else {"remaining": listing}.get(outcome, threads_json())
+    gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED, remaining)
+    gh.respond(reviews_key(), [rev("a" * 40 if outcome == "inherited" else head, "primary")])
     transient = outcome in {"applied", "retry", "unknown"}
     error_status = 503 if transient else {"denied": 403, "missing": 404, "missing-required": 404}.get(outcome)
     gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": f"HTTP {error_status}"} if error_status else "", "")
     monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
-    runs = [] if outcome == "retry" else [{"display_title": "any title"}]
+    runs = [{"display_title": f"Refresh eligibility for PR #{8 if outcome == 'retry' else 7}"}]
     monkeypatch.setattr(github.time, "time", lambda: 1795640554)
     endpoint = ELIGIBILITY_DISPATCH.removesuffix("/dispatches")
     gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs) + (outcome == "unknown")})
     title = r"\u0141\xf3d\u017a" if outcome == "refreshed" else "Łódź"
     expect_cli(capsys, 0, "resolve", stderr="", stdout=f"0b9b59e7  important  src/{title}.py:3  {title}\n")
-    assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
+    assert not any(ELIGIBILITY_DISPATCH in c["argv"] for c in gh.calls)
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
     assert out.splitlines()[0] == f"resolved 0b9b59e7: {title}"
     calls = [c["argv"] for c in gh.calls
@@ -4383,7 +4379,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
     dispatches = [c["argv"] for c in gh.calls if ELIGIBILITY_DISPATCH in c["argv"]]
-    assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "retry": 2}.get(outcome, 1)
+    assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "inherited": 0, "retry": 2}.get(outcome, 1)
     assert backoffs == ([5] if transient else [])
     if outcome == "missing-required":
         assert code == 1 and "Check that eligibility.yml exists" in err and "before retrying" not in err
@@ -4392,13 +4388,12 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
         assert f"gh api -X POST {ELIGIBILITY_DISPATCH} -f ref=main -f 'inputs[pr]=7'" in err
     else:
         assert (code, err) == (0, "")
-        status = {"remaining": [], "missing": ["Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete."]}
+        status = {"remaining": [], "inherited": [], "missing": ["Hosted eligibility workflow was not found or could not be accessed. Finding resolution is complete."]}
         assert out.splitlines()[1:] == status.get(outcome, [ELIGIBILITY_REQUESTED])
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
 def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, monkeypatch, cut):
-    node = finding_pr
     reply = "Fixed the loop bound."
     accepted = {"reply": 0, "resolution": 0}
     original_gh, original_json = github._gh, github._gh_json
@@ -4413,11 +4408,9 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
             finding_pr["comments"]["pageInfo"] = {"hasNextPage": True, "endCursor": "ROOT"}
             return threads_json(dict(finding_pr, isResolved=True), duplicate)
         if "reviewThreads(" in query:
-            node["isResolved"] = bool(accepted["resolution"])
-            node["comments"]["pageInfo"] = {
-                "hasNextPage": bool(accepted["reply"]), "endCursor": "ROOT",
-            }
-            return threads_json(node)
+            finding_pr["isResolved"] = bool(accepted["resolution"])
+            finding_pr["comments"]["pageInfo"] = {"hasNextPage": bool(accepted["reply"]), "endCursor": "ROOT"}
+            return threads_json(finding_pr)
         if "comments(first: 100" in query:
             assert kwargs.get("token") == ""
             root = "after=ROOT" in args
@@ -5298,7 +5291,7 @@ def test_queue_wait_budget_boundaries(monkeypatch):
     assert cli._queue_wait(1, poll, bounded=True) == "e" * 40  # a landing verified in time survives scope exit
     monkeypatch.setattr(github, "merge", lambda *_: setattr(clock, "now", 50))
     monkeypatch.setattr(cli, "_wait_for_merge", lambda _config, _pr, timeout: budgets.append(timeout))
-    cli._merge_and_follow(SimpleNamespace(repo=REPO, merge_strategy="queue"), pr, 60, 60)
+    cli._merge_and_follow(SimpleNamespace(repo=REPO, merge_strategy="queue", base_branch="main"), pr, 60, 60)
     assert budgets == [10]  # the follow budget is what the merge write left
     closed = [github.ClosedUnmerged(("gh",), "closed")]
     monkeypatch.setattr(github, "merged_sha", lambda *_args, **_kwargs: "e" * 40)
