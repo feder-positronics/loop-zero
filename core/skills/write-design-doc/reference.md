@@ -4,11 +4,10 @@ Apply at the depth appropriate to the artifact and next action.
 
 ## Grounding
 
-Read the request, complete existing artifact, linked issue or task, upstream decisions,
-repository guidance and code needed to verify current claims and capabilities.
-Separate facts from assumptions. Keep requester decisions settled unless evidence
-invalidates their premise. Keep assumptions vetoable and deferred decisions open.
-Follow [the delivery contract](../../CONTRACT.md) in the task worktree.
+In the task worktree, read the request, full artifact, linked issue/task,
+upstream decisions, repo guidance and code that verifies current capabilities.
+Keep requester decisions settled unless evidence defeats their premise. Mark
+assumptions as vetoable and keep deferred decisions open.
 
 ## Artifact Choice
 
@@ -20,18 +19,16 @@ Follow [the delivery contract](../../CONTRACT.md) in the task worktree.
 | Specify bounded implementation | Blueprint |
 | Explain an existing procedure | Guide |
 
-Use repository conventions for paths, templates, frontmatter, terms and labels.
-Without a convention, choose and explain a descriptive Markdown path in the docs
-tree and avoid a new hierarchy for one document. Replace copies with links to the
-section that carries the same rule for the same actor.
+Follow repo path, template, frontmatter, term and label conventions. Otherwise
+explain a descriptive Markdown path in the docs tree. Avoid a new hierarchy for
+one file. Link to the owning rule for the same actor instead of copying it.
 
 ## Design Contract
 
 Cover the material:
 
 - Plain-language owner opening and shape-matched visuals per
-  [Reporting](../../CONTRACT.md#reporting) (using
-  [design-mockup](../design-mockup/SKILL.md) for material UI shape).
+  [Reporting](../../CONTRACT.md#reporting).
 - Trigger, actors/jobs, outcome, non-goals, success evidence.
 - Verified current state, state/data boundaries, consumers, integration,
   failures, and blast radius.
