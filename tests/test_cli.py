@@ -4121,13 +4121,12 @@ def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head
         git(wt, "commit", "--allow-empty", "-m", "local after close")
         gh.respond(f"api repos/{REPO}/commits/{head_of(wt)}/pulls?per_page=100&page=1", [])
     code, out, err = run(capsys, "merge", "--wait=0")
-    assert code == (1 if case == "unpushed" else 0), (out, err)
+    assert (code, out) == (1, "")
     assert wt.exists() is (case != "owned")
     assert git(repo, "branch", "--list", branch)
     assert git(origin, "rev-parse", branch).strip() == head
-    if case != "owned":
-        assert {"external": "ownership is unverified", "dirty": "worktree is dirty",
-                "unpushed": "push or pull first"}[case] in err
+    assert {"owned": "kept both branch refs", "external": "ownership is unverified",
+            "dirty": "worktree is dirty", "unpushed": "push or pull first"}[case] in err
     assert all(call["argv"][:2] != ["api", "-X"] for call in gh.calls)
 
 

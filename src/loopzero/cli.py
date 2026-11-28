@@ -1279,6 +1279,7 @@ def _cleanup(wt: Path, pr: github.PR, *, closed: bool = False) -> None:
         worktree.require_started(wt, root)
         if closed:
             worktree.cleanup(wt, pr.head_sha, keep_branch=True)
+            print(f"removed worktree {wt}; kept both branch refs", file=sys.stderr)
         else:
             worktree.cleanup(wt, pr.head_sha)
     except PrimaryCheckout as exc:
@@ -1859,6 +1860,10 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
     except github.ReadDeadline:
         print("timed out while checking merge readiness")
         return 3
+    if pr.state == "CLOSED":
+        print(f"PR #{pr.number} closed without merging", file=sys.stderr)
+        _cleanup(wt, pr, closed=True)
+        return 1
     if readiness is not None and args.wait is not None and _pending_checks(readiness):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
                                      args=args, allow_merged=True, initial=readiness,
@@ -1866,10 +1871,6 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
         if waited is None:
             return 3
         pr, readiness, _ = waited
-    if pr.state == "CLOSED":
-        print(f"PR #{pr.number} closed; cleaning up the worktree and keeping branch refs")
-        _cleanup(wt, pr, closed=True)
-        return 0
     if readiness is None:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha is None:

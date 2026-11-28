@@ -45,7 +45,8 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    applies to worktrees recorded by `start`. Follow any cleanup warning.
    After closing a PR without merging, run `loopzero merge` from its task
    worktree via the same subshell. It verifies the closed PR and removes the
-   clean managed worktree at the exact PR head, keeping both branches.
+   clean managed worktree at the exact PR head, keeping both branches. The
+   command exits 1 because the PR did not merge.
    Without `--wait`, a queue request or entry can exit 0 before landing. With
    `--wait`, source checks, mergeability and landing share one budget.
    `merge --wait=0` can enqueue. A Mergify departure without a merge exits 1
