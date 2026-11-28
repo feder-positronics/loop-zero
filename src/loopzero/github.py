@@ -767,7 +767,7 @@ def _closed_history_number(repo: str, branch: str, endpoint: str, row: dict,
     return number
 
 
-def merged_pr_for_branch(repo: str, branch: str) -> PR | None:
+def merged_pr_for_branch(repo: str, branch: str, *, base: str | None = None) -> PR | None:
     """Prove completion, or read the complete closed history before publication."""
     head = quote(f"{repo.split('/', 1)[0]}:{branch}", safe="")
     commit_endpoint, matches = _commit_branch_prs(repo, branch)
@@ -786,7 +786,9 @@ def merged_pr_for_branch(repo: str, branch: str) -> PR | None:
             number = _closed_history_number(repo, branch, endpoint, row, seen)
             seen.add(number)
             if row["merged_at"] is not None:
-                return _confirm_branch_pr(repo, branch, endpoint, number, "MERGED")
+                pr = _confirm_branch_pr(repo, branch, endpoint, number, "MERGED")
+                if base is None or pr.base_ref == base:
+                    return pr
         if page == 0:
             # A prior merge may belong to a different commit of this branch.
             seen.clear()
