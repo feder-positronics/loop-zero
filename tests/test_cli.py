@@ -3492,7 +3492,7 @@ def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatc
     assert run(capsys, "ready", "--wait=60")[0] == exit_code and clock.fetch_timeout == 60 - clock.sleeps[0]
 
 
-@pytest.mark.parametrize("prior_hash", [None, "a5b223bb4bbb56165079349faf1232ec5863a473560bcebe461c9eedba9cbb6d"])
+@pytest.mark.parametrize("prior_hash", [None, "55d37760fc170d550b75a2d25d8e1c5bee0e519724b2c1b19aeda5a2713bbb47"])
 def test_ready_accepts_receipt_after_forwarding_worker_cpu_grant(wt, capsys, monkeypatch, check_environment, prior_hash):
     path, _, args = check_environment
     monkeypatch.delenv("ZZ_LZ_UNUSED", raising=False)

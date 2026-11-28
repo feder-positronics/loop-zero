@@ -18,7 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 from select import select
 from threading import Event, current_thread
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 from urllib.parse import quote
 
 import pytest
@@ -75,10 +75,10 @@ def make_config(**overrides) -> Config:
 
 
 @pytest.mark.parametrize("inputs,expected", [
-    ({}, "93d09d9b25849bd98e9f24f82ca2aa26dee49b6f683c07fd2797a4998401f6df"),
-    ({"echo hello": (".",)}, "7c7a6b12ef710f9ef79c882d268e1e8879f97e85a7319771cb3800e2eb17e60c")])
+    ({}, "f7713e56ba051aaa822cf97799a51ec7c61f21488dd60f7a42b242a362589594"),
+    ({"echo hello": (".",)}, "41de782373c01d9e87e55f2f37df3b246124c556097ac06d02556165ce000c66")])
 def test_settings_fingerprint_is_stable_across_releases(inputs, expected):
-    # A changed digest makes ready refuse every receipt written by the previous release.
+    # This version deliberately rejects receipts created before stage redaction.
     config = make_config(env_allowlist=Config.env_allowlist, inputs=inputs)
     assert sandbox.settings_fingerprint(config) == expected
 
@@ -145,7 +145,7 @@ def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, monkeypatch, com
     monkeypatch.setenv("SERVICE_KEY", f" {SERVICE_KEY}\n" if end == "[REDACTED]" else SERVICE_KEY)
     (result,) = sandbox.run_checks(make_config(checks=(command,), env_allowlist=("PATH", "SERVICE_KEY")), git_repo).results
     if end == "----------":
-        assert "[REDACTED]" in result.tail and all(piece in "[REDACTED]" for piece in result.tail.split("----------"))
+        assert "[REDACTED]" in result.tail and not set(result.tail) - set("[REDACTED]-")
     elif end == "[REDACTED]":
         assert result.tail == '"[REDACTED]" [REDACTED] [REDACTED]'
     lines = result.tail.splitlines()
@@ -260,7 +260,7 @@ def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch
 
 
 def inject_check_timeout(monkeypatch, output, before_timeout=None):
-    def read_output_tail(process, limit, timeout):
+    def read_output_tail(process, limit, timeout, _forms):
         if before_timeout is not None:
             before_timeout()
         raise subprocess.TimeoutExpired(process.args, timeout, output=output[-limit:])
@@ -290,8 +290,7 @@ sys.exit(7)
     finally:
         tracemalloc.stop()
     assert result.exit_code == 7
-    assert result.tail.endswith("\nlast stdout\nfinal Ω diagnostic")
-    assert len(result.tail.encode()) == 16 * 1024
+    assert result.tail == "last stdout\nfinal Ω diagnostic"
     assert peak - baseline < 4 * 1024 * 1024
 
 
@@ -412,6 +411,23 @@ def interrupt_after_checkpoint(repo, config, *, verify_first_exit=False):
 
     with pytest.raises(KeyboardInterrupt):
         sandbox.run_checks(config, repo, checkpoint=checkpoint)
+
+
+def test_checkpoint_drops_tails_from_pre_redaction_receipts(
+    git_repo, bwrap_log, fetched_base, cache_check, receipt_path, monkeypatch,
+):
+    first, second = "echo first", "echo second"
+    config = make_config(checks=(first, second), inputs={"*": (".",)})
+    settings = sandbox._execution_settings
+    with monkeypatch.context() as legacy:
+        legacy.setattr(sandbox, "_execution_settings", lambda *args: settings(*args) | {"check_runner": []})
+        report = cache_check(config, clean=True)
+        assert all(stage.input_key for stage in report.results)
+        stage = replace(report.results[1], tail="unsafe-fragment-from-old-tail")
+        _save_report(git_repo, replace(report, results=(report.results[0], stage)))
+
+    interrupt_after_checkpoint(git_repo, config, verify_first_exit=True)
+    assert "unsafe-fragment-from-old-tail" not in receipt_path.read_text()
 
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
@@ -1088,3 +1104,59 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     assert report.results[0].exit_code == 7
     assert 'stage-ran' in report.results[0].tail
     assert not report.results[0].reused_from
+
+
+@pytest.mark.parametrize("timed_out", [False, True])
+@pytest.mark.parametrize(("output", "canary"), [
+    ('print("ghp_" + "q" * 40_000)', "q" * 10),
+    ('print("ghp_" + "q" * 180_000)', "q" * 10),
+    ('print("https://ghp_FAKE0123456789:example-password@host")', "example-password"),
+    ('print(os.environ["MULTILINE_SECRET"])', "private-second-line"),
+    ('print("-----BEGIN " + "A" * 180_000)', "A" * 10),
+    ('''
+print("-----BEGIN PRIVATE KEY-----")
+for _ in range(4_500):
+    print("synthetic-private-material")
+print("-----END PRIVATE KEY-----")
+''', "synthetic-private-material"),
+])
+def test_check_output_redaction_across_capture_boundaries(git_repo, bwrap_log, monkeypatch, timed_out, output, canary):
+    monkeypatch.setenv("MULTILINE_SECRET", "private-first-line\r\nprivate-second-line")
+    code = f"""
+import os
+import sys
+import time
+
+{output}
+print("ordinary diagnostic", flush=True)
+if sys.argv[1] == "True":
+    time.sleep(30)
+"""
+    command = shlex.join([sys.executable, "-c", code, str(timed_out)])
+    config = make_config(env_allowlist=("PATH", "MULTILINE_SECRET"))
+    result = sandbox._run_one(config, git_repo, ["bwrap", "--chdir", str(git_repo), "--"], command, 2)
+    assert result.exit_code == (sandbox.TIMEOUT_EXIT if timed_out else 0)
+    assert "ordinary diagnostic" in result.tail
+    assert ("timed out" in result.tail) == timed_out
+    assert canary not in result.tail
+
+
+@pytest.mark.parametrize(("label_end", "following", "expected"), [
+    (b"", b" PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----\nordinary diagnostic\n", "ordinary diagnostic"),
+    (b"PRIVATE KEY", b"-----\ns3", ""),
+])
+def test_capture_reassembles_key_opener_when_cut_splits_the_prefix(monkeypatch, label_end, following, expected):
+    proc = sandbox._proc
+    limit = sandbox.CHECK_TAIL_BYTES
+    first = b"-----BEGIN ".ljust(limit + 64 * 1024 + 1 - len(label_end), b"A") + label_end
+    chunks = iter((first[:65536], first[65536:], following, b""))
+    with monkeypatch.context() as patch:
+        patch.setattr(proc.os, "read", lambda *_args: next(chunks))
+        patch.setattr(proc.selectors, "DefaultSelector", MagicMock())
+        tail = proc._read_output_tail(Mock(stdout=Mock(encoding="utf-8")), limit, 10, ())
+    assert tail.strip() == expected
+
+
+@pytest.mark.parametrize(("skip", "expected"), [(0, "[REDACTED] end"), (1, " end")])
+def test_redact_overlapping_occurrences_of_one_forwarded_value(skip, expected):
+    assert sandbox._proc.redact("abcabcabc end", ("abcabc",), skip=skip) == expected
