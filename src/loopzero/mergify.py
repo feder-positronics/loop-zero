@@ -432,11 +432,11 @@ def queue_attempt(repo: str, number: int, head: str, queue: str) -> QueueAttempt
         author = _author(item)
         body = str(item.get("body") or "")
         lines, requeue = body.splitlines(), _queue_command(body, queue)
-        same_request = _marker(REQUEST, head, queue) in lines
+        markers = [line for line in lines if line.startswith(f"<!-- {REQUEST} ")]
+        same_request = _marker(REQUEST, head, queue) in markers or (not markers and requeue and (confirmed or item is retry))
         if author != login and not (item is retry or (requeue and same_request and _verified_writer(repo, author))):
             continue
-        marked = any(line.startswith(f"<!-- {REQUEST} ") for line in lines)
-        if same_request or (not marked and requeue and (confirmed or item is retry)):
+        if same_request:
             requested, requested_at = True, str(item.get("created_at") or "")
         confirmed = (author == login and _marker(CONFIRMED, head, queue) in lines) or (confirmed and not requeue)
     latest = max((item for item in comments if _author(item) == "mergify[bot]"), key=_updated_at, default={})

@@ -4956,12 +4956,12 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     )),
     *((True, kind, "wait") for kind in ("stacked", "isolated", "unknown", "conflict", "batch", "dequeued")),
     *((False, kind, "no_wait") for kind in ("rule", "rule_requeue", "rule_blocked")),
-    *((False, "requeue", permission) for permission in ("write", "read")),
+    *((False, "requeue", permission) for permission in ("write", "read", "write_report")),
     *((False, kind, "status") for kind in ("rule", "rule_stale")),
     (False, "rule_blocked", "unverified"),
 ])
 def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, confirmed, kind, mode):
-    blocked, foreign = kind == "rule_blocked", mode in {"write", "read"}
+    blocked, foreign = kind == "rule_blocked", mode in {"write", "read", "write_report"}
     head = arm_mergify_pr(wt, gh, "failure" if blocked else "success")
     admission = kind in MERGIFY_QUEUE_FIXTURE["admission"]
     request = MERGIFY_QUEUE_FIXTURE["request"].replace("@head@", head)
@@ -5000,13 +5000,16 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
                          "body": body})
     requeued = {"rule_requeue": "19:02", "requeue": "19:02", "rule_same": "19:01", "linked_already": "19:00:30"}
     if foreign:
-        gh.respond(f"api repos/{REPO}/collaborators/carol/permission", {"permission": mode})
+        gh.respond(f"api repos/{REPO}/collaborators/carol/permission", {"permission": mode.partition("_")[0]})
         comments.append({"id": 44, "user": {"login": LOGIN},
                          "body": f"<!-- loopzero:mergify-confirmed head={head} queue=main -->"})
     if kind in requeued:  # linked_already: a command Mergify answered "already queued" before the departure
         at = requeued[kind]
         comments.append({"id": 45, "user": {"login": "carol" if foreign else LOGIN}, "body": "@mergifyio queue",
                          "created_at": f"2026-11-25T{at}{':00' if at.count(':') == 1 else ''}Z"})
+    if mode == "write_report":
+        comments.append({"id": 46, "user": {"login": "mergify[bot]"}, "updated_at": "2026-11-25T19:03:00Z",
+                         "body": MERGIFY_QUEUE_FIXTURE["admission_report"]})
     endpoint = f"api repos/{REPO}/issues/7/comments"
     gh.respond(endpoint, comments)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
@@ -5026,13 +5029,13 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         gh.append(f"api repos/{REPO}/pulls/7", opened, landed_snapshot(head))
         gh.respond("api -X", "")
     if mode == "status" or foreign:
-        label = {"rule_stale": "not admitted"}.get(kind, "waiting for admission" if mode == "write" else "ejected")
+        label = {"rule_stale": "not admitted"}.get(kind, "waiting for admission" if mode.startswith("write") else "ejected")
         summary, _ = expect_cli(capsys, 0, "status", stdout_contains=(f"mergify:  {label} (main)",), stderr="")
         if mode == "status":
             assert ("Integration checks failed" in summary) is (kind == "rule")
             return
-        if mode == "read":
-            assert f"{URL}#issuecomment-43" in summary
+        if mode != "write":
+            assert f"{URL}#issuecomment-{43 if mode == 'read' else 46}" in summary
     if admission:
         summary, _ = expect_cli(capsys, 0, "status", stdout_contains=("waiting for admission",), stderr="")
         assert (f"{URL}#issuecomment-43" in summary) is (kind == "current")
