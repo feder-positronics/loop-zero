@@ -17,9 +17,9 @@ def issue(number, created, closed=None, reason=None):
 @pytest.fixture
 def sources(tmp_path, monkeypatch, request):
     commit_rows, commit_total = getattr(request, "param", (1, 1))
-    pulls = [(1, "2026-05-26T06:00:00Z", SINCE), (2, SINCE, END)]
     rows = {
-        "pulls": [dict(issue(n, created, closed), merged_at=closed) for n, created, closed in pulls],
+        "pulls": [dict(issue(n, created, closed), merged_at=closed)
+                  for n, created, closed in [(1, "2026-05-26T06:00:00Z", SINCE), (2, SINCE, END)]],
         "outcomes": [issue(n, "2026-05-24T00:00:00Z", SINCE, reason)
                      for n, reason in [(6, "completed"), (7, "not_planned")]],
         "orders": [issue(8, "2026-05-27T00:00:00Z", SINCE, "completed")],
@@ -46,20 +46,18 @@ def sources(tmp_path, monkeypatch, request):
             assert request["repo"] == REPO
             assert len(request["windows"]) == 5
             data = {
-                "custom_window": {"owner_messages": 0, "tokens_by_role": {"builder": 31},
-                                  "spend": 1.25},
+                "custom_window": {"owner_messages": 0, "tokens_by_role": {"builder": 31}, "spend": 1.25},
                 "owners": {"coordinator": False},
             }
         else:
             path, _, query = argv[4].removeprefix(f"repos/{REPO}/").partition("?")
             assert argv[:4] == ["gh", "api", "--method", "GET"]
             if path == "issues":
-                label = query.split("labels=")[1].split("&")[0]
-                if label == "orders" and "state=open" in query:
-                    label = "orders_open"
-                if label not in rows:
+                path = query.split("labels=")[1].split("&")[0]
+                if path == "orders" and "state=open" in query:
+                    path = "orders_open"
+                if path not in rows:
                     raise subprocess.CalledProcessError(1, argv)
-                path = label
             data = rows[path]
             if path == "pulls/3/commits":
                 offset = (int(query.rsplit("=", 1)[1]) - 1) * 100
@@ -73,11 +71,9 @@ def sources(tmp_path, monkeypatch, request):
     outcomes += [("fail", 1, "2026-05-28T01:00:00Z"), ("cancelled", 143, "2026-05-28T02:00:00Z")]
     ledger.write_text("".join(json.dumps(dict(base, outcome=outcome, exit_code=code, end_utc=end)) + "\n"
                               for outcome, code, end in outcomes))
-    return calls, [
-        "--repo", REPO, "--since", SINCE, "--until", END,
-        "--label-outcome", "outcomes", "--label-order", "orders", "--label-p0", "p0",
-        "--frozen-inputs", str(tmp_path), "--check-receipts", str(ledger),
-    ]
+    return calls, ["--repo", REPO, "--since", SINCE, "--until", END,
+                   "--label-outcome", "outcomes", "--label-order", "orders", "--label-p0", "p0",
+                   "--frozen-inputs", str(tmp_path), "--check-receipts", str(ledger)]
 
 
 @pytest.fixture
@@ -101,17 +97,10 @@ def test_record_replay_and_weekly_window(sources, record):
     calls, _ = sources
     report, stderr = record(host=True)
     assert sum(call == ["host-adapter"] for call in calls) == 1 and len(calls) == 6
-    row = report["custom_window"]
-    assert row["merges"] == 1
-    assert row["open_to_merge_median_hours"] == 42
-    assert row["outcomes_closed"] == 1
-    assert row["orders_accepted"] == 1
-    assert row["order_to_acceptance_median_hours"] == 24
-    assert (row["checks_passed"], row["checks_failed"]) == (1, 1)
-    assert (row["open_p0"], row["oldest_open_p0_hours"]) == (2, 132)
-    assert row["owner_messages"] == 0
-    assert row["tokens_by_role"] == {"builder": 31}
-    assert row["spend"] == 1.25
+    expected = dict(merges=1, open_to_merge_median_hours=42, outcomes_closed=1, orders_accepted=1,
+                    order_to_acceptance_median_hours=24, checks_passed=1, checks_failed=1,
+                    open_p0=2, oldest_open_p0_hours=132, owner_messages=0, tokens_by_role={"builder": 31}, spend=1.25)
+    assert {key: report["custom_window"][key] for key in expected} == expected
     assert len(report["trend_4_weeks"]) == 4
     assert report["trend_4_weeks"][0]["since"] == "2026-05-01T00:00:00Z"
     assert report["previous_7_days"]["until"] == report["last_7_days"]["since"]
@@ -127,16 +116,8 @@ def test_record_replay_and_weekly_window(sources, record):
 def test_weekly_sample_reserves_controls_and_deduplicates_stalled_order():
     start, end = map(retro_metrics.timestamp, (SINCE, END))
     pulls = [{"number": number, "merged_at": SINCE} for number in range(10, 15)]
-    orders = [
-        issue(1, "2026-05-21T00:00:00Z"),
-        issue(2, "2026-05-22T00:00:00Z"),
-        issue(3, "2026-05-23T00:00:00Z"),
-        issue(4, "2026-05-24T00:00:00Z"),
-        issue(5, "2026-05-25T00:00:00Z"),
-        issue(6, "2026-05-26T00:00:00Z", SINCE, "completed"),
-        issue(7, "2026-05-25T00:00:00Z", SINCE, "completed"),
-        issue(8, "2026-05-24T00:00:00Z", SINCE, "completed"),
-    ]
+    orders = [issue(number, f"2026-05-{20 + number}T00:00:00Z") for number in range(1, 6)]
+    orders += [issue(number, f"2026-05-{32 - number}T00:00:00Z", SINCE, "completed") for number in range(6, 9)]
     alerts = [{"kind": "stalled_p0", "issue": 1, "hours": 48}]
     sample = retro_metrics.weekly_sample(REPO, start, end, pulls, orders, orders, alerts)
     assert sample == retro_metrics.weekly_sample(
