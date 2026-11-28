@@ -118,12 +118,16 @@ def test_report_head_and_results(git_repo, bwrap_log):
     assert report.ok is False
 
 
-def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
+@pytest.mark.parametrize("dirty", [False, True])
+def test_report_fails_when_worktree_changes_during_run(git_repo, bwrap_log, dirty):
     before = git(git_repo, "rev-parse", "HEAD").strip()
     command = "git -c user.name=test -c user.email=test@example.com commit --allow-empty -m drift"
+    if dirty:
+        (git_repo / "README.md").write_text("dirty\n")
+        command = "echo changed > README.md"
     report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
     after = git(git_repo, "rev-parse", "HEAD").strip()
-    assert after != before
+    assert (after == before) is dirty
     assert report.head == before and report.dirty is True and report.ok is False
     drift = report.results[-1]
     assert (drift.command, drift.exit_code) == ("<worktree changed during run>", 1)
