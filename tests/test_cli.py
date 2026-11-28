@@ -94,6 +94,7 @@ def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
     commit_file(checkout, "workflow.toml", WORKFLOW, "config")
     origin = seed / "origin.git"
     git(checkout, "init", "-q", "--bare", "-b", "main", str(origin))
+    git(origin, "config", "receive.autogc", "false")
     git(checkout, "remote", "add", "origin", str(origin))
     git(checkout, "push", "-q", "origin", "main")
     git(checkout, "remote", "set-head", "origin", "main")

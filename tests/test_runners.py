@@ -1281,6 +1281,7 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
         def terminate_review(process, home, pid):
             process.terminate()
             # Wake communicate if SIGTERM reached Python just before its blocking poll.
+            # This test covers cleanup after handler delivery.
             with suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGUSR1)
             assert process.wait(timeout=30) == -signal.SIGTERM

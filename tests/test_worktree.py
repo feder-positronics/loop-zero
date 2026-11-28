@@ -24,6 +24,7 @@ from tests.test_setup import SETUP, setup_commands
 def origin_seed(git_repo_seed, tmp_path_factory):
     origin = tmp_path_factory.mktemp("worktree-origin") / "origin.git"
     git(git_repo_seed, "clone", "-q", "--bare", str(git_repo_seed), str(origin))
+    git(origin, "config", "receive.autogc", "false")
     return origin
 
 
