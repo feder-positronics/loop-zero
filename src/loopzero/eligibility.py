@@ -268,9 +268,9 @@ def restore_landed(repo: str, head: str, pending_id: int | None = None) -> int:
     progress = {("pending", "Refreshing live source review evidence"), ("pending", "Refreshing source review evidence")}
     rows = github.context_statuses(repo, head, CONTEXT)
     if ((top := next(rows, {})) and (pending_id is None or top.get("id") == pending_id)
-            and (top["state"], top.get("description")) in progress and (prior := next(
-                (r for r in rows if (r["state"], r.get("description")) not in progress), None))):
-        publish_verdict(repo, head, prior["state"], prior["description"])
+            and (top["state"], top.get("description")) in progress):
+        prior = next((r for r in rows if (r["state"], r.get("description")) not in progress), {})
+        publish_verdict(repo, head, prior.get("state", "failure"), prior.get("description", "Source merged without a prior verdict"))
     return 0
 
 
@@ -299,8 +299,11 @@ def main(argv: list[str] | None = None) -> int:
             raise LoopZeroError("configure delivery.review_publishers in the trusted workflow.toml")
         if args.pr <= 0 or not is_sha(args.head):
             raise LoopZeroError("specify the PR number and the full 40-character source SHA")
+        current = github.pr_view(cfg.repo, args.pr) if args.publish else None
+        if current and current.state == "MERGED" and current.head_sha == args.head:
+            return restore_landed(cfg.repo, args.head)
         pending = (github.commit_status(cfg.repo, args.head, CONTEXT, "pending", "Refreshing source review evidence")
-                   if args.publish and github.pr_view(cfg.repo, args.pr).state != "MERGED" else None)
+                   if current and current.state != "MERGED" else None)
         snapshot = source_snapshot(cfg.repo, args.pr, args.head) if pending is not None else None
         result = evaluate(cfg.repo, args.pr, args.head, cfg.base_branch, cfg.review_publishers, snapshot=snapshot)
         if snapshot is not None and pending is not None:

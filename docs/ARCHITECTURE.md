@@ -375,7 +375,10 @@ stop at once, and success requires one complete attestation. Policy evidence is
 not atomic across reads. Source PRs skip these attestation retries but keep
 their mergeability polling; a source that lands mid-refresh gets its preceding
 evaluated verdict back, only while this run's own pending status (by id) is still
-newest, outside the failure handler; a late refresh cannot leave it pending or red.
+newest, outside the failure handler. A publish retry for the same merged source
+head also restores the preceding verdict if a refresh marker is still newest.
+When no preceding verdict exists, a failure status records that the source
+merged without one.
 After GitHub acknowledges a pending status, SIGTERM during evaluation triggers a
 bounded failure write for that SHA. Once the final write starts, publication
 recovery owns its verdict.
@@ -491,7 +494,8 @@ the status of its rightmost failed member, or zero when all members succeed.
 The local shell is part of the receipt and stage reuse fingerprints.
 
 The coordinator resolves stages, aggregates them in order, stops on failure and
-verifies that HEAD and the clean/dirty state match their starting values. Only the coordinator
+verifies that HEAD, the clean/dirty state, and the staged and unstaged diffs for
+an initially dirty worktree match their starting values. Only the coordinator
 writes the authoritative `checks.json` receipt. Checks lock the task state directory
 through execution and receipt publication. A waiter can reuse a newly published
 passing receipt when it acquires the lock within 60 seconds and HEAD, settings
