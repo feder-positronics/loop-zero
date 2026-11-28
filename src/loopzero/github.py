@@ -217,11 +217,9 @@ def redact_credentials(value: str) -> str:
 
 def _redact_tokens(value: str, token: str = "") -> str:
     value = redact(value, secret_forms((token, os.environ.get("GH_TOKEN", ""), os.environ.get("GITHUB_TOKEN", ""))), *SECRET_PATTERNS)
-    value = re.sub(r"(?i)\b(authorization)\s*[:=]\s*"
-                   r"(?:(?:basic|bearer|token)\s+)?[^\s,;]+", r"\1=[REDACTED]", value)
+    value = re.sub(r"(?i)\b(authorization)\s*[:=]\s*(?:(?:basic|bearer|token)\s+)?[^\s,;]+", r"\1=[REDACTED]", value)
     value = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", value)
-    value = re.sub(r"(?i)\b(access_token|auth_token|token)\s*[:=]\s*"
-                   r"[^\s,;]+", r"\1=[REDACTED]", value)
+    value = re.sub(r"(?i)\b(access_token|auth_token|token)\s*[:=]\s*[^\s,;]+", r"\1=[REDACTED]", value)
     value = re.sub(r"(?i)(https?://[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
     return re.sub(r"(?<!\S)(/[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
 

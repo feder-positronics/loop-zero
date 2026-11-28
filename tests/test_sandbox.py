@@ -18,7 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 from select import select
 from threading import Event, current_thread
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 from urllib.parse import quote
 
 import pytest
@@ -1139,3 +1139,21 @@ if sys.argv[1] == "True":
     assert "ordinary diagnostic" in result.tail
     assert ("timed out" in result.tail) == timed_out
     assert canary not in result.tail
+
+
+def test_capture_reassembles_key_opener_when_cut_splits_the_prefix(monkeypatch):
+    proc = sandbox._proc
+    limit = sandbox.CHECK_TAIL_BYTES
+    first = b"-----BEGIN ".ljust(limit + 64 * 1024 + 1, b"A")
+    chunks = iter((first[:65536], first[65536:],
+                   b" PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----\nordinary diagnostic\n", b""))
+    with monkeypatch.context() as patch:
+        patch.setattr(proc.os, "read", lambda *_args: next(chunks))
+        patch.setattr(proc.selectors, "DefaultSelector", MagicMock())
+        tail = proc._read_output_tail(Mock(stdout=Mock(encoding="utf-8")), limit, 10, ())
+    assert tail.strip() == "ordinary diagnostic"
+
+
+@pytest.mark.parametrize(("skip", "expected"), [(0, "[REDACTED] end"), (1, " end")])
+def test_redact_overlapping_occurrences_of_one_forwarded_value(skip, expected):
+    assert sandbox._proc.redact("abcabcabc end", ("abcabc",), skip=skip) == expected

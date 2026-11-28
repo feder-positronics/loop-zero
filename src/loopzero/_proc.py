@@ -101,9 +101,10 @@ def tail(text: str, lines: int = TAIL_LINES) -> str:
     return "\n".join(text.rstrip("\n").splitlines()[-lines:])
 
 
-_KEY_START = r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+_KEY_LEADER = "-----BEGIN "
+_KEY_START = rf"{_KEY_LEADER}[A-Z ]*PRIVATE KEY-----"
 _KEY_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
-_KEY_BOUNDARY = re.compile(rf"({_KEY_START})|({_KEY_END.pattern})|-----BEGIN [A-Z ]*+-{{0,4}}\Z")
+_KEY_BOUNDARY = re.compile(rf"({_KEY_START})|({_KEY_END.pattern})|{_KEY_LEADER}[A-Z ]*+-{{0,4}}\Z")
 SECRET_PATTERNS = (
     r"\b(?:github_pat_[A-Za-z0-9_]+\b|gh[pousr]_[A-Za-z0-9_]{10,}\b|sk-[A-Za-z0-9_-]{8,})",
     r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", r"\brt_[A-Za-z0-9_.-]{20,}", r"\bAKIA[0-9A-Z]{16}\b",
@@ -121,9 +122,10 @@ def secret_forms(values: Iterable[str]) -> list[str]:
 
 
 def redact(text: str, forms: Sequence[str], *patterns: str, skip: int = 0) -> str:
-    spans = sorted(match.span() for pattern in (*map(re.escape, forms), *patterns) for match in re.finditer(pattern, text))
+    spans = [(m.start(), m.start() + len(form)) for form in forms for m in re.finditer(rf"(?={re.escape(form)})", text)]
+    spans.extend(m.span() for pattern in patterns for m in re.finditer(pattern, text))
     parts = []
-    for start, end in spans:
+    for start, end in sorted(spans):
         if start >= skip:
             parts.extend((text[skip:start], "[REDACTED]"))
         skip = max(skip, end)
@@ -143,8 +145,7 @@ def _redact_capture(text: str, forms: Sequence[str], lead: int, clipped: bool, k
     return redact(text, forms, *SECRET_PATTERNS, skip=skip)
 
 
-def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float,
-                      forms: Sequence[str] | None = None) -> str:
+def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float, forms: Sequence[str] | None = None) -> str:
     stream = proc.stdout
     assert stream is not None
     decode = io.IncrementalNewlineDecoder(
@@ -162,13 +163,15 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float,
         content = chunk.rstrip("\n")
         if content:
             text = suffix + "\n" * newlines + content
-            if forms is not None and (cut := len(text) - window) > 0:
+            cut = max(0, len(text) - window)
+            if forms is not None and cut:
                 clipped = True
-                leader = "-----BEGIN " if key_open is None else ""
+                leader = _KEY_LEADER if key_open is None else ""
                 key_open = bool(key_open)
                 for marker in (m for m in _KEY_BOUNDARY.finditer(leader + text) if m.start() < cut + len(leader)):
                     key_open = True if marker[1] else False if marker[2] else key_open or None
-            suffix = text[-window:]
+                    cut = max(cut, marker.start() + len(_KEY_LEADER) - len(leader)) if key_open is None else cut
+            suffix = text[cut:]
             newlines = 0
         newlines = min(window, newlines + len(chunk) - len(content))
 
@@ -208,10 +211,10 @@ def run(
     preserve_newlines: bool = False, tail_chars: int | None = None, graceful_interrupt: bool = False,
     pass_fds: tuple[int, ...] = (), tail_secrets: Sequence[str] | None = None,
 ) -> Completed:
-    """Run directly with a filtered environment and report nonzero exits in Completed.
+    """Run directly with a filtered environment and capture the exit code.
 
-    Preserve raw newlines and undecodable stdout with `preserve_newlines`.
-    A bounded merged tail strips trailing newlines on completion and retains them on timeout.
+    Preserve raw newlines and undecodable stdout with `preserve_newlines`. A
+    bounded merged tail retains trailing newlines only on timeout.
     """
     if tail_chars is not None and (not merge_output or preserve_newlines or input is not None or tail_chars <= 0):
         raise ValueError("bounded tails require merged text output, no input and a positive length")

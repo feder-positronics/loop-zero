@@ -419,13 +419,12 @@ def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tupl
         if (not path.is_absolute() and "/" in script and ".." not in path.parts
                 and not any((worktree / path).resolve().is_relative_to(Path(root)) for root in config.writable)
                 and not (worktree / path).is_file()):
-            message = (
+            tail = _check_tail(
                 f"Check preflight: repo-local file {script!r} is absent from this task tree. "
                 "If trusted-base checks advanced, integrate the current configured base "
                 "into this task branch (resolve conflicts), then rerun loopzero check; "
-                "otherwise restore the required file."
-            )
-            return CheckResult(command, 1, 0.0, _check_tail(message)), ()
+                "otherwise restore the required file.")
+            return CheckResult(command, 1, 0.0, tail), ()
         match = re.fullmatch(r"uv run((?: --group [A-Za-z0-9_-]+)*) [A-Za-z0-9_./][A-Za-z0-9_./-]*(?: [A-Za-z0-9_./=-]+)*", command)
         if match:
             groups = [*(groups or []), *match[1].split()[1::2]]
