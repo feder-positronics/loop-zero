@@ -2177,6 +2177,7 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
         (wt / ".gitmodules").write_text('[submodule "dep"]\npath = dep\nurl = ../dep\nignore = all\n')
         git(wt, "add", ".gitmodules")
         git(wt, "update-index", "--add", "--cacheinfo", f"160000,{reviewed},dep")
+        (wt / "dep").mkdir()
         commit_file(wt, "topic.py", "topic = 2\n", "topic repair")
         base = git(repo, "rev-parse", "main" if case == "verified" else "main^").strip()
     blocker = case in {"second parent", "empty with blocker"}
