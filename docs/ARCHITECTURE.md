@@ -48,6 +48,9 @@ not a tamper-proof security boundary: repository writers can edit PR evidence,
 and branch protection remains essential.
 
 Local `.loopzero/task.md` is working handoff context, rendered into the PR.
+The PR body carries hidden task text fingerprints for narrative sync. Using
+the same body for the text and fingerprints keeps the comparison baseline
+with the published update. The delivery contract defines the sync rule.
 The CLI also writes a head-bound checks receipt and saved review output in
 `.loopzero/` for local readiness and reposting. The CLI rejects tracked state
 and symlinks and uses the worktree's state directory descriptor for receipt I/O.

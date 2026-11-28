@@ -535,40 +535,59 @@ def _seed_task_evidence(task: str, body: str) -> str:
 
 
 def _sync_task_narrative(task: str, existing: str) -> str:
-    """Explicit pr updates task-owned prose; live evidence stays authoritative."""
+    """Merge each narrative part against its last shared text."""
     pattern = re.compile(rf"{_SECTION_START}([^\n]*)(?:\n|\Z).*?{_SECTION_END}", re.MULTILINE | re.DOTALL)
-    existing = existing.replace("\r\n", "\n")
-    task_prose = _outside_fences(task)
-    owned = {m[1].rstrip(" \t"): task[m.start():m.end()] for m in pattern.finditer(task_prose)
-             if m[1].rstrip(" \t") not in {"Validation", "Review"}}
-    prefix = task[:first.start()] if (first := pattern.search(task_prose)) else task
-    live_prose = _outside_fences(existing)
-    prior = re.search(r"^<!-- loopzero:task-sections ([0-9a-f ]+) -->$", live_prose, re.MULTILINE)
-    if existing:
-        live_end = first.start() if (first := pattern.search(live_prose)) else len(existing)
-        prefix = existing[:live_end]
-        if prior and prior.end() <= live_end:
-            prefix = prefix[:prior.start()] + prefix[prior.end():]
 
-    def section_id(name: str) -> str:
-        return hashlib.sha256(name.encode()).hexdigest()[:16]
+    def parts(body: str) -> dict[tuple[str | None, int], str]:
+        prose = _outside_fences(body)
+        prefix = body[:first.start()] if (first := pattern.search(prose)) else body
+        result: dict[tuple[str | None, int], str] = {(None, 0): prefix.rstrip()}
+        counts: dict[str, int] = {}
+        for match in pattern.finditer(prose):
+            name = match[1].rstrip(" \t")
+            index = counts.get(name, 0)
+            result[name, index] = body[match.start():match.end()].rstrip()
+            counts[name] = index + 1
+        return result
 
-    if owned:
-        prefix = prefix.rstrip() + "\n\n<!-- loopzero:task-sections " + " ".join(map(section_id, owned)) + " -->\n\n"
+    def digest(value: str) -> str:
+        return hashlib.sha256(value.encode()).hexdigest()[:16]
 
-    def replace(match: re.Match[str]) -> str:
-        section = existing[match.start():match.end()]
-        name = match[1].rstrip(" \t")
-        if name not in owned and prior and section_id(name) in prior[1].split():
-            return ""
-        replacement = owned.pop(name, section)
-        trailing = section[len(section.rstrip()):]
-        return replacement.rstrip() + trailing
+    local = parts(task)
+    live = parts(existing.replace("\r\n", "\n"))
+    prefix = live[None, 0]
+    marker = r"^<!-- loopzero:task-(?:sections [0-9a-f ]+|sync ((?:[0-9a-f]{16}:[0-9a-f]{16} )*))-->$"
+    prior = re.search(marker, _outside_fences(prefix), re.MULTILINE)
+    baseline = {}
+    has_baseline = bool(prior and prior[1] is not None)
+    if prior:
+        live[None, 0] = (prefix[:prior.start()] + prefix[prior.end():]).rstrip()
+        baseline = dict(pair.split(":") for pair in (prior[1] or "").split())
 
-    content = "".join(map(replace, pattern.finditer(live_prose)))
-    for section in owned.values():
-        content = content.rstrip() + "\n\n" + section
-    return prefix + content.lstrip("\n")
+    content = []
+    fingerprints = {}
+    empty = digest("")
+    for part in dict.fromkeys([*live, *local]):
+        name, _ = part
+        current, proposed = live.get(part, ""), local.get(part, "")
+        if name in {"Validation", "Review"}:
+            content.append(current)
+            continue
+        key = digest(repr(part))
+        current_hash, proposed_hash = digest(current), digest(proposed)
+        # Older bodies lack content fingerprints. Preserve overlapping live text on adoption.
+        default = proposed_hash if not has_baseline and current else empty
+        previous = baseline.get(key, default)
+        if proposed_hash != previous and current_hash not in {previous, proposed_hash}:
+            raise CliError(f"PR description conflict in {name or 'the preamble'}: "
+                           "reconcile .loopzero/task.md with the GitHub PR body and rerun loopzero pr")
+        content.append(current if proposed_hash == previous else proposed)
+        if proposed:
+            fingerprints[key] = proposed_hash
+
+    metadata = "".join(f"{key}:{fingerprints[key]} " for key in sorted(fingerprints))
+    content.insert(1, f"<!-- loopzero:task-sync {metadata}-->")
+    return "\n\n".join(filter(None, content)) + "\n"
 
 
 def _require_pr_details(wt: Path, task: str) -> None:
