@@ -730,6 +730,13 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
     return 0 if report.ok else 1
 
 
+def _require_pr_head_and_base(
+    pr: github.PR | None, base: str, *, head: str | None = None,
+) -> None:
+    if pr is not None and (pr.base_ref != base or (head is not None and pr.head_sha != head)):
+        raise CliError(f"PR #{pr.number} is at {pr.head_sha[:12]} on {pr.base_ref}; rerun loopzero pr")
+
+
 def cmd_pr(args: argparse.Namespace) -> int:
     wt, config = _context(args)
     branch, head = worktree.branch(wt), worktree.head(wt)
@@ -746,12 +753,13 @@ def cmd_pr(args: argparse.Namespace) -> int:
         raise CliError(f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
                        "run `loopzero start <new-task-slug>` from the main checkout")
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
+    _require_pr_head_and_base(pr, config.base_branch)
     created = pr is None
     existing = _sync_task_narrative(task, pr.body if pr else "")
     _pr_body(wt, head, config, _seed_task_evidence(task, existing))  # refuse an unusable body before pushing
     force_lease = False
     git_branch = os.fsdecode(branch.encode("utf-8", "surrogateescape"))
-    push = ["push", "origin"]
+    push = ["push", "--no-follow-tags", "origin"]
     if pr is not None:
         if config_mod.run_git(wt, "cat-file", "-e", f"{pr.head_sha}^{{commit}}").exit_code != 0:
             raise CliError(f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first")
@@ -772,8 +780,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
         live = github.pr_view(config.repo, pr.number)
         if live.state != "OPEN":
             raise CliError(f"PR #{pr.number} closed during publication; reopen it before retrying loopzero pr")
-        if (live.head_sha, live.base_ref) != (head, config.base_branch):
-            raise CliError(f"PR #{pr.number} is at {live.head_sha[:12]} on {live.base_ref}; rerun loopzero pr")
+        _require_pr_head_and_base(live, config.base_branch, head=head)
         live_body = live.body.replace("\r\n", "\n")
         body = live_body if created else _sync_task_narrative(task, live_body)
         if (body := _pr_body(wt, head, config, _seed_task_evidence(task, body))) != live_body:

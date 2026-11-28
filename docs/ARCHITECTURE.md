@@ -132,9 +132,11 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    prove completion, the fallback scans closed PRs by source branch across up
    to 100 REST pages.
    Invalid or incomplete history blocks publication. An unfinished branch
-   creates or refreshes a draft PR. All effective origin push URLs must target
+   creates or refreshes a draft PR. An open PR must already target the configured
+   base before pushing. All effective origin push URLs must target
    the configured repository. A leased rewrite requires the PR head in the task branch's
-   local history. The push source is the captured commit. A new draft starts with task prose.
+   local history. The push sends the captured commit to the task branch and disables
+   automatic tag following. A new draft starts with task prose.
    The body patch, including saved evidence on a new draft, requires an open PR at the
    captured commit and configured target.
 4. `review` requires a matching check receipt before launching a native review
