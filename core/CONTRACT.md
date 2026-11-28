@@ -55,17 +55,23 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    `--wait`, source checks, mergeability and landing share one budget.
    `merge --wait=0` can enqueue. A Mergify departure without a merge exits 1
    and prints available [departure details](../docs/MERGIFY.md#failed-candidate-checks).
-   `loopzero merge --cancel` requests Mergify removal without `--wait`. Before
-   pushing to a requested or queued PR, withdraw it, confirm the removal on the PR,
-   then push, review the new head and admit it again; a CLI failure does not prove
-   the request was removed.
+   Keep requested or queued PRs stable. Let the waiter follow the candidate
+   through slow checks, base movement and speculative rebuilds. While delivery
+   is active, leave queue commands, head pushes (including `loopzero pr`),
+   hold labels and draft toggles alone. Leave Mergify's batch PR open;
+   closing it discards the whole batch's CI. Withdraw only to stop unsafe
+   delivery, honor an owner stop, repair a confirmed delivery blocker,
+   [change findings or review thread state](../SETUP.md#hosted-review-eligibility)
+   or [replace an exhausted PR](#review-budget).
+   `loopzero merge --cancel` requests removal asynchronously. Confirm removal
+   on the PR before editing. Before readmitting, refresh eligibility and get
+   fresh checks and eligible review for any changed head.
 
-On start/resume, use `loopzero status` in an existing worktree to read Git, GitHub
-and the receipt. Rerun the last `--wait` if pending. After ejection, read the
-reason and follow [Mergify recovery](../SETUP.md#requeue-after-cancellation-or-ejection). If cleanup removed the
-worktree, verify the merge in GitHub. Never yield (end the turn while
-something is pending) waiting for a notice that
-may already have fired. Notifications never replace the waiter.
+On start/resume, run `loopzero status` and resume a pending `--wait` before
+yielding. Notifications never replace the waiter. A timeout or CLI error does
+not confirm removal. After ejection,
+read the [Mergify recovery steps](../SETUP.md#requeue-after-cancellation-or-ejection).
+If cleanup removed the worktree, verify the merge in GitHub.
 Before yielding, record head, last exit code, awaited event and next command
 in one PR comment per PR owner (the session delivering the PR, or the
 coordinator once it adopts it). Post on first yield; update the existing comment ID
