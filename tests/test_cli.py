@@ -4319,6 +4319,31 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert f"ready:    {'yes' if attested else 'no'}" in out
 
 
+@pytest.mark.parametrize("current_head", [True, False])
+def test_status_reports_automatic_mergify_ejection(wt, gh, capsys, monkeypatch, current_head):
+    head = arm_mergify_pr(wt, gh)
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    source = head if current_head else "f" * 40
+    reason = "Integration checks failed"
+    payload = {"version": 1, "state": "dequeued", "queue_rule_name": "main",
+               "dequeue_reason": {"code": "CHECKS_FAILED", "label": reason}}
+    gh.respond(f"api repos/{REPO}/issues/7/comments", [{
+        "id": 42, "user": {"login": "mergify[bot]"},
+        "body": f"- ✅ **Entered the queue** via queue rule\n"
+                f"- 🚫 **Left the queue** after failing checks · `{source}`\n"
+                f"-*- Mergify Payload -*-\n{json.dumps(payload)}\n-*- Mergify Payload End -*-",
+    }])
+
+    out, _ = expect_cli(capsys, 0, "status", stderr="")
+    if current_head:
+        assert "mergify:  ejected (main)" in out
+        assert reason in out
+    else:
+        assert "mergify:  not admitted (main)" in out
+        assert reason not in out
+
+
 @pytest.mark.parametrize("outcome,evidence", [
     ("merged", "open open landed"), ("ejected", "open open open"), ("landed-on-ejection", "open open landed"),
     ("head-changed-early", "moved-open moved-landed"), ("head-changed-late", "open moved-landed"),
