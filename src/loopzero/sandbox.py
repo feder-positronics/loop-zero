@@ -95,7 +95,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         raise SandboxUnavailable(
             "bwrap binary missing: bwrap not found on PATH\nsudo apt install bubblewrap")
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+    dirty = bool(_git(config, worktree, "status", "--porcelain", "--untracked-files=all").strip())
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config)
     previous, resuming = (_previous(config, worktree, settings_sha256, head)
@@ -121,7 +121,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
         probe(config, worktree, prefix)
         _preflight_alternates(config, worktree, prefix, common_dir)
-        missing, preparations = _preflight(config, worktree)
+        missing, preparations = check_preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
         last_run = _scratch_reuse_boundary(config, worktree, commands, base, previous, resuming)
@@ -164,7 +164,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             if result.exit_code != 0:
                 break
     final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+    final_dirty = bool(_git(config, worktree, "status", "--porcelain", "--untracked-files=all").strip())
     if (final_head, final_dirty) != (head, dirty):
         results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
                     f"HEAD before: {head}; HEAD after: {final_head}; "
@@ -405,7 +405,7 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], com
             raise SandboxUnavailable(remedy)
 
 
-def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tuple[str, ...]]:
+def check_preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tuple[str, ...]]:
     # Recognize a deliberately small argv grammar, never interpret shell syntax.
     groups = None
     for command in config.checks:

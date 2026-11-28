@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import tomllib
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -90,20 +89,6 @@ def base_revision(worktree: Path, base_branch: str) -> str:
     raise ConfigError(f"git rev-parse origin/{base_branch} failed: {message}")
 
 
-def _has_replacement_refs(common_dir: Path) -> bool:
-    # A replacement can change what Git reads at a fixed object name.
-    try:
-        for entry in ("refs/replace", "reftable"):
-            with suppress(FileNotFoundError):
-                (common_dir / entry).lstat()
-                return True
-        with suppress(FileNotFoundError):
-            return b" refs/replace/" in (common_dir / "packed-refs").read_bytes()
-    except OSError:
-        return True
-    return False
-
-
 def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
                      refresh: bool, require_ci: bool, read_timeout: Callable[[float], float]) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
@@ -116,18 +101,18 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
             message = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@",
                              _proc.tail(fetched.stderr or fetched.stdout, 1) or f"git exited {fetched.exit_code}")
             raise ConfigError(f"could not refresh origin/{branch}: {message}. Verify network connectivity and access to origin/{branch}, then rerun the command. If the branch is missing, check repo.base or supply --config.")
-    directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
+    local_env = {"GIT_NO_REPLACE_OBJECTS": "1"}
     # Stage-boundary reads reuse the existing ref without fetching absent objects.
-    local_env = {"GIT_NO_LAZY_FETCH": "1"} if previous is not None and not refresh else None
-    resolved = _proc.run_git_paths(
-        ["git", "rev-parse", *directory_args, "--verify", f"{ref}^{{commit}}"],
+    if previous is not None and not refresh:
+        local_env["GIT_NO_LAZY_FETCH"] = "1"
+    resolved = _proc.run(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), extra_env=local_env,
     )
     if resolved.exit_code != 0:
         raise ConfigError(f"{source} has no remote-tracking base commit. Fetch origin/{branch}. {hint}")
-    common_dir, _, revision = resolved.stdout.rpartition("\n")
-    if (previous is not None and previous.base_branch == branch and previous.trusted_base_revision == revision
-            and common_dir and not _has_replacement_refs(Path(common_dir))):
+    revision = resolved.stdout.strip()
+    if previous is not None and previous.base_branch == branch and previous.trusted_base_revision == revision:
         return previous, revision
     shown = _proc.run(
         ["git", "show", f"{revision}:workflow.toml"],

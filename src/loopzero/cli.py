@@ -272,7 +272,7 @@ def _readiness(
     mergify_deadline: float | None = None, dates: tuple[str, ...] = (),
 ) -> github.Readiness:
     if problem := github.merge_hold(pr.number, pr.labels) or (
-        None if diagnostics else _check_report_problem(_load_report(wt), config, head)
+        None if diagnostics else _check_report_problem(wt, _load_report(wt), config, head)
     ):
         return github.Readiness(False, (problem,))
     # GitHub's Date header, not the host clock, ages the review.
@@ -326,7 +326,7 @@ def _readiness(
                 exhausted if reason == review_reason else reason for reason in result.reasons
             ))
     report = _load_report(wt)  # deliberate re-read: a check can land during the GitHub reads
-    receipt_problem = _check_report_problem(report, config, head)
+    receipt_problem = _check_report_problem(wt, report, config, head)
     if receipt_problem:
         return github.Readiness(False, (*result.reasons, receipt_problem), checks=result.checks)
     if announce_receipt:
@@ -364,41 +364,43 @@ def _waitable_eligibility_refresh(
 
 
 def _check_report_problem(
-    report: CheckReport | None, config: Config, head: str, *, require_pass: bool = True,
+    wt: Path, report: CheckReport | None, config: Config, head: str, *, require_pass: bool = True,
 ) -> str | None:
     if report is None:
         return "run loopzero check at this head"
     if report.head != head:
         return f"check receipt is for {report.head[:12]}. Run `loopzero check` at {head[:12]}."
     if report.dirty:
-        return ("check receipt was recorded in a dirty worktree. Run `git status --short`, "
-                "settle the changes, then run `loopzero check`.")
+        return "check receipt was recorded in a dirty worktree. Run `git status --short`, settle the changes, then run `loopzero check`."
     commands = tuple(result.command for result in report.results)
-    if commands != config.checks or (require_pass and not report.ok):
-        if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
-            return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
-        if require_pass and not report.ok:
-            return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
-                    "Retry unchanged only if the failure was transient.")
-        return ("check receipt's plan differs from the trusted workflow. "
-                "Run `loopzero check` with the current workflow.")
-    recovery = ("Rerun `loopzero check` in this worktree at this head with the same CLI version, environment "
-                "and `--config` (if supplied) as the blocked command, then retry it.")
-    if report.settings_sha256 is None:
-        return f"check receipt is missing its settings fingerprint. {recovery}"
-    if all(report.settings_sha256 != sandbox.settings_fingerprint(config, legacy_allowlist=names)
-           for names in (None, config.env_allowlist, tuple(n for n in config.env_allowlist if n != sandbox.CPU_GRANT_ENV))):
-        return f"check receipt has an incompatible settings fingerprint. {recovery}"
+    if not commands or commands[-1] == sandbox.INCOMPLETE_CHECK_COMMAND:
+        return "check receipt is incomplete. Run `loopzero check` to resume with the current workflow."
+    if require_pass and not report.ok:
+        return ("check receipt records a failed stage. Fix the failure, then run `loopzero check`. "
+                "Retry unchanged only if the failure was transient.")
+    expected = (config.checks,)
+    if not report.ok:
+        missing, preparations = sandbox.check_preflight(config, wt)
+        expected = ((missing.command,),) if missing else (config.checks[:len(commands)], preparations)
+    if commands not in expected:
+        return "check receipt's plan differs from the trusted workflow. Run `loopzero check` with the current workflow."
+    if report.settings_sha256 is None or all(
+        report.settings_sha256 != sandbox.settings_fingerprint(config, legacy_allowlist=names)
+        for names in (None, config.env_allowlist, tuple(n for n in config.env_allowlist if n != sandbox.CPU_GRANT_ENV))
+    ):
+        problem = "is missing its" if report.settings_sha256 is None else "has an incompatible"
+        return (f"check receipt {problem} settings fingerprint. Rerun `loopzero check` in this worktree at this head "
+                "with the same CLI version, environment and `--config` (if supplied) as the blocked command, then retry it.")
     return None
 
 
 def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
     report = _load_report(wt)
-    return None if _check_report_problem(report, config, head) else report
+    return None if _check_report_problem(wt, report, config, head) else report
 
 
 def _require_receipt(wt: Path, config: Config, head: str, *, suffix: str = "") -> None:
-    if problem := _check_report_problem(_load_report(wt), config, head):
+    if problem := _check_report_problem(wt, _load_report(wt), config, head):
         raise CliError(problem + suffix)
 
 
@@ -439,21 +441,19 @@ def _save_report(
 
 
 def _load_report(wt: Path) -> CheckReport | None:
-    path = wt / CHECKS_FILE
     try:
-        data = json.loads(worktree.read_local_state(wt, path.name))
+        data = json.loads(worktree.read_local_state(wt, CHECKS_FILE.name))
         results = tuple(CheckResult(**item) for item in data["results"])
         if any(not is_check_exit_code(result.exit_code) for result in results):
             raise TypeError("exit_code must be an integer")
-        dirty = data["dirty"]
-        if not isinstance(dirty, bool):
+        if not isinstance(dirty := data["dirty"], bool):
             raise TypeError("dirty must be a bool")
         return CheckReport(head=str(data["head"]), dirty=dirty, results=results,
                            settings_sha256=data.get("settings_sha256"))
     except FileNotFoundError:
         return None
     except (TypeError, KeyError, ValueError) as exc:
-        print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
+        print(f"warning: ignoring unreadable {wt / CHECKS_FILE}: {exc}", file=sys.stderr)
         return None
 
 
@@ -462,7 +462,7 @@ def _validation_section(wt: Path, head: str, config: Config) -> str:
     if loaded is None:
         return "(no `loopzero check` run recorded)"
     heading = f"Recorded for `{loaded.head[:12]}`" + ("" if loaded.head == head else " (not current head)")
-    if _check_report_problem(loaded, config, head, require_pass=False):
+    if _check_report_problem(wt, loaded, config, head, require_pass=False):
         heading += " (unverified, run `loopzero check`)"
     results = [f"- `{github.redact_credentials(r.command)}`: exit {r.exit_code}" for r in loaded.results]
     return "\n".join([heading, *(results or ["- (no check commands configured)"])])
@@ -532,14 +532,10 @@ def _sync_task_narrative(task: str, existing: str) -> str:
     return prefix + content.lstrip("\n")
 
 
-_REQUIRED_TASK_LINES = ("Context", "Problem", "Goal")
-
-
-def _require_pr_details(wt: Path) -> None:
+def _require_pr_details(wt: Path, task: str) -> None:
     """Report every unfilled PR description field before push."""
-    task = worktree.task_text(wt)
     unfilled = []
-    for name in _REQUIRED_TASK_LINES:
+    for name in ("Context", "Problem", "Goal"):
         match = re.search(rf"^- \*\*{name}:\*\*[ \t]*(.*(?:\n[ \t]+\S.*)*)", task, re.MULTILINE)
         value = match.group(1).strip() if match else ""
         if not value or re.fullmatch(r"<[^<>]*>", value):
@@ -613,9 +609,7 @@ def _check_failure_preview(tail: str) -> str:
         line if len(line) <= 2 * edge else line[:edge] + b" [...] " + line[-edge:]
         for line in (line.encode() for line in tail.splitlines())
     )
-    if len(preview) > limit:
-        preview = b"[...]\n" + preview[6 - limit:]
-    return preview.decode(errors="ignore")
+    return (preview if len(preview) <= limit else b"[...]\n" + preview[6 - limit:]).decode(errors="ignore")
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -641,10 +635,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def _receipt_inode(path: Path) -> int | None:
-    try:
+    with suppress(FileNotFoundError):
         return path.lstat().st_ino
-    except FileNotFoundError:
-        return None
+    return None
 
 
 def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int) -> int:
@@ -685,13 +678,13 @@ def cmd_pr(args: argparse.Namespace) -> int:
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
-    _require_pr_details(wt)
+    task = worktree.task_text(wt).replace("\r\n", "\n")
+    _require_pr_details(wt, task)
     pr = github.merged_pr_for_branch(config.repo, branch)
     if pr is not None:
         raise CliError(f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
                        "run `loopzero start <new-task-slug>` from the main checkout")
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
-    task = worktree.task_text(wt).replace("\r\n", "\n")
     created = pr is None
     existing = task if created else _sync_task_narrative(task, pr.body)
     _pr_body(wt, head, config, _seed_task_evidence(task, existing))  # refuse an unusable body before pushing
@@ -834,7 +827,14 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
             wt, config, head, kind, publication_context,
         ):
             raise CliError(f"saved {kind} review for {head[:12]}; run `loopzero review --repost`")
-        _require_receipt(wt, config, head)
+        if problem := _check_report_problem(wt, report := _load_report(wt), config, head, require_pass=False):
+            raise CliError(problem)
+        if report is not None and not report.ok:
+            required = set(config.required_ci) - {eligibility.CONTEXT}
+            checks = github._check_signals(config.repo, head)[0] if required else {}
+            blocked = [f"{name} ({checks.get(name, 'missing')})" for name in sorted(required) if checks.get(name) != "success"]
+            if blocked or not required:
+                raise CliError(f"hosted checks must pass on this head or rerun `loopzero check`: {', '.join(blocked) or 'no required hosted checks before review'}")
         result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
                              runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
         final_head, final_dirty = worktree.head(wt), worktree.is_dirty(wt)

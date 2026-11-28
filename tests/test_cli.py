@@ -1293,7 +1293,7 @@ def test_pr_refuses_invalid_local_state(wt, gh, capsys, name, value):
 def test_pr_accepts_angle_brackets_and_sublists_as_filled_text(wt: Path) -> None:
     task = wt / ".loopzero" / "task.md"
     task.write_text(task.read_text().replace("The feature", "\n  - maps <PMID> via `Pick<T>`, then"))
-    cli._require_pr_details(wt)
+    cli._require_pr_details(wt, (wt / '.loopzero/task.md').read_text())
 
 
 def test_progress_output_precedes_the_stderr_verdict_in_one_file(tmp_path: Path) -> None:
@@ -1513,14 +1513,48 @@ def test_review_context_mismatch_names_the_recovery(wt, gh, capsys, head, monkey
     assert not any(posted(call) for call in gh.calls)
 
 
-@pytest.mark.parametrize("local_exit", [None, 1])
-def test_review_requires_passing_receipt(wt, gh, capsys, head, monkeypatch, local_exit):
+@pytest.mark.parametrize(("local_exit", "hosted"), [(None, "success"), (1, "failure"), (1, None)])
+def test_review_blocks_without_passing_checks(wt, gh, capsys, head, monkeypatch, local_exit, hosted):
     arm_review_pr(wt, gh, head, receipt=False)
     arm_readiness(gh, head, wt, local_exit=local_exit)
+    if hosted is None:
+        arm_check_runs(gh, head, [])
+    else:
+        arm_named_check(gh, head, status="completed", conclusion=hosted)
     launch = Mock(side_effect=AssertionError("review launched before checks passed"))
     monkeypatch.setattr(cli, "_run_review", launch)
     expect_cli(capsys, 1, "review", stderr_contains=("loopzero check",))
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["check", "preflight", "preparation", "other plan"])
+def test_review_uses_hosted_checks_with_valid_failed_receipt(wt, gh, fake_bin, fake_tool, capsys, failure):
+    commands = {
+        "preflight": ["echo ok", "scripts/gate.py"],
+        "preparation": ["echo ok", "uv run --group dev pytest -q"],
+        "other plan": ["echo ok", "test -f README.md"],
+        "check": ["echo ok", "test -f README.md"],
+    }
+    workflow = WORKFLOW.replace('["checks"]', '["checks", "Loop-zero Eligibility"]')
+    publish_workflow(wt, workflow.replace('["echo ok", "test -f README.md"]', json.dumps(commands[failure])))
+    if failure == "preparation":
+        commit_file(wt, "pyproject.toml", '[project]\nname = "fixture"\nversion = "0"\n', "add project")
+        fake_tool("uv", "exit 1")
+    elif failure == "check":
+        (wt / "README.md").unlink()
+        git(wt, "commit", "-qam", "remove check input")
+    head = prepare_review(wt, gh, fake_bin, post_id=1, receipt=False)
+    arm_readiness(gh, head, wt, local_exit=None)
+    if failure == "other plan":
+        config = cli.config_mod.load_trusted(wt)
+        stage = CheckResult("echo obsolete", 1, 0.1, "")
+        cli._save_report(wt, CheckReport(head, False, (stage,), cli.sandbox.settings_fingerprint(config)))
+        expect_cli(capsys, 1, "review", stderr_contains=("plan differs",))
+        assert not any(posted(call) for call in gh.calls)
+    else:
+        expect_cli(capsys, 1, "check")
+        expect_cli(capsys, 0, "review")
+        assert posted_review(gh)["commit_id"] == head
 
 
 def prepare_review(wt: Path, gh: FakeGh, fake_bin: Path, *, payload=APPROVE,

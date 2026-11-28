@@ -26,9 +26,7 @@ When authorized to file slices from an active goal or blueprint, use its
 tracking issue as the parent. Create each issue per
 [BACKLOG](../../../docs/BACKLOG.md#for-agents). Name the parent step and the evidence it
 needs in an `Unblocks: #<parent> (step N) — <evidence>` line. Link each child with
-`gh api "repos/$repo/issues/$parent/sub_issues" -F sub_issue_id="$id"`. Use
-`owner/repo` for `repo`, the parent issue number for `parent`, and the child's
-numeric `id` from the REST response for `id`.
+`gh api "repos/$repo/issues/$parent/sub_issues" -F sub_issue_id="$id"`. Use `owner/repo`, parent issue number and the child's numeric REST `id`, respectively.
 
 Record the plan in `.loopzero/task.md` using [HANDOFF](../../HANDOFF.md), without
 another tracking file. Resolve routine choices from evidence; missing authority,

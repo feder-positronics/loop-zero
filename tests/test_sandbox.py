@@ -105,10 +105,12 @@ def bwrap_log(fake_tool, tmp_path) -> Path:
 
 
 def test_report_head_and_results(git_repo, bwrap_log):
+    git(git_repo, "config", "status.showUntrackedFiles", "no")
+    (git_repo / "untracked.txt").touch()
     checks = ("echo one", "echo two; exit 4", "echo never")
     report = sandbox.run_checks(make_config(checks=checks), git_repo)
     assert report.head == git(git_repo, "rev-parse", "HEAD").strip()
-    assert report.dirty is False
+    assert report.dirty is True
     assert [(r.command, r.exit_code, r.tail) for r in report.results] == [
         ("echo one", 0, "one"),
         ("echo two; exit 4", 4, "two"),
@@ -119,7 +121,6 @@ def test_report_head_and_results(git_repo, bwrap_log):
 def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
     before = git(git_repo, "rev-parse", "HEAD").strip()
     command = "git -c user.name=test -c user.email=test@example.com commit --allow-empty -m drift"
-
     report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
     after = git(git_repo, "rev-parse", "HEAD").strip()
     assert after != before
@@ -154,23 +155,18 @@ def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, monkeypatch, com
     assert len(result.tail.encode("utf-8")) <= 16 * 1024
 
 
-@pytest.mark.parametrize(
-    ("command", "stage_exit"),
-    [
-        ("/bin/sh -c 'exit 7' | /bin/cat", 7),
-        ("/bin/sh -c 'kill -TERM $$' | /bin/cat", 143),
-        ("echo ok | /bin/cat", 0),
-        ("echo ok", 0),
-    ],
-)
+@pytest.mark.parametrize("command,stage_exit", [
+    ("/bin/sh -c 'exit 7' | /bin/cat", 7),
+    ("/bin/sh -c 'kill -TERM $$' | /bin/cat", 143),
+    ("echo ok | /bin/cat", 0),
+    ("echo ok", 0),
+])
 def test_check_pipeline_verdict(git_repo, bwrap_log, monkeypatch, capsys, command, stage_exit):
     config = make_config(checks=(command,))
     monkeypatch.setattr(cli, "_context", lambda *args, **kwargs: (git_repo, config))
     monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *args: None)
-
     assert cli.main(["check"]) == (1 if stage_exit else 0)
-    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
-    [stage] = receipt["results"]
+    [stage] = json.loads((git_repo / ".loopzero/checks.json").read_text())["results"]
     assert stage["exit_code"] == stage_exit
     assert set(stage) == {"command", "exit_code", "duration_s", "tail"}
     assert capsys.readouterr().out.splitlines()[-1] == ("FAIL" if stage_exit else "PASS")
@@ -374,14 +370,13 @@ def test_alternate_probe_skips_default_inventory_and_honors_override(git_repo, m
     assert "Transfer this task branch" in rendered
 
 
-def test_not_a_git_repo(tmp_path, bwrap_log):
-    with pytest.raises(sandbox.SandboxUnavailable, match="git rev-parse HEAD failed"):
-        sandbox.run_checks(make_config(), tmp_path)
-
-
-def test_unborn_branch_names_its_cause(tmp_path, bwrap_log):
-    git(tmp_path, "init", "-q")
-    with pytest.raises(sandbox.SandboxUnavailable, match="no commit yet; make the first commit"):
+@pytest.mark.parametrize("init,reason", [
+    (False, "git rev-parse HEAD failed"), (True, "no commit yet; make the first commit"),
+])
+def test_check_requires_a_git_head(tmp_path, bwrap_log, init, reason):
+    if init:
+        git(tmp_path, "init", "-q")
+    with pytest.raises(sandbox.SandboxUnavailable, match=reason):
         sandbox.run_checks(make_config(), tmp_path)
 
 

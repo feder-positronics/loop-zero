@@ -6,9 +6,8 @@ description: Advisory review of a frozen code diff against acceptance criteria, 
 # Code Review
 
 Review one frozen diff without editing the tree. Read [the contract](../../CONTRACT.md),
-the PR body, and surrounding code. Confirm the exact head and follow the
-contract's [scope and budget](../../CONTRACT.md#review-budget) and
-[missing-evidence rule](../../CONTRACT.md#findings).
+PR body and surrounding code. Confirm the exact head. Follow
+[review budget](../../CONTRACT.md#review-budget) and [findings rules](../../CONTRACT.md#findings).
 Apply [local check receipt reuse](../../CONTRACT.md#check-reuse-and-delivery-priority).
 
 ## Judge
