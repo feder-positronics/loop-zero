@@ -979,16 +979,18 @@ def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_ba
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
     assert path.read_bytes() == b"hello\n"
     assert cache_check(config, clean=True, verify_reuse=True).head == fetched_base
+    cli._require_receipt(git_repo, config, fetched_base)
 
     git(git_repo, "config", "core.autocrlf", "true")
     path.unlink()
     git(git_repo, "checkout-index", "-u", "--", path.name)
     assert path.read_bytes() == b"hello\r\n"
     assert not git(git_repo, "status", "--porcelain")
+    with pytest.raises(cli.CliError, match=r"input bytes.*Rerun `loopzero check`"):
+        cli._require_receipt(git_repo, config, fetched_base)
     report = sandbox.run_checks(config, git_repo)
     assert not report.dirty and report.head == fetched_base
-    assert report.results[0].exit_code == 1
-    assert report.results[0].reused_from is None
+    assert report.results[0].exit_code == 1 and report.results[0].reused_from is None
 
 
 @pytest.mark.parametrize("base", ["tracked", "recorded", "absent"])
