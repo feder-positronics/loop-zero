@@ -2911,8 +2911,11 @@ def test_ready_waits_for_checks_on_original_head(wt, gh, capsys, monkeypatch, se
 
 
 @pytest.mark.parametrize("wait", [False, True])
-def test_pending_mergeability_does_not_delay_draft_checks(wt, gh, capsys, head, wait):
+@pytest.mark.parametrize("settles", [False, True])
+def test_pending_mergeability_does_not_delay_draft_checks(wt, gh, capsys, head, wait, settles):
     arm_approved_pr(gh, head, wt, "skipped", mergeable="UNKNOWN")
+    if settles:
+        gh.respond_pr_view(pr_json(headRefOid=head, mergeable="UNKNOWN"), pr_json(headRefOid=head))
     expect_cli(capsys, 3, "ready", *(["--wait=0"] if wait else []), stderr="",
                stdout_contains=("marked ready;", "checks", "GitHub is computing mergeability"))
     assert sum(is_ready_call(call) for call in gh.calls) == 1

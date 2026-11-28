@@ -1301,13 +1301,14 @@ def _recheck_activation(wt: Path, config: Config, live: github.PR, args: argpars
     _verify_wait_snapshot(args, wt, config, live.head_sha, live.head_sha, config)
     fresh = _readiness(wt, config, live, live.head_sha, workflow_wait=True, mergify_deadline=deadline)
     if (retry and live.mergeable == "UNKNOWN") or not (fresh.ready or _draft_checks_waiting(config, live, fresh)):
+        _require_receipt(wt, config, live.head_sha, suffix=f". {OWNER_ROUTE}")
         raise CliError(f"draft activation blocked: {'; '.join(fresh.reasons)}; rerun loopzero ready")
     latest = github.pr_view(config.repo, live.number)
     if ((latest.head_sha, latest.state, latest.base_ref) != (live.head_sha, live.state, live.base_ref)
             or github.merge_hold(latest.number, latest.labels)
-            or (latest.is_draft and (latest.mergeable != live.mergeable
+            or (latest.is_draft and (latest.mergeable not in (live.mergeable, "MERGEABLE")
                                      or (latest.merge_state == "BEHIND" and live.merge_state != "BEHIND")))):
-        raise CliError("PR changed during draft activation recovery; rerun loopzero ready")
+        raise CliError("PR changed during draft activation; rerun loopzero ready")
     return latest
 
 
@@ -1328,7 +1329,6 @@ def _mark_ready(
                 return
             if observe_only is not None:
                 raise observe_only
-            _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
             if not (live := _recheck_activation(wt, config, live, args, deadline, retry=retry)).is_draft:
                 return
             _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
