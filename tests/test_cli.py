@@ -1143,15 +1143,23 @@ def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, 
 
 
 @pytest.mark.parametrize("failure", ["merged", "CLOSED", "OPEN", "read", "malformed", "incomplete",
-                                     "repeated", "detail", "closed-unmerged"])
+                                     "repeated", "detail", "closed-unmerged", "reused", "reused-open"])
 def test_pr_requires_proven_branch_history(wt, gh, fake_tool, tmp_path, capsys, head, failure):
     gh.respond_pr_create(pr_json(headRefOid=head))
-    if failure == "closed-unmerged":
-        closed = pr_json(state="CLOSED", headRefOid=head)
+    if failure in {"closed-unmerged", "reused", "reused-open"}:
+        closed = pr_json(state="CLOSED", headRefOid=head) if failure == "closed-unmerged" else pr_json(number=8, state="MERGED")
         gh.respond(branch_history_key(), [closed_history_row(closed)])
-        gh.respond_pr_list([closed])
+        if failure.startswith("reused"):
+            gh.respond(f"api repos/{REPO}/pulls/8", {**rest_pr_json(closed), "merge_commit_sha": cli.worktree.base_sha(wt)})
+        if failure == "reused-open":
+            git(wt, "push", "-q", "origin", "lz/t1")
+            gh.respond(branch_head_key(), {"commit": {"sha": head}})
+            gh.respond(" ".join(commit_pr_read(head)), [])
+        prs = {"reused": [], "reused-open": [pr_json(headRefOid=head)], "closed-unmerged": [closed]}
+        gh.respond_pr_list(prs[failure])
         arm_draft_validation(gh, wt, head)
         expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
+        assert any(c["argv"][:2] == ["api", f"repos/{REPO}/pulls"] for c in gh.calls) is (failure != "reused-open")
         return
     completed = failure in {"merged", "CLOSED", "OPEN"}
     if completed:
@@ -3953,7 +3961,7 @@ def test_merge_warns_when_cleanup_fails(wt, gh, capsys, monkeypatch, head, remov
     arm_squash_merge(gh, head, wt, landed_snapshot(head, "d" * 40))
     gh.respond("api -X", "")
 
-    def fail_cleanup(path, _expected_head):
+    def fail_cleanup(path, _expected_head, **_kwargs):
         if removed:
             shutil.rmtree(path)
         raise cli.worktree.WorktreeError(error)
@@ -4206,7 +4214,7 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
     expect_cli(capsys, 1, "status", stdout="", stderr="loopzero status: HEAD is detached. Switch to a branch and retry.\n")
 
 
-@pytest.mark.parametrize("case", ["owned", "during-wait", "external", "dirty", "unpushed"])
+@pytest.mark.parametrize("case", ["owned", "during-wait", "external", "dirty", "ignored", "unpushed"])
 def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head(wt, repo, gh, capsys, monkeypatch, case):
     head, branch = head_of(wt), "lz/t1"
     origin = repo.parent / "origin.git"
@@ -4221,6 +4229,10 @@ def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head
         cli.worktree.task_file(wt).write_text("# Handwritten task\n")
     elif case == "dirty":
         (wt / "untracked").touch()
+    elif case == "ignored":
+        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("\n.env\n")
+        (wt / ".env").write_text("local configuration")
     elif case == "unpushed":
         git(wt, "commit", "--allow-empty", "-m", "local after close")
         gh.respond(f"api repos/{REPO}/commits/{head_of(wt)}/pulls?per_page=100&page=1", [])
@@ -4230,7 +4242,9 @@ def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head
     assert git(repo, "branch", "--list", branch)
     assert git(origin, "rev-parse", branch).strip() == head
     assert {"owned": "kept both branch refs", "during-wait": "kept both branch refs", "external": "ownership is unverified",
-            "dirty": "worktree is dirty", "unpushed": "push or pull first"}[case] in err
+            "dirty": "worktree is dirty", "ignored": ".env", "unpushed": "push or pull first"}[case] in err
+    if case == "ignored":
+        assert (wt / ".env").read_text() == "local configuration"
     assert all(call["argv"][:2] != ["api", "-X"] for call in gh.calls)
 
 

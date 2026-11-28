@@ -693,11 +693,13 @@ def _matches_commit_pr(row: dict, repo: str, branch: str, endpoint: str) -> bool
     return True
 
 
+def remote_branch_sha(repo: str, branch: str) -> str | None:
+    return _branch_sha(f"repos/{repo}/branches/{quote(branch, safe='')}", "commit",
+                       "invalid remote branch SHA", full_sha=True)
+
+
 def _commit_branch_prs(repo: str, branch: str, head_sha: str | None = None) -> tuple[str, list[dict]]:
-    sha = head_sha
-    if sha is None:
-        sha = _branch_sha(f"repos/{repo}/branches/{quote(branch, safe='')}", "commit",
-                          "invalid remote branch SHA", full_sha=True)
+    sha = head_sha if head_sha is not None else remote_branch_sha(repo, branch)
     if sha is None:
         return "", []
 

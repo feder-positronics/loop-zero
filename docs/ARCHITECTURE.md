@@ -331,10 +331,13 @@ Git configuration so URL rewrites cannot change its destination.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. A merge
-invocation that finds a closed, unmerged PR can remove its worktree and keeps
-both branch refs. Local removal requires a linked checkout in the primary
+invocation that finds a closed, unmerged PR keeps both branch refs and reports
+ignored paths outside `.loopzero/` that prevent worktree removal. A new task can
+reuse a merged PR's branch name when the remote ref no longer points to the
+old PR head and the merge commit is in the task's recorded base. Local removal
+requires a linked checkout in the primary
 repository's managed worktree directory with the marker written to its task
-file by `start`. It allows ignored files in a clean worktree and refuses to
+file by `start`. After a merge, it allows ignored files in a clean worktree. It refuses to
 remove nested worktrees. Git removal stays non-forced. A Git ref lock keeps the
 worktree at the final PR head during removal. After a merge, cleanup deletes
 the local branch only if it still points at that head.
