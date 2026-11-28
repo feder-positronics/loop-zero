@@ -1,7 +1,6 @@
 """Codex's bounded public proof derives from complete private native streams."""
 
 import base64
-import copy
 import dataclasses
 import hashlib
 import json
@@ -252,12 +251,25 @@ def test_full_native_attribution_and_fatal_controls(recorded_native, mutation):
 
 
 @pytest.mark.parametrize("mutation", [
-    "valid", "missing", "reorder", "duplicate_session", "range", "context", "chunk_index",
+    "valid", "partial_reads", "missing", "reorder", "duplicate_session", "range", "context", "chunk_index", "wrong_head",
 ])
-def test_complete_ordered_native_chunks(recorded_native, mutation):
-    first, _, _ = recorded_native((1, 2))
-    second, _, _ = recorded_native((2, 2))
-    merged = runners.merge_reviews([first, second])
+def test_complete_ordered_native_chunks(recorded_native, request, fake_bin, mutation):
+    if mutation == "wrong_head":
+        another_head = dataclasses.replace(SYNTHETIC_NATIVE, head="b" * 40)
+        with pytest.raises(ValueError, match="chunk reviews do not describe the same review"):
+            runners.merge_reviews([SYNTHETIC_NATIVE, another_head])
+        return
+    chunks = []
+    if mutation == "partial_reads":
+        invoke, _, _ = request.getfixturevalue("native")
+        tool = fake_bin / "codex"
+        script = tool.read_text()
+        for index in range(2):
+            tool.write_text(script.replace(" command=", f" if index != {index}: continue\n command="))
+            chunks.append(invoke((index + 1, 2)))
+    else:
+        chunks = [recorded_native((index, 2))[0] for index in (1, 2)]
+    merged = runners.merge_reviews(chunks)
     data = json.loads(merged.raw)
     edits = {
         "duplicate_session": (("session_id",), data[0]["session_id"]),
@@ -273,16 +285,15 @@ def test_complete_ordered_native_chunks(recorded_native, mutation):
     elif mutation == "reorder":
         data.reverse()
     changed = dataclasses.replace(merged, raw=json.dumps(data))
-    if mutation == "valid":
+    if mutation in {"valid", "partial_reads"}:
         evidence = runners.codex_evidence(changed)
+        assert evidence["complete"]
         assert [c["index"] for c in evidence["calls"]] == [1, 2]
         assert all(c["inspection"] == "unknown" for c in evidence["calls"])
         assert len({c["session"] for c in evidence["calls"]}) == 2
         assert projection(changed) == (True, evidence)
     else:
-        assert not runners.validate_runner_result(changed)
-        with pytest.raises(runners.RunnerBadOutput):
-            runners.codex_evidence(changed)
+        assert_invalid_native(changed)
 
 
 def legacy_inspection(value):
@@ -316,26 +327,24 @@ def update_evidence(value, path, replacement):
 @pytest.mark.parametrize("mutation", [
     "duplicate_header", "before_marker", "after_prose", "noncanonical", "duplicate_key", "oversized",
     "fence", "wrong_adjudication", "unknown_leading", "whitespace_json", "invalid_event_offset",
-    *[
-        (("extra",), 1),
-        (("version",), 2),
-        (("chunk_count",), True),
-        (("pr",), 7.0),
-        (("receipt",), "/private/review.json"),
-        (("raw_sha256",), "A" * 64),
-        (("calls", 0, "head_event", "start"), -1),
-        (("calls",), []),
-        (("calls", 0, "session"), None),
-        (("kind",), "delta"),
-        (("repo",), "another/repo"),
-        (("pr",), 8),
-        (("publisher",), "stranger"),
-        (("head",), "f" * 40),
-        (("complete",), False),
-        (("calls", 0, "fatal"), "present"),
-        (("calls", 0, "reported", "model"), "m" * 129),
-        (("calls", 0, "requested", "effort"), "e" * 33),
-    ],
+    (("extra",), 1),
+    (("version",), 2),
+    (("chunk_count",), True),
+    (("pr",), 7.0),
+    (("receipt",), "/private/review.json"),
+    (("raw_sha256",), "A" * 64),
+    (("calls", 0, "head_event", "start"), -1),
+    (("calls",), []),
+    (("calls", 0, "session"), None),
+    (("kind",), "delta"),
+    (("repo",), "another/repo"),
+    (("pr",), 8),
+    (("publisher",), "stranger"),
+    (("head",), "f" * 40),
+    (("complete",), False),
+    (("calls", 0, "fatal"), "present"),
+    (("calls", 0, "reported", "model"), "m" * 129),
+    (("calls", 0, "requested", "effort"), "e" * 33),
 ])
 def test_invalid_review_evidence_is_rejected(published_native, mutation):
     result, rendered, line = published_native
@@ -379,15 +388,17 @@ def test_invalid_review_evidence_is_rejected(published_native, mutation):
         assert (found is not None) is (mutation == "after_prose")
 
 
-def test_overflow_is_hold_without_silent_chunk_truncation():
-    value = runners.codex_evidence(SYNTHETIC_NATIVE)
-    value["calls"] = [
-        {**copy.deepcopy(value["calls"][0]), "index": i, "session": "s" + str(i)}
-        for i in range(1, 40)
-    ]
-    value["chunk_count"] = len(value["calls"])
-    assert runners.valid_codex_evidence(value)
-    with pytest.raises(runners.RunnerBadOutput, match="8192"):
+@pytest.mark.parametrize("valid,diagnostic", [
+    (True, "8192"), (False, "invalid native evidence projection"),
+], ids=["overflow", "wrong-schema"])
+def test_codex_evidence_rejects_invalid_or_oversized_projections(valid, diagnostic):
+    value = {"version": 2}
+    if valid:
+        value = runners.codex_evidence(SYNTHETIC_NATIVE)
+        value["calls"] = [dict(value["calls"][0], index=i, session=f"s{i}") for i in range(1, 40)]
+        value["chunk_count"] = len(value["calls"])
+        assert runners.valid_codex_evidence(value)
+    with pytest.raises(runners.RunnerBadOutput, match=diagnostic):
         runners.encode_codex_evidence(value)
 
 
@@ -552,17 +563,6 @@ def test_codex_evidence_rejects_invalid_transport(header, diagnostic):
         runners.decode_codex_evidence(header)
 
 
-def test_codex_evidence_encoder_rejects_wrong_schema():
-    with pytest.raises(runners.RunnerBadOutput, match="invalid native evidence projection"):
-        runners.encode_codex_evidence({"version": 2})
-
-
-def test_chunk_merge_requires_the_same_review_identity():
-    another_head = dataclasses.replace(SYNTHETIC_NATIVE, head="b" * 40)
-    with pytest.raises(ValueError, match="chunk reviews do not describe the same review"):
-        runners.merge_reviews([SYNTHETIC_NATIVE, another_head])
-
-
 def test_native_evidence_projection_requires_schema_validation(monkeypatch):
     monkeypatch.setattr(runners, "valid_codex_evidence", lambda _evidence: False)
     with pytest.raises(runners.RunnerBadOutput, match="invalid full native evidence"):
@@ -596,20 +596,6 @@ def test_contradictory_native_session_fields(native, identity):
         data["events"][2].update(thread_id=data["session_id"], session_id=identity)
 
     assert_invalid_native(rewrite(native[0](), change))
-
-
-def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bin):
-    tool = fake_bin / "codex"
-    source = tool.read_text()
-    partial = []
-    for index in range(2):
-        tool.write_text(source.replace(" command=", f" if index != {index}: continue\n command="))
-        partial.append(native[0]((index + 1, 2)))
-    merged = runners.merge_reviews(partial)
-    proof = runners.codex_evidence(merged)
-    assert proof["complete"] and len({call["session"] for call in proof["calls"]}) == 2
-    assert all(call["inspection"] == "unknown" for call in proof["calls"])
-    assert projection(merged)[1] == proof
 
 
 @pytest.mark.parametrize("separator,overflow,tightened", [

@@ -2372,26 +2372,30 @@ def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher)
     expect_cli(capsys, 1, "review", stderr_contains=("already has a primary review; run `loopzero ready`",))
 
 
-@pytest.mark.parametrize("condition,message", [
-    ("no-pr", "no pull request for lz/t1"),
-    ("retargeted", "PR targets release, configured base is main"),
-    ("dirty", "uncommitted"),
-    ("unpushed", "push or pull first"),
+@pytest.mark.parametrize("command,case,diagnostics", [
+    ("review", "no-pr", ("no pull request for lz/t1",)),
+    ("review", "retargeted", ("PR targets release, configured base is main",)),
+    ("review", "dirty", ("uncommitted",)),
+    *((command, "unpushed", ("push or pull first",)) for command in ("review", "ready", "merge")),
+    *((command, "closed", ("PR #7 is CLOSED", "Reopen a closed unmerged PR")) for command in ("review", "ready")),
 ])
-def test_review_refuses_invalid_preflight(wt: Path, gh: FakeGh, fake_bin: Path,
-                                         capsys, condition, message) -> None:
-    if condition == "no-pr":
+def test_delivery_refuses_invalid_preflight(wt, gh, fake_bin, capsys, head, command, case, diagnostics):
+    if case == "no-pr":
         gh.respond_pr_list([])
-    elif condition == "dirty":
+    elif case == "dirty":
         (wt / "scratch.txt").write_text("x")
-    elif condition == "retargeted":
-        arm_pr(gh, head_of(wt), baseRefName="release")
+    elif case == "retargeted":
+        arm_pr(gh, head, baseRefName="release")
+    elif case == "closed":
+        arm_pr(gh, head, state="CLOSED")
     else:
-        arm_pr(gh, "0" * 40)
-    expect_cli(capsys, 1, "review", stdout="", stderr_contains=(message,))
+        arm_pr(gh, "0" * 40, isDraft=command == "review")
+    expect_cli(capsys, 1, command, stdout=None if case == "closed" else "", stderr_contains=diagnostics)
     assert not (fake_bin / "claude.stdin").exists()
-    if condition == "dirty":
+    if case == "dirty":
         assert gh.calls == []
+    if case == "unpushed" and command != "review":
+        assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] and not is_ready_call(c) for c in gh.calls)
 
 
 @pytest.mark.parametrize("case", ["auth", "redaction", "bad-effort-codex-ok", "bad-effort-codex-unavailable"])
@@ -2720,23 +2724,37 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head, body_
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
-@pytest.mark.parametrize("command,required,code,override", [
-    ("ready", "", 1, False), ("merge", "", 1, False), ("ready", "", 1, True),
-    ("ready", "required_ci = []", 0, False), ("ready", 'required_ci = ["checks"]', 1, False),
+@pytest.mark.parametrize("command,policy,setting,code,override", [
+    ("ready", "ci", "", 1, False), ("merge", "ci", "", 1, False), ("ready", "ci", "", 1, True),
+    ("ready", "ci", "required_ci = []", 0, False), ("ready", "ci", 'required_ci = ["checks"]', 1, False),
+    *(pytest.param(command, "publishers", value, int(command != "status"), override,
+                   id=f"{command}-publishers-{'empty' if value else 'missing'}-{'override' if override else 'base'}")
+      for command in ("ready", "merge", "status") for value in ("", "review_publishers = []\n")
+      for override in (False, True)),
 ])
-def test_delivery_requires_explicit_ci_policy(wt, gh, capsys, head, tmp_path, command, required, code, override):
-    publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', required) + "\n")
-    if required:
-        arm_approved_pr(gh, head, wt, "failure", isDraft=False)
+def test_delivery_requires_explicit_ci_and_publisher_policy(wt, gh, capsys, head, tmp_path, command, policy, setting, code, override):
+    workflow = WORKFLOW_BASE + setting if policy == "publishers" else WORKFLOW.replace('required_ci = ["checks"]', setting)
     source, options = "origin/main:workflow.toml", ()
+    if policy == "publishers":
+        arm_approved_pr(gh, head, wt, isDraft=False)
+    if policy == "ci" or not override:
+        publish_workflow(wt, workflow + ("\n" if policy == "ci" else ""))
+    if policy == "ci" and setting:
+        arm_approved_pr(gh, head, wt, "failure", isDraft=False)
     if override:
         path = tmp_path / "override.toml"
-        path.write_text(WORKFLOW.replace('required_ci = ["checks"]', required))
+        path.write_text(workflow)
         source, options = str(path), ("--config", str(path))
     out, err = expect_cli(capsys, code, *options, command)
-    if not required:
-        assert f"{source}: checks.required_ci must list the required contexts" in err
-        assert "required_ci = []" in err and not gh.calls
+    if policy == "publishers":
+        assert_contains(out + err, "delivery.review_publishers must list the intended", source)
+        if command == "status":
+            assert_contains(out, "ready:    no", "review:   not evaluated")
+        else:
+            assert not gh.calls
+    elif not setting:
+        assert_contains(err, f"{source}: checks.required_ci must list the required contexts", "required_ci = []")
+        assert not gh.calls
     elif code:
         assert "required check 'checks' is failure" in out
     else:
@@ -4149,20 +4167,6 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
     expect_cli(capsys, 1, "status", stdout="", stderr="loopzero status: HEAD is detached. Switch to a branch and retry.\n")
 
 
-@pytest.mark.parametrize("command,closed", [
-    *((command, False) for command in ("ready", "merge")),
-    *((command, True) for command in ("review", "ready")),
-])
-def test_commands_refuse_closed_or_mismatched_pr(wt, gh, capsys, command, closed):
-    if closed:
-        arm_pr(gh, head_of(wt), state="CLOSED")
-        expect_cli(capsys, 1, command, stderr_contains=("PR #7 is CLOSED", "Reopen a closed unmerged PR",))
-    else:
-        arm_pr(gh, "0" * 40, isDraft=False)
-        expect_cli(capsys, 1, command, stdout="", stderr_contains=("push or pull first",))
-        assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] and not is_ready_call(c) for c in gh.calls)
-
-
 @pytest.mark.parametrize("case", ["owned", "external", "dirty", "unpushed"])
 def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head(wt, repo, gh, capsys, case):
     head, branch = head_of(wt), "lz/t1"
@@ -5464,23 +5468,6 @@ def test_ready_rejects_check_interrupted_after_a_failed_stage(wt, head, gh, caps
     )
     assert cli.main([*args, "ready"]) == 1
     assert "check receipt records a failed stage" in capsys.readouterr().out
-
-
-@pytest.mark.parametrize("command", ["ready", "merge", "status"])
-@pytest.mark.parametrize("publishers", ["", "review_publishers = []\n"])
-@pytest.mark.parametrize("override", [False, True])
-def test_delivery_requires_explicit_review_publishers(wt, gh, capsys, tmp_path, head, command, publishers, override):
-    arm_approved_pr(gh, head, wt, isDraft=False)
-    path = tmp_path / "override.toml"
-    path.write_text(WORKFLOW_BASE + publishers)
-    if not override:  # With an override the valid trusted base must not be the source.
-        publish_workflow(wt, WORKFLOW_BASE + publishers)
-    calls = len(gh.calls)
-    code, out, err = run(capsys, *(("--config", str(path)) if override else ()), command)
-    assert code == (command != "status") and "delivery.review_publishers must list the intended" in out + err
-    assert (str(path) if override else "origin/main:workflow.toml") in out + err
-    assert command == "status" or len(gh.calls) == calls
-    assert command != "status" or ("ready:    no" in out and "review:   not evaluated" in out)
 
 
 @pytest.mark.parametrize("operation", ["ready", "request", "confirm", "resolve"])
