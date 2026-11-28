@@ -181,8 +181,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    The saved stage key pairs a byte digest with its execution digest. Only stage reuse
    compares the execution digest, which binds the exact base revision. Older keyed
    receipts require a fresh check. Configured inputs bind file bytes and symlink
-   text in real worktree directories. Declare target files separately when a
-   check reads through a symlink. A missing base revision still permits
+   text in real worktree directories. Symlink inputs also bind the bytes of
+   resolved tracked regular files inside the worktree. A missing base revision still permits
    a byte digest and disables stage reuse. Source-check waiters check for policy
    changes on every poll.
    Local readiness and hosted eligibility share the mergeability verdict.
@@ -340,7 +340,10 @@ repository's managed worktree directory with the marker written to its task
 file by `start`. After a merge, removal allows ignored loop-zero state and
 known generated artifact directories. Other ignored paths are reported and
 keep the worktree in place. Cleanup refuses to remove nested worktrees.
-Git removal stays non-forced. A Git ref lock keeps the
+Git removal uses force only for closed PRs with initialized tracked submodules
+whose Git directories belong to the task checkout. Ignored paths and commits
+reachable from local refs or reflogs but absent from remote-tracking refs block
+submodule removal. A Git ref lock keeps the
 worktree at the final PR head during removal. After a merge, cleanup deletes
 the local branch only if it still points at that head.
 Hosted eligibility trusts the configured publisher's projection and live identity,
