@@ -84,6 +84,26 @@ the last 256 Ki characters of up to three job logs, preferring jobs in reusable
 workflows, and shows up to ten distinct test IDs per log, including pytest
 parameters. Open the job link for the full log if the report has no test IDs.
 
+For a lint failure in **Architecture docs and size budget**, open that step in
+the job log. A size budget fails when the count is above its cap and grew
+against the logged base. The `headroom` field gives the number of lines left;
+a negative value gives the overage. The step can also fail earlier with a
+message naming a missing architecture guide update or `Architecture-Review`
+trailer. Follow the architecture acknowledgement rules in [Architecture](ARCHITECTURE.md)
+for that failure.
+
+Before queueing a PR that adds lines near a cap, fetch current main. In a
+disposable checkout of the PR head, merge `origin/main` with
+`git merge --no-commit --no-ff origin/main`. After a clean merge, run
+`scripts/size_budget.sh origin/main` on that tree. For an existing failure,
+use the failed job's checkout SHA and `BASE_SHA` to reproduce the original
+comparison. A speculative candidate can include earlier queued changes, so
+passing against current main can still leave the candidate over budget.
+Reduce the flagged count if the PR grows it beyond the cap against main.
+If the overage depends on earlier queued work, check again against main
+after that work lands or leaves the queue. Retry when the new integration
+fits, or when the flagged count holds steady or shrinks against the new base.
+
 ## Recovery
 
 If the queue misbehaves, stop admission and prevent Mergify landing, restore the
