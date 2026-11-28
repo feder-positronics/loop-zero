@@ -1506,11 +1506,15 @@ def merge(repo: str, number: int, strategy: str, head_sha: str, base: str) -> st
         return None
     if sha := merged_sha(repo, number, expected_head=head_sha, expected_base=base, check_hold=True):
         return sha
-    read_timeout(0)
+    timeout = read_timeout(300)
     write_error = None
     try:
-        _gh(*argv, timeout=300)
+        _gh(*argv, timeout=timeout if strategy == "queue" else 300)
     except (GhError, ProcTimeout, OSError) as exc:
+        if isinstance(exc, ProcTimeout) and strategy == "queue" and _read_scope.get() is not None:
+            raise MergeFailed(
+                ("gh", *argv), "Queue submission timed out. Submission state is unknown. Run loopzero status before retrying.",
+            ) from exc
         write_error = exc
     try:
         with _read_scope.set(_read_scope.get() if strategy == "queue" else None):
@@ -1523,10 +1527,8 @@ def merge(repo: str, number: int, strategy: str, head_sha: str, base: str) -> st
         raise MergeFailed(("gh", *argv), f"PR #{number} merge could not be verified: {exc}") from exc
     if sha or queued:
         return sha
-    if queue_error:
-        raise queue_error
     detail = f": {write_error}" if write_error else ""
-    raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued{detail}")
+    raise queue_error or MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued{detail}")
 
 
 def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
