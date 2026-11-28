@@ -15,7 +15,7 @@ import pytest
 from loopzero import github, hosted
 from loopzero.candidate import CandidateError, CandidateRaceError
 from tests import test_github as fixtures
-from tests.conftest import git
+from tests.conftest import git, review_summary
 from tests.test_candidate import event as candidate_event
 from tests.test_candidate import payloads as candidate_payloads
 from tests.test_candidate import status as candidate_status
@@ -71,9 +71,9 @@ def publisher(tmp_path, gh, monkeypatch):
     return gh
 
 
-def approval(head=HEAD, *, state="APPROVED", verdict="**approve**"):
+def approval(head=HEAD, *, state="APPROVED"):
     return {"state": state, "commit_id": head, "user": {"login": "trusted-publisher"},
-            "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n{verdict}"}
+            "body": f"<!-- loopzero:review v=1 head={head} kind=primary source=model -->\n{review_summary(head)}"}
 
 
 @pytest.mark.parametrize("case,states", [
@@ -214,9 +214,8 @@ def test_hosted_review_coverage_after_source_head_changes(
     source = fixtures.rest_pr_json(pr_json(headRefOid=head))
     source["base"]["sha"] = base
     publisher.respond(f"api repos/{REPO}/pulls/7", source)
-    verdict = "loopzero primary review by claude: **approve** (0 critical, 0 important, 0 suggestion)"
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET",
-                      [approval(reviewed, state="COMMENTED", verdict=verdict)])
+                      [approval(reviewed, state="COMMENTED")])
     publisher.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": "ahead"})
     monkeypatch.setattr(hosted.candidate_mod, "fetched_git",
                         lambda *_: nullcontext(partial(git, git_repo)))

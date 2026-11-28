@@ -74,7 +74,7 @@ def task_file(wt: Path) -> Path:
 
 
 @contextmanager
-def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False):
+def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False, wait: Callable[[float], None] | None = None):
     path = wt / ".loopzero"
     if git(wt, "ls-files", "-z", "--", ".loopzero"):
         raise WorktreeError(f"refusing repository-tracked local state: {path}")
@@ -93,7 +93,7 @@ def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    time.sleep(min(0.1, remaining))
+                    (wait or time.sleep)(min(0.1, remaining))
             else:
                 raise TimeoutError(f"task state is busy in {wt}; retry when the other command finishes")
         yield fd
@@ -101,9 +101,9 @@ def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False
         os.close(fd)
 
 
-def lock_local_state(wt: Path):
+def lock_local_state(wt: Path, *, wait: Callable[[float], None] | None = None):
     """Serialize check execution, receipt publication and Mergify admission for this worktree."""
-    return _local_state_directory(wt, create=True, lock=True)
+    return _local_state_directory(wt, create=True, lock=True, wait=wait)
 
 
 def _regular_state(wt: Path, fd: int, name: str) -> bool:

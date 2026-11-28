@@ -300,7 +300,7 @@ class Departure:
         if self.failure_report is None:
             return ""
         base = f"https://github.com/{repo}/actions/runs/"
-        links = re.findall(rf"^- ❌ \[`([^`\n]+)`\]\({re.escape(base)}([0-9]+/job/([0-9]+))\)",
+        links = re.findall(rf"^- ❌ \[`([^\n]+?)`\]\({re.escape(base)}([0-9]+/job/([0-9]+))\)",
                            self.failure_report, re.M)
         if not links and (candidates := re.findall(rf"^- ❌ \*\*Checks failed\*\* [^\n]*\(/{re.escape(repo)}/pull/(\d+)\)",
                                                     self.failure_report, re.M)):
@@ -316,7 +316,7 @@ class Departure:
                 return " Candidate jobs unavailable: GitHub could not read the candidate checks."
         jobs = sorted(dict.fromkeys(links), key=lambda job: " / " not in job[0])
         return " " + " ".join(
-            f"{name!r} ({base}{path}): " + (_job_failure(repo, job_id) if index < 3 else "log limit reached") + "."
+            f"{github._redact_tokens(name)!r} ({base}{path}): " + (_job_failure(repo, job_id) if index < 3 else "log limit reached") + "."
             for index, (name, path, job_id) in enumerate(jobs)
         ) if jobs else " Candidate jobs unavailable: no failed GitHub Actions jobs found."
 

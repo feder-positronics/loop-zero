@@ -207,7 +207,9 @@ def _pr_markers(reviews: list[dict], head: str,
                 runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1]):
             continue
         match = eligibility.leading_marker(body)
-        if not match or review.get("commit_id") != match.group(1):
+        if not match or review.get("commit_id") != match[1] or (
+            review.get("state") == "COMMENTED" and not eligibility.published_verdict(body, match[1], match[2])
+        ):
             continue
         if not trusted:
             trusted = {github.login().casefold()}
@@ -1290,8 +1292,7 @@ OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its on
 def _mark_ready(
     wt: Path, config: Config, number: int, head: str, args: argparse.Namespace, deadline: float | None,
 ) -> None:
-    _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
-    with github.pr_lock(config.repo, number), (github.bounded_reads(deadline, token=None, retry=True) if deadline is not None else nullcontext()):
+    with (github.bounded_reads(deadline, token=None, retry=True) if deadline is not None else nullcontext()), github.pr_lock(config.repo, number):
         observe_only = None
         for retry in (False, True):
             live = github.pr_view(config.repo, number)
@@ -1309,6 +1310,7 @@ def _mark_ready(
                 fresh = _readiness(wt, config, live, head, workflow_wait=True, mergify_deadline=deadline)
                 if not fresh.ready and not _draft_checks_waiting(config, live, fresh):
                     raise CliError(f"draft activation blocked: {'; '.join(fresh.reasons)}; rerun loopzero ready")
+            _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
             try:
                 github.mark_ready(config.repo, number, live.node_id)
                 return
@@ -1656,12 +1658,12 @@ def _mergify_timeout_detail(
         f"https://github.com/{config.repo}/pull/{state.candidate_number}"
         if state.candidate_number is not None else
         f"https://dashboard.mergify.com/orgs/{config.repo.replace('/', '/repos/', 1)}/queues/status"
-        f"?branch={config.base_branch}&pull={pr.number}"
+        f"?branch={quote(config.base_branch, safe='')}&pull={pr.number}"
     )
     detail = f"still queued in {queue}. {location}"
     if state.unmet_conditions:
         shown = [label[:160].decode(errors="ignore") + ("…" if len(label) > 160 else "")
-                 for label in map(str.encode, state.unmet_conditions[:4])]
+                 for label in (github._redact_tokens(condition).encode() for condition in state.unmet_conditions[:4])]
         detail += ". Unmet candidate conditions: " + "; ".join(shown)
         if omitted := len(state.unmet_conditions) - len(shown):
             detail += f"; {omitted} more"
@@ -1689,15 +1691,15 @@ def _mergify_departure(
     if report is not None:
         detail = f"Mergify report: {report.url}."
         if report.reason and report.failure_report is None:
-            detail += f" Departure reason: {report.reason!r}."
+            detail += f" Departure reason: {github._redact_tokens(report.reason)!r}."
         if report.attribution == "base_conflict":
-            detail = (f"The PR conflicts with {pr.base_ref}. Run `git fetch origin {pr.base_ref}` and resolve the base "
+            detail = (f"The PR conflicts with {pr.base_ref}. Run `git fetch origin {shlex.quote(pr.base_ref)}` and resolve the base "
                       f"integration according to the PR's review state. {detail}")
             requeue = ("After resolving the conflict, run `loopzero check`, `loopzero pr`, "
                        "`loopzero review`, `loopzero ready --wait` and `loopzero merge --wait`.")
         else:
             if report.checks:
-                detail += " Failing checks: " + ", ".join(repr(check) for check in report.checks) + "."
+                detail += " Failing checks: " + ", ".join(repr(github._redact_tokens(check)) for check in report.checks) + "."
             detail += " " + {
                 "stacked": "Mergify tested a stack and could not attribute the failure. Inspect the candidate in the report or requeue after the earlier PRs clear.",
                 "isolated": "Mergify tested this PR alone. Inspect or fix the failed check before requeueing unless it is a known flake.",
@@ -1790,7 +1792,7 @@ def _merge_with_mergify(
         return _follow_blocked_mergify(config, pr, readiness, queue, deadline, bounded=admit_by is not None)
     if pr.is_draft:
         raise CliError(f"PR #{pr.number} is still a draft; next: loopzero ready --wait")
-    with worktree.lock_local_state(wt), github.pr_lock(config.repo, pr.number):
+    with worktree.lock_local_state(wt, wait=lambda delay: _sleep(github.read_timeout(delay))), github.pr_lock(config.repo, pr.number):
         attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
         state = mergify.membership(config.repo, pr.number, queue, admit_by)
         if state is None and not attempt.requested and admit_by is not None and time.monotonic() >= admit_by:
