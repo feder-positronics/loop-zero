@@ -28,6 +28,8 @@ def replay(
         basic = " ".join(args[:2])
         if basic == "api graphql" and any("viewer { login }" in arg for arg in args):
             basic += " viewer"
+        if basic == "api graphql" and any("markPullRequestReadyForReview(" in arg for arg in args):
+            basic += " ready"
         method = args[args.index("--method") + 1] if "--method" in args else ""
         page = next((arg for arg in args if arg.startswith("page=") and arg != "page=1"), "")
         return next((key for key in (f"{basic} {page}", f"{basic} --method {method}") if key in plan), basic)

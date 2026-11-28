@@ -118,6 +118,7 @@ class PR:
     merge_state: str = "UNKNOWN"  # GitHub mergeStateStatus, e.g. "BEHIND" | "CLEAN"
     body: str = ""
     labels: tuple[str, ...] = ()
+    node_id: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -653,6 +654,7 @@ def pr_from_rest(data: object) -> PR:
             merge_state=merge_state.upper() if merge_state else "UNKNOWN",
             author=str((data.get("user") or {}).get("login") or ""),
             body=str(data.get("body") or ""), labels=_pr_labels(data),
+            node_id=data["node_id"] if isinstance(data.get("node_id"), str) else "",
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
@@ -957,9 +959,8 @@ def _diff_map(repo: str, number: int, head_sha: str,
     anchor: dict | None = None
     endpoint = f"repos/{repo}/pulls/{number}/files"
     rows = _iter_paged(endpoint) if remaining or blocking else ()
-    count = 0
-    for entry in rows:
-        count += 1
+    _count = 0
+    for _count, entry in enumerate(rows, 1):
         path = entry["filename"]
         lines, first_added = _right_lines(entry.get("patch") or "")
         commentable[path] = lines
@@ -970,7 +971,7 @@ def _diff_map(repo: str, number: int, head_sha: str,
         if not remaining and (not blocking or anchor is not None):
             return commentable, anchor
     missing = next((f.path for f in blocking if f.path in remaining), None)
-    if missing is not None and count >= PR_FILE_LIMIT:
+    if missing is not None and _count >= PR_FILE_LIMIT:
         pr, detail = _pr_detail(repo, number)
         request = ("gh", "api", endpoint)
         if pr.head_sha != head_sha:
@@ -1482,7 +1483,15 @@ def readiness(
     )
 
 
-def mark_ready(repo: str, number: int) -> None:
+def mark_ready(repo: str, number: int, node_id: str = "") -> None:
+    if node_id:
+        try:
+            _gh("api", "graphql", "-f", "query=mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}",
+                "-f", f"id={node_id}", timeout=read_timeout(120))
+            return
+        except (GhUnavailable, ProcTimeout) as exc:
+            if _read_scope.get() is not None or getattr(exc, "confirmed_rate_limit", False):
+                raise
     _gh("pr", "ready", str(number), "--repo", repo, timeout=read_timeout(120), retry_idempotent=_read_scope.get() is None)
 
 
@@ -1514,10 +1523,9 @@ def merged_sha(
         if ref != expected_base:
             raise GhError(argv, f"PR retargeted to {ref}; restore {expected_base} before rerunning loopzero merge --wait")
     state = view.get("state")
-    if merged and state == "closed":
-        if is_sha(sha := view.get("merge_commit_sha")):
-            return sha
-    elif not merged and state == "open":
+    if merged and state == "closed" and is_sha(sha := view.get("merge_commit_sha")):
+        return sha
+    if not merged and state == "open":
         if check_hold and (hold := merge_hold(number, _pr_labels(view))):
             raise GhError(argv, hold)
         return None  # An open PR's merge_commit_sha is only a test merge.
@@ -1609,12 +1617,11 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
         if done.exit_code != 0:
             raise GhError(init, done.stderr or done.stdout)
         done = run(argv, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
-    if done.exit_code:
-        current = read_head()
-        if current == expected_head:
-            raise GhError(argv, done.stderr or done.stdout)
-        return current is None
-    return True
+    if done.exit_code == 0:
+        return True
+    if (current := read_head()) == expected_head:
+        raise GhError(argv, done.stderr or done.stdout)
+    return current is None
 
 
 def commit_status(
