@@ -973,19 +973,19 @@ NONBLOCKING_THREADS = (
 
 @pytest.mark.parametrize("reviewed,threads,reasons", [
     (HEAD, (), ()),
-    ("b" * 40, (), (f"head {HEAD[:12]} differs from reviewed {'b' * 12}",)),
-    (None, (), ("no review recorded for the current head",)),
+    ("b" * 40, (), (f"head {HEAD[:12]} differs from reviewed {'b' * 12}. Run `loopzero review` for the current head.",)),
+    (None, (), ("no review recorded for this head. Run `loopzero review`.",)),
     pytest.param(HEAD, (thread(f"{marker('important')}\n**important: Oops**"),),
-                 ("open important finding at src/a.py:3: Oops",), id="located"),
+                 ("open important finding at src/a.py:3: Oops. Run `loopzero resolve` to list finding IDs and address the review.",), id="located"),
     pytest.param(HEAD, (thread(f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n"
                               "**critical: Global**\n\nno file", path="src/first.py", line=12),),
-                 ("open critical finding at src/first.py:12: Global",), id="anchored"),
+                 ("open critical finding at src/first.py:12: Global. Run `loopzero resolve` to list finding IDs and address the review.",), id="anchored"),
     pytest.param(HEAD, (
         thread(f"{marker('important', 'b' * 40)}\n**important: Still applies**"),
         thread(f"{marker('critical', 'b' * 40)}\n**critical: Obsolete**", outdated=True),
         thread(f"{marker('critical')}\n**critical: Current**", outdated=True),
-    ), ("open important finding at src/a.py:3: Still applies",
-        "open critical finding at src/a.py:3: Current"), id="outdated"),
+    ), ("open important finding at src/a.py:3: Still applies. Run `loopzero resolve` to list finding IDs and address the review.",
+        "open critical finding at src/a.py:3: Current. Run `loopzero resolve` to list finding IDs and address the review."), id="outdated"),
 ])
 def test_readiness_requires_current_review_and_resolved_findings(gh, reviewed, threads, reasons):
     arm_readiness(gh, threads=(*threads, *NONBLOCKING_THREADS))
@@ -1088,7 +1088,7 @@ def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
 
 @pytest.mark.parametrize(("metadata", "reason"), [
     ({"mergeStateStatus": "BEHIND"}, "PR #7 is behind main. Run `git fetch origin main`, `git merge origin/main`, `loopzero check` and `loopzero pr` before retrying readiness."),
-    ({"mergeable": "CONFLICTING"}, "PR #7 has merge conflicts with main"),
+    ({"mergeable": "CONFLICTING"}, "PR #7 has merge conflicts with main. Run `git fetch origin main` and `git merge origin/main`. Resolve conflicts, run `loopzero check` and `loopzero pr`, then follow the review guidance from `loopzero ready`."),
     ({"state": "MERGED"}, "PR #7 is MERGED, not open"),
 ], ids=["behind-base", "merge-conflict", "merged-pr"])
 def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> None:

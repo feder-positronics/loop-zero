@@ -313,12 +313,12 @@ def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path)
 def test_task_helpers_errors(repo: Path) -> None:
     wt = worktree.start(repo, "tk", "main")
     worktree.task_file(wt).write_text("# no base line\n")
-    with pytest.raises(worktree.WorktreeError, match="Base section"):
+    with pytest.raises(worktree.WorktreeError, match="Restore that line in the task file"):
         worktree.base_sha(wt)
     worktree.task_file(wt).write_text("## Base\nmain @ " + "a" * 40 + "\n")
     assert worktree.base_sha(wt) == "a" * 40
     worktree.task_file(wt).write_text("Base: " + "b" * 40 + "\n")  # retired single-line form
-    with pytest.raises(worktree.WorktreeError, match="Base section"):
+    with pytest.raises(worktree.WorktreeError, match="Restore that line in the task file"):
         worktree.base_sha(wt)
     worktree.task_file(wt).unlink()
     with pytest.raises(worktree.WorktreeError, match="missing"):
