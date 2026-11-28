@@ -16,16 +16,17 @@ count_base() {
   git -c core.quotepath=off ls-tree -rz "$base" -- "$path" \
     | { grep -z '^100' | grep -z "$ext" || true; } \
     | while IFS= read -r -d '' file; do printf '%s\0' "$base:${file#*$'\t'}"; done \
-    | xargs -0 -r git show | wc -l
+    | xargs -0 -r bash -e -o pipefail -c 'for blob; do git show "$blob" | awk "END {print NR}"; done' _ \
+    | awk '{total += $1} END {print total + 0}'
 }
 # The candidate is the working tree, so uncommitted and new files count too.
 count_tree() {
   local path=$1 ext=$2 file
   git -c core.quotepath=off ls-files -zco --exclude-standard -- "$path" | { grep -z "$ext" || true; } \
     | while IFS= read -r -d '' file; do
-        if [ -f "$file" ] && [ ! -L "$file" ]; then printf '%s\0' "$file"; fi
+        if [ -f "$file" ] && [ ! -L "$file" ]; then printf './%s\0' "$file"; fi
       done \
-    | xargs -0 -r cat -- | wc -l
+    | xargs -0 -r awk 'END {print NR}' | awk '{total += $1} END {print total + 0}'
 }
 status=0
 report() { # name path cap ext_re

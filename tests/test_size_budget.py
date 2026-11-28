@@ -37,7 +37,7 @@ def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_to
     source = git_repo / "src/loopzero" / ("a.py" if failure else os.fsdecode(b"\xc3\xa9 space\nname.py"))
     source.parent.mkdir(parents=True)
     source.write_text("one\ntwo\n")
-    source.with_name("z.py").write_text("three\n")
+    source.with_name("z.py").write_text("three")
     base = stage_tree(git_repo)
     if failure == "deleted":  # unstaged deletion: skipped, not an error
         source.unlink()
@@ -60,9 +60,10 @@ def stage_tree(repo):
     return git(repo, "write-tree").strip()
 
 
-@pytest.mark.parametrize("path,cap", [("core/CONTRACT.md", 1500), ("docs/DELEGATION.md", 660)])
+@pytest.mark.parametrize("path,cap", [("core/CONTRACT.md", 1500), ("docs/DELEGATION.md", 660),
+                                     ("src/loopzero/original.py", 8250)])
 @pytest.mark.parametrize("case", ["grow", "hold", "symlink"])
-def test_markdown_doc_budgets(git_repo, path, cap, case):
+def test_line_budgets(git_repo, path, cap, case):
     doc = git_repo / path
     doc.parent.mkdir(parents=True)
     target = git_repo.parent / "external.md" if case == "symlink" else doc
@@ -70,7 +71,9 @@ def test_markdown_doc_budgets(git_repo, path, cap, case):
     if case == "symlink":
         doc.symlink_to(target)
     base = stage_tree(git_repo)
-    if case == "grow":
-        doc.write_text("line\n" * (cap + 6))
+    if case == "grow" and doc.suffix == ".py":
+        doc.with_name("added.py").write_text("line")
+    elif case == "grow":
+        doc.write_text("line\n" * (cap + 5) + "line")
     done = run_budget(git_repo, base)
     assert done.returncode == int(case == "grow"), done.stdout + done.stderr
