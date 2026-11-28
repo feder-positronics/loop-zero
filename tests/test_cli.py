@@ -4393,7 +4393,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
-def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, monkeypatch, cut):
+def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, monkeypatch, cut, head):
     reply = "Fixed the loop bound."
     accepted = {"reply": 0, "resolution": 0}
     original_gh, original_json = github._gh, github._gh_json
@@ -4403,14 +4403,12 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
         query = args[3]
         if "viewer {" in query:
             return {"data": {"viewer": {"login": LOGIN}}}
-        if cut == "resolution" and accepted["resolution"] and "reviewThreads(" in query:
-            duplicate = dict(finding_pr, id="THREAD_2", line=4, comments={"nodes": finding_pr["comments"]["nodes"]})
-            finding_pr["comments"]["pageInfo"] = {"hasNextPage": True, "endCursor": "ROOT"}
-            return threads_json(dict(finding_pr, isResolved=True), duplicate)
         if "reviewThreads(" in query:
             finding_pr["isResolved"] = bool(accepted["resolution"])
             finding_pr["comments"]["pageInfo"] = {"hasNextPage": bool(accepted["reply"]), "endCursor": "ROOT"}
-            return threads_json(finding_pr)
+            duplicate = dict(finding_pr, id="THREAD_2", line=4, isResolved=False,
+                             comments={"nodes": finding_pr["comments"]["nodes"]})
+            return threads_json(finding_pr, duplicate) if cut == "resolution" and finding_pr["isResolved"] else threads_json(finding_pr)
         if "comments(first: 100" in query:
             assert kwargs.get("token") == ""
             root = "after=ROOT" in args
@@ -4436,6 +4434,7 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
     monkeypatch.setattr(github, "_gh_json", read_or_reply)
     monkeypatch.setattr(github, "_gh", resolve_or_dispatch)
     gh.respond("api -X", "")
+    gh.respond(reviews_key(), [rev(head, "primary")])
     assert run(capsys, "resolve", "0b9b59e7", reply)[0] == 130
     out, _err = expect_cli(capsys, 0, "resolve", "0b9b59e7", reply, stderr="")
     assert accepted == {"reply": 1, "resolution": 1}
