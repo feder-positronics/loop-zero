@@ -173,6 +173,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    budget covers the first readiness read, the live PR reread before draft activation,
    and revalidation after taking a PR out of draft.
    Before the first draft activation it rereads the PR and refuses a moved head, changed target, closed state or hold.
+   The live REST detail supplies the node ID for the GraphQL activation mutation.
    Waiting is best-effort observation: short grace periods cover CI scheduling
    and a required check refreshing after an eligible review (constants in
    [cli.py](../src/loopzero/cli.py)), the check blocks readiness throughout,

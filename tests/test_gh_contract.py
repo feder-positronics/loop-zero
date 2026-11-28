@@ -60,7 +60,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
     arm_workflow_check(fake)
     fake.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     fake.append(f"api repos/{REPO}/pulls/7", merged)
-    fake.respond("pr ready", "")
+    fake.respond("api graphql ready", "")
     fake.respond("pr merge", "")
     fake.fail(f"api repos/{REPO}/git/ref/heads/lz/x", "gh: Not Found (HTTP 404)")
 
@@ -76,7 +76,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
         github.post_review(REPO, 7, HEAD, result)
         github.open_blocking_findings(REPO, 7, HEAD, ("bot-user",))
         github._check_signals(REPO, HEAD)
-        github.mark_ready(REPO, 7)
+        github.mark_ready(REPO, 7, "PR_7")
         github.merge(REPO, 7, "squash", HEAD)
         github.delete_remote_branch(REPO, "lz/x", HEAD)
     return fake.calls
@@ -115,7 +115,7 @@ def offline_run(argv: list[str], tmp_path: Path, call: dict | None = None) -> st
 def test_contract_capture_covers_operations_with_rest_metadata(captured_argv: list[dict]) -> None:
     calls = [call["argv"] for call in captured_argv]
     assert {tuple(argv[:2]) for argv in calls} >= {
-        ("pr", "ready"), ("pr", "merge"), ("api", "graphql"),
+        ("pr", "merge"), ("api", "graphql"),
         ("api", f"repos/{REPO}/pulls"), ("api", f"repos/{REPO}/pulls/7"),
     }
     assert not any(argv[:2] in (["pr", "list"], ["pr", "view"], ["pr", "create"])
@@ -132,7 +132,7 @@ def test_captured_methods_match_the_wire(captured_argv: list[dict], tmp_path: Pa
     for index, call in enumerate(captured_argv):
         argv = call["argv"]
         if argv[0] == "pr":
-            assert argv[1] in {"ready", "merge"}
+            assert argv[1] == "merge"
             expected = "POST"
         elif argv[1] == "graphql":
             expected = "POST"

@@ -1261,11 +1261,10 @@ def _pr_readiness(
     _require_task_branch(config, branch)
     pr = _require_pr(config, branch, allow_merged=allow_merged, head_sha=head)
     _require_pushed(pr, head)
-    readiness = None if pr.state == "MERGED" else _readiness(
+    return pr, None if pr.state == "MERGED" else _readiness(
         wt, config, pr, head, workflow_wait=workflow_wait, announce_receipt=True,
         mergify_deadline=mergify_deadline,
     )
-    return pr, readiness
 
 
 CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup"
@@ -1299,7 +1298,8 @@ def _mark_ready(wt: Path, config: Config, number: int, head: str, deadline: floa
         if problem := github.merge_hold(number, live.labels) or (
                 seen != (head, "OPEN", config.base_branch) and f"PR changed to {seen}"):
             raise CliError(f"{problem}; rerun loopzero ready")
-        github.mark_ready(config.repo, number)
+        if live.is_draft:
+            github.mark_ready(config.repo, number, live.node_id)
     except github.ReadDeadline:
         raise
     except github.GhUnavailable as exc:
@@ -1324,10 +1324,9 @@ def _ready(  # noqa: C901 - wait and draft activation paths share one readiness 
                                       mergify_deadline=deadline)
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
-    kicked = bool(waiting)
     wait = partial(_wait_with_deadline, wt, config, timeout=args.wait, started=started,
                    args=args, allow_skipped=True, initial_read_time=time.monotonic() - started)
-    if waiting:
+    if kicked := bool(waiting):
         _mark_ready(wt, config, pr.number, pr.head_sha, deadline)
         if args.wait is None:
             pending = f"; {github.MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
@@ -1341,9 +1340,9 @@ def _ready(  # noqa: C901 - wait and draft activation paths share one readiness 
         pr, readiness, kicked = waited
     if readiness.ready and pr.is_draft and not kicked:
         _mark_ready(wt, config, pr.number, pr.head_sha, deadline)
+        if args.wait is not None and (waited := wait(pr, kicked=True)) is None:
+            return 3
         if args.wait is not None:
-            if (waited := wait(pr, kicked=True)) is None:
-                return 3
             pr, readiness, _ = waited
     for reason in _readiness_messages(pr, readiness):
         print(f"not ready: {reason}")
@@ -1366,19 +1365,14 @@ def _draft_checks_waiting(config: Config, pr: github.PR, readiness: github.Readi
     reasons = set(readiness.reasons) - {github.MERGEABILITY_PENDING}
     if not pr.is_draft or not reasons or not reasons <= (expected := _check_reasons(readiness, "missing", "skipped")).keys():
         return ()
-    blocked = {expected[reason] for reason in reasons}
-    return tuple(name for name in config.required_ci if name in blocked)
+    return tuple(name for name in config.required_ci if name in {expected[reason] for reason in reasons})
 
 
 def _pending_checks(readiness: github.Readiness, *, allow_skipped: bool = False) -> tuple[str, ...]:
-    """Reasons worth waiting on: mergeability or required checks can still settle.
-
-    An explicit ready wait can observe a skipped result left over from draft CI.
-    """
+    """Filter for unsettled mergeability or checks, including draft CI skips when allowed."""
     states = ["missing", "pending", *(["skipped"] if allow_skipped else [])]
     waitable = {*_check_reasons(readiness, *states), *readiness.waitable_failures, github.MERGEABILITY_PENDING}
-    reasons = readiness.reasons
-    return reasons if all(r in waitable for r in reasons) else ()
+    return readiness.reasons if all(reason in waitable for reason in readiness.reasons) else ()
 
 
 def _readiness_messages(pr: github.PR, readiness: github.Readiness) -> Iterator[str]:
@@ -1588,8 +1582,7 @@ def _queue_wait(deadline: float, poll: Callable[[float], str | None], *, bounded
 def _landed(
     config: Config, pr: github.PR, closed: list[github.GhError], *, confirm_closed: bool = False,
 ) -> str | None:
-    """Merge SHA if landed; a closed-unmerged read is held as not final (GitHub lags a
-    queue merge) until the next poll or the deadline."""
+    """Hold a closed-unmerged result for confirmation because GitHub can lag a queue merge."""
     try:
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
     except github.ClosedUnmerged as exc:

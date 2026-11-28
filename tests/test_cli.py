@@ -380,8 +380,13 @@ def poll_clock(monkeypatch, *, start=0.0, jitter=None, after_sleep=None, patch_s
     return clock
 
 
+def is_ready_call(call):
+    argv = call["argv"]
+    return argv[:2] == ["pr", "ready"] or any("markPullRequestReadyForReview(" in arg for arg in argv)
+
+
 def on_ready_transition(gh, monkeypatch, callback):
-    gh.respond("pr ready", "")
+    gh.respond("api graphql ready", "")
     mark_ready = github.mark_ready
     observation = SimpleNamespace(marked=False)
 
@@ -1531,6 +1536,7 @@ def arm_approved_pr(
     reviews=None, readiness=None, **pr_overrides,
 ) -> None:
     arm_pr(gh, head, **pr_overrides)
+    gh.respond("api graphql ready", "")
     gh.respond(reviews_key(), reviews if reviews is not None else [rev(head, "primary", login=review_login)])
     arm_readiness(gh, head, wt, conclusion=conclusion, **(readiness or {}))
 
@@ -2587,7 +2593,6 @@ def test_late_check_preserves_receipt_when_head_moves(wt, gh, capsys, monkeypatc
         assert f"HEAD before: {old_head}; HEAD after: {head}" in err
         expect_cli(capsys, 0, "check")
         arm_approved_pr(gh, head, wt, readiness={"local_exit": None})
-        gh.respond("pr ready", "")
         ready, _ = expect_cli(capsys, 0, "ready", stderr="")
         assert "receipt accepted:" in ready
 
@@ -2664,7 +2669,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head, body_
         "Another `loopzero review` on this PR will be refused.",
         "not ready: required check 'checks' is failure",
     ]
-    assert not any(call["argv"][:2] == ["pr", "ready"] for call in gh.calls)
+    assert not any(is_ready_call(call) for call in gh.calls)
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
@@ -2775,24 +2780,22 @@ def test_required_check_blocks_delivery_or_activates_draft(wt, gh, capsys, head,
             hint = "; next: loopzero ready --wait" if draft else ""
             assert err == f"loopzero merge: not ready to merge: {reason}{hint}\n"
     else:
-        gh.respond("pr ready", "")
         out, _ = expect_cli(capsys, 3 if draft or conclusion == "pending" else 1, "ready", stderr="")
         if draft:
             assert without_accepted_receipt(out).splitlines() == [
                 "marked ready; waiting for required checks: checks; next: loopzero ready --wait",
             ]
-            assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
+            assert any(is_ready_call(c) for c in gh.calls)
             return
         hint = "\nnext: loopzero ready --wait" if conclusion == "pending" else ""
         assert without_accepted_receipt(out) == f"not ready: {reason}{hint}\n"
-    assert not any(call["argv"][:2] == ["pr", "ready"] for call in gh.calls)
+    assert not any(is_ready_call(call) for call in gh.calls)
 
 
 @pytest.mark.parametrize("scenario", ["uninterrupted", "resume", "resume-timeout"])
 def test_ready_wait_after_draft_transition(wt, gh, capsys, monkeypatch, head, git_calls, scenario):
     arm_approved_pr(gh, head, wt, "skipped")
     if scenario == "uninterrupted":
-        gh.respond("pr ready", "")
         snapshots = ("skipped", "skipped", "pending", "success")
     else:
         def interrupt_after_mark_ready():
@@ -2822,7 +2825,7 @@ def test_ready_wait_after_draft_transition(wt, gh, capsys, monkeypatch, head, gi
     else:
         assert ("waiting: required check 'checks' is pending" in out) is not timed_out
         assert ("timed out waiting for required checks" in out) is timed_out
-        assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 1
+        assert sum(is_ready_call(call) for call in gh.calls) == 1
 
 
 @pytest.mark.parametrize("settled", ["success", "skipped"])
@@ -2832,24 +2835,22 @@ def test_ready_waits_for_checks_on_original_head(wt, gh, capsys, monkeypatch, se
     pending = [{"name": "a", "status": "in_progress"}]
     success = [{"name": name, "conclusion": "success"} for name in ("a", "b")]
     arm_check_runs(gh, head, pending, pending, [{"name": "a", "conclusion": settled}], success)
-    gh.respond("pr ready", "")
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
     monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
     out, _ = expect_cli(capsys, 0, "--config", "workflow.toml", "ready", "--wait", stderr="", stdout_endswith=f"ready: {URL}\n")
     assert out.count("receipt accepted:") == 1
     assert "required check 'a' is pending" in out
     assert all("f" * 40 not in " ".join(c["argv"]) for c in gh.calls)
-    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 1
+    assert sum(is_ready_call(call) for call in gh.calls) == 1
 
 
 @pytest.mark.parametrize("wait", [False, True])
 def test_pending_mergeability_does_not_delay_draft_checks(wt, gh, capsys, head, wait):
     arm_approved_pr(gh, head, wt, "skipped", mergeable="UNKNOWN")
-    gh.respond("pr ready", "")
 
     expect_cli(capsys, 3, "ready", *(["--wait=0"] if wait else []), stderr="",
                stdout_contains=("marked ready;", "checks", "GitHub is computing mergeability"))
-    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 1
+    assert sum(is_ready_call(call) for call in gh.calls) == 1
 
 
 @pytest.fixture
@@ -2951,14 +2952,13 @@ def test_hold_blocks_ready_and_merge(wt, gh, capsys, monkeypatch, queue_requests
 
     out, err = expect_cli(capsys, 1, command, "--wait=0")
     assert "merge-authority hold" in out + err
-    assert not queue_requests and all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+    assert not queue_requests and all(not is_ready_call(c) for c in gh.calls)
 
     arm_approved_pr(gh, head, wt, check, isDraft=command == "ready")
-    gh.respond("pr ready", "")
     monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
     expect_cli(capsys, 0 if command == "ready" and check == "success" else 3, command, "--wait=0")
     assert queue_requests == ([(REPO, 7, head, "main")] if command == "merge" else [])
-    assert any(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == (command == "ready")
+    assert any(is_ready_call(c) for c in gh.calls) == (command == "ready")
 
 
 def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monkeypatch, capsys):
@@ -3040,7 +3040,6 @@ def test_ready_keeps_required_check_signals_from_both_apps(wt, gh, capsys, head,
 @pytest.mark.parametrize("budget,activation", [(0, False), (1, False), (1, True)])
 def test_ready_bounds_reads_before_activation(wt, gh, capsys, monkeypatch, head, budget, activation):
     arm_approved_pr(gh, head, wt, isDraft=bool(budget))
-    gh.respond("pr ready", "")
     clock = poll_clock(monkeypatch)
     read = github.pr_view if activation else github.pr_for_branch
     limits = []
@@ -3055,7 +3054,7 @@ def test_ready_bounds_reads_before_activation(wt, gh, capsys, monkeypatch, head,
     out, _ = expect_cli(capsys, 3 if budget else 0, "ready", f"--wait={budget}", stderr="")
     assert limits == [budget or 120]
     assert ("timed out" in out) is bool(budget)
-    assert not any(call["argv"][:2] == ["pr", "ready"] for call in gh.calls)
+    assert not any(is_ready_call(call) for call in gh.calls)
 
 
 @pytest.mark.parametrize("replacement,expected", [("success", 0), ("failure", 1), ("pending", 3)])
@@ -3102,7 +3101,7 @@ def test_ready_wait_revalidates_its_ready_transition(
     assert clock.sleeps == ([30.0, 9.0, 1.0] if replacement == "pending" else
                       [30.0, 9.0] if initial_pending else [30.0])
     assert out.endswith(ready_wait_tail(head, expected))
-    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 1
+    assert sum(is_ready_call(call) for call in gh.calls) == 1
 
 
 @pytest.mark.parametrize("after", ["pending", "late_success", "head_move", "blocker", "cancelled"])
@@ -3138,7 +3137,7 @@ def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypat
         assert "not ready: required check 'checks' is cancelled" in out
     if after == "blocker":
         assert "PR targets release, configured base is main" in out
-    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 1
+    assert sum(is_ready_call(call) for call in gh.calls) == 1
 
 
 @pytest.mark.parametrize("run_appears", [True, False])
@@ -3164,7 +3163,7 @@ def test_ready_transition_missing_run_gets_observation_grace(
     assert marked_at == [210.0]
     assert clock.sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [55.0, 5.0])
     assert out.endswith(ready_wait_tail(head, 0 if run_appears else 3))
-    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 1
+    assert sum(is_ready_call(call) for call in gh.calls) == 1
 
 
 @pytest.mark.parametrize("branch,wait,draft", [
@@ -3174,12 +3173,12 @@ def test_ready_transition_missing_run_gets_observation_grace(
 def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, branch, wait, draft, git_calls):
     git(wt, "branch", "-m", branch)
     arm_approved_pr(gh, head, wt, branch=branch, isDraft=draft)
-    gh.respond("pr ready", "")
     git_calls.clear()
     code, out, err = run(capsys, "ready", *(["--wait"] if wait else []))
     assert (code, without_accepted_receipt(out), err) == (0, f"ready: {URL}\n", "")
-    ready_calls = [c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "ready"]]
-    assert ready_calls == ([["pr", "ready", "7", "--repo", REPO]] if draft else [])
+    ready_calls = [c["argv"] for c in gh.calls if is_ready_call(c)]
+    assert len(ready_calls) == int(draft)
+    assert all(argv[:2] == ["api", "graphql"] and "id=PR_7" in argv for argv in ready_calls)
     assert sum(c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/check-runs"]
                for c in gh.calls) == (2 if wait and draft else 1)
     if not wait:
@@ -3329,9 +3328,8 @@ def test_ready_rechecks_the_live_pr_before_the_first_activation(wt, gh, capsys, 
         monkeypatch.setattr(cli, "_pr_readiness", snapshot)
     else:
         gh.respond_pr_view(pr_json(**{"headRefOid": head, **change}))
-    gh.respond("pr ready", "")
     expect_cli(capsys, 1, "ready", stderr_contains=diagnostic)
-    assert not any(call["argv"][:2] == ["pr", "ready"] for call in gh.calls)
+    assert not any(is_ready_call(call) for call in gh.calls)
 
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
@@ -3497,7 +3495,6 @@ def test_ready_respects_latest_review_state(wt, gh, capsys, state, head):
         reviews = [rev(head, "primary", login="stranger"), rev(head, "primary", commit="1" * 40)]
     else:
         reviews = [rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")]
-        gh.respond("pr ready", "")
     arm_approved_pr(gh, head, wt, reviews=reviews)
     ready = state == "COMMENTED"
     out, _ = expect_cli(capsys, 0 if ready else 1, "ready")
@@ -4090,7 +4087,7 @@ def test_commands_refuse_closed_or_mismatched_pr(wt, gh, capsys, command, closed
     else:
         arm_pr(gh, "0" * 40, isDraft=False)
         expect_cli(capsys, 1, command, stdout="", stderr_contains=("push or pull first",))
-        assert wt.exists() and all(c["argv"][:2] not in (["pr", "merge"], ["pr", "ready"]) for c in gh.calls)
+        assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] and not is_ready_call(c) for c in gh.calls)
 
 
 @pytest.mark.parametrize("changed", [False, True])
@@ -4535,7 +4532,6 @@ def test_start_uses_the_primary_repo_for_task_worktrees(repo, tmp_path, monkeypa
 def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_pr(gh, head, wt, reviews=[rev("f" * 40, "primary", login="x")] * 100)
     gh.respond(reviews_key(2), [rev(head, "primary")])
-    gh.respond("pr ready", "")
     expect_cli(capsys, 0, "ready", stdout_endswith=f"ready: {URL}\n")
 
 
@@ -4949,7 +4945,6 @@ def test_mergify_ready_draft_requires_safe_queue_before_ci_activation(
         arm_check_progress(gh, head, "skipped", "success")
     else:
         arm_check_runs(gh, head, [], [{"name": "checks", "status": "completed", "conclusion": "success"}])
-    gh.respond("pr ready", "")
     calls = []
     def configured(*_):
         calls.append(True)
@@ -4958,7 +4953,7 @@ def test_mergify_ready_draft_requires_safe_queue_before_ci_activation(
         return queue_state == "safe" or (queue_state == "becomes_unsafe" and len(calls) == 1)
     monkeypatch.setattr(mergify, "configured", configured)
     out, err = expect_cli(capsys, 0 if queue_state == "safe" else 1, "ready", "--wait=0")
-    writes = sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls)
+    writes = sum(is_ready_call(c) for c in gh.calls)
     assert writes == (1 if queue_state in {"safe", "becomes_unsafe"} else 0)
     if queue_state != "safe":
         assert "configuration" in out + err
@@ -5040,7 +5035,6 @@ def test_receipt_print_failure_preserves_verdict(wt, gh, capsys, head, monkeypat
 
     if command == "ready":
         arm_approved_pr(gh, head, wt)
-        gh.respond("pr ready", "")
     monkeypatch.setattr(builtins, "print", broken)
     assert run(capsys, command)[0] == 0
 

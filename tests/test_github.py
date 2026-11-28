@@ -157,7 +157,7 @@ def rest_pr_json(data: dict, *, branch: str = "lz/t1") -> dict:
         return dict(data)  # preserve intentionally malformed fixtures
     mergeable = data.get("mergeable")
     return {
-        "number": data.get("number", 7), "html_url": data.get("url"),
+        "number": data.get("number", 7), "html_url": data.get("url"), "node_id": "PR_7",
         "head": {"sha": data["headRefOid"], "ref": branch,
                  "repo": {"full_name": REPO}},
         "base": {"ref": data.get("baseRefName", "main")},
@@ -241,9 +241,10 @@ def test_missing_gh_raises_typed_error(fake_bin: Path, monkeypatch: pytest.Monke
 
 def test_mark_ready_retries_a_transient_failure(gh: FakeGh, monkeypatch) -> None:
     monkeypatch.setattr(github, "_retry_sleep", lambda _delay: None)
-    gh.respond("pr ready", {"stdout": "", "stderr": "gh: HTTP 502: Bad Gateway\n", "exit": 1}, "")
-    github.mark_ready(REPO, 7)  # r7-d4-1: one GraphQL 502 no longer ends ready/merge --wait.
-    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 2
+    gh.respond("api graphql ready", {"stdout": "", "stderr": "gh: HTTP 502: Bad Gateway\n", "exit": 1})
+    gh.respond("pr ready", "")
+    github.mark_ready(REPO, 7, "PR_7")
+    assert [call["argv"][:2] for call in gh.calls] == [["api", "graphql"], ["pr", "ready"]]
 
 
 def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
@@ -259,7 +260,7 @@ def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
 def test_generic_failure_carries_command_and_tail(gh: FakeGh, stdout: str) -> None:
     gh.respond("pr ready", {"stdout": stdout, "stderr": "gh: HTTP 422\n", "exit": 1})
     with pytest.raises(github.GhError) as info:
-        github.mark_ready(REPO, 7)
+        github.mark_ready(REPO, 7, "")
     assert info.value.command == ("gh", "pr", "ready", "7", "--repo", REPO)
     assert info.value.tail == "gh: HTTP 422" + ("\n\n" + stdout if stdout else "\n")
 
