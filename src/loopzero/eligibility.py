@@ -275,14 +275,13 @@ def restore_landed(repo: str, head: str, pending_id: int | None = None) -> int:
 
 
 def publish_verdict(repo: str, head: str, state: str, description: str) -> None:
-    context = CONTEXT
     try:
-        github.commit_status(repo, head, context, state, description)
+        github.commit_status(repo, head, CONTEXT, state, description)
     except github.StatusLimitReached:
         raise
     except (github.GhError, github.ProcTimeout, OSError) as exc:
         with suppress(github.GhError, github.ProcTimeout, OSError):
-            if ((r := next(github.context_statuses(repo, head, context), {})).get("state"), r.get("description")) == (state, description):
+            if ((r := next(github.context_statuses(repo, head, CONTEXT), {})).get("state"), r.get("description")) == (state, description):
                 return
         raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
 
@@ -307,7 +306,9 @@ def main(argv: list[str] | None = None) -> int:
         if snapshot is not None and pending is not None:
             current = github.pr_view(cfg.repo, args.pr)
             if current.state == "MERGED" and current.head_sha == snapshot.head_sha == args.head:
-                return restore_landed(cfg.repo, args.head, pending.get("id") or 0)
+                code = restore_landed(cfg.repo, args.head, pending.get("id") or 0)
+                print("source landed during eligibility refresh")
+                return code
             result = _confirm_source(snapshot, current, result)
             state, description = source_status(result)
             publish_verdict(cfg.repo, args.head, state, description[:140])

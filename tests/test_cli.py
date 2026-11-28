@@ -3084,18 +3084,22 @@ def ready_wait_tail(head, status, resume="loopzero ready --wait"):
 
 
 @pytest.mark.parametrize("rerun", [False, True])
-@pytest.mark.parametrize("same_app", [False, True])
-def test_ready_keeps_required_check_signals_from_distinct_producers(wt, gh, capsys, head, rerun, same_app):
+@pytest.mark.parametrize("producer", ["app", "suite", "unknown", "workflow"])
+def test_ready_keeps_required_check_signals_from_distinct_producers(wt, gh, capsys, head, rerun, producer):
     arm_approved_pr(gh, head, wt, isDraft=False)
     runs = [
         {"id": 1, "app": {"id": 10}, "check_suite": {"id": 1}, "name": "checks", "conclusion": "failure"},
-        {"id": 2, "app": {"id": 10 if same_app else 20}, "check_suite": {"id": 2}, "name": "checks", "conclusion": "success"},
+        {"id": 2, "app": {"id": 20 if producer == "app" else 10}, "check_suite": {"id": 2}, "name": "checks", "conclusion": "success"},
     ]
     if rerun:
         runs.append({**runs[0], "id": 3, "conclusion": "success"})
     arm_check_runs(gh, head, runs)
-    out, _ = expect_cli(capsys, 0 if rerun else 1, "ready", stderr="")
-    assert ("required check 'checks' is failure" in out) is not rerun
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": [
+        {"head_sha": head, "check_suite_id": suite, "workflow_id": 7 if producer == "workflow" else suite}
+        for suite in ((1, 2) if producer != "unknown" else ())]})
+    ready = rerun or producer == "workflow"
+    out, _ = expect_cli(capsys, 0 if ready else 1, "ready", stderr="")
+    assert ("required check 'checks' is failure" in out) is not ready
 
 
 @pytest.mark.parametrize("outcome", ["retry", "timeout-retry", "applied", "blocker", "moved", "exhausted", "quota", "short-applied", "write-deadline", "unknown", "late-hold", "applied-late", "late-conflict", "status-retry"])

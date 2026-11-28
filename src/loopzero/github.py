@@ -1256,10 +1256,18 @@ def _check_signals(
     *, workflow_wait: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
-    latest_runs: dict[tuple[str, int | None, int | None], dict] = {}
+    latest_runs: dict[tuple[str, int | None, tuple[str, int | None]], dict] = {}
     runs = paged(f"repos/{repo}/commits/{head_sha}/check-runs", "check_runs")
-    for cr in runs:
-        key = cr["name"], (cr.get("app") or {}).get("id"), (cr.get("check_suite") or {}).get("id")
+    run_keys = [(r["name"], (r.get("app") or {}).get("id"),
+                 suite.get("id") if isinstance(suite := r.get("check_suite"), dict) else None) for r in runs]
+    required_suites = {(name, app, suite) for name, app, suite in run_keys if name in required_ci and suite is not None}
+    workflows = (paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
+                 if len(required_suites) > len({(name, app) for name, app, _ in required_suites}) else None)
+    producers = {r["check_suite_id"]: r["workflow_id"] for r in workflows or ()
+                 if r.get("head_sha") == head_sha and r.get("check_suite_id") and r.get("workflow_id")}
+    for cr, (name, app, suite) in zip(runs, run_keys, strict=True):
+        producer = ("workflow", producers[suite]) if suite in producers else ("suite", suite)
+        key = name, app, producer
         latest_runs[key] = max(latest_runs.get(key, cr), cr, key=_check_run_order)
     for (name, _, _), cr in latest_runs.items():
         state = cr.get("conclusion") or cr.get("status") or "unknown"
@@ -1281,7 +1289,6 @@ def _check_signals(
                            and all(at and at < review_at for state, at in values if state != "success"))
     stale += stale_verdicts
     superseded: list[str] = []
-    workflows: list[dict] | None = None
     for (name, _, _), cr in latest_runs.items():
         if (not workflow_wait or name not in required_ci or name in stale
                 or cr.get("conclusion") not in {"failure", "cancelled", "timed_out"}
@@ -1292,19 +1299,11 @@ def _check_signals(
             workflows = paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
         if _has_active_replacement(repo, cr, workflows, head_sha):
             superseded.append(name)
-    capped = _check_suites_at_limit(runs)
+    capped = len({suite for _, _, suite in run_keys if type(suite) is int}) >= CHECK_SUITE_LIMIT
     # A status-only success may hide a failed run outside the returned suites.
     run_names = {name for name, _, _ in latest_runs}
     states = {name: state for name, state in states.items() if not capped or state != "success" or name in run_names}
     return states, (*stale, *superseded), stale_verdicts, capped
-
-
-def _check_suites_at_limit(runs: list[dict]) -> bool:
-    suites = {
-        suite["id"] for run in runs
-        if isinstance(suite := run.get("check_suite"), dict) and type(suite.get("id")) is int
-    }
-    return len(suites) >= CHECK_SUITE_LIMIT
 
 
 def _missing_check_reason(name: str, head_sha: str, capped: bool) -> str:

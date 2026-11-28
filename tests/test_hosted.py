@@ -115,9 +115,8 @@ def test_source_landing_mid_refresh_keeps_settled_verdict(publisher, case, state
 
 
 def check_source(publisher, states, *, exit_code=0, error=None, match=None, manual=False):
-    manual_args = ["--config", "workflow.toml", "--pr", "7", "--head", HEAD, "--publish"]
     with pytest.raises(error, match=match) if error else nullcontext():
-        assert (eligibility.main(manual_args) if manual else hosted.main()) == exit_code
+        assert (eligibility.main(["--config", "workflow.toml", "--pr", "7", "--head", HEAD, "--publish"]) if manual else hosted.main()) == exit_code
     statuses = [json.loads(call["--input"]) for call in publisher.calls if "--input" in call]
     assert [status["state"] for status in statuses] == states
     return statuses
