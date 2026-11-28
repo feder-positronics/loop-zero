@@ -7,12 +7,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 
 1. `loopzero start <task-slug>` creates a worktree and branch from the base.
    Fill `.loopzero/task.md` from the [handoff template](HANDOFF.md): goal,
-   problem, context, acceptance, base SHA. Write the PR, like any issue or
-   design doc you write, for the human owner under [Reporting](#reporting).
-   `start` is the default. In a worktree your launcher already made, first make
-   sure it is on a task branch (not a detached HEAD) and that `.loopzero/` is in
-   the repository's local Git excludes (`info/exclude`), as `start` would do;
-   then write `.loopzero/task.md` from the template.
+   problem, context, acceptance, base SHA. Follow [Reporting](#reporting).
+   For a launcher-made worktree, verify it is on a task branch and add
+   `.loopzero/` to Git's local `info/exclude` before writing the task.
 2. Implement, commit, then run `loopzero check`. It records the sandboxed
    `[checks].commands` stages in the head's check receipt. A stage timeout
    after an hour records 124 in the receipt and `check` exits 1. For a long
@@ -23,11 +20,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    generated Validation checks. Later calls sync narrative, preserving live
    Validation, Review and extra sections; `check` refreshes only its checks
    block. Drafts need no approving review.
-4. `loopzero review` runs a reviewer model's own CLI (a native review), by
-   default from a family independent of the writers, on the exact head and posts
-   one GitHub review with inline findings. If there is no commentable line,
-   blocking findings go in the review body and need a reviewed fix. Approval
-   exits 0, changes requested 5.
+4. `loopzero review` runs a native review on the exact head and posts one GitHub
+   review with inline findings. Blocking findings without commentable lines go
+   in the review body and need a reviewed fix. Approval exits 0. Follow the [review budget](#review-budget).
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
    passes. On repositories that auto-queue ready PRs, leaving draft can queue
    the PR during this command. A draft blocked only by missing or skipped
@@ -54,8 +49,6 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    pushing to a requested or queued PR, withdraw it, confirm the removal on the PR,
    then push, review the new head and admit it again; a CLI failure does not prove
    the request was removed.
-
-Merge is authorized by default under [merge authority](#merge-authority).
 
 On start/resume, use `loopzero status` in an existing worktree to read Git, GitHub
 and the receipt. Rerun the last `--wait` if pending. After ejection, read the
@@ -92,15 +85,13 @@ and delegation templates' fields and apply these rules to their prose.
   or describe what they do here.
 - Ground conclusions in a command and result, number, file or example. Identify
   inferences, assumptions, skipped checks and failures.
-- Give returning readers changes and next steps, and new readers enough state
-  to act. Include process only when it affects what to trust.
+- Include process only when it affects what to trust.
 - Name who decides, the exact question, recommendation and default without
   an answer. Give alternatives for real choices.
 - Include a [visual](VISUALS.md) when structure, quantities or UI are harder
   to scan in prose. Each visual must add information and the prose must stand
   alone. Omit visuals for small, straightforward text or code changes.
-- Stop when the reader can act. Restate the opening only if the delivery ending
-  above requires it.
+- Stop when the reader can act.
 
 ## Merge authority
 
@@ -140,12 +131,11 @@ blocks when any of these apply:
   visible. Ordinary missing-run grace and the early out-of-draft switch do not apply.
 
 Push fixes or use `loopzero resolve <id> "<reason>"` to reply to and resolve
-one finding; no bulk or silent resolution. The CLI has no waiver file. `--config`
-replaces the pinned policy for bootstrap or an operator override and says so in
-its output. Hosted review eligibility uses the current authored SHA, review ancestry and trusted-base
-`workflow.toml` publishers; pending/dismissed reviews are ineligible. Local
-readiness also requires its sandboxed check receipt and source CI. Writers
-can edit/resolve evidence; branch protection and CI enforce these blockers.
+one finding. No bulk or silent resolution or waiver file. `--config` replaces
+pinned policy for bootstrap or an operator override and reports the override.
+Hosted eligibility uses authored SHA, reviewed ancestry and trusted-base
+`workflow.toml` publishers. Pending or dismissed reviews are ineligible.
+Writers can edit or resolve evidence; branch protection and CI enforce blockers.
 
 **Owner queue route.** The merge queue's required checks are the evidence. A PR
 covered by a review eligible under [Review budget](#review-budget) and green on
@@ -164,14 +154,11 @@ and `loopzero merge`. Where a repository rule queues ready PRs, taking a PR out 
 draft is the queue request, whatever tool does it: after a receipt refusal, post
 the one reason first, or fix the cause and rerun `loopzero check`.
 
-An attributed main regression is repaired or reverted by the PR owner of the change
-that caused it; for a shared critical
-product, build or deployment hazard, revert the culprit first within 1 h under
-the consumer's rollback rules. Non-critical failures of monitoring jobs outside a change
-get an active repair owner without freezing unrelated merges. Missing valid
-required proof still blocks the affected operation. These failure policies
-preserve exact-SHA review, receipt requirements, the owner queue route and
-merge-authority holds.
+The PR owner repairs or reverts an attributed main regression. For a shared
+critical product, build or deployment hazard, revert the culprit first within
+1 h under consumer rollback rules. Assign a repair owner to non-critical monitoring
+failures outside the change without freezing unrelated merges. Exact-SHA review,
+receipts, owner queue conditions and merge-authority holds still apply.
 
 <a id="gate-execution-and-delivery-priority"></a>
 
@@ -186,21 +173,17 @@ main-regression rule above. Never make a path-filtered job a required check.
 CI, queue and runner reliability or speed go ahead of feature work. Use the
 repository's queue priority where available.
 
-Finish planned base updates before starting checks. Reuse an identical check
-already queued or running at the same head and settings fingerprint. A second local
-check times out after 60 seconds if the first still holds the task lock. Before a fallback
-check on a published head, run `loopzero ready` and reuse any receipt it accepts.
-The session the brief assigns verification to (the worker, or under parent
-verification the parent or the integration executor it names) runs each full
-local check once and records its command,
-exact head SHA, result, time and log path; a `loopzero check` receipt also
-carries the settings fingerprint the CLI computes. Workers, reviewers and
-coordinators reuse green results at the same head (and, for `loopzero check`,
-the same settings fingerprint). Rerun only if head or inputs changed (including
-rebase), a `loopzero check` receipt's settings fingerprint changed or is
-missing, or the result is missing, red, partial or unverifiable.
-Reviewers still verify tests prove the claimed behavior. Hosted CI and sandboxed
-receipt requirements remain.
+Finish planned base updates before checks. Reuse an identical queued or running
+check at the same head and settings fingerprint. A second local check times out
+after 60 seconds if the first still holds the task lock. Before a fallback check
+on a published head, run `loopzero ready` and reuse any receipt it accepts.
+
+The brief's verification owner runs each full local check once and records its
+command, exact head, result, time and log path. `loopzero check` also records
+the settings fingerprint. Everyone reuses green evidence for matching head and
+inputs (including that fingerprint); rerun if those change or the result is
+missing, red, partial or unverifiable. Reviewers verify that tests prove the
+behavior. Hosted CI and sandboxed receipt requirements still apply.
 
 Run every check stage, script, workflow step and job on a shared runner host with the repository's
 pinned toolchain, never the host interpreter. If a newer API is missing, use the
@@ -229,12 +212,11 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   edits to each automatic remerge. The reviewed commit must be on the first-parent history, and merged parents
   must come from the verified base. Unresolved primary findings still count under Blockers.
 - Default: one writing model family per PR, including delegates and repairs;
-  another may advise read-only and review independently. Before committing
-  imported work, record every actual writing delegate in truthful
-  `Co-Authored-By` trailers; the committer does not replace the writer.
-  Preserve every actual contributor's truthful trailers through squash/amend.
-  Missing attribution
-  stays unknown; never invent it.
+  another may advise read-only and review independently. Before committing, add
+  truthful `Co-Authored-By` trailers for every model that wrote the change,
+  including your own if it wrote any of it. Applying someone else's patch
+  does not make you its writer. Preserve truthful contributor trailers through
+  squash/amend. Missing attribution stays unknown; never invent it.
 - Primary and delta prefer families absent from recognized trailers across
   all commits/trailers from configured-base merge-base through HEAD,
   including repairs. Narrower diffs, prose and a main-author-only HEAD cannot
@@ -247,13 +229,9 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   base merges containing a conflict. Otherwise, merge with readiness passing or open a replacement PR for changes that need more review.
   To open a replacement PR, withdraw the exhausted PR if it is requested or
   queued, close it, then run `loopzero pr` on the same branch.
-- When a base update is needed after a published review, merge the configured
-  base into the existing branch to preserve reviewed ancestry. Readiness and
-  hosted eligibility can inherit coverage only across proven clean base merges.
-  A request_changes primary
-  additionally requires resolution of every blocking finding. Source commits,
-  modified merges, and rebases that rewrite the reviewed commit require
-  review coverage for the new head.
+- After publishing a review, update from the configured base by merging it.
+  [Blockers](#blockers) defines inherited coverage. Source commits, modified
+  merges and rebases that rewrite the reviewed commit require new coverage.
 - Reviewer runs yielding no verdict (missing tool, authentication failure,
   unparseable output) consume no budget; the CLI tries the next available
   configured family and reports reasons/nonzero if all fail. Only
@@ -275,9 +253,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
 Local checks run with read-only source/Git, scratch writes, isolated HOME, only
 configured `[checks].ro_paths`/`[checks].writable` home paths, no network unless
 `[checks].network = true`, and allowlisted environment plus `[checks].env`.
-The configured default allowlist is `PATH HOME LANG LC_ALL TERM`. Within the
-sandbox, the default forwarded host variables are `PATH LANG LC_ALL TERM` and
-`HOME` is set to `/tmp/home`.
+Default forwarded variables are `PATH LANG LC_ALL TERM`; the allowlisted
+`HOME` is replaced with `/tmp/home`.
 
 Local checks and native reviews require working `bwrap` and fail without it.
 Checks and reviews recheck HEAD and dirtiness after running. Changes during the
