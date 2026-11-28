@@ -24,11 +24,12 @@ def sources(tmp_path, monkeypatch, request):
                      for n, reason in [(6, "completed"), (7, "not_planned")]],
         "orders": [issue(8, "2026-05-27T00:00:00Z", SINCE, "completed")],
         "orders_open": [issue(9, "2026-01-01T00:00:00Z")],
-        "p0": [issue(4, "2026-05-23T12:00:00Z"), issue(5, "2026-05-25T12:00:00Z")],
+        "p0": [issue(4, "2026-05-23T12:00:00Z"), issue(5, "2026-05-02T12:00:00Z")],
         "issues/4/timeline": [{"event": event, "created_at": time} for event, time in [
             ("labeled", "2026-05-28T23:45:00Z"), ("commented", "2026-05-28T06:00:00Z"), ("commented", END),
         ]],
-        "issues/5/timeline": [{
+        "issues/5/timeline": [{"event": "closed", "created_at": "2026-05-10T00:00:00Z"},
+                              {"event": "reopened", "created_at": "2026-05-20T00:00:00Z"}, {
             "event": "cross-referenced", "created_at": "2026-05-26T01:00:00Z",
             "source": {"issue": {"created_at": "2026-05-26T00:00:00Z",
                                  "pull_request": {"url": f"https://api.github.com/repos/{REPO}/pulls/3"}}},
@@ -101,12 +102,12 @@ def record(sources, capsys):
 def test_record_replay_and_weekly_window(sources, record):
     calls, _ = sources
     report, stderr = record(host=True)
-    assert sum(call == ["host-adapter"] for call in calls) == 1 and len(calls) == 6
+    assert sum(call == ["host-adapter"] for call in calls) == 1 and len(calls) == 8
     expected = dict(merges=1, open_to_merge_median_hours=42, outcomes_closed=1, orders_accepted=1,
                     order_to_acceptance_median_hours=24, checks_passed=1, checks_failed=1,
-                    open_p0=2, oldest_open_p0_hours=132, owner_messages=0, tokens_by_role={"builder": 31}, spend=1.25)
+                    open_p0=2, oldest_open_p0_hours=636, owner_messages=0, tokens_by_role={"builder": 31}, spend=1.25)
     assert {key: report["custom_window"][key] for key in expected} == expected
-    assert len(report["trend_4_weeks"]) == 4
+    assert [week["open_p0"] for week in report["trend_4_weeks"]] == [1, 0, 1, 2]
     assert report["trend_4_weeks"][0]["since"] == "2026-05-01T00:00:00Z"
     assert report["previous_7_days"]["until"] == report["last_7_days"]["since"]
     assert report["weekly_sample"]["items"] == [
@@ -157,8 +158,8 @@ def test_missing_and_failed_sources_do_not_report_zero(sources, record, capsys, 
     args[args.index("--check-receipts") + 1] = "/no-such-receipt-test-file"
     report, _ = record("--stall-hours", "1", replay=False)
     assert all(report["weekly_sample"]["pool_sizes"][kind] == "UNKNOWN" for kind in ("stalled_p0", "oldest_open_order"))
-    assert any(a.get("source") == "p0/#1/activity" for a in report["alerts"])
-    for key in ("orders_accepted", "checks_passed", "checks_failed", *retro_metrics.HOST_KEYS):
+    assert any(a.get("source") == "p0/#1/state" for a in report["alerts"])
+    for key in ("orders_accepted", "checks_passed", "checks_failed", "open_p0", *retro_metrics.HOST_KEYS):
         assert report["custom_window"][key] == "UNKNOWN"
         assert any(a["source"] == f"custom_window/{key}" for a in report["alerts"])
     assert [report[window]["outcomes_closed"] for window in ("custom_window", "previous_7_days")] == [1, 0]
