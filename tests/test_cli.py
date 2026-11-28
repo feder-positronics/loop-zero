@@ -3079,10 +3079,12 @@ def test_ready_keeps_required_check_signals_from_both_apps(wt, gh, capsys, head,
     assert ("required check 'checks' is failure" in out) is not rerun
 
 
-@pytest.mark.parametrize("outcome", ["retry", "timeout-retry", "applied", "blocker", "moved", "exhausted", "quota", "short-applied", "write-deadline", "unknown", "late-hold", "applied-late"])
+@pytest.mark.parametrize("outcome", ["retry", "timeout-retry", "applied", "blocker", "moved", "exhausted", "quota", "short-applied", "write-deadline", "unknown", "late-hold", "applied-late", "late-conflict", "status-retry"])
 def test_ready_recovers_ambiguous_activation(wt, gh, capsys, monkeypatch, head, outcome):
     arm_approved_pr(gh, head, wt, "skipped")
     clock, attempts = poll_clock(monkeypatch), []
+    late = {"late-hold": {"labels": [{"name": "hold"}]}, "applied-late": {"isDraft": False, "mergeStateStatus": "CLEAN"},
+            "late-conflict": {"mergeable": "CONFLICTING"}, "status-retry": {"mergeStateStatus": "BLOCKED"}}.get(outcome)
     def activate(*_):
         attempts.append(clock.now)
         clock.now += {"short-applied": 59, "write-deadline": 60}.get(outcome, 0)
@@ -3092,25 +3094,21 @@ def test_ready_recovers_ambiguous_activation(wt, gh, capsys, monkeypatch, head, 
         if outcome.endswith("applied") or applied:
             arm_pr(gh, head, isDraft=False)
             arm_named_check(gh, head, conclusion="success")
-        if outcome == "blocker":
-            arm_named_check(gh, head, conclusion="failure")
+        if outcome in {"blocker", "applied-late"}:
+            arm_named_check(gh, head, conclusion="failure" if outcome == "blocker" else "success")
         if outcome in {"moved", "unknown"}:
             arm_pr(gh, "f" * 40 if outcome == "moved" else head, mergeable="UNKNOWN")
-        if outcome == "late-hold":
-            gh.respond_pr_view(pr_json(headRefOid=head, labels=[{"name": "hold"}]))
-        if outcome == "applied-late":
-            gh.respond_pr_view(pr_json(headRefOid=head, isDraft=False, mergeStateStatus="CLEAN"))
-            arm_named_check(gh, head, conclusion="success")
+        if late and not applied:
+            draft = pr_json(headRefOid=head, mergeStateStatus="DRAFT")
+            gh.respond_pr_view(draft, draft, dict(draft, **late))  # first write, retry read, final recovery read
         if not applied:
             raise github.GhUnavailable(("gh", "pr", "ready"), "secondary rate limit" if outcome == "quota" else "HTTP 502")
     monkeypatch.setattr(github, "mark_ready", activate)
     before = (receipt := wt / ".loopzero/checks.json").read_bytes()
     code, out, err = run(capsys, "ready", "--wait=60")
-    assert attempts == ([0, 5] if outcome.endswith("retry") or outcome == "exhausted" else [0])
-    assert receipt.read_bytes() == before
-    assert code == {"blocker": 1, "moved": 1, "unknown": 1, "late-hold": 1, "exhausted": 2, "quota": 2, "write-deadline": 3}.get(outcome, 0)
-    assert code != 2 or "Run `loopzero ready --wait`" in err
-    assert code != 0 or f"ready: {URL}" in out
+    assert (attempts, receipt.read_bytes()) == ([0, 5] if outcome.endswith("retry") or outcome == "exhausted" else [0], before)
+    assert code == {"blocker": 1, "moved": 1, "unknown": 1, "late-hold": 1, "late-conflict": 1, "exhausted": 2, "quota": 2, "write-deadline": 3}.get(outcome, 0)
+    assert (code != 2 or "Run `loopzero ready --wait`" in err) and (code != 0 or f"ready: {URL}" in out)
 
 
 @pytest.mark.parametrize("command,budget,activation", [
@@ -3386,10 +3384,9 @@ def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, hea
 def test_ready_rechecks_the_live_pr_before_the_first_activation(wt, gh, capsys, head, monkeypatch, change, diagnostic):
     arm_approved_pr(gh, head, wt)
     if change is None:
-        pr = github.PR(7, URL, head, "main", True, "OPEN", "MERGEABLE")
         def snapshot(*_args, **_kwargs):
             (wt / ".loopzero/checks.json").unlink()
-            return pr, github.Readiness(True, ())
+            return github.PR(7, URL, head, "main", True, "OPEN", "MERGEABLE"), github.Readiness(True, ())
         monkeypatch.setattr(cli, "_pr_readiness", snapshot)
     else:
         gh.respond_pr_view(pr_json(**{"headRefOid": head, **change}))
