@@ -79,7 +79,6 @@ def _enter_private_directory(stack: ExitStack, prefix: str) -> Path:
 
 @contextmanager
 def private_review_home():
-    """Keep a private reviewer home scoped to one review run, including on SIGTERM."""
     with _proc.unwind_on_sigterm(), _private_directories() as stack:
         yield _enter_private_directory(stack, "loopzero-review-home-")
 
