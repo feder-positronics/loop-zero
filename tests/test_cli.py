@@ -1102,6 +1102,8 @@ def test_pr_pushes_and_creates_draft(
     if checked:
         expect_cli(capsys, 0, "check")
     head = head_of(wt)
+    git(wt, "config", "push.followTags", "true")
+    git(wt, "tag", "-am", "Local release", "release", "origin/main")
     arm_new_draft(gh, head, branch=branch)
     task = (wt / ".loopzero" / "task.md").read_text()
     narrative = task.split("## Validation\n", 1)[0].replace("## Notes\n", "## Notes\nEdited on GitHub.\n")
@@ -1113,9 +1115,10 @@ def test_pr_pushes_and_creates_draft(
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     pushes = trace_pushes(fake_tool, tmp_path)
     expect_cli(capsys, 0, "pr", stdout=URL + "\n", stderr="")
-    assert pushes.read_text() == f"push origin {head}:refs/heads/{branch}\n"
+    assert pushes.read_text() == f"push --no-follow-tags origin {head}:refs/heads/{branch}\n"
     assert git(wt, "rev-parse", "--abbrev-ref", "@{upstream}").rstrip("\n") == f"origin/{branch}"
     assert git(repo.parent / "origin.git", "rev-parse", branch).strip() == head
+    assert git(repo.parent / "origin.git", "for-each-ref", "refs/tags") == ""
     assert [c["argv"][:2] for c in gh.calls] == [
         branch_head_key(branch).split(), history_key.split(),
         branch_head_key(branch).split(), pr_list_key(branch).split(), ["api", f"repos/{REPO}/pulls"],
@@ -1240,7 +1243,7 @@ def test_pr_pushes_the_captured_commit_not_the_moved_branch(wt, gh, fake_tool, t
 exec /usr/bin/git "$@"
 ''')
     expect_cli(capsys, 0, "pr", stdout=URL + "\n")
-    assert pushes.read_text() == f"push origin {head}:refs/heads/lz/t1\n"
+    assert pushes.read_text() == f"push --no-follow-tags origin {head}:refs/heads/lz/t1\n"
     assert git(wt.parent.parent.parent / "origin.git", "rev-parse", "lz/t1").strip() == head
     assert git(wt, "config", "branch.lz/t1.merge").strip() == "refs/heads/lz/t1"
 
@@ -1270,6 +1273,17 @@ def test_pr_does_not_publish_validation_on_a_draft_created_at_another_head(wt, g
     assert "Browser verified." in body and "Saved review." in body
     assert "## Migration" not in body and "Run once." not in body
     assert_contains(body, "## Rollout\nSkip migration.", "  ## Live notes\nKeep this.")
+
+
+def test_pr_rejects_existing_target_mismatch_before_push(wt, repo, gh, capsys, head):
+    git(wt, "push", "origin", "lz/t1")
+    git(wt, "commit", "--allow-empty", "-m", "Advance task")
+    arm_pr_body_patch(gh, head, baseRefName="release")
+    gh.respond_pr_view(pr_json(headRefOid=head_of(wt), baseRefName="release"))
+
+    expect_cli(capsys, 1, "pr", stdout="", stderr_contains=("on release; rerun loopzero pr",))
+    assert git(repo.parent / "origin.git", "rev-parse", "lz/t1").strip() == head
+    assert not any(map(wrote, gh.calls))
 
 
 @pytest.mark.parametrize("command,live", [
@@ -1453,7 +1467,7 @@ def test_pr_uses_lease_for_rewritten_open_pr(wt, repo, gh, fake_tool, tmp_path, 
         assert "remote moved" not in err and all("PATCH" not in call["argv"] for call in gh.calls)
     else:
         assert (code, out, err) == (0, URL + "\n", "")
-    assert pushes.read_text().strip() == f"push origin --porcelain --force-with-lease=lz/t1:{old} {head}:refs/heads/lz/t1"
+    assert pushes.read_text().strip() == f"push --no-follow-tags origin --porcelain --force-with-lease=lz/t1:{old} {head}:refs/heads/lz/t1"
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == (old if case == "hook-fails" else head)
 
 

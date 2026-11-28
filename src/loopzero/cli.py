@@ -746,12 +746,14 @@ def cmd_pr(args: argparse.Namespace) -> int:
         raise CliError(f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
                        "run `loopzero start <new-task-slug>` from the main checkout")
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
+    if pr is not None and pr.base_ref != config.base_branch:
+        raise CliError(f"PR #{pr.number} is at {pr.head_sha[:12]} on {pr.base_ref}; rerun loopzero pr")
     created = pr is None
     existing = _sync_task_narrative(task, pr.body if pr else "")
     _pr_body(wt, head, config, _seed_task_evidence(task, existing))  # refuse an unusable body before pushing
     force_lease = False
     git_branch = os.fsdecode(branch.encode("utf-8", "surrogateescape"))
-    push = ["push", "origin"]
+    push = ["push", "--no-follow-tags", "origin"]
     if pr is not None:
         if config_mod.run_git(wt, "cat-file", "-e", f"{pr.head_sha}^{{commit}}").exit_code != 0:
             raise CliError(f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first")
