@@ -4399,6 +4399,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt, finding_pr, gh:
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
 def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, monkeypatch, cut):
     node = finding_pr
+    duplicate = dict(finding_pr, id="THREAD_2", line=4, comments={"nodes": node["comments"]["nodes"]})
     reply = "Fixed the loop bound."
     accepted = {"reply": 0, "resolution": 0}
     original_gh, original_json = github._gh, github._gh_json
@@ -4413,7 +4414,7 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
             node["comments"]["pageInfo"] = {
                 "hasNextPage": bool(accepted["reply"]), "endCursor": "ROOT",
             }
-            return threads_json(node)
+            return threads_json(node, duplicate) if cut == "resolution" and node["isResolved"] else threads_json(node)
         if "comments(first: 100" in query:
             assert kwargs.get("token") == ""
             if "after=ROOT" in args:
@@ -4446,9 +4447,9 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
     assert run(capsys, "resolve", "0b9b59e7", reply)[0] == 130
     out, _err = expect_cli(capsys, 0, "resolve", "0b9b59e7", reply, stderr="")
     assert accepted == {"reply": 1, "resolution": 1}
-    assert ELIGIBILITY_REQUESTED in out
-    assert sum("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls) == 1
-    assert run(capsys, "resolve") == (0, "", "")
+    assert (ELIGIBILITY_REQUESTED in out) == (cut == "reply")
+    assert sum("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls) == (cut == "reply")
+    assert run(capsys, "resolve") == (0, "0b9b59e7  important  src/a.py:4  Off by one\n" if cut == "resolution" else "", "")
 
 
 @pytest.mark.parametrize("argv", [("resolve",), ("resolve", "0b9b59e7", "Fixed.")])

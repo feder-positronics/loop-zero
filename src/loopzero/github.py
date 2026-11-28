@@ -1143,15 +1143,13 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
     """Reply to a blocking finding, or resume an identical resolution."""
     with pr_lock(repo, number):
         threads = _review_threads(repo, number, include_resolved=True)
-        for node in sorted(threads, key=lambda node: bool(node.get("isResolved"))):
-            parsed = _parse_thread(node, None, publishers)
-            if parsed is None or parsed[0] != finding_id:
+        for node in sorted(threads, key=lambda node: not node.get("isResolved")):
+            if (parsed := _parse_thread(node, None, publishers)) is None or parsed[0] != finding_id:
                 continue
-            _, finding = parsed
             confirmed = _has_thread_reply(node, reply)
             if node.get("isResolved"):
                 if confirmed:
-                    return finding
+                    return parsed[1]
                 continue
             if not confirmed:
                 # Two calls on purpose: fields of one mutation are not transactional, and a
@@ -1174,7 +1172,7 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
                     f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
                     f"Retry loopzero resolve with the same reply on PR #{number}.\n{exc}",
                 ) from exc
-            return finding
+            return parsed[1]
         raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}. Run `loopzero resolve` to list open IDs.")
 
 
@@ -1284,6 +1282,7 @@ def _check_signals(
     review_grace: bool = False,
     required_ci: tuple[str, ...] = (),
     stale_verdict_grace: bool = False,
+    *, workflow_wait: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, ReadinessTimestamp | None]]] = {}
     latest_runs: dict[tuple[str, int | None], dict] = {}
@@ -1297,9 +1296,10 @@ def _check_signals(
         signals.setdefault(name, []).append((state, readiness_timestamp(timestamp)))
     latest_status: dict[str, dict] = {}
     for status in paged(f"repos/{repo}/commits/{head_sha}/statuses"):
-        latest_status.setdefault(status["context"], status)
-    for name, status in latest_status.items():
-        signals.setdefault(name, []).append((status.get("state") or "unknown", readiness_timestamp(status.get("created_at"))))
+        latest_status.setdefault(status["context"].casefold(), status)
+    for name in dict.fromkeys((*signals, *required_ci, *(s["context"] for s in latest_status.values()))):
+        if status := latest_status.get(name.casefold()):
+            signals.setdefault(name, []).append((status.get("state") or "unknown", readiness_timestamp(status.get("created_at"))))
     states = {name: _aggregate_signal([state for state, _ in values]) for name, values in signals.items()}
     stale = tuple(name for name, values in signals.items() if review_at
                   and states[name] not in _NONFAILING_CHECKS
@@ -1312,7 +1312,7 @@ def _check_signals(
     superseded: list[str] = []
     workflows: list[dict] | None = None
     for (name, _), cr in latest_runs.items():
-        if (name not in required_ci or name in stale
+        if (not workflow_wait or name not in required_ci or name in stale
                 or cr.get("conclusion") not in {"failure", "cancelled", "timed_out"}
                 or cr.get("status") != "completed" or not (cr.get("check_suite") or {}).get("id")
                 or sum(state not in _NONFAILING_CHECKS for state, _ in signals[name]) != 1):
@@ -1323,9 +1323,8 @@ def _check_signals(
             superseded.append(name)
     capped = _check_suites_at_limit(runs)
     # A status-only success may hide a failed run outside the returned suites.
-    if capped:
-        run_names = {name for name, _ in latest_runs}
-        states = {name: state for name, state in states.items() if state != "success" or name in run_names}
+    run_names = {name for name, _ in latest_runs}
+    states = {name: state for name, state in states.items() if not capped or state != "success" or name in run_names}
     return states, (*stale, *superseded), stale_verdicts, capped
 
 
@@ -1442,8 +1441,8 @@ def readiness(
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}. Run `loopzero resolve` to list finding IDs and address the review.")
     checks, stale, stale_verdicts, capped = (_check_signals(
-        repo, pr.head_sha, review_at, review_grace, required_ci if workflow_wait else (),
-        workflow_wait and stale_verdict_grace,
+        repo, pr.head_sha, review_at, review_grace, required_ci,
+        workflow_wait and stale_verdict_grace, workflow_wait=workflow_wait,
     ) if required_ci else ({}, (), (), False))
     failures = {
         name: f"required check '{name}' is {checks[name]}" for name in required_ci

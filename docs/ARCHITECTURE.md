@@ -37,6 +37,8 @@ the same-host repository-and-PR lock from the live read through the update.
 Review publication holds that lock for its round recheck, POST, read-back, and
 body summary. Draft activation, Mergify request and confirmation comments, and
 finding replies hold the same PR lock across their live state checks and writes.
+A finding retry checks for the caller's matching reply on resolved threads
+before acting on an open thread with the same finding ID.
 Mergify admission takes the worktree-local lock first to protect receipt
 validation, and queue polling holds neither lock. Check coalescing and receipts
 retain the worktree-local lock.
@@ -188,7 +190,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    Ancestor coverage includes outdated unresolved blocking threads. A primary
    that requested changes also requires resolved findings at the reviewed head.
    Readiness keeps the latest run ID for each GitHub App and check name, then
-   combines the current verdicts for each required name. A positive `ready --wait`
+   combines the current verdicts for each required name. Commit status contexts
+   match case-insensitively and only the newest status for each context counts.
+   A positive `ready --wait`
    budget covers the first readiness read, the live PR reread before draft activation,
    and revalidation after taking a PR out of draft.
    Before the first draft activation it rereads the PR and refuses a moved head, changed target, closed state or hold.

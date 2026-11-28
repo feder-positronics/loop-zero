@@ -868,14 +868,14 @@ def test_check_runs_merges_paginated_runs_and_statuses(gh: FakeGh) -> None:
     names = [f"job{i}" for i in range(99)]
     runs = [check_run("success", name=name) for name in names]
     statuses = [{"context": f"legacy/{name}", "state": "failure"} for name in names]
-    statuses.append({"context": "checks", "state": "pending"})
+    statuses.append({"context": "Checks", "state": "failure"})
     second = [{"context": "required-page-two", "state": "success"}, {"context": "checks", "state": "success"}]
     arm_check_pages(gh, {"check_runs": [*runs, check_run("success")]},
                     {"check_runs": [check_run(None, name="lint", status="in_progress")]},
                     statuses=(statuses, second))
     assert github._check_signals(REPO, HEAD)[0] == {
         **dict.fromkeys(names, "success"), **dict.fromkeys((row["context"] for row in statuses[:-1]), "failure"),
-        "checks": "pending", "lint": "pending", "required-page-two": "success",
+        "checks": "failure", "Checks": "failure", "lint": "pending", "required-page-two": "success",
     }
     requests = [(call["argv"][1].rsplit("/", 1)[-1], call["argv"][-2]) for call in gh.calls]
     assert requests == [("check-runs", "page=1"), ("check-runs", "page=2"),
