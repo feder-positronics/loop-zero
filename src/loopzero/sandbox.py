@@ -121,7 +121,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
         probe(config, worktree, prefix)
         _preflight_alternates(config, worktree, prefix, common_dir)
-        missing, preparations = _preflight(config, worktree)
+        missing, preparations = check_preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
         last_run = _scratch_reuse_boundary(config, worktree, commands, base, previous, resuming)
@@ -404,7 +404,7 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], com
             raise SandboxUnavailable(remedy)
 
 
-def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tuple[str, ...]]:
+def check_preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tuple[str, ...]]:
     # Recognize a deliberately small argv grammar, never interpret shell syntax.
     groups = None
     for command in config.checks:
