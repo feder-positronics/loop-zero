@@ -712,7 +712,11 @@ def cmd_pr(args: argparse.Namespace) -> int:
     task = worktree.task_text(wt).replace("\r\n", "\n")
     _require_pr_details(wt, task)
     pr = github.merged_pr_for_branch(config.repo, branch, base=config.base_branch)
-    if pr is not None:
+    if pr is not None and not (
+        pr.head_sha != head and github.remote_branch_sha(config.repo, branch) != pr.head_sha
+        and (landed := github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha, expected_base=config.base_branch))
+        and _is_ancestor(wt, landed, worktree.base_sha(wt))
+    ):
         raise CliError(f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
                        "run `loopzero start <new-task-slug>` from the main checkout")
     pr = github.pr_for_branch(config.repo, branch, open_only=True)
@@ -1308,11 +1312,9 @@ def _cleanup(wt: Path, pr: github.PR, *, closed: bool = False) -> None:
         root = _repo_root(wt)
         name = worktree.branch(wt)
         worktree.require_started(wt, root)
+        worktree.cleanup(wt, pr.head_sha, keep_branch=closed)
         if closed:
-            worktree.cleanup(wt, pr.head_sha, keep_branch=True)
             print(f"removed worktree {wt}; kept both branch refs", file=sys.stderr)
-        else:
-            worktree.cleanup(wt, pr.head_sha)
     except PrimaryCheckout as exc:
         print(f"note: {outcome}; {exc}", file=sys.stderr)
     except (LoopZeroError, OSError) as exc:
