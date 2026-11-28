@@ -106,18 +106,15 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
 @pytest.mark.parametrize("legacy", [False, True])
 def test_start_rejects_origin_response_for_another_ref(repo, monkeypatch, legacy):
     commit_on_origin(repo, "feature.txt")
-    actual_run = worktree.run
+    run = worktree.run
 
     def wrong_ref(argv, **kwargs):
-        if argv[:3] == ("git", "fetch", "--porcelain"):
-            if legacy:
-                return actual_run(("git", "fetch", "--loopzero-unsupported"), **kwargs)
-            output = actual_run(argv, **kwargs)
-            return replace(output, stdout=output.stdout.replace("/origin/main", "/origin/unrelated"))
-        output = actual_run(argv, **kwargs)
-        if argv[:2] == ("git", "ls-remote"):
-            return replace(output, stdout=output.stdout.replace("/heads/main", "/heads/unrelated"))
-        return output
+        fetching = argv[:3] == ("git", "fetch", "--porcelain")
+        if fetching and legacy:
+            return run(("git", "fetch", "--loopzero-unsupported"), **kwargs)
+        output = run(argv, **kwargs)
+        prefix = "/origin/" if fetching else "/heads/" if argv[:2] == ("git", "ls-remote") else None
+        return replace(output, stdout=output.stdout.replace(prefix + "main", prefix + "unrelated")) if prefix else output
 
     monkeypatch.setattr(worktree, "run", wrong_ref)
     with pytest.raises(worktree.GitError, match=r"origin did not report|refs/remotes/origin/unrelated"):
@@ -171,19 +168,12 @@ def test_start_resumes_only_a_clean_checkout_at_the_expected_identity(repo, monk
     assert not worktree.task_file(wt).exists()
 
 
-@pytest.mark.parametrize("case", ["file", "directory", "append", "replace"])
-def test_start_excludes_worktrees_and_task_dir(repo: Path, monkeypatch, case: str) -> None:
+@pytest.mark.parametrize("replacement", [False, True], ids=["append", "replace"])
+def test_start_excludes_worktrees_and_task_dir(repo, monkeypatch, replacement):
     exclude = repo / ".git" / "info" / "exclude"
     exclude.write_text("*.log")  # no trailing newline on purpose
-    if case in ("file", "directory"):
-        link = exclude if case == "file" else exclude.parent
-        link.symlink_to(link.rename(repo.parent / "outside"))
-        refused_start(repo, "t1", "outside its Git directory")
-        assert exclude.read_text() == "*.log" and not (repo / ".worktrees").exists()
-        return
     old_inode = exclude.stat().st_ino
     write = worktree.os.write
-    replacement = case == "replace"
 
     def interleave(fd, rules):
         if rules.endswith(b".loopzero/\n"):
@@ -207,25 +197,31 @@ def test_start_excludes_worktrees_and_task_dir(repo: Path, monkeypatch, case: st
     assert (exclude.stat().st_ino, exclude.stat().st_mtime_ns) == (installed.st_ino, installed.st_mtime_ns)
 
 
-def test_start_refuses_exclude_symlink_swapped_in_at_open(repo, monkeypatch):
+@pytest.mark.parametrize("when", ["file", "directory", "at-open"])
+def test_start_refuses_exclude_symlinks(repo, monkeypatch, when):
     exclude = repo / ".git/info/exclude"
+    exclude.write_text("*.log")
     outside = repo.parent / "outside"
-    outside.write_text("keep me\n")
-    open_file = worktree.os.open
+    if when == "at-open":
+        open_file = worktree.os.open
 
-    def swap_at_open(path, *args, **kwargs):
-        if path == exclude:
-            monkeypatch.setattr(worktree.os, "open", open_file)
-            exclude.unlink()
-            exclude.symlink_to(outside)
-        return open_file(path, *args, **kwargs)
+        def swap_at_open(path, *args, **kwargs):
+            if path == exclude:
+                monkeypatch.setattr(worktree.os, "open", open_file)
+                exclude.symlink_to(exclude.rename(outside))
+            return open_file(path, *args, **kwargs)
 
-    monkeypatch.setattr(worktree.os, "open", swap_at_open)
-    with pytest.raises(OSError) as error:
-        worktree.start(repo, "unsafe", "main")
-    assert error.value.errno == errno.ELOOP
-    assert outside.read_text() == "keep me\n"
-    assert not worktree.worktree_dir(repo, "unsafe").exists()
+        monkeypatch.setattr(worktree.os, "open", swap_at_open)
+        with pytest.raises(OSError) as error:
+            worktree.start(repo, "t1", "main")
+        assert error.value.errno == errno.ELOOP
+        assert outside.read_text() == "*.log"
+    else:
+        link = exclude if when == "file" else exclude.parent
+        link.symlink_to(link.rename(outside))
+        refused_start(repo, "t1", "outside its Git directory")
+        assert exclude.read_text() == "*.log"
+    assert not (repo / ".worktrees").exists()
 
 
 @pytest.mark.parametrize("collision", ["branch", "directory", "worktree-link", "state-link", "task-link"])
