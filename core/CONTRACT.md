@@ -302,7 +302,7 @@ tail, name the cause or stage safely, and stop on terminal failures.
 readiness. Exit 1 can mean a failed stage, a discarded or unverified result, or
 a command error. Read the diagnostic and verify the receipt before classifying
 the failure. Exit 2 covers usage errors and sandbox unavailability in
-`check` or fresh `review`.
+`check` or fresh `review`, and temporary GitHub or Mergify unavailability during a wait.
 
 Exit 3 means a wait timed out or `ready` without `--wait` found only waitable
 blockers. `merge` without `--wait` exits 1 for waitable source check blockers.

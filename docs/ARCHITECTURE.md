@@ -360,8 +360,10 @@ one state transition should not become repeated writes that trigger policy CI.
 GitHub reads and the idempotent thread resolution mutation retry transient
 failures once after five seconds and honor a secondary limit’s Retry-After
 within the read budget. An active waiter can resume a fresh poll after a
-verified hourly reset within the original deadline. Mergify
-queue reads retry once after two seconds, subject to Retry-After and the
+verified hourly reset within the original deadline. A bounded draft activation
+reconciles an ambiguous GitHub reply by reading the exact PR again. An unchanged,
+eligible draft gets one backed-off attempt within the same budget. Queue follow
+pins the PR target branch along with its source head. Mergify queue reads retry once after two seconds, subject to Retry-After and the
 remaining queue wait budget. Calls without a deadline allow less than five
 seconds of backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).
