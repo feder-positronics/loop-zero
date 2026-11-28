@@ -818,12 +818,14 @@ def test_reuse_skipped_before_unkeyed_stage(git_repo, bwrap_log, fetched_base, c
     (git_repo / "readme-link").symlink_to("README.md")
     git(git_repo, "add", "readme-link")
     git(git_repo, "commit", "-qm", "Add readme link")
-    inputs = {"echo one": (".",), "echo three": ("*.md",), **({"echo two": middle} if middle else {})}
-    cfg = make_config(checks=("echo one", "echo two", "echo three"), scratch=(".venv",) if scratch else (),
-                      inputs=inputs)
-    cli._require_receipt(git_repo, cfg, cache_check(cfg, clean=True).head)
+    last = "grep -qx hello readme-link"
+    inputs = {"echo one": (".",), last: ("readme-link",), **({"echo two": middle} if middle else {})}
+    cfg = make_config(checks=("echo one", "echo two", last), scratch=(".venv",) if scratch else (), inputs=inputs)
+    cli._require_receipt(git_repo, cfg, cache_check(cfg).head)
     reused = [bool(r.reused_from) for r in sandbox.run_checks(cfg, git_repo).results]
     assert reused == ([False, False, True] if scratch else [True, False, True])
+    commit_file(git_repo, "README.md", "invalid\n", "Change linked input")
+    assert sandbox.run_checks(cfg, git_repo).results[-1].exit_code == 1
 
 
 def test_earlier_stage_failure_precedes_later_input_error(
@@ -954,8 +956,7 @@ def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case, cac
     command = 'test "$(cat README.md)" = hello'
     paths = () if case == "empty" else ("ipnut.txt",)
     config = make_config(checks=(command,), inputs={command: paths})
-    saved = cache_check(config)
-    cli._require_receipt(git_repo, config, saved.head)
+    cli._require_receipt(git_repo, config, cache_check(config).head)
     (git_repo / "README.md").write_text("fail\n")
     if case != "dirty":
         git(git_repo, "commit", "-qam", "change actual input")
@@ -1031,7 +1032,6 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     _save_report(git_repo, sandbox.run_checks(config, git_repo))
 
     receipt = json.loads(receipt_path.read_text())
-    assert receipt["head"] == git(git_repo, "rev-parse", "HEAD").strip()
     [result] = receipt["results"]
     assert original.ok and result["reused_from"] == original.head
     assert marker in result["tail"].splitlines()

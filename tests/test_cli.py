@@ -4226,11 +4226,12 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
 
 @pytest.mark.parametrize("case", ["owned", "during-wait", "external", "dirty", "ignored", "unpushed"])
 def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head(wt, repo, gh, capsys, monkeypatch, case):
+    if case == "owned":
+        git(wt, "-c", "protocol.file.allow=always", "submodule", "add", str(repo), "module")
+        git(wt, "commit", "-qm", "Add initialized submodule")
     head, branch = head_of(wt), "lz/t1"
-    origin = repo.parent / "origin.git"
     git(wt, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
-    if case != "during-wait":
-        arm_pr(gh, head, state="CLOSED")
+    arm_pr(gh, head, state="CLOSED")
     if case == "during-wait":
         arm_approved_pr(gh, head, wt, "pending", isDraft=False)
         gh.respond_pr_view(pr_json(headRefOid=head, state="CLOSED"))
@@ -4240,8 +4241,7 @@ def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head
     elif case == "dirty":
         (wt / "untracked").touch()
     elif case == "ignored":
-        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
-            exclude.write("\n.env\n")
+        (repo / ".git/info/exclude").write_text(".loopzero/\n.env\n")
         (wt / ".env").write_text("local configuration")
     elif case == "unpushed":
         git(wt, "commit", "--allow-empty", "-m", "local after close")
@@ -4250,7 +4250,7 @@ def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head
     assert code == 1 and (case == "during-wait" or not out)
     assert wt.exists() is (case not in {"owned", "during-wait"})
     assert git(repo, "branch", "--list", branch)
-    assert git(origin, "rev-parse", branch).strip() == head
+    assert git(repo.parent / "origin.git", "rev-parse", branch).strip() == head
     assert {"owned": "kept both branch refs", "during-wait": "kept both branch refs", "external": "ownership is unverified",
             "dirty": "worktree is dirty", "ignored": ".env", "unpushed": "push or pull first"}[case] in err
     if case == "ignored":

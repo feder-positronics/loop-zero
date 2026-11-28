@@ -350,8 +350,13 @@ def _hash_inputs(config: Config, worktree: Path, command: str, base: str | None,
                 continue
             if mode == "120000" and stat.S_ISLNK(file_type):
                 contents.append(hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest())
-                continue
-            if mode not in {"100644", "100755"} or not stat.S_ISREG(file_type):
+                target = path.resolve()
+                if (not target.is_relative_to(root) or not target.is_file()
+                        or not _git(config, root, "ls-tree", "HEAD", "--", f":(literal){target.relative_to(root)}")
+                        .startswith(("100644 ", "100755 "))):
+                    continue
+                path = target
+            elif mode not in {"100644", "100755"} or not stat.S_ISREG(file_type):
                 return None
             with path.open("rb") as stream:
                 contents.append(hashlib.file_digest(stream, "sha256").hexdigest())
