@@ -29,8 +29,10 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    blocking findings go in the review body and need a reviewed fix. Approval
    exits 0, changes requested 5.
 5. `loopzero ready --wait` takes the PR out of draft and exits 0 once readiness
-   passes. A draft blocked only by missing or skipped required checks, possibly
-   with unknown mergeability, leaves draft early to trigger CI. This can happen
+   passes. On repositories that auto-queue ready PRs, leaving draft can queue
+   the PR during this command. A draft blocked only by missing or skipped
+   required checks, possibly with unknown mergeability, leaves draft early to
+   trigger CI. This can happen
    with `--wait=0` or without `--wait`. The wait follows required checks and
    mergeability on the same head. Both waiters take `--wait[=SECONDS]` (default 5400).
    Green can precede CI scheduling. After two minutes of missing checks with

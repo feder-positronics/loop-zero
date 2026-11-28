@@ -40,6 +40,9 @@ flowchart TD
     A -->|fixes needed| B["Make all fixes in one batch"]
     B --> C["One review of only the new changes<br/><sub>delta</sub>"]
     C -->|approved| Z
+    C -->|approved, blockers resolved, then a verified base merge conflicts| M["One extra review of verified base merges<br/><sub>conflict delta</sub>"]
+    M -->|approved| Z
+    M -->|code fix needed| E
     C -->|findings remain| D["PR owner rejects findings with reasons"]
     D -->|ready| Z
     C -->|code fix needed| E["PR owner opens a replacement PR"]

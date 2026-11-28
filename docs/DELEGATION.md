@@ -409,6 +409,10 @@ Return: <authorized finish: evidence, readiness, or merge; deployment needs its 
 Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Send no mid-task messages to the parent; report a blocker at once in this final message (see Worker).
 ```
 
+Check the repository's queue rules before setting a readiness-only finish point.
+If leaving draft auto-queues the PR and the brief must stop before admission,
+keep it in draft and hand back the check and review evidence.
+
 Follow the [Worker role](#worker) for blockers. An owner continues the
 work a pending decision does not block and reports the blocker and next owner;
 silence is not approval.
