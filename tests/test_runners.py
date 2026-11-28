@@ -1224,9 +1224,9 @@ def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, repo
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
 def test_sigterm_removes_only_cancelled_review_home(family, fake_tool, tmp_path):
-    binary = fake_tool(family, "exec /bin/cat")
+    binary = fake_tool(family, f"exec {shlex.quote(sys.executable)} -c 'import signal; signal.pause()'")
     script = """
-import signal, subprocess, sys
+import subprocess, sys
 from pathlib import Path
 from loopzero import runners
 
@@ -1238,15 +1238,13 @@ runners._sandbox_prefix = lambda family, cwd, home, *args: (
 runners._observe_codex_version = lambda *args: None
 communicate = subprocess.Popen.communicate
 
-def cancel_on_eof(child, *args, **kwargs):
+def announce(child, *args, **kwargs):
     argv = child.args
     if argv[0] == "env" and argv[2] == binary:
         print(child.pid, argv[1].removeprefix("HOME="), sep="\\t", flush=True)
-        sys.stdin.read()
-        signal.raise_signal(signal.SIGTERM)
     return communicate(child, *args, **kwargs)
 
-subprocess.Popen.communicate = cancel_on_eof
+subprocess.Popen.communicate = announce
 runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
                     diff="diff", task_text="task")
 """
@@ -1259,7 +1257,7 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
         def start_review():
             process = stack.enter_context(subprocess.Popen(
                 [sys.executable, "-c", script, family, str(binary)], env=env,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                stdout=subprocess.PIPE, text=True,
             ))
             stack.callback(process.kill)
             assert select([process.stdout], [], [], 30)[0], "native reviewer did not start"
@@ -1279,7 +1277,7 @@ runners.review_with(family, cwd=Path.cwd(), head="a" * 40, kind="primary",
                 os.kill(pid, signal.SIGKILL)
 
         def terminate_review(process, home, pid):
-            process.stdin.close()
+            process.terminate()
             assert process.wait(timeout=30) == -signal.SIGTERM
             assert not home.exists()
             assert not running(pid)
