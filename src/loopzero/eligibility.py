@@ -88,9 +88,7 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     marker = leading_marker(body)
     if not marker or marker.group(1) != head or not is_sha(head):
         return None
-    verdict = latest.get("state") in {"APPROVED", "CHANGES_REQUESTED"} or any(
-        f"**{value}**" in body for value in ("approve", "request_changes")
-    )
+    verdict = latest["state"] != "COMMENTED" or published_verdict(body, head, marker[2])
     present, evidence = review_projection(latest, head, repo, number)
     if present and (evidence is None or any(call["fatal"] != "absent" for call in evidence["calls"])):
         return None
@@ -154,19 +152,23 @@ def base_merge_material(
         return None
 
 
-def _summary_verdict(body: str, kind: str) -> str:
-    # Read the publisher's summary before model prose can quote either verdict.
+def published_verdict(body: str, head: str, kind: str) -> str:
+    """Read the publisher's complete summary before any model prose."""
+    body = body.removeprefix(github.BODY_BLOCKERS)
     _, machine_block = runners.leading_review_block(body)
-    summary, _, rest = body[len(machine_block):].lstrip().partition("\n")
+    lines = filter(None, body[len(machine_block):].splitlines())
+    summary = next(lines, "")
     if summary.startswith(("Reposted from runner session: ", "Reposted from runner sessions: ")):
-        summary = rest.partition("\n")[0]
-    return summary.partition(": **")[2] if summary.startswith(f"loopzero {kind} review by ") else ""
+        summary = next(lines, "")
+    pattern = (rf"loopzero {kind} review by (?:claude|codex) on `{head}`(?:, (?:[0-9]+\.[0-9]s|unknown))?: "
+               r"\*\*(approve|request_changes)\*\* \([0-9]+ critical, [0-9]+ important, [0-9]+ suggestion\)")
+    return match[1] if (match := re.fullmatch(pattern, summary)) else ""
 
 
 def approved_delta(reviews: list[dict], head: str, publishers: tuple[str, ...], *, repo: str, number: int) -> bool:
     review = eligible_review(reviews, head, publishers, repo=repo, number=number)
     return bool(review and review["state"] in {"APPROVED", "COMMENTED"}
-                and _summary_verdict(review["body"], "delta").startswith("approve** ("))
+                and published_verdict(review["body"], head, "delta") == "approve")
 
 
 def body_blocker(review: dict | None) -> str | None:
@@ -191,12 +193,12 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
         return None
     if marker[2] == "primary" and not body_blocker(latest):
-        verdict = _summary_verdict(latest["body"], "primary")
+        verdict = published_verdict(latest["body"], reviewed, "primary")
         state = latest.get("state")
-        if verdict.startswith("request_changes** (") and state in {"CHANGES_REQUESTED", "COMMENTED"}:
+        if verdict == "request_changes" and state in {"CHANGES_REQUESTED", "COMMENTED"}:
             if github.open_blocking_findings(repo, number, reviewed, publishers):
                 return None
-        elif not (verdict.startswith("approve** (") and state in {"APPROVED", "COMMENTED"}):
+        elif not (verdict == "approve" and state in {"APPROVED", "COMMENTED"}):
             return None
     if base_merge_material(repo, number, reviewed, head, base_branch, clean=True) is None:
         return None

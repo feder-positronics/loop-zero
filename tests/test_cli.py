@@ -28,7 +28,7 @@ import pytest
 from loopzero import cli, config, github, hosted, mergify
 from loopzero._proc import Completed
 from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
-from tests.conftest import commit_file, git, init_git_repo
+from tests.conftest import commit_file, git, init_git_repo, review_summary
 from tests.test_github import (
     FakeGh,
     branch_head_key,
@@ -267,7 +267,7 @@ def test_publication_recovery_rechecks_pr_and_publisher(wt, gh, head, changed, p
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
         login: str = LOGIN, verdict: str = "approve") -> dict:
     """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""
-    return {"body": f"{marker(head, kind)}\nreview: **{verdict}**", "state": state,
+    return {"body": f"{marker(head, kind)}\n{review_summary(head, kind, verdict=verdict)}", "state": state,
             "commit_id": commit or head, "user": {"login": login}}
 
 
@@ -3499,12 +3499,13 @@ def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_pa
     assert run(capsys, "ready")[0] == 0
 
 
-@pytest.mark.parametrize("state", ["forged", "DISMISSED", "PENDING", "COMMENTED"])
+@pytest.mark.parametrize("state", ["forged", "quoted", "DISMISSED", "PENDING", "COMMENTED"])
 def test_ready_respects_latest_review_state(wt, gh, capsys, state, head):
+    reviews = [rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")]
     if state == "forged":
         reviews = [rev(head, "primary", login="stranger"), rev(head, "primary", commit="1" * 40)]
-    else:
-        reviews = [rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")]
+    elif state == "quoted":
+        reviews[-1].update(state="COMMENTED", body=f"{marker(head, 'delta')}\n\nProse quoted **approve**.")
     arm_approved_pr(gh, head, wt, reviews=reviews)
     ready = state == "COMMENTED"
     out, _ = expect_cli(capsys, 0 if ready else 1, "ready")

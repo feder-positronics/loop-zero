@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shlex
+import stat
 import tempfile
 import time
 from collections.abc import Iterator
@@ -288,8 +289,15 @@ def pr_lock(repo: str, number: int) -> Iterator[None]:
     """Serialize a GitHub write across local checkouts for this PR."""
     key = hashlib.sha256(f"{repo.casefold()}#{number}".encode()).hexdigest()
     PR_LOCK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (PR_LOCK_DIR / key).open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with os.fdopen(os.open(PR_LOCK_DIR / key, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600), "rb") as lock:
+        if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+            raise GhError(("lock",), f"PR lock is not a regular file: {PR_LOCK_DIR / key}")
+        while True:
+            with suppress(BlockingIOError):
+                fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if _read_scope.get() else 0))
+                read_timeout(0)
+                break
+            time.sleep(read_timeout(0.1))
         yield
 
 
@@ -1470,14 +1478,10 @@ def readiness(
 
 def mark_ready(repo: str, number: int, node_id: str = "") -> None:
     if node_id:
-        try:
-            _gh("api", "graphql", "-f", "query=mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}",
-                "-f", f"id={node_id}", timeout=read_timeout(120))
-            return
-        except (GhUnavailable, ProcTimeout) as exc:
-            if _read_scope.get() is not None or getattr(exc, "confirmed_rate_limit", False):
-                raise
-    _gh("pr", "ready", str(number), "--repo", repo, timeout=read_timeout(120), retry_idempotent=_read_scope.get() is None)
+        _gh("api", "graphql", "-f", "query=mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}",
+            "-f", f"id={node_id}", timeout=read_timeout(120))
+    else:
+        _gh("pr", "ready", str(number), "--repo", repo, timeout=read_timeout(120))
 
 
 _QUEUE_QUERY = (
