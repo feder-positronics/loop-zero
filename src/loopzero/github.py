@@ -1154,41 +1154,41 @@ def _has_thread_reply(node: dict, reply: str) -> bool:
 def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
                     publishers: tuple[str, ...]) -> Finding:
     """Reply to a blocking finding, or resume an identical resolution."""
-    threads = _review_threads(repo, number, include_resolved=True)
-    for node in sorted(threads, key=lambda node: bool(node.get("isResolved"))):
-        parsed = _parse_thread(node, None, publishers)
-        if parsed is None or parsed[0] != finding_id:
-            continue
-        thread_id = node["id"]
-        _, finding = parsed
-        confirmed = _has_thread_reply(node, reply)
-        if node.get("isResolved"):
-            if confirmed:
-                return finding
-            continue
-        if not confirmed:
-            # Two calls on purpose: fields of one mutation are not transactional, and a
-            # thread must never be resolved unless its reply was confirmed.
-            posted = _gh_json("api", "graphql", "-f", f"query={_REPLY_MUTATION}",
-                              "-f", f"thread={thread_id}", "-f", f"body={reply}")
+    with pr_lock(repo, number):
+        threads = _review_threads(repo, number, include_resolved=True)
+        for node in sorted(threads, key=lambda node: bool(node.get("isResolved"))):
+            parsed = _parse_thread(node, None, publishers)
+            if parsed is None or parsed[0] != finding_id:
+                continue
+            _, finding = parsed
+            confirmed = _has_thread_reply(node, reply)
+            if node.get("isResolved"):
+                if confirmed:
+                    return finding
+                continue
+            if not confirmed:
+                # Two calls on purpose: fields of one mutation are not transactional, and a
+                # thread must never be resolved unless its reply was confirmed.
+                posted = _gh_json("api", "graphql", "-f", f"query={_REPLY_MUTATION}",
+                                  "-f", f"thread={node['id']}", "-f", f"body={reply}")
+                try:
+                    posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
+                except (KeyError, TypeError) as exc:
+                    raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
             try:
-                posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
-            except (KeyError, TypeError) as exc:
-                raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
-        try:
-            response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
-                           "-f", f"thread={thread_id}", retry_idempotent=True)
-            thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
-            if thread["isResolved"] is not True:
-                raise ValueError("GitHub did not return isResolved=true")
-        except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
-            raise GhError(
-                ("resolve", finding_id),
-                f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
-                f"Retry loopzero resolve with the same reply on PR #{number}.\n{exc}",
-            ) from exc
-        return finding
-    raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
+                response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
+                               "-f", f"thread={node['id']}", retry_idempotent=True)
+                thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
+                if thread["isResolved"] is not True:
+                    raise ValueError("GitHub did not return isResolved=true")
+            except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
+                raise GhError(
+                    ("resolve", finding_id),
+                    f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
+                    f"Retry loopzero resolve with the same reply on PR #{number}.\n{exc}",
+                ) from exc
+            return finding
+        raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
 
 
 def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, ...]:

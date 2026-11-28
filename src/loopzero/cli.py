@@ -580,7 +580,6 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
 
 
 def _pr_title(wt: Path, branch: str) -> str:
-    """Use the first nonempty top-level task heading, or the branch."""
     headings = (line[2:].strip() for line in worktree.task_text(wt).splitlines() if line.startswith("# "))
     return next(filter(None, headings), branch)
 
@@ -1291,7 +1290,7 @@ def _mark_ready(
     wt: Path, config: Config, number: int, head: str, args: argparse.Namespace, deadline: float | None,
 ) -> None:
     _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
-    with github.bounded_reads(deadline, token=None, retry=True) if deadline is not None else nullcontext():
+    with github.pr_lock(config.repo, number), (github.bounded_reads(deadline, token=None, retry=True) if deadline is not None else nullcontext()):
         observe_only = None
         for retry in (False, True):
             live = github.pr_view(config.repo, number)
@@ -1478,7 +1477,11 @@ def _verify_wait_snapshot(
     if current_head != head:
         raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}; sync the branch and run loopzero ready")
     latest = _load_config(args, wt, previous=previous, refresh=True)
-    if latest == config:
+    if latest == config or (
+        dataclasses.replace(latest, env_allowlist=config.env_allowlist) == config
+        and (set(latest.env_allowlist) == set(config.env_allowlist)
+             or sandbox.settings_fingerprint(latest) == sandbox.settings_fingerprint(config))
+    ):
         return latest
     retry = "retry with the current settings" if _current_check_report(wt, latest, head) else "run loopzero check and retry"
     raise CliError(f"workflow settings changed while waiting; {retry}")
@@ -1738,7 +1741,9 @@ def _wait_for_mergify(config: Config, pr: github.PR, timeout: float, confirmed: 
             if sha:
                 return sha
             if state is not None and not confirmed:
-                mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
+                with github.pr_lock(config.repo, pr.number):
+                    if not mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue).confirmed:
+                        mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
                 confirmed = True
                 print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
         if deferred_landing_read and (sha := _landed(config, pr, closed)):
@@ -1784,7 +1789,7 @@ def _merge_with_mergify(
         return _follow_blocked_mergify(config, pr, readiness, queue, deadline, bounded=admit_by is not None)
     if pr.is_draft:
         raise CliError(f"PR #{pr.number} is still a draft; next: loopzero ready --wait")
-    with worktree.lock_local_state(wt):
+    with worktree.lock_local_state(wt), github.pr_lock(config.repo, pr.number):
         attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
         state = mergify.membership(config.repo, pr.number, queue, admit_by)
         if state is None and not attempt.requested and admit_by is not None and time.monotonic() >= admit_by:
@@ -1809,8 +1814,7 @@ def _merge_with_mergify(
     if deadline is not None:
         return _queue_wait(deadline, lambda remaining: _wait_for_mergify(config, pr, remaining, confirmed),
                            bounded=admit_by is not None)
-    state_name = "confirmed in" if confirmed else "requested from"
-    print(f"PR #{pr.number} {state_name} Mergify queue {queue}; {_FOLLOW_QUEUE}")
+    print(f"PR #{pr.number} {'confirmed in' if confirmed else 'requested from'} Mergify queue {queue}; {_FOLLOW_QUEUE}")
     return None
 
 
