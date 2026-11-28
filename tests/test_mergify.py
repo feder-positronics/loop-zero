@@ -154,18 +154,22 @@ def test_configured_validates_canonical_github_config(queue_api, text, options, 
         assert calls == [config, config, "repos/acme/widgets"]
 
 
-def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
+def test_queue_attempt_trusts_same_head_request_from_another_writer(monkeypatch):
     head = "a" * 40
     marker = f"<!-- loopzero:mergify-confirmed head={head} queue=main -->"
     rows = [("trusted", "@mergifyio queue main"), ("attacker", marker),  # early queue: no request
             ("trusted", f"prefix {marker}"), ("trusted", marker), ("attacker", "@mergifyio requeue")]
     monkeypatch.setattr(mergify.github, "login", lambda token=None: "trusted" if token == "" else "app[bot]")
-    for later, requeued in [("", False), ("@mergifyio queued", False), ("@mergifyio requeued", False),
-            ("@mergifyio queue dev", False), ("@Mergifyio queue main", True), ("@mergify requeue", True)]:
-        comments = [{"body": b, "user": {"login": who}} for who, b in [*rows, ("trusted", later)]]
+    request = f"@mergifyio queue\n\n<!-- loopzero:mergify-request head={head} queue=main -->"
+    monkeypatch.setattr(mergify.github, "api_get", lambda endpoint: {"permission": "write" if endpoint.endswith("/writer/permission") else "read"})
+    for actor, later, expected in [
+        *(("trusted", body, (False, True)) for body in ("", "@mergifyio queued", "@mergifyio requeued", "@mergifyio queue dev")),
+        ("trusted", "@Mergifyio queue main", (True, False)), ("trusted", "@mergify requeue", (True, False)),
+        ("writer", request, (True, False)), ("attacker", request, (False, True)),
+    ]:
+        comments = [{"body": b, "user": {"login": who}} for who, b in [*rows, (actor, later)]]
         monkeypatch.setattr(mergify.github, "paged", lambda *_, c=comments: c)
-        attempt = mergify.queue_attempt("acme/widgets", 7, head, "main")
-        assert (attempt.requested, attempt.confirmed) == (requeued, not requeued), later
+        assert mergify.queue_attempt("acme/widgets", 7, head, "main") == mergify.QueueAttempt(*expected), (actor, later)
 
 
 @pytest.mark.parametrize(("writer", "body"), [
