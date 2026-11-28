@@ -565,7 +565,7 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         if upstream.exit_code != 0:
             return
         branch, head = worktree.branch(wt), worktree.head(wt)
-        pr = github.pr_for_branch(config.repo, branch, open_only=True)
+        pr = github.pr_for_branch(config.repo, branch, open_only=True, head_sha=head)
         if pr is None or pr.head_sha != head:
             return
         with github.pr_lock(config.repo, pr.number):
@@ -740,9 +740,9 @@ def _published_fallback(note: str, candidates: list[str], excluded: list[str]) -
             and all(reason in _FALLBACK_REASONS for _family, _sep, reason in parts))
 
 
-def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.PR:
+def _require_review_pr(config: Config, branch: str, head: str, *, repost: bool) -> github.PR:
     try:
-        return _require_pr(config, branch)
+        return _require_pr(config, branch, head_sha=head)
     except github.GhError as exc:
         if "HTTP 404" not in exc.tail or exc.command[:2] != ("gh", "api"):
             raise
@@ -783,7 +783,7 @@ def _review_locked(args: argparse.Namespace, wt: Path, config: Config) -> int:  
         wt, "task.md", *(_review_file(wt, head, kind).name for kind in kinds)
     )
     _require_clean(wt)
-    pr = _require_review_pr(config, branch, repost=args.repost)
+    pr = _require_review_pr(config, branch, head, repost=args.repost)
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")

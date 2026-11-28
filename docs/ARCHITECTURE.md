@@ -111,7 +111,7 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
-3. Branch PR lookup uses GitHub's commit-to-PR endpoint. Ready and merge start
+3. Branch PR lookup uses GitHub's commit-to-PR endpoint. Review, ready, merge and check refresh start
    with the local HEAD and verify it still matches the PR. Other branch lookups
    resolve the remote head. Lookup matches the source branch and repository,
    then re-reads PR detail. It falls back to listing open PRs if the branch or a
