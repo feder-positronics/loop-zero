@@ -1141,17 +1141,20 @@ if sys.argv[1] == "True":
     assert canary not in result.tail
 
 
-def test_capture_reassembles_key_opener_when_cut_splits_the_prefix(monkeypatch):
+@pytest.mark.parametrize(("label_end", "following", "expected"), [
+    (b"", b" PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----\nordinary diagnostic\n", "ordinary diagnostic"),
+    (b"PRIVATE KEY", b"-----\ns3", ""),
+])
+def test_capture_reassembles_key_opener_when_cut_splits_the_prefix(monkeypatch, label_end, following, expected):
     proc = sandbox._proc
     limit = sandbox.CHECK_TAIL_BYTES
-    first = b"-----BEGIN ".ljust(limit + 64 * 1024 + 1, b"A")
-    chunks = iter((first[:65536], first[65536:],
-                   b" PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----\nordinary diagnostic\n", b""))
+    first = b"-----BEGIN ".ljust(limit + 64 * 1024 + 1 - len(label_end), b"A") + label_end
+    chunks = iter((first[:65536], first[65536:], following, b""))
     with monkeypatch.context() as patch:
         patch.setattr(proc.os, "read", lambda *_args: next(chunks))
         patch.setattr(proc.selectors, "DefaultSelector", MagicMock())
         tail = proc._read_output_tail(Mock(stdout=Mock(encoding="utf-8")), limit, 10, ())
-    assert tail.strip() == "ordinary diagnostic"
+    assert tail.strip() == expected
 
 
 @pytest.mark.parametrize(("skip", "expected"), [(0, "[REDACTED] end"), (1, " end")])

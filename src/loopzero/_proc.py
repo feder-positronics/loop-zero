@@ -164,7 +164,7 @@ def _read_output_tail(proc: subprocess.Popen[str], limit: int, timeout: float, f
         if content:
             text = suffix + "\n" * newlines + content
             cut = max(0, len(text) - window)
-            if forms is not None and cut:
+            if forms is not None and (cut or key_open is None):
                 clipped = True
                 leader = _KEY_LEADER if key_open is None else ""
                 key_open = bool(key_open)
