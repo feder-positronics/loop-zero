@@ -78,10 +78,9 @@ def _enter_private_directory(stack: ExitStack, prefix: str) -> Path:
 
 
 @contextmanager
-def private_directory(prefix: str):
-    """Keep a private directory scoped to an operation, including on SIGTERM."""
+def private_review_home():
     with _proc.unwind_on_sigterm(), _private_directories() as stack:
-        yield _enter_private_directory(stack, prefix)
+        yield _enter_private_directory(stack, "loopzero-review-home-")
 
 
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,  # noqa: C901 - runner, reuse and cleanup paths
