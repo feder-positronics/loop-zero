@@ -70,6 +70,7 @@ def init_git_repo(repo: Path) -> Path:
     """Initialize branch `main` with a single commit of README.md."""
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "maintenance.auto", "false")
     commit_file(repo, "README.md", "hello\n", "init")
     return repo
 
