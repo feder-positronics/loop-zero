@@ -1865,7 +1865,7 @@ def _merge_with_mergify(
         if confirmed and not attempt.confirmed:
             _require_receipt(wt, config, pr.head_sha)
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
-        if not confirmed and (attempt.confirmed or attempt.departure):
+        if not confirmed and attempt.was_admitted:
             if sha := _mergify_departure(config, pr, queue, closed := [], attempt.confirmed, attempt.departure):
                 return sha
             raise closed[0]
@@ -2023,6 +2023,26 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _show_mergify_status(config: Config, pr: github.PR, ready: bool) -> None:
+    queue = config.mergify_queue or ""
+    attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
+    state = mergify.membership(config.repo, pr.number, queue)
+    label = "not admitted"
+    if state:
+        label = "confirmed"
+    elif attempt.was_admitted:
+        label = "ejected"
+    elif attempt.requested or (ready and attempt.admission):
+        label = "waiting for admission"
+    _print_display(f"mergify:  {label} ({queue})")
+    if label == "ejected" and attempt.departure:
+        if attempt.departure.reason:
+            _print_display(f"  Departure reason: {github._redact_tokens(attempt.departure.reason)!r}")
+        _print_display(f"  Mergify report: {attempt.departure.url}")
+    if label == "waiting for admission" and attempt.admission:
+        _print_display(f"  Mergify report: {attempt.admission}")
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     wt = _toplevel()
     config = _load_config(args, wt)
@@ -2050,19 +2070,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         _print_display(f"  - {reason}")
     if config.merge_strategy != "mergify" or pr.state != "OPEN" or pr.head_sha != head:
         return 0
-    queue = config.mergify_queue or ""
-    attempt = mergify.queue_attempt(config.repo, pr.number, pr.head_sha, queue)
-    state = mergify.membership(config.repo, pr.number, queue)
-    label = "not admitted"
-    if state:
-        label = "confirmed"
-    elif attempt.confirmed:
-        label = "ejected"
-    elif attempt.requested or (readiness.ready and attempt.admission):
-        label = "waiting for admission"
-    _print_display(f"mergify:  {label} ({queue})")
-    if label == "waiting for admission" and attempt.admission:
-        _print_display(f"  Mergify report: {attempt.admission}")
+    _show_mergify_status(config, pr, readiness.ready)
     return 0
 
 
