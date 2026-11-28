@@ -18,8 +18,9 @@ review eligibility before publishing success. Candidate success is published onl
 from an `opened` or `synchronize` `pull_request_target` event whose sender is the
 verified Mergify bot (App `mergify` 10562, `mergify[bot]` 37929162; recheck the live
 installation, never trust a display name). Manual and workflow-run refreshes cannot
-authenticate a candidate and fail closed: dequeue and request again so Mergify
-supplies a fresh event. Source PRs can be refreshed with the eligibility
+authenticate a candidate and fail closed. If candidate authentication blocks
+delivery, follow the contract's withdrawal rules to obtain a fresh candidate
+event. Source PRs can be refreshed with the eligibility
 workflow's manual PR-number input.
 
 Keep the local required-check list, Mergify `queue_conditions` and the effective

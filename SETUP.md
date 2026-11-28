@@ -447,9 +447,8 @@ and a request can be processed after the source changes. The CLI's head-change
 error refuses further delivery and cleanup; it cannot revoke an asynchronous
 command atomically. A newly pushed head must lack eligibility until its own
 review passes. Never deploy the adapter with only product-CI queue conditions.
-Before pushing to a requested or queued PR, withdraw it, confirm removal, then
-push, review the new head and admit it again. Do not interpret a CLI
-failure as proof that Mergify has removed an outstanding request.
+Follow the [contract's withdrawal rules](core/CONTRACT.md#the-six-steps)
+before changing a requested or queued PR.
 
 Provide an admin-scope Mergify application key in `MERGIFY_API_KEY`, or store it
 in `~/.config/mergify/api-key` with mode `0600` in a private directory. The
@@ -548,8 +547,9 @@ validation or enable unattended landing without accepting this boundary.
 
 ### Requeue after cancellation or ejection
 
-After cancellation or ejection, repair the cause and requeue: an unchanged head
-needs `@mergifyio queue` as the whole PR comment; `loopzero merge` requests a new
-head, or a repository queue rule readmits it. Then resume `loopzero merge --wait`.
+Confirm the PR left the queue and address the recorded cause before retrying.
+If a queue rule already readmitted it, resume `loopzero merge --wait`.
+Otherwise, for an unchanged head use `@mergifyio queue` as the whole PR
+comment once; for a repaired head use `loopzero merge --wait` after readiness.
 The CLI never retries a failed admission automatically. Resume request markers
 are scoped to the publishing GitHub login; use the same account across sessions.
