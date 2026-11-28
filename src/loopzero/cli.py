@@ -470,14 +470,20 @@ _CHECKS_END = "<!-- loopzero:checks:end -->"
 _TASK_EVIDENCE = re.compile(r"^## (Validation|Review)[ \t]*(?:\n|\Z).*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
 
 
+def _live_heading_text(body: str) -> str:
+    # Keep character offsets while hiding headings inside Markdown fences.
+    return re.sub(r"^ {0,3}((`|~)\2{2,}+)[^\n]*\n.*?(?:^ {0,3}\1\2*[ \t]*$|\Z)",
+                  lambda match: " " * len(match[0]), body, flags=re.MULTILINE | re.DOTALL)
+
+
 def _pr_body(wt: Path, head: str, config: Config, existing: str) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = existing.replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
-    match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Validation\n(.*?)(?=^## |\Z)", _live_heading_text(body), re.DOTALL | re.MULTILINE)
     if match is None:
         return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
-    content = match.group(1)
+    content = body[match.start(1):match.end(1)]
     before, start, after = content.partition(_CHECKS_START)
     if start or _CHECKS_END in content:
         _, end, suffix = after.partition(_CHECKS_END)
@@ -545,11 +551,11 @@ def _require_pr_details(wt: Path, task: str) -> None:
 def _append_review(body: str, result: ReviewResult) -> str:
     """Append one compact review record under Review, replacing its placeholder."""
     line = f"- {result.kind}, {result.family}, {result.head[:12]}, {result.verdict}"
-    match = re.search(r"^## Review\n(.*?)(?=^## |\Z)", body, re.DOTALL | re.MULTILINE)
+    match = re.search(r"^## Review\n(.*?)(?=^## |\Z)", _live_heading_text(body), re.DOTALL | re.MULTILINE)
     if not match:
         return f"{body.rstrip()}\n\n## Review\n{line}\n"
-    existing = match[1].rstrip()
-    if existing and not existing.startswith("(filled by `loopzero review`)"):
+    existing = re.sub(r"^\(filled by `loopzero review`\)[ \t]*(?:\n+|$)", "", body[match.start(1):match.end(1)]).rstrip()
+    if existing:
         line = f"{existing}\n{line}"
     return (body[:match.start(1)] + line + "\n\n" + body[match.end():]).rstrip() + "\n"
 
@@ -1291,10 +1297,10 @@ OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its on
 
 
 def _recheck_activation(wt: Path, config: Config, live: github.PR, args: argparse.Namespace,
-                        deadline: float | None) -> github.PR:
+                        deadline: float | None, *, retry: bool) -> github.PR:
     _verify_wait_snapshot(args, wt, config, live.head_sha, live.head_sha, config)
     fresh = _readiness(wt, config, live, live.head_sha, workflow_wait=True, mergify_deadline=deadline)
-    if live.mergeable == "UNKNOWN" or not (fresh.ready or _draft_checks_waiting(config, live, fresh)):
+    if (retry and live.mergeable == "UNKNOWN") or not (fresh.ready or _draft_checks_waiting(config, live, fresh)):
         raise CliError(f"draft activation blocked: {'; '.join(fresh.reasons)}; rerun loopzero ready")
     latest = github.pr_view(config.repo, live.number)
     if ((latest.head_sha, latest.state, latest.base_ref) != (live.head_sha, live.state, live.base_ref)
@@ -1322,7 +1328,8 @@ def _mark_ready(
                 return
             if observe_only is not None:
                 raise observe_only
-            if retry and not (live := _recheck_activation(wt, config, live, args, deadline)).is_draft:
+            _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
+            if not (live := _recheck_activation(wt, config, live, args, deadline, retry=retry)).is_draft:
                 return
             _require_receipt(wt, config, head, suffix=f". {OWNER_ROUTE}")
             try:

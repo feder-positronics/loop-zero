@@ -1695,7 +1695,7 @@ def test_overlapping_review_dispatches_and_publishes_once(
 @pytest.mark.parametrize("body_case", ["edited", "read-fails", "existing-review", "receipt", "closed"])
 def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatch, body_case):
     head = prepare_review(wt, gh, fake_bin)
-    prior = "- primary, codex, 123456789abc, request_changes"
+    prior = "- primary, codex, 123456789abc, request_changes\nStaging verified."
     line = f"- primary, claude, {head[:12]}, approve"
     live = "# T1\n\n## Notes\nEdited during review\n\n## Validation\nNew check results\n"
     run_review = cli._run_review
@@ -1722,9 +1722,10 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
     elif body_case == "receipt":
         assert cli.main(["check"]) == 0
         stale = "# T1\n\n## Validation\n<!-- loopzero:checks:start -->\nRecorded for `aaaaaaaaaaaa`\n<!-- loopzero:checks:end -->\n"
-        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=stale)))
+        example = "```markdown\n## Validation\nExample\n```"
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=example + "\n" + stale)))
     elif body_case == "existing-review":
-        arm_pr_body_patch(gh, head, body=f"# T1\n\n## Review\n{prior}\n\n## Notes\n")
+        arm_pr_body_patch(gh, head, body=f"# T1\n\n## Review\n(filled by `loopzero review`)\n\n{prior}\n\n## Notes\n")
     else:
         monkeypatch.setattr(cli, "_run_review", change_body_during_review)
     _, err = expect_cli(capsys, 0, "review", stdout_contains=(f"primary review by claude on {head[:12]}: approve",))
@@ -1742,8 +1743,9 @@ def test_review_summary_preserves_live_body(wt, gh, fake_bin, capsys, monkeypatc
         updated = json.loads(patches[0]["--input"])["body"]
         if body_case == "existing-review":
             assert updated.index(prior) < updated.index(line) < updated.index("## Notes")
+            assert "(filled by `loopzero review`)" not in updated
         elif body_case == "receipt":
-            assert f"Recorded for `{head[:12]}`" in updated and "aaaaaaaaaaaa" not in updated
+            assert updated.startswith(example + "\n") and f"Recorded for `{head[:12]}`" in updated and "aaaaaaaaaaaa" not in updated
         else:
             assert updated == f"{live}\n## Review\n{line}\n"  # No receipt here: the live record is kept.
 
@@ -3264,7 +3266,7 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, b
     assert len(ready_calls) == int(draft)
     assert all(argv[:2] == ["api", "graphql"] and "id=PR_7" in argv for argv in ready_calls)
     assert sum(c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/check-runs"]
-               for c in gh.calls) == (2 if wait and draft else 1)
+               for c in gh.calls) == 1 + int(draft) + int(wait and draft)
     if not wait:
         assert_one_workflow_read(git_calls)
         assert ["ls-files", "-z", "--", ".loopzero"] in git_calls
@@ -3397,8 +3399,10 @@ def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, hea
     ({"labels": [{"name": "hold"}]}, ("rerun loopzero ready",)),
     ({"baseRefName": "release"}, ("rerun loopzero ready",)),
     ({"mergeable": "CONFLICTING"}, ("merge conflicts",)),
+    ({"mergeStateStatus": "BEHIND"}, ("is behind main",)),
+    ("dismissed", (github.MISSING_REVIEW_REASON,)),
     (None, ("run loopzero check at this head", cli.OWNER_ROUTE)),
-], ids=["head", "hold", "target", "conflict", "lost-receipt"])
+], ids=["head", "hold", "target", "conflict", "behind", "dismissed", "lost-receipt"])
 def test_ready_rechecks_the_live_pr_before_the_first_activation(wt, gh, capsys, head, monkeypatch, change, diagnostic):
     arm_approved_pr(gh, head, wt)
     if change is None:
@@ -3406,6 +3410,8 @@ def test_ready_rechecks_the_live_pr_before_the_first_activation(wt, gh, capsys, 
             (wt / ".loopzero/checks.json").unlink()
             return github.PR(7, URL, head, "main", True, "OPEN", "MERGEABLE"), github.Readiness(True, ())
         monkeypatch.setattr(cli, "_pr_readiness", snapshot)
+    elif change == "dismissed":
+        gh.respond(reviews_key(), [rev(head, "primary")], [rev(head, "primary", state="DISMISSED")])
     else:
         gh.respond_pr_view(pr_json(**{"headRefOid": head, **change}))
     expect_cli(capsys, 1, "ready", stderr_contains=diagnostic)
@@ -5001,7 +5007,7 @@ def test_mergify_ready_draft_requires_safe_queue_before_ci_activation(
     monkeypatch.setattr(mergify, "configured", configured)
     out, err = expect_cli(capsys, 0 if queue_state == "safe" else 1, "ready", "--wait=0")
     writes = sum(is_ready_call(c) for c in gh.calls)
-    assert writes == (1 if queue_state in {"safe", "becomes_unsafe"} else 0)
+    assert writes == int(queue_state == "safe")
     if queue_state != "safe":
         assert "configuration" in out + err
 
@@ -5492,6 +5498,8 @@ def test_concurrent_pr_writes(wt, tmp_path, monkeypatch, operation):
     write = Mock(side_effect=publish)
     monkeypatch.setattr(cli, "_require_receipt", Mock())
     if operation == "ready":
+        monkeypatch.setattr(cli, "_verify_wait_snapshot", Mock(return_value=settings))
+        monkeypatch.setattr(cli, "_readiness", Mock(return_value=github.Readiness(True, ())))
         monkeypatch.setattr(github, "pr_view", lambda *_: read(replace(pr, is_draft=not posted.is_set())))
         monkeypatch.setattr(github, "mark_ready", write)
         invoke = partial(cli._mark_ready, wt, settings, pr.number, pr.head_sha, SimpleNamespace(), None)
