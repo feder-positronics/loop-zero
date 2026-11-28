@@ -128,23 +128,49 @@ def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
     ((pull_path(900), "head", "repo", "id"), 8, "head repository does not match"),
     ((pull_path(900), "base", "repo", "id"), 8, "base repository does not match"),
     ((pull_path(102), "base", "ref"), "release", "source PR #102 does not target this repository"),
+    (("closed",), None, None), (("tree",), None, None),
+    *((("policy",), value, None) for value in (
+        pull(101, "1" * 40), {"merged": True, "head": {"sha": "9" * 40}}, OSError("lookup failed"),
+        [], {"merged": True, "head": None}, {"merged": 1, "head": {"sha": "1" * 40}},
+    )),
 ], ids=["author", "live-author", "sender", "action", "ref", "status", "ancestry",
-        "candidate-ready", "candidate-retargeted", "head-fork", "base-fork", "source-retargeted"])
-def test_rejects_invalid_attestation_evidence(monkeypatch, location, replacement, diagnostic):
-    incoming = event()
-    values, status_reads = payloads(incoming), [status()]
-    target = values | {"event": incoming, "status": status_reads}
-    for key in location[:-1]:
-        target = target[key]
-    target[location[-1]] = replacement
-    get = Mock(side_effect=lambda path: deepcopy(values[path]))
-    sleep = Mock()
+        "candidate-ready", "candidate-retargeted", "head-fork", "base-fork", "source-retargeted", "closed-source", "tree",
+        "open", "wrong-head", "lookup-error", "bad-shape", "missing-head", "nonbool-merged"])
+def test_nonrace_failure_does_not_retry(monkeypatch, location, replacement, diagnostic):
+    incoming, live = event(), [status()]
+    values = payloads(incoming)
+    failure = location[0]
+    policy_error = CandidateError("source #101: missing required review")
+    if failure == "closed":
+        values[pull_path(101)].update(state="closed", merged=False)
+    elif failure == "tree":
+        live[0]["batches"].pop(0)
+        values["/repos/owner/repo/git/ref/heads/main"] = {"object": {"sha": "b" * 40}}
+        monkeypatch.setattr(candidate, "_verify_tree", Mock(side_effect=CandidateError("candidate tree mismatch")))
+    elif diagnostic is not None:
+        target = values | {"event": incoming, "status": live}
+        for key in location[:-1]:
+            target = target[key]
+        target[location[-1]] = replacement
+
+    def read(path):
+        if failure == "policy" and path == pull_path(101) and get.call_args_list.count(call(path)) == 2:
+            if isinstance(replacement, Exception):
+                raise replacement
+            return deepcopy(replacement)
+        return deepcopy(values[path])
+
+    get, sleep = Mock(side_effect=read), Mock()
+    policy = Mock(side_effect=policy_error if failure == "policy" else None)
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     with pytest.raises(CandidateError, match=diagnostic) as caught:
-        run_attestation(incoming, github_get=get, status_reads=status_reads)
+        run_attestation(incoming, github_get=get, status_reads=live, source_policy=policy)
     assert not isinstance(caught.value, CandidateRaceError)
     sleep.assert_not_called()
-    assert get.call_args_list.count(call("/apps/mergify")) <= 1
+    app_reads = get.call_args_list.count(call("/apps/mergify"))
+    assert app_reads == 1 if diagnostic is None else app_reads <= 1
+    if failure == "policy":
+        assert caught.value is policy_error and get.call_args_list.count(call(pull_path(101))) == 2
 
 
 def test_same_head_source_still_requires_policy():
@@ -160,24 +186,6 @@ def test_same_head_source_still_requires_policy():
 
     with pytest.raises(CandidateError, match="source policy blocked same-head source"):
         run_attestation(incoming, github_payloads=values, source_policy=policy)
-
-
-@pytest.mark.parametrize("pr_number,diagnostic", [
-    (101, "head changed"), (900, "Candidate head changed"),
-], ids=["source-head", "candidate-head"])
-def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str) -> None:
-    values = payloads(event())
-    endpoint = pull_path(pr_number)
-
-    def read(path):
-        row = deepcopy(values[path])
-        if path == endpoint and get.call_args_list.count(call(endpoint)) == 2:
-            row["head"]["sha"] = "9" * 40
-        return row
-
-    get = Mock(side_effect=read)
-    with pytest.raises(CandidateError, match=diagnostic):
-        run_attestation(github_get=get)
 
 
 @pytest.fixture(scope="session")
@@ -438,16 +446,22 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
     assert sleeps == [4]
 
 
-@pytest.mark.parametrize("field,value", [("body", "new policy evidence"), ("draft", True)])
-def test_metadata_retry_evaluates_fresh_policy(field, value):
-    values, snapshots, reads = payloads(event()), [], 0
+@pytest.mark.parametrize("pr_number,field,value,diagnostic", [
+    (101, "head", {"sha": "9" * 40}, "head changed"),
+    (900, "head", {"sha": "9" * 40}, "Candidate head changed"),
+    (101, "body", "new policy evidence", "fresh policy rejects drift"),
+    (101, "draft", True, "fresh policy rejects drift"),
+], ids=["source-head", "candidate-head", "body", "draft"])
+def test_attestation_detects_head_and_policy_changes(pr_number, field, value, diagnostic):
+    values, snapshots, endpoint = payloads(event()), [], pull_path(pr_number)
 
-    def get(path):
-        nonlocal reads
-        reads += path == pull_path(101)
-        if path == pull_path(101) and reads == 2:
-            values[path][field] = value
-        return deepcopy(values[path])
+    def read(path):
+        row = values[path]
+        if path == endpoint and get.call_args_list.count(call(endpoint)) == 2:
+            if field == "head":
+                return deepcopy(row) | {field: value}
+            row[field] = value
+        return deepcopy(row)
 
     def policy(number, source):
         if number == 101:
@@ -455,45 +469,13 @@ def test_metadata_retry_evaluates_fresh_policy(field, value):
             if source[field] == value:
                 raise CandidateError("fresh policy rejects drift")
 
-    with pytest.raises(CandidateError, match="fresh policy rejects drift"):
-        run_attestation(github_get=get, source_policy=policy)
-    expected = (value, False) if field == "body" else ("source 101", True)
-    assert snapshots == [("source 101", False), expected]
-    assert reads == 4
-
-
-@pytest.mark.parametrize("failure,reread", [(f, None) for f in ["closed", "tree"]] +
-                         [("policy", v) for v in [pull(101, "1" * 40),
-                          {"merged": True, "head": {"sha": "9" * 40}}, OSError("lookup failed"),
-                          [], {"merged": True, "head": None},
-                          {"merged": 1, "head": {"sha": "1" * 40}}]])
-def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
-    values, live = payloads(event()), status()
-    sleeps = []
-    expected = CandidateError("source #101: missing required review")
-    if failure == "closed":
-        values[pull_path(101)].update(state="closed", merged=False)
-    if failure == "tree":
-        live["batches"].pop(0)
-        values["/repos/owner/repo/git/ref/heads/main"] = {"object": {"sha": "b" * 40}}
-
-        monkeypatch.setattr(candidate, "_verify_tree", Mock(side_effect=CandidateError("candidate tree mismatch")))
-
-    def read(path):
-        if failure == "policy" and path == pull_path(101) and get.call_args_list.count(call(path)) == 2:
-            if isinstance(reread, Exception):
-                raise reread
-            return deepcopy(reread)
-        return deepcopy(values[path])
-
     get = Mock(side_effect=read)
-    policy = Mock(side_effect=expected if failure == "policy" else None)
-    monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
-    with pytest.raises(CandidateError) as caught:
-        run_attestation(github_get=get, status_reads=[live], source_policy=policy)
-    assert not isinstance(caught.value, CandidateRaceError) and get.call_args_list.count(call("/apps/mergify")) == 1 and sleeps == []
-    if failure == "policy":
-        assert caught.value is expected and get.call_args_list.count(call(pull_path(101))) == 2
+    with pytest.raises(CandidateError, match=diagnostic):
+        run_attestation(github_get=get, **({"source_policy": policy} if field != "head" else {}))
+    if field != "head":
+        expected = (value, False) if field == "body" else ("source 101", True)
+        assert snapshots == [("source 101", False), expected]
+        assert get.call_args_list.count(call(endpoint)) == 4
 
 
 @pytest.mark.parametrize("elapsed,oversleep,attempt_count,landing", [
