@@ -1527,12 +1527,13 @@ def test_review_blocks_without_passing_checks(wt, gh, capsys, head, monkeypatch,
     launch.assert_not_called()
 
 
-def test_review_accepts_hosted_checks_after_local_failure(wt, gh, fake_bin, capsys):
+@pytest.mark.parametrize("failed_command", ["echo ok", "test -f README.md", "uv sync --offline --locked --group dev"])
+def test_review_accepts_hosted_checks_after_local_failure(wt, gh, fake_bin, capsys, failed_command):
     publish_workflow(wt, WORKFLOW.replace('["checks"]', '["checks", "Loop-zero Eligibility"]'))
     head = prepare_review(wt, gh, fake_bin, post_id=1, receipt=False)
     arm_readiness(gh, head, wt, local_exit=None)
     config = cli.config_mod.load_trusted(wt)
-    failed_stage = CheckResult(config.checks[0], 1, 0.1, "known flake")
+    failed_stage = CheckResult(failed_command, 1, 0.1, "known setup failure or flake")
     cli._save_report(wt, CheckReport(head, False, (failed_stage,), cli.sandbox.settings_fingerprint(config)))
     expect_cli(capsys, 0, "review")
     assert posted_review(gh)["commit_id"] == head
