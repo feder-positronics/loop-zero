@@ -109,11 +109,9 @@ def _review_policy(kind: str, *, split: bool) -> str:
     if kind not in ("primary", "delta"):
         raise ValueError(f"unknown review kind {kind!r}; expected 'primary' or 'delta'")
     if split:
-        scope = (
-            f"This is one chunk of the {kind} review. The fragment field gives its position. "
-            "Report defects in this chunk only, and do not judge whether the whole change is "
-            "complete or flag work missing from this chunk."
-        )
+        scope = (f"This is one chunk of the {kind} review. The fragment field gives its position. "
+                 "Report defects in this chunk only, and do not judge whether the whole change is "
+                 "complete or flag work missing from this chunk.")
     elif kind == "primary":
         scope = "This is the primary review of the whole change."
     else:
@@ -305,10 +303,8 @@ def _git_dirs(cwd: Path, env_allowlist: tuple[str, ...]) -> tuple[Path, Path]:
     if done.exit_code == 0 and len(paths) == 2 and all(path.is_absolute() for path in paths):
         return paths[0].resolve(), paths[1].resolve()
     # A path may contain a newline, which makes the combined output ambiguous.
-    common, checkout = (
-        (cwd / _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag, paths=True)).resolve()
-        for flag in flags
-    )
+    common, checkout = ((cwd / _review_git(cwd, env_allowlist, f"rev-parse {flag}", "rev-parse", flag, paths=True)).resolve()
+                        for flag in flags)
     return common, checkout
 
 
@@ -835,18 +831,14 @@ def _codex_rollout_settings(home: Path, session_id: str) -> dict:
         paths = list((home / ".codex/sessions").glob(f"*/*/*/rollout-*-{session_id}.jsonl"))
         if len(paths) != 1 or not paths[0].resolve().is_relative_to(home.resolve()):
             return unknown
-        snapshot = _read_codex_file(paths[0], max_bytes=8 * 1024 * 1024)
-        if snapshot is None:
+        if (snapshot := _read_codex_file(paths[0], max_bytes=8 * 1024 * 1024)) is None:
             return unknown
         records = [json.loads(line) for line in snapshot.decode("utf-8").splitlines()]
         if any(not isinstance(record, dict) for record in records):
             return unknown
         metadata = [record.get("payload") for record in records if record.get("type") == "session_meta"]
-        if (len(metadata) != 1 or not isinstance(metadata[0], dict)
-                or metadata[0].get("id") != session_id):
-            return unknown
-        version = metadata[0].get("cli_version")
-        if not isinstance(version, str) or not version.strip():
+        if (len(metadata) != 1 or not isinstance(meta := metadata[0], dict) or meta.get("id") != session_id
+                or not isinstance(version := meta.get("cli_version"), str) or not version.strip()):
             return unknown
         claims = [_settings(record.get("payload")) for record in records
                   if record.get("type") == "turn_context"] or [unknown]
@@ -960,14 +952,10 @@ def _read_codex_file(path: Path, *, max_bytes: int | None = None) -> bytes | Non
     data = bytearray()
     try:
         before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1:
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                or (max_bytes is not None and before.st_size > max_bytes)):
             return None
-        if max_bytes is not None and before.st_size > max_bytes:
-            return None
-        while len(data) < before.st_size:
-            block = os.read(fd, min(65536, before.st_size - len(data)))
-            if not block:
-                break
+        while len(data) < before.st_size and (block := os.read(fd, min(65536, before.st_size - len(data)))):
             data.extend(block)
         after = os.fstat(fd)
         if ((before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
@@ -1128,14 +1116,15 @@ def _pack_bytes(pieces: Iterable[str], budget: int) -> list[str]:
 
 def _summarize_deleted(block: str) -> str:
     # Judge deletion from git's header lines only; hunk lines are the PR's own text.
-    if not re.search(r"(?m)^deleted file mode [0-7]{6}$", block.partition("\n@@")[0]):
+    metadata, _, hunks = block.partition("\n@@")
+    if not re.search(r"(?m)^deleted file mode [0-7]{6}$", metadata):
         return block
     header = block.partition("\n")[0]
     match = re.fullmatch(r'diff --git ("?)a/(.*)\1 \1b/\2\1', header)
     path = match[2] if match else "(unknown file)"
     if match and match[1]:
         path = codecs.escape_decode(path.encode())[0].decode(errors="replace")
-    deleted = sum(line.startswith("-") for line in block.partition("\n@@")[2].splitlines())  # hunks only
+    deleted = sum(line.startswith("-") for line in hunks.splitlines())
     return f"{header}\n{path}: deleted, {deleted} lines\n"
 
 
@@ -1185,9 +1174,8 @@ def _valid_claude_envelopes(envelopes, provenance):
         return False
     for key in ("total_cost_usd", "duration_api_ms"):
         amounts = [item.get(key) for item in envelopes]
-        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in amounts):
-            return False
-        if provenance.get(key) != sum(amounts):
+        if (not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in amounts)
+                or provenance.get(key) != sum(amounts)):
             return False
     return True
 
