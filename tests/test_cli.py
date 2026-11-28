@@ -3592,8 +3592,7 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
 ) -> None:
     primary = repo.parent / "origin.git"
     git(primary, "remote", "add", "origin", str(primary))
-    linked = repo.parent / "linked task"
-    git(primary, "worktree", "add", "-q", "-b", "lz/bare", str(linked), "main")
+    linked = cli.worktree.start(primary, "bare", "main")
     monkeypatch.chdir(linked)
     head = head_of(linked)
     git(primary, "update-ref", "refs/remotes/origin/main", head)
@@ -3850,6 +3849,7 @@ def test_cleanup_hints_name_branch_and_configured_repo_without_commands(tmp_path
     branch = "lz/fix$version"
     monkeypatch.setattr(cli, "_repo_root", lambda _wt: tmp_path)
     monkeypatch.setattr(cli.worktree, "branch", lambda _wt: branch)
+    monkeypatch.setattr(cli.worktree, "require_started", lambda *_: None)
     monkeypatch.setattr(cli.worktree, "cleanup", Mock(side_effect=cli.worktree.WorktreeError("cannot lock ref")))
     cli._cleanup(tmp_path / "gone", SimpleNamespace(head_sha="a" * 40))
     assert capsys.readouterr().err.rstrip().endswith(
@@ -4082,7 +4082,7 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
 
 @pytest.mark.parametrize("command,closed", [
     *((command, False) for command in ("ready", "merge")),
-    *((command, True) for command in ("review", "ready", "merge")),
+    *((command, True) for command in ("review", "ready")),
 ])
 def test_commands_refuse_closed_or_mismatched_pr(wt, gh, capsys, command, closed):
     if closed:
@@ -4092,6 +4092,29 @@ def test_commands_refuse_closed_or_mismatched_pr(wt, gh, capsys, command, closed
         arm_pr(gh, "0" * 40, isDraft=False)
         expect_cli(capsys, 1, command, stdout="", stderr_contains=("push or pull first",))
         assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] and not is_ready_call(c) for c in gh.calls)
+
+
+@pytest.mark.parametrize("case", ["owned", "external", "dirty", "unpushed"])
+def test_merge_cleans_closed_pr_only_with_owned_clean_checkout_at_published_head(wt, repo, gh, capsys, case):
+    head, branch = head_of(wt), "lz/t1"
+    origin = repo.parent / "origin.git"
+    git(wt, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+    arm_pr(gh, head, state="CLOSED")
+    if case == "external":
+        cli.worktree.task_file(wt).write_text("# Handwritten task\n")
+    elif case == "dirty":
+        (wt / "untracked").touch()
+    elif case == "unpushed":
+        git(wt, "commit", "--allow-empty", "-m", "local after close")
+        gh.respond(f"api repos/{REPO}/commits/{head_of(wt)}/pulls?per_page=100&page=1", [])
+    code, out, err = run(capsys, "merge", "--wait=0")
+    assert (code, out) == (1, "")
+    assert wt.exists() is (case != "owned")
+    assert git(repo, "branch", "--list", branch)
+    assert git(origin, "rev-parse", branch).strip() == head
+    assert {"owned": "kept both branch refs", "external": "ownership is unverified",
+            "dirty": "worktree is dirty", "unpushed": "push or pull first"}[case] in err
+    assert all(call["argv"][:2] != ["api", "-X"] for call in gh.calls)
 
 
 @pytest.mark.parametrize("changed", [False, True])

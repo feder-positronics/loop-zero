@@ -96,7 +96,7 @@ class PrimaryCheckout(CliError):
     """The command runs in the primary checkout, which has no task worktree to remove."""
 
 
-def _repo_root(wt: Path) -> None:
+def _repo_root(wt: Path) -> Path:
     """Verify the primary checkout or bare repository owns this linked worktree."""
     first = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0]
     if not first.startswith("worktree "):
@@ -107,6 +107,7 @@ def _repo_root(wt: Path) -> None:
         raise PrimaryCheckout("this is the primary checkout, nothing to clean up")
     if common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
+    return root
 
 
 def _publisher_problem(args: argparse.Namespace, config: Config) -> str | None:
@@ -171,11 +172,11 @@ def _require_task_branch(config: Config, branch: str) -> None:
         raise CliError(f"branch {branch!r} is the configured base; use a task branch")
 
 
-def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, head_sha: str | None = None) -> github.PR:
+def _require_pr(config: Config, branch: str, *, allow_finished: bool = False, head_sha: str | None = None) -> github.PR:
     pr = github.pr_for_branch(config.repo, branch, head_sha=head_sha)
     if pr is None:
         raise CliError(f"no pull request for {branch}; run `loopzero pr` first")
-    if pr.state != "OPEN" and not (allow_merged and pr.state == "MERGED"):
+    if pr.state != "OPEN" and not (allow_finished and pr.state in {"MERGED", "CLOSED"}):
         raise CliError(f"PR #{pr.number} is {pr.state}: {pr.url}. Reopen a closed unmerged PR or run `loopzero start` for a new task.")
     return pr
 
@@ -1260,9 +1261,9 @@ def _pr_readiness(
 ) -> tuple[github.PR, github.Readiness | None]:
     head = worktree.head(wt)
     _require_task_branch(config, branch)
-    pr = _require_pr(config, branch, allow_merged=allow_merged, head_sha=head)
+    pr = _require_pr(config, branch, allow_finished=allow_merged, head_sha=head)
     _require_pushed(pr, head)
-    return pr, None if pr.state == "MERGED" else _readiness(
+    return pr, None if pr.state != "OPEN" else _readiness(
         wt, config, pr, head, workflow_wait=workflow_wait, announce_receipt=True,
         mergify_deadline=mergify_deadline,
     )
@@ -1271,19 +1272,25 @@ def _pr_readiness(
 CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup"
 
 
-def _cleanup(wt: Path, pr: github.PR) -> None:
+def _cleanup(wt: Path, pr: github.PR, *, closed: bool = False) -> None:
+    outcome = "closed" if closed else "merged"
     name = None
     try:
-        _repo_root(wt)
+        root = _repo_root(wt)
         name = worktree.branch(wt)
-        worktree.cleanup(wt, pr.head_sha)
+        worktree.require_started(wt, root)
+        if closed:
+            worktree.cleanup(wt, pr.head_sha, keep_branch=True)
+            print(f"removed worktree {wt}; kept both branch refs", file=sys.stderr)
+        else:
+            worktree.cleanup(wt, pr.head_sha)
     except PrimaryCheckout as exc:
-        print(f"note: merged; {exc}", file=sys.stderr)
+        print(f"note: {outcome}; {exc}", file=sys.stderr)
     except (LoopZeroError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
             retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"
-        print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
+        print(f"warning: {outcome} but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
 OWNER_ROUTE = "If the delivery contract's owner queue route applies, post its one reason on the PR before taking it out of draft."
@@ -1855,6 +1862,10 @@ def cmd_merge(args: argparse.Namespace) -> int:  # noqa: C901 - cancel, wait and
     except github.ReadDeadline:
         print("timed out while checking merge readiness")
         return 3
+    if pr.state == "CLOSED":
+        print(f"PR #{pr.number} closed without merging", file=sys.stderr)
+        _cleanup(wt, pr, closed=True)
+        return 1
     if readiness is not None and args.wait is not None and _pending_checks(readiness):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
                                      args=args, allow_merged=True, initial=readiness,
